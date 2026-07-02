@@ -1,56 +1,89 @@
-# Welcome to your Expo app 👋
+# HoopAI 🏀
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+**Real-time basketball shot tracking on your phone.** Prop your phone against a
+water bottle, point it at the hoop, and HoopAI counts every make and miss —
+live trajectory overlay, swish/miss sounds, per-session shooting stats, and
+auto-kept highlight clips. iPhone + Android, all inference on-device.
 
-## Get started
+> Working title. Built with React Native / Expo SDK 57 · VisionCamera 5 ·
+> TensorFlow Lite · Skia · Reanimated 4.
 
-1. Install dependencies
+## Features
 
-   ```bash
-   npm install
-   ```
+- **Live shot tracking** — ball + rim detection at 30fps, Kalman-filtered
+  trajectory drawn over the camera feed as it happens.
+- **Automatic make/miss** — three fused signals (rim-plane crossing geometry,
+  net-motion burst, learned ball-in-basket class) with a state machine hardened
+  against rim-rattlers, layups and double counts. Distinct sounds for makes
+  (bright swish chime) and misses (soft neutral thud); streak stingers at 3/5/10.
+- **Session stats** — FG%, streaks, shot chart, entry/release angle and
+  consistency, per-zone splits; every shot correctable with one tap.
+- **Recording & highlights** — record the session while tracking runs;
+  keep-only-makes clip planning (export lands in Phase 2).
+- **Form analysis** — pose-based metrics (set-point elbow, knee flexion,
+  release time, follow-through) with one-cue-at-a-time coaching rules
+  (engine complete; pose model wiring is Phase 2).
+- **Demo mode** — no model file or camera? A scripted scene drives the entire
+  pipeline end-to-end, so the whole app works in a simulator today.
 
-2. Start the app
+## How it decides make vs miss
 
-   ```bash
-   npx expo start
-   ```
-
-In the output, you'll find options to open the app in a
-
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
-
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
-
-## Get a fresh project
-
-When you're ready, run:
-
-```bash
-npm run reset-project
+```
+Camera ──► VisionCamera V5 frame output (yuv, preview-sized buffers)
+             │  worklet: GPU resize 640² → TFLite runSync → parse + NMS
+             ▼
+        ShotPipeline (JS thread)
+             │  BallTracker: cleaning gates + gravity-prior Kalman
+             │  RimLock: damped lock, drift detection, tap-to-adjust
+             ▼
+        ShotFsm: IDLE → SHOT_LIVE → resolve
+             │  geo: does the interpolated crossing land inside the rim span?
+             │  net: motion burst in the net ROI within the crossing window?
+             │  cls: did the 'ball_in_basket' class fire?
+             ▼
+        MAKE / MISS / UNSURE → sounds, HUD, SQLite, clip plan
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+Full architecture, budgets and risk register: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-### Other setup steps
+## Project layout
 
-- To set up ESLint for linting, run `npx expo lint`, or follow our guide on ["Using ESLint and Prettier"](https://docs.expo.dev/guides/using-eslint/)
-- If you'd like to set up unit testing, follow our guide on ["Unit Testing with Jest"](https://docs.expo.dev/develop/unit-testing/)
-- Learn more about the TypeScript setup in this template in our guide on ["Using TypeScript"](https://docs.expo.dev/guides/typescript/)
+```
+src/core/        Pure-TS pipeline (Kalman, tracker, rim lock, shot FSM,
+                 trajectory fit, stats, form analysis, clip planner) — 150 unit tests
+src/ml/          YOLO-style output parser (workletized) + scripted mock detector
+src/pipeline/    JS-thread orchestrator gluing core to the camera layer
+src/camera/      useShotEngine (VisionCamera V5 + fast-tflite), sounds
+src/data/        SQLite (sessions/shots), src/state/ Zustand stores
+src/components/  UI primitives, HUD overlays (Skia), charts
+src/app/         expo-router screens
+assets/sounds/   Synthesized WAVs (scripts/generate-sounds.mjs — no licensing)
+docs/            ARCHITECTURE / API-REFERENCE / MODELS / BUILDING
+```
 
-## Learn more
+## Develop
 
-To learn more about developing your project with Expo, look at the following resources:
+```powershell
+npm install
+npm run typecheck   # tsc --noEmit
+npm test            # jest — core pipeline suite
+npx expo start      # demo mode works in a dev build / simulator
+```
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
+Native modules ⇒ Expo Go won't run this; see [docs/BUILDING.md](docs/BUILDING.md)
+for EAS cloud builds (Android APK + iOS TestFlight, no Mac needed).
 
-## Join the community
+## Model
 
-Join our community of developers creating universal apps.
+The repo ships a placeholder at `assets/models/hoopai-det.tflite` (the app
+falls back to demo mode). Train the real 4-class detector (ball, rim,
+ball_in_basket, person) on CC BY 4.0 Roboflow datasets with an Apache-2.0
+architecture (RF-DETR Nano): [docs/MODELS.md](docs/MODELS.md).
 
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+## Credits & licenses
+
+- Datasets: Roboflow Universe (CC BY 4.0) — see docs/MODELS.md.
+- Algorithm references: josephattalla/Basketball-Shot-Detection (MIT),
+  Ed-Zh/Basketball-Analytics (MIT); idea-level: avishah3, SwishAI, chonyy,
+  HomeCourt (NEX Team) UX.
+- Ultralytics YOLO is deliberately **not** used (AGPL-3.0 extends to weights).

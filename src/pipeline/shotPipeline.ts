@@ -88,8 +88,10 @@ export class ShotPipeline {
     if (this.rimLock.driftDetected && !this.wasDrifted) {
       this.wasDrifted = true;
       this.events.onRimDrift?.();
-    } else if (!this.rimLock.driftDetected) {
+    } else if (!this.rimLock.driftDetected && this.wasDrifted) {
+      // Re-locked after a camera bump — announce so the UI clears its banner.
       this.wasDrifted = false;
+      if (this.lastRim) this.events.onRimLocked?.(this.lastRim);
     }
 
     const ball = this.tracker.step(frame, this.lastRim?.hoopRoi ?? null);

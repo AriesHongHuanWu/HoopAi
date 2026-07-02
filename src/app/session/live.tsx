@@ -1,0 +1,443 @@
+/**
+ * Live session — the flagship screen. Portrait, immersive, keep-awake.
+ *
+ * Layers (bottom → top):
+ *   camera feed (or demo court scene) → Skia trajectory overlay → aiming
+ *   guidance (until rim lock) → shot flash → glass HUD chips → bottom bar.
+ *
+ * The shot engine drives everything; this screen only wires events into the
+ * session store and renders store state. No per-frame React updates.
+ */
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { StyleSheet, Text, View } from 'react-native';
+import { router } from 'expo-router';
+import * as Haptics from 'expo-haptics';
+import { useKeepAwake } from 'expo-keep-awake';
+import { Canvas, Path, Skia } from '@shopify/react-native-skia';
+import Animated, {
+  Easing,
+  useAnimatedStyle,
+  useSharedValue,
+  withRepeat,
+  withTiming,
+} from 'react-native-reanimated';
+import { Camera } from 'react-native-vision-camera';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+
+import { useShotEngine, type ShotEngine } from '../../camera/useShotEngine';
+import { playSound, useShotSounds } from '../../camera/useShotSounds';
+import { HudChip } from '../../components/hud/HudChip';
+import { ShotFlash } from '../../components/hud/ShotFlash';
+import { StatStrip } from '../../components/hud/StatStrip';
+import { TrajectoryOverlay } from '../../components/hud/TrajectoryOverlay';
+import { Card, Chip, PillButton, Row, Screen } from '../../components/ui';
+import { color, radius, space, type } from '../../constants/tokens';
+import type { ResolvedShot } from '../../core/types';
+import { useSession } from '../../state/sessionStore';
+import { useSettings } from '../../state/settingsStore';
+
+const DRIFT_BANNER_MS = 4000;
+
+/** RN 0.86 dropped StyleSheet.absoluteFillObject — local equivalent. */
+const absoluteFill = {
+  position: 'absolute',
+  top: 0,
+  left: 0,
+  right: 0,
+  bottom: 0,
+} as const;
+
+export default function LiveSessionScreen() {
+  useKeepAwake();
+  useShotSounds();
+  const insets = useSafeAreaInsets();
+
+  const rimLocked = useSession((s) => s.rimLocked);
+  const isRecording = useSession((s) => s.isRecording);
+
+  const [drift, setDrift] = useState(false);
+  const [confirmEnd, setConfirmEnd] = useState(false);
+  const [ending, setEnding] = useState(false);
+
+  const engineRef = useRef<ShotEngine | null>(null);
+  const driftTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Entering this screen directly (deep link, dev reload) still gets a
+  // coherent session.
+  useEffect(() => {
+    if (useSession.getState().phase === 'idle') useSession.getState().beginSetup();
+  }, []);
+
+  const onShot = useCallback((shot: ResolvedShot) => {
+    useSession.getState().addShot(shot);
+    if (useSettings.getState().hapticsEnabled) {
+      const feedback =
+        shot.outcome === 'make'
+          ? Haptics.NotificationFeedbackType.Success
+          : shot.outcome === 'miss'
+            ? Haptics.NotificationFeedbackType.Error
+            : Haptics.NotificationFeedbackType.Warning;
+      void Haptics.notificationAsync(feedback);
+    }
+  }, []);
+
+  const onRimLocked = useCallback(() => {
+    setDrift(false);
+    const store = useSession.getState();
+    if (store.rimLocked) return; // re-lock after drift — already live
+    store.setRimLocked(true);
+    if (useSettings.getState().soundsEnabled) playSound('rim_locked');
+
+    const { recordVideo, keepMode } = useSettings.getState();
+    void (async () => {
+      // Stats-only sessions still go live; recording is additive.
+      await store.goLive({ keepMode: recordVideo ? keepMode : 'none', nowMs: Date.now() });
+      const engine = engineRef.current;
+      if (recordVideo && engine?.activeMode === 'camera') {
+        try {
+          await engine.startRecording();
+          useSession.getState().setRecording(true);
+        } catch {
+          // Recording failed (storage, codec) — session continues stats-only.
+          useSession.getState().setRecording(false);
+        }
+      }
+    })();
+  }, []);
+
+  const onRimDrift = useCallback(() => {
+    setDrift(true);
+    if (driftTimer.current) clearTimeout(driftTimer.current);
+    driftTimer.current = setTimeout(() => setDrift(false), DRIFT_BANNER_MS);
+  }, []);
+
+  const engine = useShotEngine('auto', { onShot, onRimLocked, onRimDrift });
+  useEffect(() => {
+    engineRef.current = engine;
+  }, [engine]);
+  useEffect(() => () => {
+    if (driftTimer.current) clearTimeout(driftTimer.current);
+  }, []);
+
+  const endSession = useCallback(async () => {
+    setEnding(true);
+    let path: string | null = null;
+    try {
+      path = (await engineRef.current?.stopRecording()) ?? null;
+    } catch {
+      path = null;
+    }
+    await useSession.getState().finish({ nowMs: Date.now(), videoPath: path });
+    router.replace('/session/summary');
+  }, []);
+
+  // ---------------------------------------------------------------------
+  // Camera permission gate (camera mode only; demo mode needs nothing).
+  // ---------------------------------------------------------------------
+  const cam = engine.camera;
+  if (cam != null && !cam.hasPermission) {
+    return (
+      <Screen style={styles.permissionScreen}>
+        <Text style={styles.permissionTitle}>Camera access needed</Text>
+        <Text style={styles.permissionBody}>
+          The live view watches the rim to count makes and misses. Everything stays on this
+          phone.
+        </Text>
+        <PillButton
+          label="Allow camera access"
+          onPress={() => void cam.requestPermission()}
+          style={styles.permissionCta}
+        />
+        <PillButton label="Back to setup" variant="ghost" onPress={() => router.back()} />
+      </Screen>
+    );
+  }
+
+  return (
+    <View style={styles.root}>
+      {cam != null && cam.device != null ? (
+        <Camera
+          style={StyleSheet.absoluteFill}
+          isActive={!ending}
+          device={cam.device}
+          outputs={cam.outputs}
+        />
+      ) : (
+        <DemoCourt />
+      )}
+
+      <TrajectoryOverlay overlay={engine.overlay} />
+
+      {!rimLocked && <AimingOverlay />}
+
+      <ShotFlash />
+
+      {/* Top HUD */}
+      <View style={[styles.topHud, { top: insets.top + space.md }]} pointerEvents="none">
+        {rimLocked && <StatStrip />}
+        {engine.activeMode === 'demo' && (
+          <View style={styles.topCenter}>
+            <Chip label="DEMO MODE — scripted scene" tone="accent" />
+          </View>
+        )}
+        {drift && (
+          <View style={styles.topCenter}>
+            <HudChip>
+              <Text style={styles.driftText}>Camera moved — re-aiming…</Text>
+            </HudChip>
+          </View>
+        )}
+      </View>
+
+      {/* Bottom bar */}
+      <View style={[styles.bottomBar, { paddingBottom: insets.bottom + space.lg }]}>
+        {isRecording ? <RecIndicator /> : <View />}
+        <PillButton
+          label="End session"
+          variant="ghost"
+          onPress={() => setConfirmEnd(true)}
+          style={styles.endButton}
+        />
+      </View>
+
+      {/* In-screen end confirmation */}
+      {confirmEnd && (
+        <View style={styles.confirmScrim} accessibilityViewIsModal>
+          <Card style={styles.confirmCard}>
+            <Text style={styles.confirmTitle}>End this session?</Text>
+            <Text style={styles.confirmBody}>
+              {isRecording
+                ? 'Your stats and video will be saved to the summary.'
+                : 'Your stats will be saved to the summary.'}
+            </Text>
+            <Row style={styles.confirmActions} gap={space.md}>
+              <PillButton
+                label="Keep shooting"
+                variant="ghost"
+                onPress={() => setConfirmEnd(false)}
+                disabled={ending}
+                style={styles.confirmButton}
+              />
+              <PillButton
+                label={ending ? 'Saving…' : 'End session'}
+                onPress={() => void endSession()}
+                disabled={ending}
+                style={styles.confirmButton}
+              />
+            </Row>
+          </Card>
+        </View>
+      )}
+    </View>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Aiming guidance — shown until the rim locks.
+// ---------------------------------------------------------------------------
+
+function AimingOverlay() {
+  const pulse = useSharedValue(0);
+  useEffect(() => {
+    pulse.value = withRepeat(
+      withTiming(1, { duration: 1200, easing: Easing.inOut(Easing.ease) }),
+      -1,
+      true,
+    );
+  }, [pulse]);
+  const boxStyle = useAnimatedStyle(() => ({
+    opacity: 0.45 + pulse.value * 0.55,
+    transform: [{ scale: 1 + pulse.value * 0.04 }],
+  }));
+
+  return (
+    <View style={styles.aiming} pointerEvents="none">
+      <Animated.View style={[styles.rimPlaceholder, boxStyle]} />
+      <Text style={styles.aimTitle}>Point the camera at the hoop</Text>
+      <Text style={styles.aimSub}>Hold steady — the rim locks in automatically</Text>
+    </View>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Demo scene — coal background with a subtle court line drawing. The mock
+// detector still drives the same pipeline, so the overlay animates on top.
+// ---------------------------------------------------------------------------
+
+function DemoCourt() {
+  const [size, setSize] = useState({ w: 0, h: 0 });
+
+  const courtPath = useMemo(() => {
+    const p = Skia.Path.Make();
+    const { w, h } = size;
+    if (w <= 0 || h <= 0) return p;
+    const baseY = h * 0.8;
+    // Baseline
+    p.moveTo(0, baseY);
+    p.lineTo(w, baseY);
+    // The key
+    const keyW = w * 0.44;
+    const keyH = h * 0.26;
+    const keyX = (w - keyW) / 2;
+    p.addRect(Skia.XYWHRect(keyX, baseY - keyH, keyW, keyH));
+    // Free-throw arc on top of the key — the shot-arc motif in the floor.
+    p.addArc(Skia.XYWHRect(keyX, baseY - keyH - keyW / 2, keyW, keyW), 180, 180);
+    return p;
+  }, [size]);
+
+  return (
+    <View
+      style={[StyleSheet.absoluteFill, styles.demoRoot]}
+      onLayout={(e) =>
+        setSize({ w: e.nativeEvent.layout.width, h: e.nativeEvent.layout.height })
+      }
+    >
+      <Canvas style={StyleSheet.absoluteFill}>
+        <Path path={courtPath} style="stroke" strokeWidth={2} color={color.border} opacity={0.9} />
+      </Canvas>
+    </View>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// REC indicator — red dot + elapsed time, only while recording.
+// ---------------------------------------------------------------------------
+
+function RecIndicator() {
+  const startedAtMs = useSession((s) => s.startedAtMs);
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const totalSec = startedAtMs != null ? Math.max(0, Math.floor((nowMs - startedAtMs) / 1000)) : 0;
+  const mm = String(Math.floor(totalSec / 60)).padStart(2, '0');
+  const ss = String(totalSec % 60).padStart(2, '0');
+
+  return (
+    <HudChip style={styles.recChip}>
+      <Row gap={space.sm}>
+        <View style={styles.recDot} accessibilityLabel="Recording" />
+        <Text style={styles.recText}>{`REC ${mm}:${ss}`}</Text>
+      </Row>
+    </HudChip>
+  );
+}
+
+// ---------------------------------------------------------------------------
+
+const styles = StyleSheet.create({
+  root: {
+    flex: 1,
+    backgroundColor: color.bg,
+  },
+  demoRoot: {
+    backgroundColor: color.bg,
+  },
+  topHud: {
+    position: 'absolute',
+    left: space.lg,
+    right: space.lg,
+  },
+  topCenter: {
+    alignItems: 'center',
+    marginTop: space.sm,
+  },
+  driftText: {
+    ...type.bodyMedium,
+    color: color.unsure,
+  },
+  bottomBar: {
+    position: 'absolute',
+    left: space.lg,
+    right: space.lg,
+    bottom: 0,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  endButton: {
+    backgroundColor: color.hudGlass,
+  },
+  recChip: {
+    borderRadius: radius.pill,
+  },
+  recDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: color.miss,
+  },
+  recText: {
+    ...type.caption,
+    color: color.text,
+    fontVariant: ['tabular-nums'],
+  },
+  aiming: {
+    ...absoluteFill,
+    backgroundColor: color.hudGlass,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: space.xl,
+  },
+  rimPlaceholder: {
+    width: 168,
+    height: 96,
+    borderRadius: radius.md,
+    borderWidth: 2,
+    borderColor: color.accent,
+    marginBottom: space.xl,
+  },
+  aimTitle: {
+    ...type.title,
+    color: color.text,
+    textAlign: 'center',
+  },
+  aimSub: {
+    ...type.body,
+    color: color.textDim,
+    textAlign: 'center',
+    marginTop: space.sm,
+  },
+  confirmScrim: {
+    ...absoluteFill,
+    backgroundColor: color.hudGlass,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: space.xl,
+  },
+  confirmCard: {
+    alignSelf: 'stretch',
+  },
+  confirmTitle: {
+    ...type.heading,
+    color: color.text,
+  },
+  confirmBody: {
+    ...type.body,
+    color: color.textDim,
+    marginTop: space.xs,
+  },
+  confirmActions: {
+    marginTop: space.lg,
+  },
+  confirmButton: {
+    flex: 1,
+  },
+  permissionScreen: {
+    justifyContent: 'center',
+  },
+  permissionTitle: {
+    ...type.title,
+    color: color.text,
+  },
+  permissionBody: {
+    ...type.body,
+    color: color.textDim,
+    marginTop: space.sm,
+    marginBottom: space.xl,
+  },
+  permissionCta: {
+    marginBottom: space.md,
+  },
+});
