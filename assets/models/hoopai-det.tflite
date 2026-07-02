@@ -1,0 +1,4 @@
+HOOPAI_PLACEHOLDER_MODEL: not a real TFLite flatbuffer.
+Replace this file with the trained 4-class detector (ball, rim, ball_in_basket, person).
+Training + export instructions: docs/MODELS.md
+While this placeholder is present, the app runs in demo mode (scripted scene).
