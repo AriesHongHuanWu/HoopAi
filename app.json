@@ -8,9 +8,17 @@
     "scheme": "hoopai",
     "userInterfaceStyle": "automatic",
     "ios": {
-      "icon": "./assets/expo.icon"
+      "icon": "./assets/expo.icon",
+      "infoPlist": {
+        "NSCameraUsageDescription": "HoopAI uses the camera to track your shots in real time.",
+        "NSMicrophoneUsageDescription": "HoopAI records court audio with your session videos."
+      }
     },
     "android": {
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO"
+      ],
       "adaptiveIcon": {
         "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
@@ -33,17 +41,9 @@
           "imageWidth": 76
         }
       ],
-      "react-native-fast-tflite",
+      ["react-native-fast-tflite", { "enableCoreMLDelegate": true }],
       "expo-sqlite",
       "expo-audio",
-      [
-        "react-native-vision-camera",
-        {
-          "cameraPermissionText": "HoopAI uses the camera to track your shots in real time.",
-          "enableMicrophonePermission": true,
-          "microphonePermissionText": "HoopAI records court audio with your session videos."
-        }
-      ],
       [
         "expo-media-library",
         {
