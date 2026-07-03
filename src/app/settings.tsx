@@ -318,6 +318,7 @@ export default function SettingsScreen() {
   const detectionRate = useSettings((s) => s.detectionRate);
   const lastBenchmark = useSettings((s) => s.lastBenchmark);
   const debugMode = useSettings((s) => s.debugMode);
+  const formAnalysis = useSettings((s) => s.formAnalysis);
   const set = useSettings((s) => s.set);
   const resetTutorial = useSettings((s) => s.resetTutorial);
 
@@ -521,6 +522,20 @@ export default function SettingsScreen() {
             onValueChange={(v) => {
               tick();
               set('debugMode', v);
+            }}
+          />
+        </Card>
+
+        {/* Coaching */}
+        <Card>
+          <Eyebrow>Coaching</Eyebrow>
+          <ToggleRow
+            label="Shooting form analysis"
+            description="Analyzes your elbow, knee, release and follow-through with a pose model and gives one cue per shot. Runs a second model — best on recent phones (iPhone 12 and newer)."
+            value={formAnalysis}
+            onValueChange={(v) => {
+              tick();
+              set('formAnalysis', v);
             }}
           />
         </Card>

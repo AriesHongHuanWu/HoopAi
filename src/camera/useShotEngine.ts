@@ -29,6 +29,7 @@ import { DETECTION } from '../core/config';
 import type { Box, ResolvedShot, RimGeometry } from '../core/types';
 import { createMockDetector } from '../ml/mockDetector';
 import { parseYoloOutput } from '../ml/yoloParser';
+import { parseMoveNet } from '../ml/poseParser';
 import { ShotPipeline, type FramePayload } from '../pipeline/shotPipeline';
 import { useSettings } from '../state/settingsStore';
 
@@ -39,7 +40,12 @@ const MODEL_ASSETS = {
   standard: require('../../assets/models/hoopai-det.tflite'),
   precise: require('../../assets/models/hoopai-det-precise.tflite'),
 } as const;
+// MoveNet SinglePose Lightning (Apache-2.0) for opt-in form analysis.
+const POSE_ASSET = require('../../assets/models/movenet-pose.tflite');
 /* eslint-enable @typescript-eslint/no-var-requires */
+
+/** MoveNet input side (square). Separate from the detector's 640. */
+const POSE_INPUT = 192;
 
 /**
  * 'auto' detector budget: keep the precise model only when a smoke-test
@@ -348,6 +354,41 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
       modelState.model != null ? NitroModules.box(modelState.model) : null;
   }, [modelState.model, boxedModelSv]);
 
+  // Pose model (MoveNet) for opt-in form analysis. Loaded only when the setting
+  // is on, on the fast delegate with a CPU fallback. Rides a SharedValue like
+  // the detector so the frame worklet reads it fresh (never a stale closure).
+  const formAnalysis = useSettings((s) => s.formAnalysis);
+  const shootingHand = useSettings((s) => s.shootingHand);
+  const boxedPoseSv = useSharedValue<ReturnType<typeof NitroModules.box> | null>(null);
+  useEffect(() => {
+    pipeline.setFormHand(shootingHand);
+  }, [pipeline, shootingHand]);
+  useEffect(() => {
+    let alive = true;
+    if (!formAnalysis) {
+      boxedPoseSv.value = null;
+      return;
+    }
+    void (async () => {
+      const delegates: ('core-ml' | 'android-gpu')[] =
+        Platform.OS === 'ios' ? ['core-ml'] : ['android-gpu'];
+      for (const d of [delegates, [] as ('core-ml' | 'android-gpu')[]]) {
+        try {
+          const pm = await loadTensorflowModel(POSE_ASSET, d);
+          if (!alive) return;
+          boxedPoseSv.value = NitroModules.box(pm);
+          return;
+        } catch {
+          // try next (CPU) rung
+        }
+      }
+    })();
+    return () => {
+      alive = false;
+      boxedPoseSv.value = null;
+    };
+  }, [formAnalysis, boxedPoseSv]);
+
   // Detection-rate budget (Settings > Detection). Captured as a plain const —
   // changing the setting re-renders and re-registers the frame worklet with
   // the new gate. 'battery' ~15fps (66ms), 'auto' ~30fps (33ms), 'max' = every
@@ -368,6 +409,18 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
     // produces real detections (scores up to 0.7). fast-tflite does NOT
     // transpose; the buffer layout must match the tensor exactly.
     pixelLayout: 'planar',
+  });
+
+  // Pose resizer: MoveNet wants NHWC uint8 192×192 (INTERLEAVED — verified the
+  // model input tensor is [1,192,192,3] uint8, standard TFLite layout, unlike
+  // the detector's planar float).
+  const { resizer: poseResizer } = useResizer({
+    width: POSE_INPUT,
+    height: POSE_INPUT,
+    channelOrder: 'rgb',
+    dataType: 'uint8',
+    scaleMode: 'cover',
+    pixelLayout: 'interleaved',
   });
 
   const onPayload = useMemo(
@@ -483,7 +536,32 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
           delegate: debug.value.delegate,
           modelError: '',
         };
-        scheduleOnRN(onPayload, { frame: parsed, netMotionScore });
+
+        // Opt-in form analysis: run the pose model on a separate 192×192 uint8
+        // resize and attach the keypoints. Entirely skipped unless the pose
+        // model is loaded (form-analysis setting on), so normal detection is
+        // never slowed. Guarded so a pose failure can't kill the frame.
+        let pose = null;
+        const poseBox = boxedPoseSv.value;
+        if (poseBox != null && poseResizer != null) {
+          try {
+            const pModel = poseBox.unbox() as TensorflowModel;
+            const pResized = poseResizer.resize(frame);
+            const pBuf = pResized.getPixelBuffer();
+            const pOut = pModel.runSync([pBuf]);
+            pResized.dispose();
+            pose = parseMoveNet(
+              new Float32Array(pOut[0]!),
+              DETECTION.inputSize,
+              DETECTION.inputSize,
+              0,
+            );
+          } catch {
+            pose = null;
+          }
+        }
+
+        scheduleOnRN(onPayload, { frame: parsed, netMotionScore, pose });
       } finally {
         frame.dispose();
       }

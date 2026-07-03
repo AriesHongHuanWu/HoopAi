@@ -12,13 +12,16 @@
 import { SHOT_FSM } from '../core/config';
 import { BallTracker } from '../core/ballTracker';
 import { estimateShotValue } from '../core/court';
+import { FormAnalyzer, coachingTips } from '../core/formAnalysis';
 import { RimLock } from '../core/rimLock';
 import { ShotFsm } from '../core/shotFsm';
 import type {
   Box,
   FrameDetections,
+  PoseFrame,
   ResolvedShot,
   RimGeometry,
+  ShootingHand,
   ShotPhase,
   TrackedBall,
 } from '../core/types';
@@ -28,6 +31,11 @@ export interface FramePayload {
   frame: FrameDetections;
   /** 0..1 motion score inside the current net ROI (0 when not computed). */
   netMotionScore: number;
+  /**
+   * Pose keypoints for this frame, present only when form analysis is enabled
+   * and the pose model ran. Null/undefined otherwise (analysis is skipped).
+   */
+  pose?: PoseFrame | null;
 }
 
 export interface PipelineEvents {
@@ -59,12 +67,22 @@ export class ShotPipeline {
   private lastRim: RimGeometry | null = null;
   private wasDrifted = false;
 
+  /** Pose-based form analyzer (lazy; only alive while pose frames arrive). */
+  private form: FormAnalyzer | null = null;
+  private formHand: ShootingHand = 'right';
+  private sawPoseThisShot = false;
+
   constructor(events: PipelineEvents = {}) {
     this.events = events;
   }
 
   setEvents(events: PipelineEvents): void {
     this.events = events;
+  }
+
+  /** Shooting hand for form analysis (from Settings). */
+  setFormHand(hand: ShootingHand): void {
+    this.formHand = hand;
   }
 
   /** Manual rim override from the setup screen's tap-to-adjust. */
@@ -96,6 +114,16 @@ export class ShotPipeline {
     }
 
     const ball = this.tracker.step(frame, this.lastRim?.hoopRoi ?? null);
+
+    // Form analysis (opt-in): feed each frame's pose to the analyzer so it can
+    // track the shot phases (dip → release → follow-through). Entirely skipped
+    // when no pose arrives, so it never touches the normal detection path.
+    const pose = payload.pose;
+    if (pose) {
+      if (!this.form) this.form = new FormAnalyzer({ hand: this.formHand, frameHeight: frame.frameHeight });
+      this.form.push(pose, ball);
+      this.sawPoseThisShot = true;
+    }
 
     let phase: ShotPhase = 'IDLE';
     let liveTrajectory: readonly { cx: number; cy: number }[] = [];
@@ -139,6 +167,20 @@ export class ShotPipeline {
         resolved.shotValue = est.value;
         resolved.distanceRimWidths = est.distanceRimWidths;
       }
+      // Finalize the pose-based form report (only if a pose was seen this shot).
+      if (this.form && this.sawPoseThisShot) {
+        try {
+          const metrics = this.form.finalize({
+            entryAngleDeg: resolved.entryAngleDeg,
+            releaseAngleDeg: resolved.releaseAngleDeg,
+          });
+          resolved.form = { metrics, tips: coachingTips(metrics) };
+        } catch {
+          // Form analysis must never break shot emission.
+        }
+      }
+      if (this.form) this.form.reset();
+      this.sawPoseThisShot = false;
       this.events.onShot?.(resolved);
     }
     return state;
@@ -147,6 +189,8 @@ export class ShotPipeline {
   reset(): void {
     this.tracker.reset();
     this.rimLock.reset();
+    this.form = null;
+    this.sawPoseThisShot = false;
     this.fsm = null;
     this.lastRim = null;
     this.wasDrifted = false;

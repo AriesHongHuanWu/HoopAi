@@ -81,6 +81,11 @@ export interface SettingsState {
   lastBenchmark: { delegate: string; ms: number } | null;
   /** Show the on-screen detection diagnostics panel. Default off. */
   debugMode: boolean;
+  /**
+   * Run the pose model for shooting-form analysis + coaching. Default off — it
+   * runs a second model per frame, best on recent phones. See formAnalysis.ts.
+   */
+  formAnalysis: boolean;
   /** Per-screen "has the coach-marks walkthrough been shown once?" flags. */
   tutorialSeen: TutorialSeen;
 
@@ -114,6 +119,7 @@ export const useSettings = create<SettingsState>()(
       detectionRate: 'auto',
       lastBenchmark: null,
       debugMode: false,
+      formAnalysis: false,
       tutorialSeen: TUTORIAL_SEEN_DEFAULT,
       set: (key, value) => set({ [key]: value } as Pick<SettingsState, typeof key>),
       markTutorialSeen: (screen) =>

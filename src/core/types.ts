@@ -184,6 +184,18 @@ export interface ResolvedShot {
    * computed; can be present with a null origin (defaults to 0).
    */
   distanceRimWidths?: number;
+  /**
+   * Pose-based shooting-form report, attached by the pipeline when form
+   * analysis is enabled (Settings) and a pose was tracked through the shot.
+   * Undefined when form analysis was off or the pose was never seen.
+   */
+  form?: FormReport;
+}
+
+/** Pose-based form metrics + prioritized coaching cues for one shot. */
+export interface FormReport {
+  metrics: FormMetrics;
+  tips: CoachingTip[];
 }
 
 /** Per-frame input to the shot FSM. All in analysis-frame space. */

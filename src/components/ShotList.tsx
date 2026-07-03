@@ -29,6 +29,7 @@ import {
 import Animated, { FadeInDown } from 'react-native-reanimated';
 
 import { HeroArcStat, ShotChart } from '@/components/charts/ShotChart';
+import { FormReportCard } from '@/components/FormReport';
 import {
   Card,
   Chip,
@@ -305,6 +306,7 @@ function ShotListItem({
   onCorrect?: (shot: ResolvedShot, outcome: ShotOutcome) => void;
   onCorrectValue?: (shot: ResolvedShot, value: ShotValue) => void;
 }) {
+  const [formOpen, setFormOpen] = useState(false);
   const correct = (outcome: ShotOutcome) => {
     void Haptics.selectionAsync();
     onCorrect?.(shot, outcome);
@@ -312,58 +314,81 @@ function ShotListItem({
   const flipTo: ShotOutcome | null =
     shot.outcome === 'make' ? 'miss' : shot.outcome === 'miss' ? 'make' : null;
   const value: ShotValue = shot.shotValue === 3 ? 3 : 2;
+  const hasForm = shot.form != null;
   return (
-    <View style={styles.row}>
-      <View style={styles.rowDot}>
-        <MakeMissDot outcome={shot.outcome} />
-      </View>
-      <View style={styles.rowBody}>
-        <Row>
-          <Text style={styles.rowTitle}>Shot {shot.id}</Text>
-          <ValuePill
-            value={value}
-            distanceRimWidths={shot.distanceRimWidths}
-            onFlip={
-              onCorrectValue ? (next) => onCorrectValue(shot, next) : undefined
-            }
-          />
-          {shot.corrected === true && <Chip label="Edited" tone="accent" />}
-        </Row>
-        {(shot.entryAngleDeg != null || shot.releaseAngleDeg != null) && (
-          <Row gap={space.xs} style={{ flexWrap: 'wrap' }}>
-            {shot.entryAngleDeg != null && (
-              <Chip label={`${Math.round(shot.entryAngleDeg)}° entry`} />
-            )}
-            {shot.releaseAngleDeg != null && (
-              <Chip label={`${Math.round(shot.releaseAngleDeg)}° release`} />
-            )}
+    <View>
+      <View style={styles.row}>
+        <View style={styles.rowDot}>
+          <MakeMissDot outcome={shot.outcome} />
+        </View>
+        <View style={styles.rowBody}>
+          <Row>
+            <Text style={styles.rowTitle}>Shot {shot.id}</Text>
+            <ValuePill
+              value={value}
+              distanceRimWidths={shot.distanceRimWidths}
+              onFlip={
+                onCorrectValue ? (next) => onCorrectValue(shot, next) : undefined
+              }
+            />
+            {shot.corrected === true && <Chip label="Edited" tone="accent" />}
           </Row>
-        )}
+          {(shot.entryAngleDeg != null || shot.releaseAngleDeg != null || hasForm) && (
+            <Row gap={space.xs} style={{ flexWrap: 'wrap' }}>
+              {shot.entryAngleDeg != null && (
+                <Chip label={`${Math.round(shot.entryAngleDeg)}° entry`} />
+              )}
+              {shot.releaseAngleDeg != null && (
+                <Chip label={`${Math.round(shot.releaseAngleDeg)}° release`} />
+              )}
+              {hasForm && (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={formOpen ? 'Hide form report' : 'Show form report'}
+                  accessibilityHint="Toggles this shot's pose-based form analysis"
+                  hitSlop={8}
+                  onPress={() => {
+                    void Haptics.selectionAsync();
+                    setFormOpen((v) => !v);
+                  }}
+                  style={styles.formChipTouch}
+                >
+                  <Chip label={formOpen ? 'Form ▲' : 'Form ▼'} tone="accent" />
+                </Pressable>
+              )}
+            </Row>
+          )}
+        </View>
+        {onCorrect != null &&
+          (flipTo != null ? (
+            <PillButton
+              variant="ghost"
+              label={flipTo === 'make' ? 'Change to make' : 'Change to miss'}
+              onPress={() => correct(flipTo)}
+              style={styles.correctBtn}
+            />
+          ) : (
+            <View style={{ gap: space.xs }}>
+              <PillButton
+                variant="ghost"
+                label="Make"
+                onPress={() => correct('make')}
+                style={styles.correctBtn}
+              />
+              <PillButton
+                variant="ghost"
+                label="Miss"
+                onPress={() => correct('miss')}
+                style={styles.correctBtn}
+              />
+            </View>
+          ))}
       </View>
-      {onCorrect != null &&
-        (flipTo != null ? (
-          <PillButton
-            variant="ghost"
-            label={flipTo === 'make' ? 'Change to make' : 'Change to miss'}
-            onPress={() => correct(flipTo)}
-            style={styles.correctBtn}
-          />
-        ) : (
-          <View style={{ gap: space.xs }}>
-            <PillButton
-              variant="ghost"
-              label="Make"
-              onPress={() => correct('make')}
-              style={styles.correctBtn}
-            />
-            <PillButton
-              variant="ghost"
-              label="Miss"
-              onPress={() => correct('miss')}
-              style={styles.correctBtn}
-            />
-          </View>
-        ))}
+      {hasForm && formOpen && (
+        <View style={styles.formWrap}>
+          <FormReportCard report={shot.form!} />
+        </View>
+      )}
     </View>
   );
 }
@@ -814,6 +839,14 @@ const styles = StyleSheet.create({
   },
   correctBtn: {
     paddingHorizontal: space.lg,
+  },
+  formChipTouch: {
+    minHeight: touch.minTarget,
+    justifyContent: 'center',
+  },
+  formWrap: {
+    paddingBottom: space.md,
+    paddingLeft: 20 + space.md,
   },
   bodyDim: {
     ...type.body,
