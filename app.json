@@ -77,7 +77,8 @@
             "deploymentTarget": "16.4"
           }
         }
-      ]
+      ],
+      "expo-video"
     ],
     "experiments": {
       "typedRoutes": true,

@@ -27,6 +27,11 @@ export interface SessionRow {
   videoPath: string | null;
   /** 'makes' | 'all' | 'decided' | 'none' — clip retention chosen for this session. */
   keepMode: string;
+  /**
+   * Engine-clock second at which the recording started, or null when the
+   * session wasn't recorded. videoTime = shot.tResolved − recordingStartSec.
+   */
+  recordingStartSec: number | null;
 }
 
 export interface SessionSummaryRow extends SessionRow {
@@ -144,6 +149,15 @@ async function migrate(db: SQLite.SQLiteDatabase): Promise<void> {
       PRAGMA user_version = 1;
     `);
   }
+  if (version < 2) {
+    // v2: align shot timestamps with the session recording. Shot times are
+    // engine-clock seconds; the recording starts later (at rim lock), so the
+    // video player needs this offset: videoTime = shot.tResolved − recordingStartSec.
+    await db.execAsync(`
+      ALTER TABLE sessions ADD COLUMN recordingStartSec REAL;
+      PRAGMA user_version = 2;
+    `);
+  }
 }
 
 /** Run a DB operation; on ANY failure log + return the fallback (never throw). */
@@ -192,14 +206,20 @@ export async function createSession(opts: {
 
 export async function endSession(
   sessionId: number,
-  opts: { endedAt: number; videoPath?: string | null },
+  opts: {
+    endedAt: number;
+    videoPath?: string | null;
+    /** Engine-clock second when the recording started (see SessionRow). */
+    recordingStartSec?: number | null;
+  },
 ): Promise<void> {
   return safe('endSession', undefined, async () => {
     const db = await getDb();
     await db.runAsync(
-      'UPDATE sessions SET endedAt = ?, videoPath = ? WHERE id = ?',
+      'UPDATE sessions SET endedAt = ?, videoPath = ?, recordingStartSec = ? WHERE id = ?',
       opts.endedAt,
       opts.videoPath ?? null,
+      opts.recordingStartSec ?? null,
       sessionId,
     );
   });

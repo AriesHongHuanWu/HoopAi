@@ -124,7 +124,9 @@ export default function LiveSessionScreen() {
       if (recordVideo && engine?.activeMode === 'camera') {
         try {
           await engine.startRecording();
-          useSession.getState().setRecording(true);
+          // Engine-clock start so shot timestamps map onto the video timeline
+          // (videoTime = shot.tResolved − recordingStartSec).
+          useSession.getState().setRecording(true, null, engine.nowSec());
         } catch {
           // Recording failed (storage, codec) — session continues stats-only.
           useSession.getState().setRecording(false);

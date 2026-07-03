@@ -4,7 +4,7 @@
  * summary (shared SessionRecap). Corrections persist via updateShotOutcome
  * with an optimistic local flip.
  */
-import { useLocalSearchParams } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 import React from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
@@ -15,7 +15,7 @@ import {
   formatSessionTime,
   useSessionRecord,
 } from '@/components/ShotList';
-import { Card, Eyebrow, Row, Screen } from '@/components/ui';
+import { Card, Eyebrow, PillButton, Row, Screen } from '@/components/ui';
 import { color, space, type } from '@/constants/tokens';
 
 export default function SessionDetailScreen() {
@@ -57,6 +57,13 @@ export default function SessionDetailScreen() {
             {formatSessionDate(session.startedAt)}
           </Text>
           {meta != null && <Text style={styles.meta}>{meta}</Text>}
+          {session.videoPath != null && (
+            <PillButton
+              label="Watch replay"
+              onPress={() => router.push(`/video/${session.id}`)}
+              style={{ marginTop: space.lg }}
+            />
+          )}
           <View style={{ marginTop: space.lg }}>
             <SessionRecap
               shots={record.shots}

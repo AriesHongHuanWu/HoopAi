@@ -8,7 +8,7 @@
  * search param so the screen also works after a reload / deep link.
  */
 import { router, useLocalSearchParams } from 'expo-router';
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
 import {
@@ -17,9 +17,10 @@ import {
   SessionTitle,
   useSessionRecord,
 } from '@/components/ShotList';
-import { Card, Eyebrow, PillButton, Row, Screen } from '@/components/ui';
+import { Card, Chip, Eyebrow, PillButton, Row, Screen } from '@/components/ui';
 import { color, space, type } from '@/constants/tokens';
 import type { ResolvedShot, ShotOutcome, ShotValue } from '@/core/types';
+import { saveSessionVideo } from '@/data/videoLibrary';
 import { useSession } from '@/state/sessionStore';
 import { useSettings } from '@/state/settingsStore';
 
@@ -34,6 +35,7 @@ export default function SessionSummaryScreen() {
   const correctShotValue = useSession((s) => s.correctShotValue);
   const resetToIdle = useSession((s) => s.resetToIdle);
   const keepSetting = useSettings((s) => s.keepMode);
+  const saveToPhotos = useSettings((s) => s.saveToPhotos);
 
   const storeMode = phase === 'ended';
   const paramId =
@@ -55,6 +57,18 @@ export default function SessionSummaryScreen() {
   // persistSessionLabel writes through when the data layer supports it.
   const [labelOverride, setLabelOverride] = useState<string | null>(null);
   const sessionId = storeMode ? liveSessionId : (record.session?.id ?? null);
+
+  // Auto-save the just-ended recording to Photos (once — the effect can
+  // re-run on re-renders/param changes, so a ref guards the actual save).
+  const saveFired = useRef(false);
+  const [saveStatus, setSaveStatus] = useState<'idle' | 'saved' | 'failed'>('idle');
+  useEffect(() => {
+    if (!storeMode || videoPath == null || !saveToPhotos || saveFired.current) return;
+    saveFired.current = true;
+    void saveSessionVideo(videoPath).then((ok) => {
+      setSaveStatus(ok ? 'saved' : 'failed');
+    });
+  }, [storeMode, videoPath, saveToPhotos]);
   const label = labelOverride ?? (storeMode ? '' : (record.session?.label ?? ''));
   const onRename = (next: string) => {
     setLabelOverride(next);
@@ -102,6 +116,25 @@ export default function SessionSummaryScreen() {
           <View style={styles.titleBlock}>
             <SessionTitle label={label} onRename={onRename} />
           </View>
+          {saveStatus !== 'idle' && (
+            <View style={styles.saveChip}>
+              <Chip
+                label={
+                  saveStatus === 'saved'
+                    ? 'Saved to Photos'
+                    : 'Couldn’t save — check permissions'
+                }
+                tone={saveStatus === 'saved' ? 'make' : 'unsure'}
+              />
+            </View>
+          )}
+          {videoPath != null && sessionId != null && (
+            <PillButton
+              label="Watch replay"
+              onPress={() => router.push(`/video/${sessionId}`)}
+              style={styles.replayButton}
+            />
+          )}
           <SessionRecap
             shots={shots}
             stats={stats}
@@ -128,6 +161,12 @@ export default function SessionSummaryScreen() {
 const styles = StyleSheet.create({
   titleBlock: {
     marginBottom: space.sm,
+  },
+  saveChip: {
+    marginBottom: space.md,
+  },
+  replayButton: {
+    marginBottom: space.lg,
   },
   heading: {
     ...type.heading,

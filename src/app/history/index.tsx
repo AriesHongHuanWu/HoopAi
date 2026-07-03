@@ -1,13 +1,14 @@
 /**
  * History — list of past sessions as cards: date up top, FG% as the big
  * numeral, makes/attempts meta and a mini pip row of the actual shot
- * sequence. Tapping a card opens the full session detail at /history/[id].
+ * sequence. Tapping a card opens the full session detail at /history/[id];
+ * long-pressing offers delete (which also removes the local recording).
  * The empty state draws the signature shot arc waiting for its first make.
  */
 import { Canvas, Circle, DashPathEffect, Line, Path, vec } from '@shopify/react-native-skia';
 import { router, useFocusEffect } from 'expo-router';
 import React, { useCallback, useState } from 'react';
-import { StyleSheet, Text, View } from 'react-native';
+import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import {
   BackPill,
@@ -23,9 +24,10 @@ import {
   Screen,
   StatNumber,
 } from '@/components/ui';
-import { color, space, type } from '@/constants/tokens';
+import { color, radius, space, type } from '@/constants/tokens';
 import type { ShotOutcome } from '@/core/types';
-import { listSessions, sessionShots, type SessionSummaryRow } from '@/data/db';
+import { deleteSession, listSessions, sessionShots, type SessionSummaryRow } from '@/data/db';
+import { deleteLocalVideo } from '@/data/videoLibrary';
 
 interface HistoryItem {
   row: SessionSummaryRow;
@@ -60,6 +62,29 @@ function EmptyArc() {
 
 export default function HistoryScreen() {
   const [items, setItems] = useState<HistoryItem[] | null>(null);
+
+  const confirmDelete = useCallback((row: SessionSummaryRow) => {
+    Alert.alert(
+      'Delete this session?',
+      'Its shots and stats are removed and the recording is deleted from the app. Videos already saved to Photos stay in Photos.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: () => {
+            void (async () => {
+              if (row.videoPath != null) await deleteLocalVideo(row.videoPath);
+              await deleteSession(row.id);
+              setItems((prev) =>
+                prev == null ? prev : prev.filter((i) => i.row.id !== row.id),
+              );
+            })();
+          },
+        },
+      ],
+    );
+  }, []);
 
   useFocusEffect(
     useCallback(() => {
@@ -111,40 +136,55 @@ export default function HistoryScreen() {
           {items.map(({ row, pips }) => {
             const makes = row.makes ?? 0;
             const fg = Math.round(row.fgPct * 100);
+            const hasVideo = row.videoPath != null;
             return (
-              <Card
+              <Pressable
                 key={row.id}
+                accessibilityRole="button"
+                accessibilityLabel={`Session on ${formatSessionDate(row.startedAt)}, ${fg} percent field goals${hasVideo ? ', has replay video' : ''}`}
+                accessibilityHint="Opens the session detail. Long press to delete."
                 onPress={() =>
                   router.push({
                     pathname: '/history/[id]',
                     params: { id: String(row.id) },
                   })
                 }
+                onLongPress={() => confirmDelete(row)}
+                style={({ pressed }) => pressed && { opacity: 0.8 }}
               >
-                <Row style={{ justifyContent: 'space-between' }} gap={space.lg}>
-                  <View style={styles.cardInfo}>
-                    <Text style={styles.heading}>
-                      {formatSessionDate(row.startedAt)}
-                    </Text>
-                    <Text style={styles.caption}>
-                      {formatSessionTime(row.startedAt)}
-                    </Text>
-                    <Text style={[styles.meta, { marginTop: space.sm }]}>
-                      {row.attempts} {row.attempts === 1 ? 'shot' : 'shots'} ·{' '}
-                      {makes} {makes === 1 ? 'make' : 'makes'}
-                    </Text>
-                  </View>
-                  <StatNumber value={`${fg}%`} size="medium" label="FG" />
-                </Row>
-                {pips.length > 0 && (
-                  <PipRow
-                    outcomes={pips}
-                    size={10}
-                    max={24}
-                    style={{ marginTop: space.md }}
-                  />
-                )}
-              </Card>
+                <Card>
+                  <Row style={{ justifyContent: 'space-between' }} gap={space.lg}>
+                    <View style={styles.cardInfo}>
+                      <Text style={styles.heading}>
+                        {formatSessionDate(row.startedAt)}
+                      </Text>
+                      <Row gap={space.sm}>
+                        <Text style={styles.caption}>
+                          {formatSessionTime(row.startedAt)}
+                        </Text>
+                        {hasVideo && (
+                          <View style={styles.videoBadge} importantForAccessibility="no">
+                            <Text style={styles.videoGlyph}>▶</Text>
+                          </View>
+                        )}
+                      </Row>
+                      <Text style={[styles.meta, { marginTop: space.sm }]}>
+                        {row.attempts} {row.attempts === 1 ? 'shot' : 'shots'} ·{' '}
+                        {makes} {makes === 1 ? 'make' : 'makes'}
+                      </Text>
+                    </View>
+                    <StatNumber value={`${fg}%`} size="medium" label="FG" />
+                  </Row>
+                  {pips.length > 0 && (
+                    <PipRow
+                      outcomes={pips}
+                      size={10}
+                      max={24}
+                      style={{ marginTop: space.md }}
+                    />
+                  )}
+                </Card>
+              </Pressable>
             );
           })}
         </View>
@@ -186,6 +226,15 @@ const styles = StyleSheet.create({
     flex: 1,
     minWidth: 0,
     gap: 2,
+  },
+  videoBadge: {
+    paddingHorizontal: space.xs,
+    borderRadius: radius.sm,
+    backgroundColor: color.accentTint,
+  },
+  videoGlyph: {
+    ...type.micro,
+    color: color.accent,
   },
   dim: {
     ...type.body,

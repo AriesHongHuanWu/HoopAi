@@ -470,7 +470,8 @@ function HighlightsCard({
         </View>
       )}
       <Text style={styles.footnote}>
-        Clip export lands in the next update — the full video is saved.
+        Watch highlights in the replay player. Exporting clip files comes
+        later.
       </Text>
     </Card>
   );

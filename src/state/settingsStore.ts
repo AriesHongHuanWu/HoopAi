@@ -37,6 +37,8 @@ export interface SettingsState {
   soundPack: SoundPack;
   /** Record video during sessions at all. */
   recordVideo: boolean;
+  /** Auto-save each session recording to the device photo library. */
+  saveToPhotos: boolean;
   keepMode: KeepMode;
   /** Seconds of video kept before a shot resolves in highlight clips (2–10). */
   clipPreRollSec: number;
@@ -61,6 +63,7 @@ export const useSettings = create<SettingsState>()(
       hapticsEnabled: true,
       soundPack: 'classic',
       recordVideo: true,
+      saveToPhotos: true,
       keepMode: 'makes',
       clipPreRollSec: 6,
       clipPostRollSec: 2,

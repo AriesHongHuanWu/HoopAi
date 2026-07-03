@@ -78,21 +78,25 @@ function ToggleRow({
   label,
   description,
   value,
+  disabled,
   onValueChange,
 }: {
   label: string;
   description?: string;
   value: boolean;
+  disabled?: boolean;
   onValueChange: (v: boolean) => void;
 }) {
   return (
-    <Row style={styles.settingRow} gap={space.lg}>
+    <Row style={[styles.settingRow, disabled === true && styles.disabled]} gap={space.lg}>
       <View style={styles.settingText}>
         <Text style={styles.settingLabel}>{label}</Text>
         {description != null && <Text style={styles.settingDesc}>{description}</Text>}
       </View>
       <Switch
         accessibilityLabel={label}
+        accessibilityState={{ disabled: disabled === true }}
+        disabled={disabled === true}
         value={value}
         onValueChange={onValueChange}
         trackColor={{ false: color.border, true: color.accent }}
@@ -255,6 +259,7 @@ export default function SettingsScreen() {
   const hapticsEnabled = useSettings((s) => s.hapticsEnabled);
   const soundPack = useSettings((s) => s.soundPack);
   const recordVideo = useSettings((s) => s.recordVideo);
+  const saveToPhotos = useSettings((s) => s.saveToPhotos);
   const keepMode = useSettings((s) => s.keepMode);
   const clipPreRollSec = useSettings((s) => s.clipPreRollSec);
   const clipPostRollSec = useSettings((s) => s.clipPostRollSec);
@@ -426,6 +431,17 @@ export default function SettingsScreen() {
             onValueChange={(v) => {
               tick();
               set('recordVideo', v);
+            }}
+          />
+          <View style={styles.divider} />
+          <ToggleRow
+            label="Save recordings to Photos"
+            description="Add the full session video to your photo library when a session ends."
+            value={saveToPhotos}
+            disabled={!recordVideo}
+            onValueChange={(v) => {
+              tick();
+              set('saveToPhotos', v);
             }}
           />
           <View style={styles.divider} />

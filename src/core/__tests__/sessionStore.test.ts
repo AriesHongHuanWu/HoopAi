@@ -195,7 +195,11 @@ describe('finish', () => {
     await useSession.getState().finish({ nowMs: 2002 });
     expect(useSession.getState().phase).toBe('ended');
     expect(mockEndSession).toHaveBeenCalledTimes(1);
-    expect(mockEndSession).toHaveBeenCalledWith(7, { endedAt: 2000, videoPath: null });
+    expect(mockEndSession).toHaveBeenCalledWith(7, {
+      endedAt: 2000,
+      videoPath: null,
+      recordingStartSec: null,
+    });
   });
 
   it('still ends the session in memory when endSession rejects', async () => {

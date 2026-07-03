@@ -41,6 +41,11 @@ export interface SessionState {
   rimLocked: boolean;
   isRecording: boolean;
   recordingPath: string | null;
+  /**
+   * Engine-clock second when the recording started; aligns shot timestamps
+   * with the video (videoTime = shot.tResolved − recordingStartSec).
+   */
+  recordingStartSec: number | null;
   /** Sound the UI should play for the latest shot (consumed once). */
   pendingSound: SoundEvent | null;
   /** The most recent shot, for the result flash card. */
@@ -60,7 +65,7 @@ export interface SessionState {
    */
   correctShotValue: (shotId: number, value: ShotValue) => void;
   consumeSound: () => SoundEvent | null;
-  setRecording: (recording: boolean, path?: string | null) => void;
+  setRecording: (recording: boolean, path?: string | null, startSec?: number | null) => void;
   finish: (opts: { nowMs: number; videoPath?: string | null }) => Promise<void>;
   resetToIdle: () => void;
 }
@@ -78,6 +83,7 @@ export const useSession = create<SessionState>((set, get) => ({
   rimLocked: false,
   isRecording: false,
   recordingPath: null,
+  recordingStartSec: null,
   pendingSound: null,
   lastShot: null,
 
@@ -92,6 +98,7 @@ export const useSession = create<SessionState>((set, get) => ({
       rimLocked: false,
       isRecording: false,
       recordingPath: null,
+      recordingStartSec: null,
       pendingSound: null,
       lastShot: null,
     });
@@ -195,19 +202,27 @@ export const useSession = create<SessionState>((set, get) => ({
     return sound;
   },
 
-  setRecording: (recording, path = null) =>
-    set({ isRecording: recording, recordingPath: path ?? null }),
+  setRecording: (recording, path = null, startSec) =>
+    set((s) => ({
+      isRecording: recording,
+      recordingPath: path ?? s.recordingPath,
+      recordingStartSec: startSec !== undefined ? startSec : s.recordingStartSec,
+    })),
 
   finish: async ({ nowMs, videoPath }) => {
-    const { sessionId, phase } = get();
+    const { sessionId, phase, recordingStartSec } = get();
     // Idempotent: a double-tap on End (or a background/foreground race) must
     // not end the session twice or overwrite endedAt with a later timestamp.
     if (phase === 'ended') return;
     // Flip the phase FIRST so the UI moves on even if persistence fails.
-    set({ phase: 'ended', isRecording: false });
+    set({ phase: 'ended', isRecording: false, recordingPath: videoPath ?? get().recordingPath });
     if (sessionId != null) {
       try {
-        await endSession(sessionId, { endedAt: nowMs, videoPath: videoPath ?? null });
+        await endSession(sessionId, {
+          endedAt: nowMs,
+          videoPath: videoPath ?? null,
+          recordingStartSec,
+        });
       } catch (err) {
         console.warn('[session] endSession failed', err);
       }
@@ -225,6 +240,7 @@ export const useSession = create<SessionState>((set, get) => ({
       rimLocked: false,
       isRecording: false,
       recordingPath: null,
+      recordingStartSec: null,
       pendingSound: null,
       lastShot: null,
     });
