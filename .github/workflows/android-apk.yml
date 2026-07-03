@@ -60,7 +60,7 @@ jobs:
       - name: Build release APK
         working-directory: android
         run: |
-          ./gradlew assembleRelease --no-daemon \
+          ./gradlew assembleRelease --no-daemon --stacktrace \
             -Pandroid.injected.signing.store.file="$RUNNER_TEMP/hoopai.keystore" \
             -Pandroid.injected.signing.store.password=hoopai-ci \
             -Pandroid.injected.signing.key.alias=hoopai \
