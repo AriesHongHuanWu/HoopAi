@@ -22,7 +22,7 @@ import {
   type CameraOutput,
 } from 'react-native-vision-camera';
 import { useResizer } from 'react-native-vision-camera-resizer';
-import { useTensorflowModel } from 'react-native-fast-tflite';
+import { loadTensorflowModel, type TensorflowModel } from 'react-native-fast-tflite';
 import { NitroModules } from 'react-native-nitro-modules';
 
 import { DETECTION } from '../core/config';
@@ -73,6 +73,10 @@ export interface EngineDebug {
   /** Model input value range (should be ~0..1). */
   inputMin: number;
   inputMax: number;
+  /** Which delegate the model loaded with ('core-ml' | 'android-gpu' | 'cpu' | 'loading'). */
+  delegate: string;
+  /** Load failure reason, empty when loaded. */
+  modelError: string;
 }
 
 export const EMPTY_DEBUG: EngineDebug = {
@@ -85,6 +89,8 @@ export const EMPTY_DEBUG: EngineDebug = {
   detCount: 0,
   inputMin: 0,
   inputMax: 0,
+  delegate: 'loading',
+  modelError: '',
 };
 
 export interface ShotEngineEvents {
@@ -119,18 +125,63 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
   const { hasPermission, requestPermission } = useCameraPermission();
   const device = useCameraDevice('back');
 
-  const model = useTensorflowModel(
-    MODEL_ASSET,
-    Platform.OS === 'ios' ? ['core-ml'] : ['android-gpu'],
-  );
-  const isModelLoaded = model.state === 'loaded';
+  // Manual model loading with a delegate fallback chain: the accelerator
+  // delegates (CoreML on iOS / GPU on Android) reject some models outright,
+  // and the useTensorflowModel hook just parks in 'error' silently. Try the
+  // fast delegate first, fall back to plain CPU (always compatible), and
+  // surface the failure reason to the debug panel.
+  const [modelState, setModelState] = useState<{
+    model: TensorflowModel | null;
+    delegate: string;
+    error: string;
+  }>({ model: null, delegate: 'loading', error: '' });
+
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      const attempts: { label: string; delegates: ('core-ml' | 'android-gpu')[] }[] =
+        Platform.OS === 'ios'
+          ? [{ label: 'core-ml', delegates: ['core-ml'] }, { label: 'cpu', delegates: [] }]
+          : [{ label: 'android-gpu', delegates: ['android-gpu'] }, { label: 'cpu', delegates: [] }];
+      let lastError = '';
+      for (const a of attempts) {
+        try {
+          const m = await loadTensorflowModel(MODEL_ASSET, a.delegates);
+          if (!alive) return;
+          setModelState({ model: m, delegate: a.label, error: '' });
+          return;
+        } catch (e) {
+          lastError = `${a.label}: ${String(e).slice(0, 160)}`;
+          if (!alive) return;
+          setModelState({ model: null, delegate: a.label, error: lastError });
+        }
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const isModelLoaded = modelState.model != null;
   const activeMode: 'demo' | 'camera' =
     mode === 'demo' || (mode === 'auto' && !isModelLoaded) || device == null
       ? 'demo'
       : 'camera';
 
+
   const overlay = useSharedValue<OverlayState>(EMPTY_OVERLAY);
   const debug = useSharedValue<EngineDebug>({ ...EMPTY_DEBUG });
+
+  // Mirror the load state into the debug panel as soon as it changes.
+  useEffect(() => {
+    debug.value = {
+      ...debug.value,
+      modelLoaded: isModelLoaded,
+      delegate: modelState.delegate,
+      modelError: modelState.error,
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modelState, isModelLoaded]);
 
   // Session clock: monotonic seconds since engine mount.
   const t0 = useRef<number>(performance.now());
@@ -167,7 +218,13 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
   useEffect(() => {
     if (activeMode !== 'demo') return;
     const mock = createMockDetector();
-    debug.value = { ...EMPTY_DEBUG, mode: 'demo', modelLoaded: isModelLoaded };
+    debug.value = {
+      ...EMPTY_DEBUG,
+      mode: 'demo',
+      modelLoaded: isModelLoaded,
+      delegate: modelState.delegate,
+      modelError: modelState.error,
+    };
     const id = setInterval(() => {
       const t = nowSec();
       const state = pipeline.step({ frame: mock.frameAt(t), netMotionScore: 0 });
@@ -181,14 +238,14 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
       clearInterval(id);
       pipeline.reset();
     };
-  }, [activeMode, pipeline, nowSec]);
+  }, [activeMode, pipeline, nowSec, isModelLoaded, modelState.delegate, modelState.error, debug]);
 
   // -------------------------------------------------------------------------
   // Camera mode: worklet → detections → JS pipeline.
   // -------------------------------------------------------------------------
   const boxedModel = useMemo(
-    () => (isModelLoaded ? NitroModules.box(model.model) : undefined),
-    [isModelLoaded, model],
+    () => (modelState.model != null ? NitroModules.box(modelState.model) : undefined),
+    [modelState.model],
   );
 
   const { resizer } = useResizer({
@@ -247,6 +304,8 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
           detCount: parsed.detections.length,
           inputMin: inMin,
           inputMax: inMax,
+          delegate: debug.value.delegate,
+          modelError: '',
         };
         scheduleOnRN(onPayload, { frame: parsed, netMotionScore: 0 });
       } finally {

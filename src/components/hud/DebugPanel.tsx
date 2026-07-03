@@ -31,6 +31,12 @@ export function DebugPanel({ debug }: { debug: SharedValue<EngineDebug> }) {
       <Text style={styles.title}>DETECT DEBUG</Text>
       <Row k="mode" v={d.mode} vc={d.mode === 'camera' ? color.make : color.unsure} />
       <Row k="model" v={d.modelLoaded ? 'loaded' : 'NOT loaded (demo)'} vc={d.modelLoaded ? color.make : color.miss} />
+      <Row k="delegate" v={d.delegate} vc={d.delegate === 'cpu' ? color.unsure : color.text} />
+      {d.modelError !== '' && (
+        <Text style={styles.err} numberOfLines={4}>
+          {d.modelError}
+        </Text>
+      )}
       <Row k="frames" v={String(d.frames)} vc={running ? color.text : color.miss} />
       <Row k="output" v={`${d.outputLen} · ${d.layout}`} />
       <Row k="maxScore" v={d.maxScore.toFixed(3)} vc={scoreColor} />
@@ -79,5 +85,11 @@ const styles = StyleSheet.create({
   val: {
     ...type.micro,
     color: color.text,
+  },
+  err: {
+    ...type.micro,
+    color: color.miss,
+    marginTop: 4,
+    maxWidth: 220,
   },
 });
