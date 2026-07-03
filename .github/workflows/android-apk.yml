@@ -12,6 +12,7 @@ on:
     paths-ignore:
       - 'docs/**'
       - '**.md'
+      - 'notebooks/**'
       - '.github/workflows/ios-*.yml'
   workflow_dispatch:
 

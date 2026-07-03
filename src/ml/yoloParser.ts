@@ -38,12 +38,26 @@ export function parseYoloOutput(
     scoreMin = 0.15,
     iouThreshold = 0.45,
     maxDetections = 16,
-    normalized = false,
+    normalized,
   } = opts;
   const nc = CLASS_ORDER.length;
   const rows = 4 + nc;
   const n = Math.floor(data.length / rows);
-  const scale = normalized ? inputSize : 1;
+  // Coordinate scale. YOLO TFLite exports vary: some emit normalized 0..1
+  // coords, others pixel coords in [0, inputSize]. Auto-detect when the caller
+  // doesn't say, so a model swap never needs a code change + rebuild: scan the
+  // cx row and treat everything as normalized when the max is ~<=1.
+  let scale: number;
+  if (normalized === undefined) {
+    let maxCx = 0;
+    for (let i = 0; i < n; i++) {
+      const v = data[i]!;
+      if (v > maxCx) maxCx = v;
+    }
+    scale = maxCx <= 2 ? inputSize : 1;
+  } else {
+    scale = normalized ? inputSize : 1;
+  }
 
   const raw: Detection[] = [];
   for (let i = 0; i < n; i++) {
