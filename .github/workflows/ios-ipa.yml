@@ -59,16 +59,22 @@ jobs:
           ")
           if [ -z "$SCHEME" ]; then echo '::error::Could not determine Xcode scheme'; exit 1; fi
           echo "Workspace: $WS  Scheme: $SCHEME"
-          # `archive` + generic/platform=iOS is the correct device build; the
-          # earlier `build -sdk iphoneos` mis-resolved destinations and built
-          # the Expo xcframeworks for the wrong archs. No pipe → xcodebuild's
-          # own exit code (and full log) propagate.
+          # Pre-resolve Swift packages into a stable, shared clone dir first —
+          # Expo 57 builds ExpoModulesJSI as an xcframework via a nested build
+          # that was failing with "Could not resolve package dependencies".
+          xcodebuild -resolvePackageDependencies \
+            -workspace "$WS" -scheme "$SCHEME" \
+            -clonedSourcePackagesDirPath build/SourcePackages || true
+          # `archive` + generic/platform=iOS is the correct device build.
+          # No pipe → xcodebuild's own exit code (and full log) propagate.
           xcodebuild archive \
             -workspace "$WS" \
             -scheme "$SCHEME" \
             -configuration Release \
             -destination 'generic/platform=iOS' \
             -archivePath build/HoopAI.xcarchive \
+            -clonedSourcePackagesDirPath build/SourcePackages \
+            -scmProvider system \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
