@@ -30,9 +30,12 @@ import { HudChip } from '../../components/hud/HudChip';
 import { ShotFlash } from '../../components/hud/ShotFlash';
 import { StatStrip } from '../../components/hud/StatStrip';
 import { TrajectoryOverlay } from '../../components/hud/TrajectoryOverlay';
+import { ModeBanner } from '../../components/modes/ModeBanner';
+import { ModeComplete } from '../../components/modes/ModeComplete';
 import { Card, Chip, PillButton, Row, Screen } from '../../components/ui';
 import { color, radius, space, type } from '../../constants/tokens';
 import type { ResolvedShot } from '../../core/types';
+import { useMode } from '../../state/modeStore';
 import { useSession } from '../../state/sessionStore';
 import { useSettings } from '../../state/settingsStore';
 
@@ -55,6 +58,10 @@ export default function LiveSessionScreen() {
   const rimLocked = useSession((s) => s.rimLocked);
   const isRecording = useSession((s) => s.isRecording);
 
+  const activeMode = useMode((s) => s.activeMode);
+  const modeDone = activeMode?.done ?? false;
+  const isTimedMode = activeMode?.modeId === 'timed';
+
   const [drift, setDrift] = useState(false);
   const [confirmEnd, setConfirmEnd] = useState(false);
   const [ending, setEnding] = useState(false);
@@ -70,6 +77,11 @@ export default function LiveSessionScreen() {
 
   const onShot = useCallback((shot: ResolvedShot) => {
     useSession.getState().addShot(shot);
+    // Fold the same resolved shot into the active game mode (no-op when none).
+    // Use the wall clock (seconds) so the timed-mode countdown shares one clock
+    // with the tick loop below — shot.tResolved is camera-frame time, a
+    // different origin that would desync the timer.
+    useMode.getState().applyShot(shot, Date.now() / 1000);
     if (useSettings.getState().hapticsEnabled) {
       const feedback =
         shot.outcome === 'make'
@@ -119,6 +131,17 @@ export default function LiveSessionScreen() {
     if (driftTimer.current) clearTimeout(driftTimer.current);
   }, []);
 
+  // Timed-mode countdown. Arms + drains the clock on the same wall-clock source
+  // as applyShot (see onShot). Only runs while the timed game is live and not
+  // yet finished; tickMode is a no-op for every other mode.
+  useEffect(() => {
+    if (!isTimedMode || !rimLocked || modeDone || ending) return;
+    const id = setInterval(() => {
+      useMode.getState().tick(Date.now() / 1000);
+    }, 250);
+    return () => clearInterval(id);
+  }, [isTimedMode, rimLocked, modeDone, ending]);
+
   const endSession = useCallback(async () => {
     setEnding(true);
     let path: string | null = null;
@@ -128,7 +151,18 @@ export default function LiveSessionScreen() {
       path = null;
     }
     await useSession.getState().finish({ nowMs: Date.now(), videoPath: path });
+    // The game ends with the session — clear it so it never leaks into the next
+    // run (the hero quick-start also resets, but this covers the mode paths).
+    useMode.getState().reset();
     router.replace('/session/summary');
+  }, []);
+
+  // Restart the just-finished mode for another run without leaving the session:
+  // re-init the same mode (fresh clock/score) and keep shooting.
+  const replayMode = useCallback(() => {
+    const mode = useMode.getState().activeMode;
+    if (mode == null) return;
+    useMode.getState().selectMode(mode.modeId, mode.config ?? undefined);
   }, []);
 
   // ---------------------------------------------------------------------
@@ -175,6 +209,11 @@ export default function LiveSessionScreen() {
       {/* Top HUD */}
       <View style={[styles.topHud, { top: insets.top + space.md }]} pointerEvents="none">
         {rimLocked && <StatStrip />}
+        {rimLocked && activeMode != null && (
+          <View style={styles.modeBanner}>
+            <ModeBanner mode={activeMode} />
+          </View>
+        )}
         {engine.activeMode === 'demo' && (
           <View style={styles.topCenter}>
             <Chip label="DEMO MODE — scripted scene" tone="accent" />
@@ -199,6 +238,11 @@ export default function LiveSessionScreen() {
           style={styles.endButton}
         />
       </View>
+
+      {/* Mode-complete celebration sheet */}
+      {activeMode != null && modeDone && !confirmEnd && !ending && (
+        <ModeComplete mode={activeMode} onReplay={replayMode} onExit={() => void endSession()} />
+      )}
 
       {/* In-screen end confirmation */}
       {confirmEnd && (
@@ -341,6 +385,9 @@ const styles = StyleSheet.create({
   },
   topCenter: {
     alignItems: 'center',
+    marginTop: space.sm,
+  },
+  modeBanner: {
     marginTop: space.sm,
   },
   driftText: {

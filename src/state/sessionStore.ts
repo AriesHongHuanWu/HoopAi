@@ -20,6 +20,7 @@ import type {
   ResolvedShot,
   SessionStats,
   ShotOutcome,
+  ShotValue,
   SoundEvent,
 } from '../core/types';
 
@@ -52,6 +53,12 @@ export interface SessionState {
   addShot: (shot: ResolvedShot) => void;
   /** One-tap make↔miss correction by shot id (in-session index). */
   correctShot: (shotId: number, outcome: ShotOutcome) => void;
+  /**
+   * One-tap 2↔3 correction by shot id. Updates the in-memory shot value and
+   * rebuilds stats (points + 2/3 splits fold shotValue automatically). Live
+   * only — persisted sessions don't carry a value column yet.
+   */
+  correctShotValue: (shotId: number, value: ShotValue) => void;
   consumeSound: () => SoundEvent | null;
   setRecording: (recording: boolean, path?: string | null) => void;
   finish: (opts: { nowMs: number; videoPath?: string | null }) => Promise<void>;
@@ -136,6 +143,22 @@ export const useSession = create<SessionState>((set, get) => ({
       const target = shots.find((e) => e.shot.id === shotId);
       if (target?.rowId != null) void updateShotOutcome(target.rowId, outcome);
       return { shots, stats: acc.stats, lastShot: shots[shots.length - 1]?.shot ?? null };
+    });
+  },
+
+  correctShotValue: (shotId, value) => {
+    set((s) => {
+      const shots = s.shots.map((e) =>
+        e.shot.id === shotId
+          ? { ...e, shot: { ...e.shot, shotValue: value, corrected: true } }
+          : e,
+      );
+      acc = shots.reduce((a, e) => pushShot(a, e.shot), createAccumulator());
+      return {
+        shots,
+        stats: acc.stats,
+        lastShot: shots[shots.length - 1]?.shot ?? null,
+      };
     });
   },
 

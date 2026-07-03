@@ -14,7 +14,7 @@ import { StyleSheet, Text } from 'react-native';
 import { SessionRecap, useSessionRecord } from '@/components/ShotList';
 import { Card, Eyebrow, PillButton, Row, Screen } from '@/components/ui';
 import { color, space, type } from '@/constants/tokens';
-import type { ResolvedShot, ShotOutcome } from '@/core/types';
+import type { ResolvedShot, ShotOutcome, ShotValue } from '@/core/types';
 import { useSession } from '@/state/sessionStore';
 import { useSettings } from '@/state/settingsStore';
 
@@ -25,6 +25,7 @@ export default function SessionSummaryScreen() {
   const storeStats = useSession((s) => s.stats);
   const recordingPath = useSession((s) => s.recordingPath);
   const correctShot = useSession((s) => s.correctShot);
+  const correctShotValue = useSession((s) => s.correctShotValue);
   const resetToIdle = useSession((s) => s.resetToIdle);
   const keepSetting = useSettings((s) => s.keepMode);
 
@@ -47,6 +48,11 @@ export default function SessionSummaryScreen() {
   const onCorrect = (shot: ResolvedShot, outcome: ShotOutcome) => {
     if (storeMode) correctShot(shot.id, outcome);
     else record.correct(shot, outcome);
+  };
+
+  const onCorrectValue = (shot: ResolvedShot, value: ShotValue) => {
+    if (storeMode) correctShotValue(shot.id, value);
+    else record.correctValue(shot, value);
   };
 
   const onDone = () => {
@@ -81,6 +87,7 @@ export default function SessionSummaryScreen() {
             shots={shots}
             stats={stats}
             onCorrect={onCorrect}
+            onCorrectValue={onCorrectValue}
             videoPath={videoPath}
             keepMode={keepMode}
           />

@@ -9,7 +9,7 @@
  * Also exports HeroArcStat — the summary hero: a scoreboard numeral with the
  * signature arc drawn behind it and a small ball dot at the arc's end.
  */
-import { Canvas, Circle, Path, Skia } from '@shopify/react-native-skia';
+import { BlurMask, Canvas, Circle, Group, Path, Skia } from '@shopify/react-native-skia';
 import React, { useMemo, useState } from 'react';
 import {
   Pressable,
@@ -114,6 +114,17 @@ export function ShotChart({ shots, height = 200, onSelect }: ShotChartProps) {
     return p;
   }, [placed]);
 
+  /** Downtown ring around any DECIDED 3-point shot (make or miss). */
+  const threeRingPath = useMemo(() => {
+    const p = Skia.Path.Make();
+    for (const { x, y, shot } of placed) {
+      if (shot.shotValue === 3 && shot.outcome !== 'unsure') {
+        p.addCircle(x, y, MARK_R + 3.5);
+      }
+    }
+    return p;
+  }, [placed]);
+
   const handlePress = (e: GestureResponderEvent) => {
     if (!onSelect) return;
     const { locationX, locationY } = e.nativeEvent;
@@ -134,6 +145,9 @@ export function ShotChart({ shots, height = 200, onSelect }: ShotChartProps) {
   const makes = shots.filter((s) => s.outcome === 'make').length;
   const misses = shots.filter((s) => s.outcome === 'miss').length;
   const unsureCount = shots.length - makes - misses;
+  const threeCount = shots.filter(
+    (s) => s.shotValue === 3 && s.outcome !== 'unsure',
+  ).length;
   const chartLabel =
     `Shot chart. ${shots.length} shots: ${makes} makes, ${misses} misses` +
     (unsureCount > 0 ? `, ${unsureCount} unsure.` : '.');
@@ -157,6 +171,14 @@ export function ShotChart({ shots, height = 200, onSelect }: ShotChartProps) {
                 color={color.border}
               />
             )}
+            {/* downtown ring behind the mark for decided 3s */}
+            <Path
+              path={threeRingPath}
+              style="stroke"
+              strokeWidth={1.5}
+              color={color.threePt}
+              opacity={0.9}
+            />
             <Path path={makePath} color={color.make} />
             <Path
               path={missPath}
@@ -197,6 +219,12 @@ export function ShotChart({ shots, height = 200, onSelect }: ShotChartProps) {
           <Row gap={space.xs}>
             <MakeMissDot outcome="unsure" size={10} />
             <Text style={styles.legend}>Unsure</Text>
+          </Row>
+        )}
+        {threeCount > 0 && (
+          <Row gap={space.xs}>
+            <View style={styles.threeSwatch} />
+            <Text style={styles.legend}>3PT</Text>
           </Row>
         )}
       </Row>
@@ -259,14 +287,30 @@ export function HeroArcStat({
       {width > 0 && arc != null && (
         <View style={[StyleSheet.absoluteFill, { pointerEvents: 'none' }]}>
           <Canvas style={{ width, height: HERO_H }}>
-            <Path
-              path={arc}
-              style="stroke"
-              strokeWidth={3}
-              strokeCap="round"
-              color={color.accent}
-              opacity={0.55}
-            />
+            {/* soft bloom under the signature arc */}
+            <Group>
+              <Path
+                path={arc}
+                style="stroke"
+                strokeWidth={9}
+                strokeCap="round"
+                color={color.accent}
+                opacity={0.28}
+              >
+                <BlurMask blur={10} style="normal" />
+              </Path>
+              <Path
+                path={arc}
+                style="stroke"
+                strokeWidth={3}
+                strokeCap="round"
+                color={color.accent}
+                opacity={0.6}
+              />
+            </Group>
+            <Circle cx={width * 0.94} cy={HERO_H - 30} r={11} color={color.accent} opacity={0.35}>
+              <BlurMask blur={8} style="normal" />
+            </Circle>
             <Circle
               cx={width * 0.94}
               cy={HERO_H - 30}
@@ -286,6 +330,13 @@ const styles = StyleSheet.create({
   legend: {
     ...type.caption,
     color: color.textFaint,
+  },
+  threeSwatch: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    borderWidth: 1.5,
+    borderColor: color.threePt,
   },
   hero: {
     height: HERO_H,

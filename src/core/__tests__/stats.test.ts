@@ -75,6 +75,13 @@ describe('stats', () => {
         center: { attempts: 0, makes: 0, fgPct: 0 },
         right: { attempts: 0, makes: 0, fgPct: 0 },
       },
+      points: 0,
+      twoPtMakes: 0,
+      twoPtAttempts: 0,
+      threePtMakes: 0,
+      threePtAttempts: 0,
+      twoPtPct: 0,
+      threePtPct: 0,
     });
   });
 
@@ -251,6 +258,13 @@ describe('stats', () => {
         center: { attempts: 2, makes: 2, fgPct: 1 },
         right: { attempts: 0, makes: 0, fgPct: 0 },
       },
+      points: 4,
+      twoPtMakes: 2,
+      twoPtAttempts: 2,
+      threePtMakes: 0,
+      threePtAttempts: 0,
+      twoPtPct: 1,
+      threePtPct: 0,
     };
     const s = applyShot(
       foreign,
@@ -288,6 +302,48 @@ describe('stats', () => {
     const zoneAttempts =
       s.byZone.left.attempts + s.byZone.center.attempts + s.byZone.right.attempts;
     expect(zoneAttempts).toBe(5);
+  });
+
+  // -------------------------------------------------------------------------
+  // Points / 2-3 split (estimated shotValue)
+  // -------------------------------------------------------------------------
+
+  test('make without shotValue defaults to a 2-pointer', () => {
+    const s = fold([shot({ outcome: 'make' })]);
+    expect(s.points).toBe(2);
+    expect(s.twoPtMakes).toBe(1);
+    expect(s.twoPtAttempts).toBe(1);
+    expect(s.threePtMakes).toBe(0);
+    expect(s.threePtAttempts).toBe(0);
+    expect(s.twoPtPct).toBe(1);
+    expect(s.threePtPct).toBe(0);
+  });
+
+  test('points sum 2s and 3s; misses count as attempts only', () => {
+    const s = fold([
+      shot({ outcome: 'make', shotValue: 3 }), // +3
+      shot({ outcome: 'make', shotValue: 2 }), // +2
+      shot({ outcome: 'miss', shotValue: 3 }), // 3pt attempt, no points
+      shot({ outcome: 'miss', shotValue: 2 }), // 2pt attempt
+      shot({ outcome: 'unsure', shotValue: 3 }), // ignored entirely
+    ]);
+    expect(s.points).toBe(5);
+    expect(s.twoPtMakes).toBe(1);
+    expect(s.twoPtAttempts).toBe(2);
+    expect(s.threePtMakes).toBe(1);
+    expect(s.threePtAttempts).toBe(2);
+    expect(s.twoPtPct).toBeCloseTo(0.5, 12);
+    expect(s.threePtPct).toBeCloseTo(0.5, 12);
+  });
+
+  test('unsure shots never contribute points or attempts', () => {
+    const s = fold([
+      shot({ outcome: 'unsure', shotValue: 3 }),
+      shot({ outcome: 'unsure', shotValue: 2 }),
+    ]);
+    expect(s.points).toBe(0);
+    expect(s.twoPtAttempts).toBe(0);
+    expect(s.threePtAttempts).toBe(0);
   });
 
   // -------------------------------------------------------------------------

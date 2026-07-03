@@ -1,22 +1,42 @@
 /**
- * ShotFlash — full-screen result flash for the live HUD.
+ * ShotFlash — the full-screen result celebration for the live HUD.
  *
- * make   → "SPLASH" in swish green over a brief accent wash, scale + fade;
- *          a flame "🔥 ×N" joins at streak ≥ 3.
- * miss   → small neutral "MISS" (never punishing — no red wash, no shake).
- * unsure → small "UNSURE" in chalk yellow (fix later in the summary).
+ * make   → a Skia "splash" burst (expanding ring + radiating spokes) blooms
+ *          behind a scoreboard "SPLASH", scale-punched in on a spring; the shot's
+ *          point value rides along as a gold "3" ring for downtown makes; a
+ *          flame "🔥 ×N" joins at streak ≥ 3.
+ * miss   → a quiet neutral "MISS" (never punishing — no wash, no shake).
+ * unsure → a quiet "UNSURE" in chalk yellow (fix later in the summary).
  *
- * Auto-dismisses after ~700 ms (motion.celebrate + fade headroom).
+ * The burst runs entirely on Skia/Reanimated shared values (no per-frame React
+ * state). Auto-dismisses after motion.celebrate + fade headroom.
  */
 import React, { useEffect, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
-import Animated, { FadeIn, FadeOut, ZoomIn } from 'react-native-reanimated';
+import Animated, {
+  Easing,
+  FadeIn,
+  FadeOut,
+  ZoomIn,
+  useDerivedValue,
+  useSharedValue,
+  withTiming,
+} from 'react-native-reanimated';
+import {
+  BlurMask,
+  Canvas,
+  Circle,
+  Group,
+  Path,
+  Skia,
+} from '@shopify/react-native-skia';
 
-import { color, motion, space, type } from '../../constants/tokens';
+import { color, glow, motion, space, type } from '../../constants/tokens';
 import type { ResolvedShot } from '../../core/types';
 import { useSession } from '../../state/sessionStore';
 
 const FLASH_MS = motion.celebrate + 100;
+const BURST_SPOKES = 12;
 
 /** RN 0.86 dropped StyleSheet.absoluteFillObject — local equivalent. */
 const absoluteFill = {
@@ -26,6 +46,100 @@ const absoluteFill = {
   right: 0,
   bottom: 0,
 } as const;
+
+/**
+ * MakeBurst — a radial splash drawn once per make. `t` animates 0→1; a ring
+ * expands and fades while spokes shoot outward. Colored gold for a 3, green
+ * for a 2, so the burst itself signals the point value.
+ */
+function MakeBurst({ is3 }: { is3: boolean }) {
+  const [size, setSize] = useState({ w: 0, h: 0 });
+  const t = useSharedValue(0);
+
+  useEffect(() => {
+    t.value = 0;
+    t.value = withTiming(1, {
+      duration: motion.celebrate,
+      easing: Easing.out(Easing.cubic),
+    });
+  }, [t]);
+
+  const cx = size.w / 2;
+  const cy = size.h / 2;
+  const maxR = Math.min(size.w, size.h) * 0.42;
+  const hue = is3 ? glow.rimLive : color.make; // green for both; gold accent handled by ring badge
+  const spokeColor = is3 ? glow.downtown : color.make;
+
+  const ringR = useDerivedValue(() => maxR * (0.3 + t.value * 0.7));
+  const ringOpacity = useDerivedValue(() => (1 - t.value) * 0.9);
+  const ringStroke = useDerivedValue(() => 6 * (1 - t.value) + 1.5);
+
+  const spokePath = useDerivedValue(() => {
+    const p = Skia.Path.Make();
+    if (size.w <= 0) return p;
+    const inner = maxR * (0.24 + t.value * 0.55);
+    const outer = maxR * (0.42 + t.value * 0.9);
+    for (let i = 0; i < BURST_SPOKES; i++) {
+      const a = (i / BURST_SPOKES) * Math.PI * 2 + (is3 ? Math.PI / BURST_SPOKES : 0);
+      const dx = Math.cos(a);
+      const dy = Math.sin(a);
+      p.moveTo(cx + dx * inner, cy + dy * inner);
+      p.lineTo(cx + dx * outer, cy + dy * outer);
+    }
+    return p;
+  });
+  const spokeOpacity = useDerivedValue(() => (1 - t.value) * 0.8);
+
+  const coreR = useDerivedValue(() => maxR * (0.5 - t.value * 0.2));
+  const coreOpacity = useDerivedValue(() => (1 - t.value) * 0.5);
+
+  return (
+    <Canvas
+      style={absoluteFill}
+      pointerEvents="none"
+      onLayout={(e) => setSize({ w: e.nativeEvent.layout.width, h: e.nativeEvent.layout.height })}
+    >
+      {size.w > 0 && (
+        <Group>
+          <Circle cx={cx} cy={cy} r={coreR} color={hue} opacity={coreOpacity}>
+            <BlurMask blur={30} style="normal" />
+          </Circle>
+          <Circle
+            cx={cx}
+            cy={cy}
+            r={ringR}
+            style="stroke"
+            strokeWidth={ringStroke}
+            color={hue}
+            opacity={ringOpacity}
+          >
+            <BlurMask blur={3} style="normal" />
+          </Circle>
+          <Path
+            path={spokePath}
+            style="stroke"
+            strokeWidth={3}
+            strokeCap="round"
+            color={spokeColor}
+            opacity={spokeOpacity}
+          >
+            <BlurMask blur={2} style="normal" />
+          </Path>
+        </Group>
+      )}
+    </Canvas>
+  );
+}
+
+/** Small gold "3" ring badge — the downtown mark shown on 3-point results. */
+function ValueBadge({ value }: { value: 2 | 3 }) {
+  if (value !== 3) return null;
+  return (
+    <View style={styles.badge} accessibilityLabel="Three pointer">
+      <Text style={styles.badgeText}>3</Text>
+    </View>
+  );
+}
 
 export function ShotFlash() {
   const lastShot = useSession((s) => s.lastShot);
@@ -42,23 +156,32 @@ export function ShotFlash() {
   if (!shot) return null;
 
   if (shot.outcome === 'make') {
+    const value = shot.shotValue ?? 2;
+    const is3 = value === 3;
     return (
       <View style={styles.fill} pointerEvents="none">
         <Animated.View
           key={`wash-${shot.id}`}
           entering={FadeIn.duration(motion.instant)}
           exiting={FadeOut.duration(motion.standard)}
-          style={[styles.fill, styles.makeWash]}
+          style={[styles.fill, is3 ? styles.downtownWash : styles.makeWash]}
         />
+        <View style={styles.fill} pointerEvents="none">
+          <MakeBurst key={`burst-${shot.id}`} is3={is3} />
+        </View>
         <Animated.View
           key={`splash-${shot.id}`}
-          entering={ZoomIn.duration(motion.quick)}
+          entering={ZoomIn.springify().damping(11).stiffness(180)}
           exiting={FadeOut.duration(motion.standard)}
           style={styles.center}
         >
-          <Text style={styles.splash} accessibilityLabel="Make">
-            SPLASH
-          </Text>
+          <View style={styles.splashRow}>
+            <Text style={styles.splash} accessibilityLabel={is3 ? 'Make, three' : 'Make'}>
+              SPLASH
+            </Text>
+            <ValueBadge value={value} />
+          </View>
+          {is3 && <Text style={styles.downtownTag}>DOWNTOWN · +3</Text>}
           {streak >= 3 && <Text style={styles.flame}>{`🔥 ×${streak}`}</Text>}
         </Animated.View>
       </View>
@@ -94,9 +217,23 @@ const styles = StyleSheet.create({
   makeWash: {
     backgroundColor: color.makeTint,
   },
+  downtownWash: {
+    backgroundColor: color.threePtTint,
+  },
+  splashRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: space.md,
+  },
   splash: {
     ...type.scoreboard,
     color: color.make,
+  },
+  downtownTag: {
+    ...type.caption,
+    color: color.threePt,
+    letterSpacing: 2,
+    marginTop: space.xs,
   },
   flame: {
     ...type.statMedium,
@@ -109,5 +246,19 @@ const styles = StyleSheet.create({
   },
   unsure: {
     color: color.unsure,
+  },
+  badge: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    borderWidth: 3,
+    borderColor: color.threePt,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: color.threePtTint,
+  },
+  badgeText: {
+    ...type.statMedium,
+    color: color.threePt,
   },
 });

@@ -113,6 +113,13 @@ export type ShotPhase = 'IDLE' | 'SHOT_LIVE' | 'COOLDOWN';
 
 export type ShotOutcome = 'make' | 'miss' | 'unsure';
 
+/**
+ * Point value of a made shot, from automatic 2/3-point estimation
+ * (src/core/court.ts). This is an ESTIMATE derived from the rim box scale and
+ * the shooter's foot position — not a calibrated court measurement.
+ */
+export type ShotValue = 2 | 3;
+
 /** The three fused make/miss signals. null = signal unavailable that shot. */
 export interface ShotSignals {
   /** Geometric rim-plane crossing test. */
@@ -152,6 +159,18 @@ export interface ResolvedShot {
   trajectory: BallSample[];
   /** Set true when the user flips the outcome by hand. */
   corrected?: boolean;
+  /**
+   * Estimated point value (2 or 3) from {@link estimateShotValue}
+   * (src/core/court.ts), attached by the pipeline before the shot is emitted.
+   * Undefined when 2/3 estimation didn't run. An ESTIMATE — see court.ts.
+   */
+  shotValue?: ShotValue;
+  /**
+   * Shooter's image-plane ground distance to the point under the rim, expressed
+   * in rim widths (the scale ref used for {@link shotValue}). Undefined when not
+   * computed; can be present with a null origin (defaults to 0).
+   */
+  distanceRimWidths?: number;
 }
 
 /** Per-frame input to the shot FSM. All in analysis-frame space. */
@@ -265,7 +284,39 @@ export interface SessionStats {
   avgReleaseAngleDeg: number | null;
   releaseAngleStdDeg: number | null;
   byZone: Record<ChartZone, { attempts: number; makes: number; fgPct: number }>;
+  /**
+   * Total points from made shots using the estimated {@link ShotValue}
+   * (src/core/court.ts). A make with no shotValue counts as 2. Misses and
+   * unsure shots contribute 0.
+   */
+  points: number;
+  /** Made 2-pointers (shotValue !== 3). */
+  twoPtMakes: number;
+  /** Decided (make|miss) attempts estimated as 2-pointers. */
+  twoPtAttempts: number;
+  /** Made 3-pointers (shotValue === 3). */
+  threePtMakes: number;
+  /** Decided (make|miss) attempts estimated as 3-pointers. */
+  threePtAttempts: number;
+  /** twoPtMakes / twoPtAttempts; 0 when no 2-pt attempts. */
+  twoPtPct: number;
+  /** threePtMakes / threePtAttempts; 0 when no 3-pt attempts. */
+  threePtPct: number;
 }
+
+// ---------------------------------------------------------------------------
+// Game modes
+// ---------------------------------------------------------------------------
+
+/** The seven playable modes layered on top of the make/miss stream. */
+export type GameModeId =
+  | 'free'
+  | 'aroundTheWorld'
+  | 'spotShooting'
+  | 'timed'
+  | 'threePoint'
+  | 'ftStreak'
+  | 'horse';
 
 // ---------------------------------------------------------------------------
 // Clips

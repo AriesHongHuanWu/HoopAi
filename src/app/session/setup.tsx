@@ -12,6 +12,8 @@ import {
 
 import { Card, Chip, Eyebrow, PillButton, Row, Screen } from '../../components/ui';
 import { color, radius, space, touch, type } from '../../constants/tokens';
+import { getModeDef } from '../../core/gameModes';
+import { useMode } from '../../state/modeStore';
 import { useSession } from '../../state/sessionStore';
 import { useSettings, type KeepMode } from '../../state/settingsStore';
 
@@ -48,6 +50,8 @@ export default function SessionSetupScreen() {
   const keepMode = useSettings((s) => s.keepMode);
   const set = useSettings((s) => s.set);
   const beginSetup = useSession((s) => s.beginSetup);
+  const activeMode = useMode((s) => s.activeMode);
+  const modeDef = activeMode != null ? getModeDef(activeMode.modeId) : null;
 
   const openCamera = async () => {
     if (!camera.hasPermission && camera.canRequestPermission) {
@@ -69,6 +73,28 @@ export default function SessionSetupScreen() {
       <Text style={styles.lede}>
         One minute of setup keeps make/miss calls accurate all session.
       </Text>
+
+      {/* Chosen game mode (or Free Play when none picked) */}
+      <Card style={styles.card}>
+        <Row style={styles.modeRow} gap={space.md}>
+          <View style={styles.modeBadge}>
+            <Text style={styles.modeEmoji}>{modeDef?.emoji ?? '🏀'}</Text>
+          </View>
+          <View style={styles.checkBody}>
+            <Eyebrow>Game mode</Eyebrow>
+            <Text style={styles.itemTitle}>{modeDef?.name ?? 'Free Play'}</Text>
+            <Text style={styles.itemBody}>
+              {modeDef?.tagline ?? 'Just shoot — every make counts.'}
+            </Text>
+          </View>
+          <PillButton
+            label={modeDef != null ? 'Change' : 'Choose'}
+            variant="ghost"
+            onPress={() => router.push('/modes')}
+            style={styles.modeChange}
+          />
+        </Row>
+      </Card>
 
       <Card style={styles.card}>
         {CHECKLIST.map((item, i) => (
@@ -183,6 +209,23 @@ const styles = StyleSheet.create({
   },
   card: {
     marginBottom: space.lg,
+  },
+  modeRow: {
+    alignItems: 'center',
+  },
+  modeBadge: {
+    width: 48,
+    height: 48,
+    borderRadius: radius.md,
+    backgroundColor: color.accentTint,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  modeEmoji: {
+    fontSize: 24,
+  },
+  modeChange: {
+    paddingHorizontal: space.lg,
   },
   checkRow: {
     alignItems: 'flex-start',

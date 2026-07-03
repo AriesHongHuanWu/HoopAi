@@ -24,8 +24,19 @@ import type {
   ResolvedShot,
   SessionStats,
   ShotOutcome,
+  ShotValue,
   SoundEvent,
 } from './types';
+
+/**
+ * Estimated point value of a shot for stats folding: the attached
+ * {@link ResolvedShot.shotValue}, defaulting to 2 when 2/3 estimation didn't
+ * run. Applies to makes and misses alike (a missed 3-attempt still counts as a
+ * 3-point ATTEMPT).
+ */
+function shotPointValue(shot: ResolvedShot): ShotValue {
+  return shot.shotValue === 3 ? 3 : 2;
+}
 
 // ---------------------------------------------------------------------------
 // Internal: Welford running-moment state
@@ -153,6 +164,13 @@ export function emptyStats(): SessionStats {
       center: { attempts: 0, makes: 0, fgPct: 0 },
       right: { attempts: 0, makes: 0, fgPct: 0 },
     },
+    points: 0,
+    twoPtMakes: 0,
+    twoPtAttempts: 0,
+    threePtMakes: 0,
+    threePtAttempts: 0,
+    twoPtPct: 0,
+    threePtPct: 0,
   };
   hiddenStates.set(stats, EMPTY_HIDDEN);
   return stats;
@@ -234,6 +252,16 @@ export function applyShot(stats: SessionStats, shot: ResolvedShot): SessionStats
     z.fgPct = zoneDecided[zone] > 0 ? z.makes / zoneDecided[zone] : 0;
   }
 
+  // --- 2/3-point tallies (estimated shotValue; make w/o value ⇒ 2) ---------
+  // Only DECIDED shots contribute to attempts; only makes to makes/points.
+  const value = shotPointValue(shot);
+  const is3 = value === 3;
+  const twoPtMakes = stats.twoPtMakes + (isMake && !is3 ? 1 : 0);
+  const twoPtAttempts = stats.twoPtAttempts + (isDecided && !is3 ? 1 : 0);
+  const threePtMakes = stats.threePtMakes + (isMake && is3 ? 1 : 0);
+  const threePtAttempts = stats.threePtAttempts + (isDecided && is3 ? 1 : 0);
+  const points = stats.points + (isMake ? value : 0);
+
   const next: SessionStats = {
     attempts: stats.attempts + 1,
     makes,
@@ -247,6 +275,13 @@ export function applyShot(stats: SessionStats, shot: ResolvedShot): SessionStats
     avgReleaseAngleDeg: welfordAvg(release),
     releaseAngleStdDeg: welfordStd(release),
     byZone,
+    points,
+    twoPtMakes,
+    twoPtAttempts,
+    threePtMakes,
+    threePtAttempts,
+    twoPtPct: twoPtAttempts > 0 ? twoPtMakes / twoPtAttempts : 0,
+    threePtPct: threePtAttempts > 0 ? threePtMakes / threePtAttempts : 0,
   };
   hiddenStates.set(next, { entry, release, zoneDecided });
   return next;

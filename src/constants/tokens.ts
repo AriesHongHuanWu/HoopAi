@@ -40,6 +40,10 @@ export const palette = {
   /** Informational (charts secondary series, links). */
   paintBlue: '#4F8DE8',
 
+  /** 3-point accent — downtown gold, distinct from make-green & leather. */
+  downtown: '#F2C14E',
+  downtownTint: 'rgba(242, 193, 78, 0.16)',
+
   /** Text. Chalk white, then dimmed steps. */
   chalk: '#F5F1EC',
   chalkDim: '#B3ACA5',
@@ -67,9 +71,42 @@ export const color = {
   missTint: palette.brickTint,
   unsure: palette.chalkYellow,
   info: palette.paintBlue,
+  /** 2-point shots / stat pill. */
+  twoPt: palette.chalkDim,
+  /** 3-point shots / stat pill accent. */
+  threePt: palette.downtown,
+  threePtTint: palette.downtownTint,
   /** Live HUD chip background over camera (glass). */
   hudGlass: 'rgba(18, 16, 16, 0.62)',
   hudGlassBorder: 'rgba(245, 241, 236, 0.14)',
+  /** Deeper glass for stacked HUD panels. */
+  hudGlassDeep: 'rgba(14, 12, 12, 0.74)',
+} as const;
+
+/**
+ * Skia overlay glow palette — raw rgba strings consumed directly by the live
+ * tracking canvas (Skia color props, not RN styles). Kept here so the HUD's
+ * bloom, comet trail and rim reticle all pull from one source of truth.
+ */
+export const glow = {
+  /** Comet trail body — leather orange at full heat. */
+  trail: 'rgba(240, 90, 36, 1)',
+  /** Trail outer bloom. */
+  trailBloom: 'rgba(240, 90, 36, 0.55)',
+  /** Chalk-white comet core. */
+  cometCore: '#FFFFFF',
+  /** Warm halo just outside the core. */
+  cometHalo: 'rgba(255, 214, 170, 0.9)',
+  /** Ball detection reticle (idle tracking). */
+  reticle: 'rgba(245, 241, 236, 0.92)',
+  /** Rim lock brackets, resting. */
+  rimIdle: 'rgba(245, 241, 236, 0.85)',
+  /** Rim lock brackets + fill, live shot (swish green). */
+  rimLive: '#2FD6A3',
+  rimLiveGlow: 'rgba(47, 214, 163, 0.6)',
+  /** Downtown gold for the 3-point range ring. */
+  downtown: '#F2C14E',
+  downtownGlow: 'rgba(242, 193, 78, 0.5)',
 } as const;
 
 /**

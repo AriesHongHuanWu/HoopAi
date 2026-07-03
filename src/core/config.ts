@@ -118,3 +118,35 @@ export const STREAKS = {
   /** Streak lengths that trigger celebration stingers. */
   celebrateAt: [3, 5, 10] as readonly number[],
 } as const;
+
+/**
+ * Automatic 2/3-point estimation (src/core/court.ts). No manual court
+ * calibration — the model already marks the rim and the shooter's foot, and we
+ * use the detected rim box width in pixels as a real-world scale reference
+ * (regulation rim inner diameter ≈ 0.45 m).
+ *
+ * A regulation NBA 3-point arc is ~6.75 m at the top; 6.75 / 0.45 ≈ 15 rim
+ * widths. But the shooter distance we can measure is the ground gap between the
+ * person's foot and the point under the rim IN THE IMAGE PLANE, which is
+ * foreshortened by camera angle and perspective — a true 6.75 m shot rarely
+ * measures a full 15 rim widths on screen. The default threshold is tuned lower
+ * so realistic 3-pt setups classify correctly; treat every result as an
+ * ESTIMATE, adjustable per session via {@link adjust3ptThreshold} in court.ts.
+ */
+export const COURT = {
+  /** Regulation rim inner diameter, meters (scale reference). */
+  rimDiameterM: 0.45,
+  /** NBA 3-pt arc distance at the top, meters (documentation only). */
+  threePtDistanceM: 6.75,
+  /**
+   * Distance (in rim widths, image-plane) at/above which a shot is a 3.
+   * Perspective-tuned default — see COURT doc.
+   */
+  default3ptRimWidths: 9,
+  /** Clamp bounds when a session adjusts its 3-pt threshold. */
+  min3ptRimWidths: 4,
+  max3ptRimWidths: 20,
+} as const;
+
+/** Exposed constant: default rim-width distance that classifies a shot as a 3. */
+export const DEFAULT_3PT_RIMWIDTHS = COURT.default3ptRimWidths;

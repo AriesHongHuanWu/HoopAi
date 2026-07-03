@@ -11,6 +11,7 @@
  */
 import { SHOT_FSM } from '../core/config';
 import { BallTracker } from '../core/ballTracker';
+import { estimateShotValue } from '../core/court';
 import { RimLock } from '../core/rimLock';
 import { ShotFsm } from '../core/shotFsm';
 import type {
@@ -124,7 +125,22 @@ export class ShotPipeline {
       frameHeight: frame.frameHeight,
     };
     this.events.onFrame?.(state);
-    if (resolved) this.events.onShot?.(resolved);
+    if (resolved) {
+      // Automatic 2/3-point estimation: the model already marked the rim and
+      // the shooter's foot (resolved.originX/Y). Attach the estimated value
+      // BEFORE emitting so downstream stats/modes can score points.
+      if (this.lastRim) {
+        const est = estimateShotValue(
+          this.lastRim,
+          resolved.originX,
+          resolved.originY,
+          { width: frame.frameWidth, height: frame.frameHeight },
+        );
+        resolved.shotValue = est.value;
+        resolved.distanceRimWidths = est.distanceRimWidths;
+      }
+      this.events.onShot?.(resolved);
+    }
     return state;
   }
 

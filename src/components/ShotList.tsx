@@ -16,7 +16,15 @@
 import * as Haptics from 'expo-haptics';
 import { router } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { FlatList, StyleSheet, Text, View, type StyleProp, type ViewStyle } from 'react-native';
+import {
+  FlatList,
+  Pressable,
+  StyleSheet,
+  Text,
+  View,
+  type StyleProp,
+  type ViewStyle,
+} from 'react-native';
 import Animated, { FadeInDown } from 'react-native-reanimated';
 
 import { HeroArcStat, ShotChart } from '@/components/charts/ShotChart';
@@ -29,11 +37,11 @@ import {
   Row,
   StatNumber,
 } from '@/components/ui';
-import { color, motion, space, touch, type } from '@/constants/tokens';
+import { color, motion, radius, space, touch, type } from '@/constants/tokens';
 import { planClips } from '@/core/clipPlanner';
 import { FORM } from '@/core/config';
 import { recomputeStats } from '@/core/stats';
-import type { ResolvedShot, SessionStats, ShotOutcome } from '@/core/types';
+import type { ResolvedShot, SessionStats, ShotOutcome, ShotValue } from '@/core/types';
 import {
   getSession,
   sessionShots,
@@ -138,12 +146,72 @@ function Separator() {
   return <View style={styles.separator} />;
 }
 
+/**
+ * ValuePill — a shot's estimated point value. A 2 reads quiet (chalk on
+ * surface); a 3 gets the downtown-gold ring so threes pop in a scan. When
+ * `onFlip` is provided it becomes a one-tap 2↔3 toggle (44pt target).
+ */
+function ValuePill({
+  value,
+  distanceRimWidths,
+  onFlip,
+}: {
+  value: ShotValue;
+  distanceRimWidths?: number;
+  onFlip?: (next: ShotValue) => void;
+}) {
+  const is3 = value === 3;
+  const rw =
+    distanceRimWidths != null && distanceRimWidths > 0
+      ? `~${distanceRimWidths.toFixed(1)}rw`
+      : null;
+  const body = (
+    <View style={[styles.valuePill, is3 ? styles.valuePill3 : styles.valuePill2]}>
+      <Text style={[styles.valuePillNum, is3 && styles.valuePillNum3]}>{value}</Text>
+      <Text style={[styles.valuePillUnit, is3 && styles.valuePillUnit3]}>PT</Text>
+    </View>
+  );
+  if (onFlip == null) {
+    return (
+      <View
+        style={styles.valueWrap}
+        accessible
+        accessibilityLabel={is3 ? 'Three pointer' : 'Two pointer'}
+      >
+        {body}
+        {rw != null && <Text style={styles.valueRw}>{rw}</Text>}
+      </View>
+    );
+  }
+  const next: ShotValue = is3 ? 2 : 3;
+  return (
+    <Pressable
+      onPress={() => {
+        void Haptics.selectionAsync();
+        onFlip(next);
+      }}
+      accessibilityRole="button"
+      accessibilityLabel={
+        is3 ? 'Three pointer. Change to two.' : 'Two pointer. Change to three.'
+      }
+      accessibilityHint="Toggles this shot between a 2 and a 3"
+      hitSlop={12}
+      style={styles.valueWrap}
+    >
+      {body}
+      {rw != null && <Text style={styles.valueRw}>{rw}</Text>}
+    </Pressable>
+  );
+}
+
 function ShotListItem({
   shot,
   onCorrect,
+  onCorrectValue,
 }: {
   shot: ResolvedShot;
   onCorrect?: (shot: ResolvedShot, outcome: ShotOutcome) => void;
+  onCorrectValue?: (shot: ResolvedShot, value: ShotValue) => void;
 }) {
   const correct = (outcome: ShotOutcome) => {
     void Haptics.selectionAsync();
@@ -151,6 +219,7 @@ function ShotListItem({
   };
   const flipTo: ShotOutcome | null =
     shot.outcome === 'make' ? 'miss' : shot.outcome === 'miss' ? 'make' : null;
+  const value: ShotValue = shot.shotValue === 3 ? 3 : 2;
   return (
     <View style={styles.row}>
       <View style={styles.rowDot}>
@@ -159,6 +228,13 @@ function ShotListItem({
       <View style={styles.rowBody}>
         <Row>
           <Text style={styles.rowTitle}>Shot {shot.id}</Text>
+          <ValuePill
+            value={value}
+            distanceRimWidths={shot.distanceRimWidths}
+            onFlip={
+              onCorrectValue ? (next) => onCorrectValue(shot, next) : undefined
+            }
+          />
           {shot.corrected === true && <Chip label="Edited" tone="accent" />}
         </Row>
         {(shot.entryAngleDeg != null || shot.releaseAngleDeg != null) && (
@@ -203,10 +279,13 @@ function ShotListItem({
 export function ShotList({
   shots,
   onCorrect,
+  onCorrectValue,
 }: {
   shots: readonly ResolvedShot[];
   /** One-tap correction: called with the shot and its NEW outcome. */
   onCorrect?: (shot: ResolvedShot, outcome: ShotOutcome) => void;
+  /** One-tap 2↔3 correction: called with the shot and its NEW point value. */
+  onCorrectValue?: (shot: ResolvedShot, value: ShotValue) => void;
 }) {
   if (shots.length === 0) {
     return <Text style={styles.empty}>No shots recorded.</Text>;
@@ -217,7 +296,11 @@ export function ShotList({
       keyExtractor={(s) => String(s.id)}
       scrollEnabled={false}
       renderItem={({ item }) => (
-        <ShotListItem shot={item} onCorrect={onCorrect} />
+        <ShotListItem
+          shot={item}
+          onCorrect={onCorrect}
+          onCorrectValue={onCorrectValue}
+        />
       )}
       ItemSeparatorComponent={Separator}
     />
@@ -310,6 +393,8 @@ export interface SessionRecapProps {
   stats: SessionStats;
   /** One-tap correction: called with the shot and its NEW outcome. */
   onCorrect?: (shot: ResolvedShot, outcome: ShotOutcome) => void;
+  /** One-tap 2↔3 correction: called with the shot and its NEW point value. */
+  onCorrectValue?: (shot: ResolvedShot, value: ShotValue) => void;
   /** Session recording path; the highlights plan card shows when set. */
   videoPath?: string | null;
   /** Clip keep mode ('makes' | 'decided' | 'all' | 'none'). */
@@ -320,6 +405,7 @@ export function SessionRecap({
   shots,
   stats,
   onCorrect,
+  onCorrectValue,
   videoPath,
   keepMode = 'makes',
 }: SessionRecapProps) {
@@ -344,7 +430,7 @@ export function SessionRecap({
       <Animated.View entering={FadeInDown.duration(motion.standard)}>
         <HeroArcStat
           value={fgValue}
-          caption={`MAKES ${stats.makes} · ATTEMPTS ${stats.attempts}`}
+          caption={`${stats.points} PTS · ${stats.makes}/${stats.attempts} FG`}
         />
         <PipRow
           outcomes={shots.map((s) => s.outcome)}
@@ -391,6 +477,41 @@ export function SessionRecap({
         </Row>
 
         <Card>
+          <Eyebrow>Scoring</Eyebrow>
+          <Row gap={space.md} style={{ alignItems: 'stretch', marginTop: space.xs }}>
+            <View style={styles.splitCol}>
+              <Row gap={space.sm} style={{ alignItems: 'baseline' }}>
+                <Text style={styles.splitTag}>2PT</Text>
+                <Text style={styles.splitMade}>
+                  {stats.twoPtMakes}
+                  <Text style={styles.splitOf}>/{stats.twoPtAttempts}</Text>
+                </Text>
+              </Row>
+              <Text style={styles.splitPct}>
+                {stats.twoPtAttempts > 0
+                  ? `${Math.round(stats.twoPtPct * 100)}%`
+                  : '—'}
+              </Text>
+            </View>
+            <View style={styles.splitDivide} />
+            <View style={styles.splitCol}>
+              <Row gap={space.sm} style={{ alignItems: 'baseline' }}>
+                <Text style={[styles.splitTag, styles.splitTagGold]}>3PT</Text>
+                <Text style={[styles.splitMade, styles.splitMadeGold]}>
+                  {stats.threePtMakes}
+                  <Text style={styles.splitOfGold}>/{stats.threePtAttempts}</Text>
+                </Text>
+              </Row>
+              <Text style={[styles.splitPct, styles.splitPctGold]}>
+                {stats.threePtAttempts > 0
+                  ? `${Math.round(stats.threePtPct * 100)}%`
+                  : '—'}
+              </Text>
+            </View>
+          </Row>
+        </Card>
+
+        <Card>
           <Eyebrow>Consistency</Eyebrow>
           <Row gap={space.lg}>
             <StatNumber
@@ -422,7 +543,11 @@ export function SessionRecap({
 
         <View>
           <Eyebrow>Shots</Eyebrow>
-          <ShotList shots={shots} onCorrect={onCorrect} />
+          <ShotList
+            shots={shots}
+            onCorrect={onCorrect}
+            onCorrectValue={onCorrectValue}
+          />
         </View>
       </Animated.View>
     </View>
@@ -441,18 +566,27 @@ export interface SessionRecord {
   loaded: boolean;
   /** Optimistic correction: flips locally, persists via updateShotOutcome. */
   correct: (shot: ResolvedShot, outcome: ShotOutcome) => void;
+  /**
+   * 2↔3 correction for a persisted shot. Applied in-memory only — the shots
+   * table has no value column yet, so this refines the current view (points +
+   * splits recompute) but does not survive a reload.
+   */
+  correctValue: (shot: ResolvedShot, value: ShotValue) => void;
 }
 
 export function useSessionRecord(sessionId: number | null): SessionRecord {
   const [session, setSession] = useState<SessionRow | null>(null);
   const [rows, setRows] = useState<DbShotRow[]>([]);
   const [loaded, setLoaded] = useState(false);
+  /** shotIndex → overridden point value (in-memory; not persisted). */
+  const [valueOverrides, setValueOverrides] = useState<Record<number, ShotValue>>({});
 
   useEffect(() => {
     let alive = true;
     setLoaded(false);
     setSession(null);
     setRows([]);
+    setValueOverrides({});
     if (sessionId == null) {
       setLoaded(true);
       return;
@@ -472,7 +606,17 @@ export function useSessionRecord(sessionId: number | null): SessionRecord {
     };
   }, [sessionId]);
 
-  const shots = useMemo(() => rows.map(shotFromRow), [rows]);
+  const shots = useMemo(
+    () =>
+      rows.map((r) => {
+        const shot = shotFromRow(r);
+        const override = valueOverrides[r.shotIndex];
+        return override != null
+          ? { ...shot, shotValue: override, corrected: true }
+          : shot;
+      }),
+    [rows, valueOverrides],
+  );
   const stats = useMemo(() => recomputeStats(shots), [shots]);
 
   const correct = useCallback(
@@ -489,7 +633,11 @@ export function useSessionRecord(sessionId: number | null): SessionRecord {
     [rows],
   );
 
-  return { session, shots, stats, loaded, correct };
+  const correctValue = useCallback((shot: ResolvedShot, value: ShotValue) => {
+    setValueOverrides((prev) => ({ ...prev, [shot.id]: value }));
+  }, []);
+
+  return { session, shots, stats, loaded, correct, correctValue };
 }
 
 // ---------------------------------------------------------------------------
@@ -561,5 +709,92 @@ const styles = StyleSheet.create({
     ...type.body,
     color: color.textDim,
     flex: 1,
+  },
+
+  // Value pill (2/3 badge + optional tap-to-flip)
+  valueWrap: {
+    alignItems: 'center',
+    gap: 1,
+  },
+  valuePill: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    gap: 2,
+    borderRadius: radius.pill,
+    borderWidth: 1.5,
+    paddingHorizontal: space.sm,
+    paddingVertical: 1,
+    minHeight: 22,
+    justifyContent: 'center',
+  },
+  valuePill2: {
+    borderColor: color.border,
+    backgroundColor: color.surfaceRaised,
+  },
+  valuePill3: {
+    borderColor: color.threePt,
+    backgroundColor: color.threePtTint,
+  },
+  valuePillNum: {
+    ...type.caption,
+    fontFamily: type.heading.fontFamily,
+    color: color.textDim,
+    fontVariant: ['tabular-nums'],
+  },
+  valuePillNum3: {
+    color: color.threePt,
+  },
+  valuePillUnit: {
+    ...type.micro,
+    color: color.textFaint,
+  },
+  valuePillUnit3: {
+    color: 'rgba(242, 193, 78, 0.7)',
+  },
+  valueRw: {
+    ...type.micro,
+    fontSize: 9,
+    color: color.textFaint,
+  },
+
+  // Scoring split card (2PT / 3PT)
+  splitCol: {
+    flex: 1,
+    gap: space.xs,
+  },
+  splitDivide: {
+    width: StyleSheet.hairlineWidth,
+    alignSelf: 'stretch',
+    backgroundColor: color.border,
+  },
+  splitTag: {
+    ...type.micro,
+    color: color.textDim,
+  },
+  splitTagGold: {
+    color: color.threePt,
+  },
+  splitMade: {
+    ...type.statMedium,
+    color: color.text,
+    fontVariant: ['tabular-nums'],
+  },
+  splitMadeGold: {
+    color: color.threePt,
+  },
+  splitOf: {
+    ...type.body,
+    color: color.textFaint,
+  },
+  splitOfGold: {
+    ...type.body,
+    color: 'rgba(242, 193, 78, 0.6)',
+  },
+  splitPct: {
+    ...type.caption,
+    color: color.textDim,
+  },
+  splitPctGold: {
+    color: 'rgba(242, 193, 78, 0.85)',
   },
 });

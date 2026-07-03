@@ -21,6 +21,7 @@ import {
 import { Card, Eyebrow, PillButton, Row, Screen, StatNumber } from '@/components/ui';
 import { color, radius, space, touch, type } from '@/constants/tokens';
 import { listSessions, type SessionSummaryRow } from '@/data/db';
+import { useMode } from '@/state/modeStore';
 import { useSettings } from '@/state/settingsStore';
 
 const HERO_HEIGHT = 176;
@@ -88,6 +89,9 @@ export default function HomeScreen() {
 
   const startSession = () => {
     if (hapticsEnabled) void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    // Quick-start is an open run — clear any mode picked in a past session so a
+    // stale game HUD never leaks in. The mode picker is the path to a game.
+    useMode.getState().reset();
     router.push('/session/setup');
   };
 
@@ -133,6 +137,26 @@ export default function HomeScreen() {
             START SESSION
           </Text>
           <Text style={styles.heroSub}>Point your phone at the hoop — we do the counting.</Text>
+        </Pressable>
+
+        {/* Choose a game mode */}
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Choose a mode"
+          accessibilityHint="Pick a game like Around the World, Timed Challenge or HORSE"
+          onPress={() => {
+            if (hapticsEnabled) void Haptics.selectionAsync();
+            router.push('/modes');
+          }}
+          style={({ pressed }) => [styles.modeRow, pressed && styles.modeRowPressed]}
+        >
+          <View style={styles.modeText}>
+            <Text style={styles.modeTitle}>Choose a mode</Text>
+            <Text style={styles.modeSub}>
+              Around the World · Timed · 3-Point Contest · HORSE and more
+            </Text>
+          </View>
+          <Text style={styles.modeChevron}>{'›'}</Text>
         </Pressable>
 
         {/* Last session */}
@@ -254,6 +278,39 @@ const styles = StyleSheet.create({
     ...type.body,
     color: color.onAccent,
     opacity: 0.85,
+  },
+  modeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: space.md,
+    backgroundColor: color.surface,
+    borderRadius: radius.lg,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: color.border,
+    paddingVertical: space.lg,
+    paddingHorizontal: space.lg,
+    minHeight: touch.minTarget,
+  },
+  modeRowPressed: {
+    backgroundColor: color.surfaceRaised,
+  },
+  modeText: {
+    flex: 1,
+    minWidth: 0,
+    gap: 2,
+  },
+  modeTitle: {
+    ...type.heading,
+    color: color.text,
+  },
+  modeSub: {
+    ...type.body,
+    color: color.textDim,
+  },
+  modeChevron: {
+    ...type.title,
+    color: color.accent,
   },
   cardPressed: {
     backgroundColor: color.surfaceRaised,
