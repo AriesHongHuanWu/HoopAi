@@ -1,0 +1,64 @@
+name: Export detection model (Path A)
+
+# Cloud model conversion — no Colab / no local install needed.
+# Downloads the avishah3 basketball ball+hoop YOLOv8n weights and exports a
+# FP16 TFLite that HoopAI loads on both Android (GPU delegate) and iOS
+# (CoreML delegate). Publishes it as a build artifact AND to the
+# `model-latest` release so it can be pulled straight into the app.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Ultralytics
+        run: pip install --quiet ultralytics
+
+      - name: Download weights + export FP16 TFLite
+        run: |
+          python - <<'PY'
+          import urllib.request, glob, shutil, os
+          from ultralytics import YOLO
+          urllib.request.urlretrieve(
+              "https://raw.githubusercontent.com/avishah3/AI-Basketball-Shot-Detection-Tracker/master/best.pt",
+              "best.pt")
+          m = YOLO("best.pt")
+          print("CLASSES:", m.names, flush=True)
+          # FP16 (GPU delegate has no int8 kernels), NMS stays in our JS parser.
+          m.export(format="tflite", imgsz=640, half=True, nms=False)
+          cands = glob.glob("best_saved_model/*float16.tflite") or glob.glob("best_saved_model/*.tflite")
+          assert cands, "no tflite produced"
+          shutil.copy(cands[0], "hoopai-det.tflite")
+          print("TFLITE_KB:", os.path.getsize("hoopai-det.tflite")//1024, flush=True)
+          # Record the class list for the app side.
+          with open("model-classes.txt", "w") as f:
+              f.write(str(m.names))
+          PY
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hoopai-det-tflite
+          path: |
+            hoopai-det.tflite
+            model-classes.txt
+          if-no-files-found: error
+
+      - name: Publish to model-latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete model-latest --yes --cleanup-tag 2>/dev/null || true
+          gh release create model-latest hoopai-det.tflite model-classes.txt \
+            --title "HoopAI detection model (Path A: avishah3 ball+hoop)" \
+            --notes "FP16 TFLite, 2 classes (Basketball, Basketball Hoop), 640 input, NMS external. From avishah3/AI-Basketball-Shot-Detection-Tracker best.pt. Personal/internal use only."
