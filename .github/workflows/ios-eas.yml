@@ -1,0 +1,60 @@
+name: iOS device build (EAS / TestFlight)
+
+# Produces an INSTALLABLE iOS build for real iPhones. This requires:
+#   1. An Expo account token in the repo secret EXPO_TOKEN
+#      (expo.dev → account → Access Tokens).
+#   2. A paid Apple Developer account ($99/yr), configured once with
+#      `eas credentials` or interactively on the first `eas build`.
+# Without EXPO_TOKEN this job stops early with a clear message.
+# Choose the profile when dispatching: 'preview' (ad-hoc IPA for registered
+# device UDIDs) or 'production' (App Store / TestFlight).
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: EAS build profile
+        type: choice
+        options: [preview, production]
+        default: preview
+      submit:
+        description: Submit to TestFlight after build (production only)
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for EXPO_TOKEN
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: |
+          if [ -z "$EXPO_TOKEN" ]; then
+            echo "::error::EXPO_TOKEN secret is not set. Add it in Settings → Secrets → Actions."
+            echo "See docs/BUILDS.md for the iOS setup steps."
+            exit 1
+          fi
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: EAS build (iOS)
+        run: eas build --platform ios --profile ${{ inputs.profile }} --non-interactive --wait
+
+      - name: Submit to TestFlight
+        if: ${{ inputs.submit && inputs.profile == 'production' }}
+        run: eas submit --platform ios --latest --non-interactive

@@ -13,7 +13,6 @@ import {
 import {
   createAccumulator,
   pushShot,
-  recomputeStats,
   streakSoundFor,
   type StatsAccumulator,
 } from '../core/stats';
@@ -114,6 +113,12 @@ export const useSession = create<SessionState>((set, get) => ({
         set((s) => ({
           shots: s.shots.map((e) => (e.shot.id === shot.id ? { ...e, rowId } : e)),
         }));
+        // If the shot was corrected before its row id arrived, persist now —
+        // otherwise the DB keeps the pre-correction outcome forever.
+        const current = get().shots.find((e) => e.shot.id === shot.id);
+        if (current && current.shot.outcome !== shot.outcome) {
+          void updateShotOutcome(rowId, current.shot.outcome);
+        }
       });
     }
   },
@@ -125,10 +130,12 @@ export const useSession = create<SessionState>((set, get) => ({
           ? { ...e, shot: { ...e.shot, outcome, corrected: true } }
           : e,
       );
-      const stats = recomputeStats(shots.map((e) => e.shot));
+      // Rebuild the module accumulator from the corrected list so any later
+      // addShot stays consistent (acc otherwise keeps the old outcome).
+      acc = shots.reduce((a, e) => pushShot(a, e.shot), createAccumulator());
       const target = shots.find((e) => e.shot.id === shotId);
       if (target?.rowId != null) void updateShotOutcome(target.rowId, outcome);
-      return { shots, stats, lastShot: shots[shots.length - 1]?.shot ?? null };
+      return { shots, stats: acc.stats, lastShot: shots[shots.length - 1]?.shot ?? null };
     });
   },
 

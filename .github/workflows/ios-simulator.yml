@@ -1,0 +1,71 @@
+name: iOS Simulator build
+
+# The ONLY free iOS artifact: an unsigned .app that runs in Xcode's iOS
+# Simulator on a Mac. It does NOT install on a physical iPhone — Apple requires
+# a paid Developer account for that (see docs/BUILDS.md / the EAS workflow).
+# Manual only: macOS runners are ~10x the cost of Linux and this is best-effort.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Prebuild native iOS project
+        run: npx expo prebuild --platform ios --no-install
+
+      - name: Install CocoaPods
+        working-directory: ios
+        run: pod install
+
+      - name: Build for iOS Simulator
+        working-directory: ios
+        run: |
+          SCHEME=$(xcodebuild -list -json | node -e "const j=JSON.parse(require('fs').readFileSync(0));console.log(j.workspace.schemes[0])")
+          echo "Building scheme: $SCHEME"
+          xcodebuild build \
+            -workspace *.xcworkspace \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -sdk iphonesimulator \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO | tail -40
+
+      - name: Package .app
+        working-directory: ios
+        run: |
+          APP=$(find build/Build/Products -name "*.app" -maxdepth 2 | head -1)
+          echo "Packaging $APP"
+          cd "$(dirname "$APP")"
+          tar -czf "$GITHUB_WORKSPACE/HoopAI-simulator.app.tar.gz" "$(basename "$APP")"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: HoopAI-ios-simulator
+          path: HoopAI-simulator.app.tar.gz
+          if-no-files-found: error
+
+      - name: Publish to rolling release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete ios-simulator-latest --yes --cleanup-tag 2>/dev/null || true
+          gh release create ios-simulator-latest HoopAI-simulator.app.tar.gz \
+            --title "HoopAI — iOS Simulator build" \
+            --notes "Unsigned iOS Simulator build from ${{ github.sha }}. Runs ONLY in Xcode's iOS Simulator on a Mac (drag the .app onto a booted simulator, or 'xcrun simctl install booted HoopAI.app'). It will NOT install on a physical iPhone — that needs a paid Apple Developer account (see docs/BUILDS.md)."
