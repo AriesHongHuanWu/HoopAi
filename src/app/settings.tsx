@@ -36,6 +36,11 @@ const MIN_HEIGHT_CM = 120;
 const MAX_HEIGHT_CM = 230;
 const DEFAULT_HEIGHT_CM = 175;
 
+/** Daily goal stepper bounds (see Home's GoalRing). 0 = off. */
+const DAILY_GOAL_MIN = 0;
+const DAILY_GOAL_MAX = 500;
+const DAILY_GOAL_STEP = 10;
+
 /**
  * Privacy policy + support links, required by App Store Connect / Play
  * Console before submission.
@@ -279,6 +284,8 @@ function StepperRow({
   unit,
   min,
   max,
+  step = 1,
+  valueLabel,
   disabled,
   onChange,
 }: {
@@ -288,6 +295,10 @@ function StepperRow({
   unit: string;
   min: number;
   max: number;
+  /** Amount each tap changes the value by. Defaults to 1. */
+  step?: number;
+  /** Override the displayed/spoken value (e.g. "Off" at 0). Defaults to `value`. */
+  valueLabel?: string;
   disabled?: boolean;
   onChange: (next: number) => void;
 }) {
@@ -306,20 +317,24 @@ function StepperRow({
           glyph="−"
           label={`Decrease ${label.toLowerCase()}`}
           disabled={disabled === true || value <= min}
-          onPress={() => bump(-1)}
+          onPress={() => bump(-step)}
         />
         <Text
           style={styles.stepValue}
-          accessibilityLabel={`${label}: ${value} ${unit}`}
+          accessibilityLabel={`${label}: ${valueLabel ?? `${value} ${unit}`}`}
         >
-          {value}
-          <Text style={styles.stepUnit}>{` ${unit}`}</Text>
+          {valueLabel ?? (
+            <>
+              {value}
+              <Text style={styles.stepUnit}>{` ${unit}`}</Text>
+            </>
+          )}
         </Text>
         <StepperButton
           glyph="+"
           label={`Increase ${label.toLowerCase()}`}
           disabled={disabled === true || value >= max}
-          onPress={() => bump(1)}
+          onPress={() => bump(step)}
         />
       </Row>
     </Row>
@@ -344,6 +359,7 @@ export default function SettingsScreen() {
   const lastBenchmark = useSettings((s) => s.lastBenchmark);
   const debugMode = useSettings((s) => s.debugMode);
   const formAnalysis = useSettings((s) => s.formAnalysis);
+  const dailyGoalMakes = useSettings((s) => s.dailyGoalMakes);
   const set = useSettings((s) => s.set);
   const resetTutorial = useSettings((s) => s.resetTutorial);
 
@@ -576,6 +592,22 @@ export default function SettingsScreen() {
               tick();
               set('formAnalysis', v);
             }}
+          />
+        </Card>
+
+        {/* Goals */}
+        <Card>
+          <Eyebrow>Goals</Eyebrow>
+          <StepperRow
+            label="Daily goal"
+            description="Shows a progress ring on Home for makes logged today. Off hides the ring."
+            value={dailyGoalMakes}
+            unit={dailyGoalMakes === 0 ? '' : 'makes'}
+            min={DAILY_GOAL_MIN}
+            max={DAILY_GOAL_MAX}
+            step={DAILY_GOAL_STEP}
+            valueLabel={dailyGoalMakes === 0 ? 'Off' : undefined}
+            onChange={(v) => set('dailyGoalMakes', v)}
           />
         </Card>
 
@@ -870,7 +902,7 @@ const styles = StyleSheet.create({
   stepValue: {
     ...type.statMedium,
     color: color.text,
-    minWidth: 56,
+    minWidth: 64,
     textAlign: 'center',
     fontVariant: ['tabular-nums'],
   },

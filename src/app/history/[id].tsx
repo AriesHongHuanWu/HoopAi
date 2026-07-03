@@ -6,9 +6,10 @@
  * comparison (against the next older session with shots) and the entry-angle
  * histogram.
  */
+import * as Haptics from 'expo-haptics';
 import { router, useLocalSearchParams } from 'expo-router';
 import React, { useEffect, useMemo, useState } from 'react';
-import { StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import {
   BackPill,
@@ -23,10 +24,70 @@ import {
 } from '@/components/charts/AngleHistogram';
 import { CompareBars } from '@/components/charts/CompareBars';
 import { Card, Chip, ErrorCard, Eyebrow, PillButton, Row, Screen } from '@/components/ui';
-import { color, space, type } from '@/constants/tokens';
+import { color, radius, space, touch, type } from '@/constants/tokens';
 import { getModeDef, type ModeState } from '@/core/gameModes';
 import type { SessionStats } from '@/core/types';
-import { listSessions, sessionStatsFromDb } from '@/data/db';
+import { listSessions, sessionStatsFromDb, updateSessionLabel } from '@/data/db';
+
+/**
+ * Inline tag editor — a small pill near the session title. Tap to reveal a
+ * text field; submit/blur commits the trimmed tag via `onChange` (caller
+ * persists). Distinct from the date title above it: this is the free-text
+ * label used for filtering History and CSV export, not a rename of the
+ * session itself.
+ */
+function TagField({
+  tag,
+  onChange,
+}: {
+  tag: string;
+  onChange: (next: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(tag);
+
+  const commit = () => {
+    setEditing(false);
+    const next = draft.trim();
+    if (next !== tag) onChange(next);
+  };
+
+  if (editing) {
+    return (
+      <TextInput
+        value={draft}
+        onChangeText={setDraft}
+        onSubmitEditing={commit}
+        onBlur={commit}
+        autoFocus
+        maxLength={40}
+        returnKeyType="done"
+        placeholder="Add a tag"
+        placeholderTextColor={color.textFaint}
+        accessibilityLabel="Session tag"
+        selectionColor={color.accent}
+        style={styles.tagInput}
+      />
+    );
+  }
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={tag.length > 0 ? `Tag: ${tag}. Edit tag` : 'Add a tag'}
+      accessibilityHint="Opens a text field to edit this session's tag"
+      onPress={() => {
+        void Haptics.selectionAsync();
+        setDraft(tag);
+        setEditing(true);
+      }}
+      style={({ pressed }) => [styles.tagPill, pressed && { opacity: 0.7 }]}
+    >
+      <Text style={styles.tagText} numberOfLines={1}>
+        {tag.length > 0 ? tag : 'Add a tag'}
+      </Text>
+    </Pressable>
+  );
+}
 
 interface PreviousSession {
   startedAt: number;
@@ -102,6 +163,15 @@ export default function SessionDetailScreen() {
   const record = useSessionRecord(sessionId);
   const session = record.session;
 
+  // Tag: optimistic local override on top of the persisted label so the
+  // pill updates immediately; persists via updateSessionLabel (never throws).
+  const [tagOverride, setTagOverride] = useState<string | null>(null);
+  const tag = tagOverride ?? (session?.label ?? '');
+  const onTagChange = (next: string) => {
+    setTagOverride(next);
+    if (sessionId != null) void updateSessionLabel(sessionId, next);
+  };
+
   /**
    * The next older session that actually has shots, for the comparison card.
    * undefined = still loading, null = none found (card skipped either way).
@@ -170,6 +240,9 @@ export default function SessionDetailScreen() {
             {formatSessionDate(session.startedAt)}
           </Text>
           {meta != null && <Text style={styles.meta}>{meta}</Text>}
+          <View style={{ marginTop: space.sm }}>
+            <TagField tag={tag} onChange={onTagChange} />
+          </View>
           {session.videoPath != null && (
             <PillButton
               label="Watch replay"
@@ -240,5 +313,28 @@ const styles = StyleSheet.create({
   },
   modeEmoji: {
     fontSize: 20,
+  },
+  tagPill: {
+    alignSelf: 'flex-start',
+    minHeight: touch.minTarget,
+    justifyContent: 'center',
+    paddingHorizontal: space.md,
+    borderRadius: radius.pill,
+    borderWidth: 1,
+    borderColor: color.border,
+    backgroundColor: color.surfaceRaised,
+  },
+  tagText: {
+    ...type.caption,
+    color: color.textDim,
+  },
+  tagInput: {
+    ...type.caption,
+    color: color.text,
+    minHeight: touch.minTarget,
+    paddingHorizontal: space.md,
+    borderRadius: radius.pill,
+    borderWidth: 1,
+    borderColor: color.accent,
   },
 });

@@ -314,6 +314,19 @@ export async function getSession(sessionId: number): Promise<SessionRow | null> 
   });
 }
 
+/**
+ * Update a session's free-text label. Used both for the session title
+ * (SessionTitle rename) and — additively — as a free-text TAG shown as a
+ * chip on the History card and used to filter the History list. Never
+ * throws; a failed write just leaves the previous label in place.
+ */
+export async function updateSessionLabel(sessionId: number, label: string): Promise<void> {
+  return safe('updateSessionLabel', undefined, async () => {
+    const db = await getDb();
+    await db.runAsync('UPDATE sessions SET label = ? WHERE id = ?', label, sessionId);
+  });
+}
+
 export async function deleteSession(sessionId: number): Promise<void> {
   return safe('deleteSession', undefined, async () => {
     const db = await getDb();

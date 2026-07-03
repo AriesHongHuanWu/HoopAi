@@ -7,8 +7,8 @@
  */
 import { Canvas, Circle, DashPathEffect, Line, Path, vec } from '@shopify/react-native-skia';
 import { router, useFocusEffect } from 'expo-router';
-import React, { useCallback, useState } from 'react';
-import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
 import {
   BackPill,
@@ -18,13 +18,15 @@ import {
 } from '@/components/ShotList';
 import {
   Card,
+  Chip,
   Eyebrow,
   PillButton,
   Row,
   Screen,
   StatNumber,
 } from '@/components/ui';
-import { color, radius, space, type } from '@/constants/tokens';
+import { color, radius, space, touch, type } from '@/constants/tokens';
+import { exportCsv, sessionsToCsv } from '@/core/csvExport';
 import { getModeDef } from '@/core/gameModes';
 import type { ShotOutcome } from '@/core/types';
 import { deleteSession, listSessions, sessionShots, type SessionSummaryRow } from '@/data/db';
@@ -88,6 +90,10 @@ function EmptyArc() {
 
 export default function HistoryScreen() {
   const [items, setItems] = useState<HistoryItem[] | null>(null);
+  /** Selected tag chip filter; null = show every session (no filter active). */
+  const [tagFilter, setTagFilter] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [exportFailed, setExportFailed] = useState(false);
 
   const confirmDelete = useCallback((row: SessionSummaryRow) => {
     Alert.alert(
@@ -131,6 +137,45 @@ export default function HistoryScreen() {
     }, []),
   );
 
+  /** Distinct, non-empty tags across every loaded session, in first-seen order. */
+  const distinctTags = useMemo(() => {
+    if (items == null) return [];
+    const seen = new Set<string>();
+    const tags: string[] = [];
+    for (const { row } of items) {
+      const tag = row.label.trim();
+      if (tag.length > 0 && !seen.has(tag)) {
+        seen.add(tag);
+        tags.push(tag);
+      }
+    }
+    return tags;
+  }, [items]);
+
+  // A tag filter can go stale once its only session is deleted or retagged.
+  useEffect(() => {
+    if (tagFilter != null && !distinctTags.includes(tagFilter)) {
+      setTagFilter(null);
+    }
+  }, [distinctTags, tagFilter]);
+
+  const visibleItems = useMemo(() => {
+    if (items == null) return null;
+    if (tagFilter == null) return items;
+    return items.filter(({ row }) => row.label.trim() === tagFilter);
+  }, [items, tagFilter]);
+
+  const onExportCsv = () => {
+    if (exporting || visibleItems == null || visibleItems.length === 0) return;
+    setExporting(true);
+    setExportFailed(false);
+    const csv = sessionsToCsv(visibleItems.map((i) => i.row));
+    void exportCsv(csv, 'hoopilot-sessions.csv').then((ok) => {
+      setExporting(false);
+      if (!ok) setExportFailed(true);
+    });
+  };
+
   return (
     <Screen scroll>
       <Row style={{ marginBottom: space.lg }}>
@@ -138,6 +183,56 @@ export default function HistoryScreen() {
       </Row>
       <Eyebrow>Your sessions</Eyebrow>
       <Text style={styles.title}>History</Text>
+
+      {items !== null && distinctTags.length > 0 && (
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={styles.tagFilterScroll}
+          contentContainerStyle={styles.tagFilterRow}
+          accessibilityLabel="Filter sessions by tag"
+        >
+          <Pressable
+            accessibilityRole="button"
+            accessibilityState={{ selected: tagFilter == null }}
+            accessibilityLabel="All sessions"
+            onPress={() => setTagFilter(null)}
+            style={({ pressed }) => [
+              styles.filterChip,
+              tagFilter == null && styles.filterChipSelected,
+              pressed && { opacity: 0.7 },
+            ]}
+          >
+            <Text style={[styles.filterChipLabel, tagFilter == null && styles.filterChipLabelSelected]}>
+              All
+            </Text>
+          </Pressable>
+          {distinctTags.map((tag) => {
+            const selected = tagFilter === tag;
+            return (
+              <Pressable
+                key={tag}
+                accessibilityRole="button"
+                accessibilityState={{ selected }}
+                accessibilityLabel={`Filter by tag ${tag}`}
+                onPress={() => setTagFilter(selected ? null : tag)}
+                style={({ pressed }) => [
+                  styles.filterChip,
+                  selected && styles.filterChipSelected,
+                  pressed && { opacity: 0.7 },
+                ]}
+              >
+                <Text
+                  style={[styles.filterChipLabel, selected && styles.filterChipLabelSelected]}
+                  numberOfLines={1}
+                >
+                  {tag}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </ScrollView>
+      )}
 
       {items === null ? (
         <Card>
@@ -159,9 +254,22 @@ export default function HistoryScreen() {
             style={{ marginTop: space.lg }}
           />
         </Card>
+      ) : visibleItems != null && visibleItems.length === 0 ? (
+        <Card>
+          <Text style={styles.heading}>No sessions with this tag</Text>
+          <Text style={[styles.dim, { marginTop: space.xs }]}>
+            Clear the filter to see every session again.
+          </Text>
+          <PillButton
+            variant="ghost"
+            label="Clear filter"
+            onPress={() => setTagFilter(null)}
+            style={{ marginTop: space.lg, alignSelf: 'flex-start' }}
+          />
+        </Card>
       ) : (
         <View style={{ gap: space.md }}>
-          {items.map(({ row, pips }) => {
+          {(visibleItems ?? []).map(({ row, pips }) => {
             const makes = row.makes ?? 0;
             const fg = Math.round(row.fgPct * 100);
             const hasVideo = row.videoPath != null;
@@ -175,11 +283,12 @@ export default function HistoryScreen() {
                     }
                   })()
                 : null;
+            const tag = row.label.trim();
             return (
               <Pressable
                 key={row.id}
                 accessibilityRole="button"
-                accessibilityLabel={`Session on ${formatSessionDate(row.startedAt)}${modeName != null ? `, ${modeName}` : ''}, ${fg} percent field goals${hasVideo ? ', has replay video' : ''}`}
+                accessibilityLabel={`Session on ${formatSessionDate(row.startedAt)}${modeName != null ? `, ${modeName}` : ''}, ${fg} percent field goals${hasVideo ? ', has replay video' : ''}${tag.length > 0 ? `, tagged ${tag}` : ''}`}
                 accessibilityHint="Opens the session detail. Long press to delete."
                 onPress={() =>
                   router.push({
@@ -211,6 +320,11 @@ export default function HistoryScreen() {
                         {row.attempts} {row.attempts === 1 ? 'shot' : 'shots'} ·{' '}
                         {makes} {makes === 1 ? 'make' : 'makes'}
                       </Text>
+                      {tag.length > 0 && (
+                        <View style={{ marginTop: space.xs, alignSelf: 'flex-start' }}>
+                          <Chip label={tag} />
+                        </View>
+                      )}
                     </View>
                     <StatNumber value={`${fg}%`} size="medium" label="FG" />
                   </Row>
@@ -230,12 +344,28 @@ export default function HistoryScreen() {
       )}
 
       {items !== null && items.length > 0 && (
-        <PillButton
-          variant="ghost"
-          label="View trends"
-          onPress={() => router.push('/trends')}
-          style={{ marginTop: space.xl, alignSelf: 'center' }}
-        />
+        <View style={{ marginTop: space.xl, alignItems: 'center', gap: space.sm }}>
+          {exportFailed && <Chip label="Couldn't export — try again" tone="unsure" />}
+          <Row gap={space.md}>
+            <PillButton
+              variant="ghost"
+              label={
+                exporting
+                  ? 'Exporting…'
+                  : tagFilter != null
+                    ? 'Export CSV (filtered)'
+                    : 'Export CSV'
+              }
+              onPress={onExportCsv}
+              disabled={exporting || visibleItems == null || visibleItems.length === 0}
+            />
+            <PillButton
+              variant="ghost"
+              label="View trends"
+              onPress={() => router.push('/trends')}
+            />
+          </Row>
+        </View>
       )}
     </Screen>
   );
@@ -293,5 +423,34 @@ const styles = StyleSheet.create({
   dim: {
     ...type.body,
     color: color.textDim,
+  },
+  tagFilterScroll: {
+    marginBottom: space.md,
+    flexGrow: 0,
+  },
+  tagFilterRow: {
+    flexDirection: 'row',
+    gap: space.sm,
+    paddingRight: space.lg,
+  },
+  filterChip: {
+    minHeight: touch.minTarget,
+    justifyContent: 'center',
+    paddingHorizontal: space.lg,
+    borderRadius: radius.pill,
+    borderWidth: 1,
+    borderColor: color.border,
+    maxWidth: 180,
+  },
+  filterChipSelected: {
+    borderColor: color.accent,
+    backgroundColor: color.accentTint,
+  },
+  filterChipLabel: {
+    ...type.bodyMedium,
+    color: color.textDim,
+  },
+  filterChipLabelSelected: {
+    color: color.accent,
   },
 });

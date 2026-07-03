@@ -30,8 +30,10 @@ import {
 
 import { Sparkline } from '@/components/charts/Sparkline';
 import { CoachMarks, useCoachMarks, type CoachStep } from '@/components/coach/CoachMarks';
+import { GoalRing } from '@/components/GoalRing';
 import { Card, EmptyState, ErrorCard, Eyebrow, Row, Screen, StatNumber } from '@/components/ui';
 import { color, radius, space, touch, type } from '@/constants/tokens';
+import { todayMakes } from '@/core/goals';
 import { listSessions, type SessionSummaryRow } from '@/data/db';
 import { useMode } from '@/state/modeStore';
 import { useSettings } from '@/state/settingsStore';
@@ -41,6 +43,12 @@ const HERO_HEIGHT = 176;
 const RECENT_LIMIT = 8;
 const MINI_SPARK_W = 76;
 const MINI_SPARK_H = 30;
+/**
+ * Sessions scanned for today's make-goal progress. Generous relative to
+ * RECENT_LIMIT so a heavy shooting day (many short sessions) still counts
+ * every make, not just the ones in the last-session sparkline window.
+ */
+const GOAL_SCAN_LIMIT = 100;
 
 function formatSessionDate(ms: number): string {
   const d = new Date(ms);
@@ -122,6 +130,7 @@ function QuickLink({
 export default function HomeScreen() {
   const onboardingDone = useSettings((s) => s.onboardingDone);
   const hapticsEnabled = useSettings((s) => s.hapticsEnabled);
+  const dailyGoalMakes = useSettings((s) => s.dailyGoalMakes);
   const { width } = useWindowDimensions();
   const contentWidth = width - space.lg * 2;
 
@@ -130,6 +139,8 @@ export default function HomeScreen() {
   /** FG% of recent sessions with shots, oldest first — the mini sparkline. */
   const [recentTrend, setRecentTrend] = useState<number[]>([]);
   const [dbFailed, setDbFailed] = useState(false);
+  /** Makes so far today, for the goal ring (src/core/goals.ts todayMakes). */
+  const [goalMakes, setGoalMakes] = useState(0);
 
   // Coach marks: measured target rects for the hero CTA, mode row and quick
   // links, filled in as each view lays out. Steps render centered until a
@@ -190,6 +201,26 @@ export default function HomeScreen() {
         alive = false;
       };
     }, []),
+  );
+
+  // Goal ring only needs data when a goal is actually set.
+  useFocusEffect(
+    useCallback(() => {
+      if (dailyGoalMakes <= 0) return;
+      let alive = true;
+      listSessions(GOAL_SCAN_LIMIT)
+        .then((rows) => {
+          if (!alive) return;
+          setGoalMakes(todayMakes(rows, Date.now()));
+        })
+        .catch(() => {
+          if (!alive) return;
+          setGoalMakes(0);
+        });
+      return () => {
+        alive = false;
+      };
+    }, [dailyGoalMakes]),
   );
 
   if (!onboardingDone) return <Redirect href="/onboarding" />;
@@ -278,6 +309,21 @@ export default function HomeScreen() {
         </Pressable>
         </View>
 
+        {/* Daily goal */}
+        {dailyGoalMakes > 0 && (
+          <Card style={styles.goalCard}>
+            <View style={styles.goalText}>
+              <Eyebrow>Daily goal</Eyebrow>
+              <Text style={styles.goalHeadline}>
+                {goalMakes >= dailyGoalMakes
+                  ? 'Goal reached — nice shooting today.'
+                  : `${dailyGoalMakes - goalMakes} makes to go today.`}
+              </Text>
+            </View>
+            <GoalRing made={goalMakes} goal={dailyGoalMakes} />
+          </Card>
+        )}
+
         {/* Last session */}
         {lastSession === undefined ? (
           <Card>
@@ -347,7 +393,11 @@ export default function HomeScreen() {
         )}
 
         {/* Quick links */}
-        <View ref={quickLinksRef} onLayout={() => measure(quickLinksRef, setQuickLinksRect)}>
+        <View
+          ref={quickLinksRef}
+          onLayout={() => measure(quickLinksRef, setQuickLinksRect)}
+          style={styles.quickLinksStack}
+        >
           <Row gap={space.md}>
             <QuickLink
               glyph="≣"
@@ -366,6 +416,14 @@ export default function HomeScreen() {
               label="Records"
               hint="See your lifetime records and badges"
               onPress={() => router.push('/records')}
+            />
+          </Row>
+          <Row gap={space.md}>
+            <QuickLink
+              glyph="🏀"
+              label="Scoreboard"
+              hint="Track a live head-to-head score"
+              onPress={() => router.push('/scoreboard')}
             />
           </Row>
         </View>
@@ -472,6 +530,21 @@ const styles = StyleSheet.create({
   cardPressed: {
     backgroundColor: color.surfaceRaised,
   },
+  goalCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: space.lg,
+  },
+  goalText: {
+    flex: 1,
+    minWidth: 0,
+    gap: space.xs,
+  },
+  goalHeadline: {
+    ...type.heading,
+    color: color.text,
+  },
   sessionRow: {
     justifyContent: 'space-between',
   },
@@ -500,6 +573,9 @@ const styles = StyleSheet.create({
   emptyBody: {
     ...type.body,
     color: color.textDim,
+  },
+  quickLinksStack: {
+    gap: space.md,
   },
   quickLink: {
     flex: 1,

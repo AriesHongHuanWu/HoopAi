@@ -98,6 +98,12 @@ export interface SettingsState {
   formAnalysis: boolean;
   /** Per-screen "has the coach-marks walkthrough been shown once?" flags. */
   tutorialSeen: TutorialSeen;
+  /**
+   * Daily make goal shown as a progress ring on Home (src/core/goals.ts).
+   * 0 means the goal is off — no ring is shown. Persisted, 0–500 by 10s in
+   * the Settings stepper.
+   */
+  dailyGoalMakes: number;
 
   set: <K extends keyof SettingsState>(key: K, value: SettingsState[K]) => void;
   /** Mark one screen's walkthrough as seen (called on finish/skip). */
@@ -132,6 +138,7 @@ export const useSettings = create<SettingsState>()(
       debugMode: false,
       formAnalysis: false,
       tutorialSeen: TUTORIAL_SEEN_DEFAULT,
+      dailyGoalMakes: 0,
       set: (key, value) => set({ [key]: value } as Pick<SettingsState, typeof key>),
       markTutorialSeen: (screen) =>
         set((s) => ({ tutorialSeen: { ...s.tutorialSeen, [screen]: true } })),
