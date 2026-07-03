@@ -49,10 +49,17 @@ jobs:
       - name: Build unsigned .app for device
         working-directory: ios
         run: |
-          SCHEME=$(xcodebuild -list -json | node -e "const j=JSON.parse(require('fs').readFileSync(0));const s=j.workspace.schemes.filter(x=>!/Pods|expo-dev/i.test(x));console.log(s[0]||j.workspace.schemes[0])")
-          echo "Building scheme: $SCHEME"
+          WS=$(ls -d *.xcworkspace | head -1)
+          SCHEME=$(xcodebuild -list -json -workspace "$WS" | node -e "
+            const j=JSON.parse(require('fs').readFileSync(0,'utf8'));
+            const schemes=(j.workspace&&j.workspace.schemes)||(j.project&&j.project.schemes)||[];
+            const s=schemes.filter(x=>!/Pods|expo-dev/i.test(x));
+            console.log(s[0]||schemes[0]||'');
+          ")
+          if [ -z "$SCHEME" ]; then echo '::error::Could not determine Xcode scheme'; exit 1; fi
+          echo "Workspace: $WS  Scheme: $SCHEME"
           xcodebuild build \
-            -workspace *.xcworkspace \
+            -workspace "$WS" \
             -scheme "$SCHEME" \
             -configuration Release \
             -sdk iphoneos \
