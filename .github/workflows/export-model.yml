@@ -34,9 +34,12 @@ jobs:
               "best.pt")
           m = YOLO("best.pt")
           print("CLASSES:", m.names, flush=True)
-          # FP16 (GPU delegate has no int8 kernels), NMS stays in our JS parser.
-          m.export(format="tflite", imgsz=640, half=True, nms=False)
-          cands = glob.glob("best_saved_model/*float16.tflite") or glob.glob("best_saved_model/*.tflite")
+          # FP32 TFLite (newer Ultralytics dropped half=True for litert export;
+          # FP32 runs on the Android GPU + iOS CoreML delegates). NMS external.
+          m.export(format="tflite", imgsz=640, nms=False)
+          cands = (glob.glob("best_saved_model/*float32.tflite")
+                   or glob.glob("best_saved_model/*float16.tflite")
+                   or glob.glob("best_saved_model/*.tflite"))
           assert cands, "no tflite produced"
           shutil.copy(cands[0], "hoopai-det.tflite")
           print("TFLITE_KB:", os.path.getsize("hoopai-det.tflite")//1024, flush=True)
