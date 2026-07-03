@@ -49,15 +49,18 @@ jobs:
 
       - name: Configure Gradle properties
         run: |
-          # More heap for the native build.
-          echo "org.gradle.jvmargs=-Xmx5g -XX:MaxMetaspaceSize=1g" >> android/gradle.properties
+          # Leading newline: prebuild's gradle.properties may end WITHOUT a
+          # trailing newline, so a plain `echo >>` would concatenate onto the
+          # last key (e.g. minSdkVersion=26org.gradle.jvmargs=...). printf with
+          # a leading \n guarantees each key lands on its own line.
+          printf '\norg.gradle.jvmargs=-Xmx5g -XX:MaxMetaspaceSize=1g\n' >> android/gradle.properties
           # Guarantee a valid JSON value for Expo's inline-modules autolinking
-          # step (mirror-kotlin-inline-modules JSON.parses this; an empty value
-          # crashes configuration). Last key wins, so this overrides any empty
-          # value prebuild may emit in CI.
-          echo "expo.inlineModules.watchedDirectories=[]" >> android/gradle.properties
-          echo "--- effective inlineModules line(s) ---"
-          grep "expo.inlineModules.watchedDirectories" android/gradle.properties
+          # step (mirror-kotlin-inline-modules JSON.parses this; empty crashes
+          # configuration). Last key wins, overriding any empty value prebuild
+          # may emit in CI.
+          printf 'expo.inlineModules.watchedDirectories=[]\n' >> android/gradle.properties
+          echo "--- tail of gradle.properties ---"
+          tail -6 android/gradle.properties
 
       - name: Generate signing keystore
         run: |
