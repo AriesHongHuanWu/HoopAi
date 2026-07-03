@@ -47,8 +47,17 @@ jobs:
       - name: Prebuild native Android project
         run: npx expo prebuild --platform android --no-install
 
-      - name: Give Gradle more heap
-        run: echo "org.gradle.jvmargs=-Xmx5g -XX:MaxMetaspaceSize=1g" >> android/gradle.properties
+      - name: Configure Gradle properties
+        run: |
+          # More heap for the native build.
+          echo "org.gradle.jvmargs=-Xmx5g -XX:MaxMetaspaceSize=1g" >> android/gradle.properties
+          # Guarantee a valid JSON value for Expo's inline-modules autolinking
+          # step (mirror-kotlin-inline-modules JSON.parses this; an empty value
+          # crashes configuration). Last key wins, so this overrides any empty
+          # value prebuild may emit in CI.
+          echo "expo.inlineModules.watchedDirectories=[]" >> android/gradle.properties
+          echo "--- effective inlineModules line(s) ---"
+          grep "expo.inlineModules.watchedDirectories" android/gradle.properties
 
       - name: Generate signing keystore
         run: |
