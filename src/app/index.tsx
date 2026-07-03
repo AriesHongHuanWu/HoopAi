@@ -1,15 +1,16 @@
 /**
  * Home dashboard — the app's face.
  *
- * Giant Start CTA (the one daily action), last-session recap from SQLite,
- * quiet links to history and trends. Redirects to /onboarding on first
- * launch; the root layout guarantees the settings store is hydrated before
- * this screen renders, so the check is flash-free.
+ * Giant Start CTA (the one daily action) with a slow-breathing shot arc,
+ * last-session recap from SQLite with a mini FG% sparkline across recent
+ * sessions, quiet glyph links to history and trends. Redirects to /onboarding
+ * on first launch; the root layout guarantees the settings store is hydrated
+ * before this screen renders, so the check is flash-free.
  */
 import { Canvas, Circle, Path } from '@shopify/react-native-skia';
 import * as Haptics from 'expo-haptics';
 import { Link, Redirect, router, useFocusEffect } from 'expo-router';
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   Pressable,
   StyleSheet,
@@ -17,14 +18,27 @@ import {
   View,
   useWindowDimensions,
 } from 'react-native';
+import {
+  Easing,
+  useDerivedValue,
+  useReducedMotion,
+  useSharedValue,
+  withRepeat,
+  withTiming,
+} from 'react-native-reanimated';
 
-import { Card, Eyebrow, PillButton, Row, Screen, StatNumber } from '@/components/ui';
+import { Sparkline } from '@/components/charts/Sparkline';
+import { Card, Eyebrow, Row, Screen, StatNumber } from '@/components/ui';
 import { color, radius, space, touch, type } from '@/constants/tokens';
 import { listSessions, type SessionSummaryRow } from '@/data/db';
 import { useMode } from '@/state/modeStore';
 import { useSettings } from '@/state/settingsStore';
 
 const HERO_HEIGHT = 176;
+/** Sessions pulled for the last-session card + its mini FG% sparkline. */
+const RECENT_LIMIT = 8;
+const MINI_SPARK_W = 76;
+const MINI_SPARK_H = 30;
 
 function formatSessionDate(ms: number): string {
   const d = new Date(ms);
@@ -37,8 +51,30 @@ function formatSessionDate(ms: number): string {
   return d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
 }
 
-/** Decorative shot arc over the hero CTA — the signature motif. */
+/**
+ * Decorative shot arc over the hero CTA — the signature motif. The ball dot
+ * at the rim breathes on a slow loop; under reduced motion it holds still.
+ */
 function HeroArc({ width }: { width: number }) {
+  const reducedMotion = useReducedMotion();
+  const pulse = useSharedValue(0);
+
+  useEffect(() => {
+    if (reducedMotion) {
+      pulse.value = 0;
+      return;
+    }
+    pulse.value = withRepeat(
+      withTiming(1, { duration: 1800, easing: Easing.inOut(Easing.ease) }),
+      -1,
+      true,
+    );
+  }, [pulse, reducedMotion]);
+
+  const dotOpacity = useDerivedValue(() => 0.32 + pulse.value * 0.22);
+  const haloR = useDerivedValue(() => 10 + pulse.value * 4);
+  const haloOpacity = useDerivedValue(() => 0.1 + pulse.value * 0.1);
+
   if (width <= 0) return null;
   // Quadratic arc from just off the bottom-left up toward a "rim" at right.
   const rimX = width - 44;
@@ -48,9 +84,36 @@ function HeroArc({ width }: { width: number }) {
     <View pointerEvents="none" style={StyleSheet.absoluteFill}>
       <Canvas style={{ width, height: HERO_HEIGHT }}>
         <Path path={path} style="stroke" strokeWidth={3} color={color.onAccent} opacity={0.24} />
-        <Circle cx={rimX} cy={rimY} r={7} color={color.onAccent} opacity={0.32} />
+        <Circle cx={rimX} cy={rimY} r={haloR} color={color.onAccent} opacity={haloOpacity} />
+        <Circle cx={rimX} cy={rimY} r={7} color={color.onAccent} opacity={dotOpacity} />
       </Canvas>
     </View>
+  );
+}
+
+/** Quiet glyph link card — History / Trends. */
+function QuickLink({
+  glyph,
+  label,
+  hint,
+  onPress,
+}: {
+  glyph: string;
+  label: string;
+  hint: string;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      accessibilityHint={hint}
+      onPress={onPress}
+      style={({ pressed }) => [styles.quickLink, pressed && styles.quickLinkPressed]}
+    >
+      <Text style={styles.quickGlyph}>{glyph}</Text>
+      <Text style={styles.quickLabel}>{label}</Text>
+    </Pressable>
   );
 }
 
@@ -62,21 +125,30 @@ export default function HomeScreen() {
 
   // undefined = loading, null = no sessions yet.
   const [lastSession, setLastSession] = useState<SessionSummaryRow | null | undefined>(undefined);
+  /** FG% of recent sessions with shots, oldest first — the mini sparkline. */
+  const [recentTrend, setRecentTrend] = useState<number[]>([]);
   const [dbFailed, setDbFailed] = useState(false);
 
   // Reload whenever the dashboard regains focus (e.g. after a session ends).
   useFocusEffect(
     useCallback(() => {
       let alive = true;
-      listSessions(1)
+      listSessions(RECENT_LIMIT)
         .then((rows) => {
           if (!alive) return;
           setLastSession(rows[0] ?? null);
+          setRecentTrend(
+            rows
+              .filter((r) => r.attempts > 0)
+              .map((r) => r.fgPct)
+              .reverse(),
+          );
           setDbFailed(false);
         })
         .catch(() => {
           if (!alive) return;
           setLastSession(null);
+          setRecentTrend([]);
           setDbFailed(true);
         });
       return () => {
@@ -188,6 +260,19 @@ export default function HomeScreen() {
                         ? `${lastSession.makes} makes · ${lastSession.attempts} attempts`
                         : 'No shots logged'}
                     </Text>
+                    {recentTrend.length >= 2 && (
+                      <View
+                        accessible
+                        accessibilityLabel={`FG% trend across your last ${recentTrend.length} sessions`}
+                        style={styles.miniSpark}
+                      >
+                        <Sparkline
+                          data={recentTrend}
+                          width={MINI_SPARK_W}
+                          height={MINI_SPARK_H}
+                        />
+                      </View>
+                    )}
                   </View>
                   <StatNumber
                     size="medium"
@@ -210,17 +295,17 @@ export default function HomeScreen() {
 
         {/* Quick links */}
         <Row gap={space.md}>
-          <PillButton
+          <QuickLink
+            glyph="≣"
             label="History"
-            variant="ghost"
+            hint="Browse your past sessions"
             onPress={() => router.push('/history')}
-            style={styles.quickLink}
           />
-          <PillButton
+          <QuickLink
+            glyph="↗"
             label="Trends"
-            variant="ghost"
+            hint="See your FG% over time"
             onPress={() => router.push('/trends')}
-            style={styles.quickLink}
           />
         </Row>
       </View>
@@ -330,6 +415,11 @@ const styles = StyleSheet.create({
     ...type.body,
     color: color.textDim,
   },
+  miniSpark: {
+    marginTop: space.xs,
+    width: MINI_SPARK_W,
+    height: MINI_SPARK_H,
+  },
   emptyTitle: {
     ...type.heading,
     color: color.text,
@@ -341,5 +431,25 @@ const styles = StyleSheet.create({
   },
   quickLink: {
     flex: 1,
+    minHeight: touch.minTarget,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: space.sm,
+    borderRadius: radius.pill,
+    borderWidth: 1,
+    borderColor: color.border,
+    paddingHorizontal: space.lg,
+  },
+  quickLinkPressed: {
+    backgroundColor: color.surfaceRaised,
+  },
+  quickGlyph: {
+    ...type.heading,
+    color: color.accent,
+  },
+  quickLabel: {
+    ...type.heading,
+    color: color.text,
   },
 });

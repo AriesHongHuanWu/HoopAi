@@ -28,10 +28,15 @@ import {
   type NativeScrollEvent,
   type NativeSyntheticEvent,
 } from 'react-native';
+import Animated, {
+  ReduceMotion,
+  useAnimatedStyle,
+  withTiming,
+} from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { MakeMissDot, PillButton, Row, Screen } from '@/components/ui';
-import { color, radius, space, touch, type } from '@/constants/tokens';
+import { color, motion, radius, space, touch, type } from '@/constants/tokens';
 import { useSettings } from '@/state/settingsStore';
 
 const ILLO_HEIGHT = 200;
@@ -50,19 +55,31 @@ function quadPoint(t: number, p0: Pt, c: Pt, p1: Pt): Pt {
   };
 }
 
-/** Pane 1 — phone on the sideline, dashed sight line to the rim. */
+/** Pane 1 — phone on the sideline, sight line to the rim, arc it will watch. */
 function AimIllustration({ w }: { w: number }) {
   const h = ILLO_HEIGHT;
   const rim: Pt = { x: w * 0.78, y: h * 0.36 };
+  // Faint preview of the shot arc the camera is set up to see.
+  const arcStart: Pt = { x: w * 0.2, y: h - 24 };
+  const arcCtrl: Pt = { x: w * 0.46, y: -h * 0.22 };
+  const arcEnd: Pt = { x: rim.x, y: rim.y - 10 };
+  const preview = `M ${arcStart.x} ${arcStart.y} Q ${arcCtrl.x} ${arcCtrl.y} ${arcEnd.x} ${arcEnd.y}`;
   return (
     <Canvas style={{ width: w, height: h, alignSelf: 'center' }}>
       {/* Floor */}
       <Line p1={vec(space.sm, h - 16)} p2={vec(w - space.sm, h - 16)} color={color.border} strokeWidth={2} />
+      {/* Ghost of the arc the camera will track */}
+      <Path path={preview} style="stroke" strokeWidth={2} color={color.accent} opacity={0.22}>
+        <DashPathEffect intervals={[2, 8]} />
+      </Path>
       {/* Phone propped at the left */}
       <RoundedRect x={28} y={h - 86} width={32} height={62} r={6} style="stroke" color={color.textDim} strokeWidth={2} />
       <Circle cx={44} cy={h - 78} r={2} color={color.textFaint} />
-      {/* Rim + backboard at the right */}
+      {/* Rim + net + backboard at the right */}
       <Circle cx={rim.x} cy={rim.y} r={10} style="stroke" color={color.accent} strokeWidth={3} />
+      <Line p1={vec(rim.x - 6, rim.y + 9)} p2={vec(rim.x - 3, rim.y + 22)} color={color.textFaint} strokeWidth={1.5} />
+      <Line p1={vec(rim.x, rim.y + 10)} p2={vec(rim.x, rim.y + 24)} color={color.textFaint} strokeWidth={1.5} />
+      <Line p1={vec(rim.x + 6, rim.y + 9)} p2={vec(rim.x + 3, rim.y + 22)} color={color.textFaint} strokeWidth={1.5} />
       <Line p1={vec(rim.x + 16, rim.y - 26)} p2={vec(rim.x + 16, rim.y + 10)} color={color.textDim} strokeWidth={3} />
       <Line p1={vec(rim.x + 16, rim.y + 10)} p2={vec(rim.x + 16, h - 16)} color={color.border} strokeWidth={2} />
       {/* Dashed sight line: camera → rim */}
@@ -73,7 +90,7 @@ function AimIllustration({ w }: { w: number }) {
   );
 }
 
-/** Pane 2 — the shot arc into the rim, ball mid-flight. */
+/** Pane 2 — the shot arc into the rim, ball mid-flight with a comet trail. */
 function CountIllustration({ w }: { w: number }) {
   const h = ILLO_HEIGHT;
   const rim: Pt = { x: w * 0.8, y: h * 0.42 };
@@ -81,16 +98,28 @@ function CountIllustration({ w }: { w: number }) {
   const ctrl: Pt = { x: w * 0.42, y: -h * 0.35 };
   const end: Pt = { x: rim.x, y: rim.y - 8 };
   const ball = quadPoint(0.72, start, ctrl, end);
+  // Comet trail: fading echoes of the ball behind it along the arc.
+  const trail = [0.64, 0.56, 0.48, 0.4].map((t, i) => ({
+    ...quadPoint(t, start, ctrl, end),
+    r: 6 - i * 1.1,
+    opacity: 0.4 - i * 0.09,
+  }));
   const path = `M ${start.x} ${start.y} Q ${ctrl.x} ${ctrl.y} ${end.x} ${end.y}`;
   return (
     <Canvas style={{ width: w, height: h, alignSelf: 'center' }}>
       {/* Floor */}
       <Line p1={vec(space.sm, h - 16)} p2={vec(w - space.sm, h - 16)} color={color.border} strokeWidth={2} />
-      {/* Rim + backboard */}
+      {/* Rim + net + backboard */}
       <Circle cx={rim.x} cy={rim.y} r={10} style="stroke" color={color.textDim} strokeWidth={3} />
+      <Line p1={vec(rim.x - 6, rim.y + 9)} p2={vec(rim.x - 3, rim.y + 22)} color={color.textFaint} strokeWidth={1.5} />
+      <Line p1={vec(rim.x, rim.y + 10)} p2={vec(rim.x, rim.y + 24)} color={color.textFaint} strokeWidth={1.5} />
+      <Line p1={vec(rim.x + 6, rim.y + 9)} p2={vec(rim.x + 3, rim.y + 22)} color={color.textFaint} strokeWidth={1.5} />
       <Line p1={vec(rim.x + 16, rim.y - 26)} p2={vec(rim.x + 16, rim.y + 10)} color={color.textDim} strokeWidth={3} />
-      {/* The arc + ball */}
+      {/* The arc + comet trail + ball */}
       <Path path={path} style="stroke" strokeWidth={3} color={color.accent} />
+      {trail.map((p, i) => (
+        <Circle key={i} cx={p.x} cy={p.y} r={p.r} color={color.accent} opacity={p.opacity} />
+      ))}
       <Circle cx={ball.x} cy={ball.y} r={8} color={color.accent} />
     </Canvas>
   );
@@ -111,6 +140,10 @@ function ClipsIllustration({ w }: { w: number }) {
   const spark = ys
     .map((y, i) => `${i === 0 ? 'M' : 'L'} ${chartL + stepX * i} ${y}`)
     .join(' ');
+  const area =
+    `M ${chartL} ${baseY} ` +
+    ys.map((y, i) => `L ${chartL + stepX * i} ${y}`).join(' ') +
+    ` L ${chartR} ${baseY} Z`;
   return (
     <Canvas style={{ width: w, height: h, alignSelf: 'center' }}>
       {/* Clip card with play button and a REC dot */}
@@ -121,8 +154,9 @@ function ClipsIllustration({ w }: { w: number }) {
         color={color.accent}
       />
       {/* FG% spark line, trending up */}
+      <Path path={area} color={color.accentTint} />
       <Line p1={vec(chartL, baseY)} p2={vec(chartR, baseY)} color={color.border} strokeWidth={2} />
-      <Path path={spark} style="stroke" strokeWidth={3} color={color.accent} />
+      <Path path={spark} style="stroke" strokeWidth={3} strokeJoin="round" color={color.accent} />
       <Circle cx={chartR} cy={ys[4]!} r={5} color={color.make} />
     </Canvas>
   );
@@ -160,6 +194,25 @@ const PAGES: PageDef[] = [
   },
 ];
 
+/** One progress dot; grows into a pill and warms up when active. */
+function PagerDot({ active }: { active: boolean }) {
+  const style = useAnimatedStyle(() => ({
+    width: withTiming(active ? space.xl : space.sm, {
+      duration: motion.quick,
+      reduceMotion: ReduceMotion.System,
+    }),
+    opacity: withTiming(active ? 1 : 0.9, {
+      duration: motion.quick,
+      reduceMotion: ReduceMotion.System,
+    }),
+  }));
+  return (
+    <Animated.View
+      style={[styles.dot, active && styles.dotActive, style]}
+    />
+  );
+}
+
 export default function OnboardingScreen() {
   const { width } = useWindowDimensions();
   const insets = useSafeAreaInsets();
@@ -194,7 +247,7 @@ export default function OnboardingScreen() {
 
   return (
     <Screen padded={false}>
-      {/* Skip — top right, always available */}
+      {/* Skip — top right, quiet but always available */}
       <Row style={styles.topBar}>
         <Pressable
           accessibilityRole="button"
@@ -252,7 +305,7 @@ export default function OnboardingScreen() {
         <View importantForAccessibility="no-hide-descendants">
           <Row gap={space.sm} style={styles.dots}>
             {PAGES.map((p, i) => (
-              <View key={p.key} style={[styles.dot, i === page && styles.dotActive]} />
+              <PagerDot key={p.key} active={i === page} />
             ))}
           </Row>
         </View>
@@ -280,7 +333,7 @@ const styles = StyleSheet.create({
   },
   skipLabel: {
     ...type.bodyMedium,
-    color: color.textDim,
+    color: color.textFaint,
   },
   page: {
     paddingHorizontal: space.xl,
@@ -321,7 +374,6 @@ const styles = StyleSheet.create({
     backgroundColor: color.border,
   },
   dotActive: {
-    width: space.xl,
     backgroundColor: color.accent,
   },
 });

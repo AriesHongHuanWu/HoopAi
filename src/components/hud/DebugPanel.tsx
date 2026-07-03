@@ -6,16 +6,24 @@
  *
  * Reads the engine's debug SharedValue by polling on the JS thread at ~4 Hz
  * (cheap; avoids a per-frame React re-render).
+ *
+ * Placement is safe-area aware in both orientations: portrait keeps the panel
+ * top-left under the status bar; landscape docks it top-right (clear of the
+ * notch/Dynamic Island and of the stat strip, which owns the left column).
  */
 import React, { useEffect, useState } from 'react';
-import { StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import type { SharedValue } from 'react-native-reanimated';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import type { EngineDebug } from '../../camera/useShotEngine';
 import { color, radius, space, type } from '../../constants/tokens';
 
 export function DebugPanel({ debug }: { debug: SharedValue<EngineDebug> }) {
   const [d, setD] = useState<EngineDebug>(debug.value);
+  const insets = useSafeAreaInsets();
+  const { width, height } = useWindowDimensions();
+  const isLandscape = width > height;
   useEffect(() => {
     const id = setInterval(() => setD({ ...debug.value }), 250);
     return () => clearInterval(id);
@@ -26,8 +34,12 @@ export function DebugPanel({ debug }: { debug: SharedValue<EngineDebug> }) {
   const inputOk = d.inputMax > 0.1 && d.inputMax <= 1.6; // ~0..1 expected
   const running = d.frames > 0;
 
+  const placement = isLandscape
+    ? { top: insets.top + space.sm, right: insets.right + space.sm }
+    : { top: Math.max(54, insets.top + space.sm), left: insets.left + space.sm };
+
   return (
-    <View style={styles.wrap} pointerEvents="none">
+    <View style={[styles.wrap, placement]} pointerEvents="none">
       <Text style={styles.title}>DETECT DEBUG</Text>
       <Row k="mode" v={d.mode} vc={d.mode === 'camera' ? color.make : color.unsure} />
       <Row k="model" v={d.modelLoaded ? 'loaded' : 'NOT loaded (demo)'} vc={d.modelLoaded ? color.make : color.miss} />
@@ -58,8 +70,6 @@ function Row({ k, v, vc }: { k: string; v: string; vc?: string }) {
 const styles = StyleSheet.create({
   wrap: {
     position: 'absolute',
-    top: 54,
-    left: 10,
     backgroundColor: 'rgba(10,9,9,0.82)',
     borderColor: color.hudGlassBorder,
     borderWidth: StyleSheet.hairlineWidth,

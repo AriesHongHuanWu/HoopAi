@@ -1,17 +1,25 @@
 /**
  * ModeComplete — the celebratory sheet shown when a game mode finishes.
  *
- * Fades up a scrim with a glass card: the mode's headline result, the hero
- * numeral (points / makes / letters / streak), an optional per-spot or contest
- * breakdown, and three actions — share the result (native share sheet), play
- * the mode again, or exit to the session summary.
+ * Fades up a scrim with a glass card: the mode's headline result, a springy
+ * hero numeral under a Skia arc-and-sparks flourish (the signature shot arc —
+ * no confetti), an optional per-spot or contest breakdown, and three actions —
+ * share the result (native share sheet), play the mode again, or exit to the
+ * session summary. All entering animations respect the system reduce-motion
+ * setting.
  *
  * Presentation only; the live screen owns when to mount it and what the buttons
  * do (replay re-inits the mode, exit runs the normal end-session flow).
  */
-import React from 'react';
+import { BlurMask, Canvas, Circle, Path, Skia } from '@shopify/react-native-skia';
+import React, { useMemo, useState } from 'react';
 import { Share, StyleSheet, Text, View } from 'react-native';
-import Animated, { FadeIn, FadeInDown } from 'react-native-reanimated';
+import Animated, {
+  FadeIn,
+  FadeInDown,
+  ReduceMotion,
+  ZoomIn,
+} from 'react-native-reanimated';
 
 import { Card, PillButton, Row } from '../ui';
 import { color, motion, space, type } from '../../constants/tokens';
@@ -25,6 +33,9 @@ const absoluteFill = {
   right: 0,
   bottom: 0,
 } as const;
+
+/** Height of the arc flourish above the numeral, px. */
+const FLOURISH_H = 64;
 
 interface Headline {
   /** Big word above the numeral, e.g. "COMPLETE" / "TIME" / "OUT". */
@@ -105,6 +116,80 @@ function headlineFor(mode: ModeState): Headline {
   }
 }
 
+/**
+ * Arc flourish — the signature shot arc landing at a glowing ball, with a few
+ * spark ticks radiating from the landing point. Static (reduced-motion safe);
+ * the celebration energy comes from the springy numeral beneath it.
+ */
+function ArcFlourish() {
+  const [width, setWidth] = useState(0);
+
+  const geom = useMemo(() => {
+    if (width <= 0) return null;
+    const h = FLOURISH_H;
+    const landX = width * 0.72;
+    const landY = h - 14;
+    const arc = Skia.Path.Make();
+    arc.moveTo(width * 0.16, h - 8);
+    arc.quadTo(width * 0.44, -6, landX, landY);
+    // Spark ticks fanning out from the landing point.
+    const sparks = Skia.Path.Make();
+    for (const deg of [-78, -42, -8]) {
+      const rad = (deg * Math.PI) / 180;
+      const x1 = landX + Math.cos(rad) * 12;
+      const y1 = landY + Math.sin(rad) * 12;
+      const x2 = landX + Math.cos(rad) * 21;
+      const y2 = landY + Math.sin(rad) * 21;
+      sparks.moveTo(x1, y1);
+      sparks.lineTo(x2, y2);
+    }
+    return { arc, sparks, landX, landY };
+  }, [width]);
+
+  return (
+    <View
+      pointerEvents="none"
+      onLayout={(e) => setWidth(e.nativeEvent.layout.width)}
+      style={styles.flourish}
+    >
+      {geom != null && (
+        <Canvas style={{ width, height: FLOURISH_H }}>
+          <Path
+            path={geom.arc}
+            style="stroke"
+            strokeWidth={7}
+            strokeCap="round"
+            color={color.accent}
+            opacity={0.25}
+          >
+            <BlurMask blur={8} style="normal" />
+          </Path>
+          <Path
+            path={geom.arc}
+            style="stroke"
+            strokeWidth={2.5}
+            strokeCap="round"
+            color={color.accent}
+            opacity={0.7}
+          />
+          <Path
+            path={geom.sparks}
+            style="stroke"
+            strokeWidth={2.5}
+            strokeCap="round"
+            color={color.threePt}
+            opacity={0.9}
+          />
+          <Circle cx={geom.landX} cy={geom.landY} r={9} color={color.accent} opacity={0.35}>
+            <BlurMask blur={6} style="normal" />
+          </Circle>
+          <Circle cx={geom.landX} cy={geom.landY} r={4.5} color={color.accent} />
+        </Canvas>
+      )}
+    </View>
+  );
+}
+
 export function ModeComplete({
   mode,
   onReplay,
@@ -127,20 +212,32 @@ export function ModeComplete({
 
   return (
     <Animated.View
-      entering={FadeIn.duration(motion.standard)}
+      entering={FadeIn.duration(motion.standard).reduceMotion(ReduceMotion.System)}
       style={styles.scrim}
       accessibilityViewIsModal
     >
-      <Animated.View entering={FadeInDown.duration(motion.celebrate).springify()}>
+      <Animated.View
+        entering={FadeInDown.duration(motion.celebrate)
+          .springify()
+          .reduceMotion(ReduceMotion.System)}
+      >
         <Card style={styles.card}>
+          <ArcFlourish />
           <Text style={styles.emoji}>{def.emoji}</Text>
           <Text style={styles.banner}>{h.banner}</Text>
 
-          <View style={styles.heroRow}>
+          <Animated.View
+            entering={ZoomIn.delay(120)
+              .duration(motion.celebrate)
+              .springify()
+              .damping(11)
+              .reduceMotion(ReduceMotion.System)}
+            style={styles.heroRow}
+          >
             <Text style={styles.hero} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.5}>
               {h.value}
             </Text>
-          </View>
+          </Animated.View>
           {h.unit !== '' && <Text style={styles.unit}>{h.unit.toUpperCase()}</Text>}
 
           <Text style={styles.sub}>{h.sub}</Text>
@@ -195,6 +292,12 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     alignSelf: 'stretch',
     paddingVertical: space.xl,
+    overflow: 'hidden',
+  },
+  flourish: {
+    ...absoluteFill,
+    bottom: undefined,
+    height: FLOURISH_H,
   },
   emoji: {
     fontSize: 40,

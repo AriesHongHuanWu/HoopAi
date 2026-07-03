@@ -3,10 +3,18 @@
  *
  * Shot rows persist everything needed to rebuild stats, shot charts and clip
  * plans offline; the raw trajectory is stored as JSON for replay drawing.
+ *
+ * CRASH SAFETY
+ * ------------
+ * Every public function is wrapped so a database failure NEVER throws into UI
+ * code: errors are logged via console.warn and a safe fallback is returned
+ * (empty array, null, no-op, or -1 for insert row ids). If opening the
+ * database itself fails (corrupt file), a one-time automatic recovery deletes
+ * and re-creates it — losing history beats crashing on every launch.
  */
 import * as SQLite from 'expo-sqlite';
 
-import type { ResolvedShot, SessionStats, ShotOutcome } from '../core/types';
+import type { ResolvedShot, SessionStats, ShotOutcome, ShotSignals } from '../core/types';
 import { recomputeStats } from '../core/stats';
 
 export interface SessionRow {
@@ -31,16 +39,73 @@ export interface SessionSummaryRow extends SessionRow {
 const DB_NAME = 'hoopai.db';
 
 let dbPromise: Promise<SQLite.SQLiteDatabase> | null = null;
+/** Only ever attempt the automatic corrupt-db recovery once per launch. */
+let recoveryAttempted = false;
 
-/** Lazily opened singleton database. */
+async function openAndMigrate(): Promise<SQLite.SQLiteDatabase> {
+  const db = await SQLite.openDatabaseAsync(DB_NAME);
+  await migrate(db);
+  return db;
+}
+
+/**
+ * Lazily opened singleton database.
+ *
+ * If the first open/migrate fails (corrupt file), the database is deleted and
+ * re-created once automatically. If even that fails, the cached promise is
+ * cleared so a later call can retry, and the rejection surfaces to the `safe`
+ * wrappers below (never to UI code).
+ */
 export function getDb(): Promise<SQLite.SQLiteDatabase> {
   if (!dbPromise) {
-    dbPromise = SQLite.openDatabaseAsync(DB_NAME).then(async (db) => {
-      await migrate(db);
-      return db;
+    const attempt = openAndMigrate().catch(async (err) => {
+      console.warn('[db] Failed to open database', err);
+      if (recoveryAttempted) throw err;
+      recoveryAttempted = true;
+      console.warn('[db] Attempting automatic recovery (delete + re-create)');
+      try {
+        await SQLite.deleteDatabaseAsync(DB_NAME);
+      } catch (deleteErr) {
+        console.warn('[db] Could not delete corrupt database', deleteErr);
+      }
+      return openAndMigrate();
     });
+    // Clear the cache on terminal failure so a future call can retry.
+    attempt.catch(() => {
+      if (dbPromise === attempt) dbPromise = null;
+    });
+    dbPromise = attempt;
   }
   return dbPromise;
+}
+
+/**
+ * Best-effort recovery: close, delete and re-create the database from scratch.
+ * All persisted history is lost. Never throws.
+ */
+export async function resetDatabase(): Promise<void> {
+  const stale = dbPromise;
+  dbPromise = null;
+  if (stale) {
+    try {
+      const db = await stale;
+      await db.closeAsync();
+    } catch {
+      // Already broken or closed — nothing to release.
+    }
+  }
+  try {
+    await SQLite.deleteDatabaseAsync(DB_NAME);
+  } catch (err) {
+    console.warn('[db] deleteDatabaseAsync failed during reset', err);
+  }
+  try {
+    const fresh = await openAndMigrate();
+    dbPromise = Promise.resolve(fresh);
+  } catch (err) {
+    console.warn('[db] Re-open after reset failed', err);
+    dbPromise = null;
+  }
 }
 
 async function migrate(db: SQLite.SQLiteDatabase): Promise<void> {
@@ -81,68 +146,101 @@ async function migrate(db: SQLite.SQLiteDatabase): Promise<void> {
   }
 }
 
+/** Run a DB operation; on ANY failure log + return the fallback (never throw). */
+async function safe<T>(op: string, fallback: T, fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    console.warn(`[db] ${op} failed`, err);
+    return fallback;
+  }
+}
+
+/** JSON.parse that can never throw (corrupt persisted rows). */
+function parseJson<T>(raw: string, fallback: T): T {
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Sessions
 // ---------------------------------------------------------------------------
 
+/**
+ * Creates a session row. Returns -1 when persistence failed — callers should
+ * treat a negative id as "no persistence this session" and carry on.
+ */
 export async function createSession(opts: {
   startedAt: number;
   label?: string;
   keepMode: string;
 }): Promise<number> {
-  const db = await getDb();
-  const res = await db.runAsync(
-    'INSERT INTO sessions (startedAt, label, keepMode) VALUES (?, ?, ?)',
-    opts.startedAt,
-    opts.label ?? '',
-    opts.keepMode,
-  );
-  return res.lastInsertRowId;
+  return safe('createSession', -1, async () => {
+    const db = await getDb();
+    const res = await db.runAsync(
+      'INSERT INTO sessions (startedAt, label, keepMode) VALUES (?, ?, ?)',
+      opts.startedAt,
+      opts.label ?? '',
+      opts.keepMode,
+    );
+    return res.lastInsertRowId;
+  });
 }
 
 export async function endSession(
   sessionId: number,
   opts: { endedAt: number; videoPath?: string | null },
 ): Promise<void> {
-  const db = await getDb();
-  await db.runAsync(
-    'UPDATE sessions SET endedAt = ?, videoPath = ? WHERE id = ?',
-    opts.endedAt,
-    opts.videoPath ?? null,
-    sessionId,
-  );
+  return safe('endSession', undefined, async () => {
+    const db = await getDb();
+    await db.runAsync(
+      'UPDATE sessions SET endedAt = ?, videoPath = ? WHERE id = ?',
+      opts.endedAt,
+      opts.videoPath ?? null,
+      sessionId,
+    );
+  });
 }
 
 export async function listSessions(limit = 50): Promise<SessionSummaryRow[]> {
-  const db = await getDb();
-  return db.getAllAsync<SessionSummaryRow>(
-    `SELECT s.*,
-            COUNT(sh.id) AS attempts,
-            SUM(CASE WHEN sh.outcome = 'make' THEN 1 ELSE 0 END) AS makes,
-            CASE
-              WHEN SUM(CASE WHEN sh.outcome IN ('make','miss') THEN 1 ELSE 0 END) = 0 THEN 0
-              ELSE CAST(SUM(CASE WHEN sh.outcome = 'make' THEN 1 ELSE 0 END) AS REAL)
-                   / SUM(CASE WHEN sh.outcome IN ('make','miss') THEN 1 ELSE 0 END)
-            END AS fgPct
-     FROM sessions s
-     LEFT JOIN shots sh ON sh.sessionId = s.id
-     GROUP BY s.id
-     ORDER BY s.startedAt DESC
-     LIMIT ?`,
-    limit,
-  );
+  return safe('listSessions', [], async () => {
+    const db = await getDb();
+    return db.getAllAsync<SessionSummaryRow>(
+      `SELECT s.*,
+              COUNT(sh.id) AS attempts,
+              SUM(CASE WHEN sh.outcome = 'make' THEN 1 ELSE 0 END) AS makes,
+              CASE
+                WHEN SUM(CASE WHEN sh.outcome IN ('make','miss') THEN 1 ELSE 0 END) = 0 THEN 0
+                ELSE CAST(SUM(CASE WHEN sh.outcome = 'make' THEN 1 ELSE 0 END) AS REAL)
+                     / SUM(CASE WHEN sh.outcome IN ('make','miss') THEN 1 ELSE 0 END)
+              END AS fgPct
+       FROM sessions s
+       LEFT JOIN shots sh ON sh.sessionId = s.id
+       GROUP BY s.id
+       ORDER BY s.startedAt DESC
+       LIMIT ?`,
+      limit,
+    );
+  });
 }
 
 export async function getSession(sessionId: number): Promise<SessionRow | null> {
-  const db = await getDb();
-  return db.getFirstAsync<SessionRow>('SELECT * FROM sessions WHERE id = ?', sessionId);
+  return safe('getSession', null, async () => {
+    const db = await getDb();
+    return db.getFirstAsync<SessionRow>('SELECT * FROM sessions WHERE id = ?', sessionId);
+  });
 }
 
 export async function deleteSession(sessionId: number): Promise<void> {
-  const db = await getDb();
-  await db.withTransactionAsync(async () => {
-    await db.runAsync('DELETE FROM shots WHERE sessionId = ?', sessionId);
-    await db.runAsync('DELETE FROM sessions WHERE id = ?', sessionId);
+  return safe('deleteSession', undefined, async () => {
+    const db = await getDb();
+    await db.withTransactionAsync(async () => {
+      await db.runAsync('DELETE FROM shots WHERE sessionId = ?', sessionId);
+      await db.runAsync('DELETE FROM sessions WHERE id = ?', sessionId);
+    });
   });
 }
 
@@ -150,30 +248,33 @@ export async function deleteSession(sessionId: number): Promise<void> {
 // Shots
 // ---------------------------------------------------------------------------
 
+/** Persists a shot. Returns -1 when persistence failed (shot stays in memory). */
 export async function insertShot(sessionId: number, shot: ResolvedShot): Promise<number> {
-  const db = await getDb();
-  const res = await db.runAsync(
-    `INSERT INTO shots (
-       sessionId, shotIndex, tStart, tResolved, outcome, corrected, rimBounce,
-       entryAngleDeg, releaseAngleDeg, xCross, originX, originY,
-       signalsJson, trajectoryJson
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    sessionId,
-    shot.id,
-    shot.tStart,
-    shot.tResolved,
-    shot.outcome,
-    shot.corrected ? 1 : 0,
-    shot.rimBounce ? 1 : 0,
-    shot.entryAngleDeg,
-    shot.releaseAngleDeg,
-    shot.xCross,
-    shot.originX,
-    shot.originY,
-    JSON.stringify(shot.signals),
-    JSON.stringify(shot.trajectory),
-  );
-  return res.lastInsertRowId;
+  return safe('insertShot', -1, async () => {
+    const db = await getDb();
+    const res = await db.runAsync(
+      `INSERT INTO shots (
+         sessionId, shotIndex, tStart, tResolved, outcome, corrected, rimBounce,
+         entryAngleDeg, releaseAngleDeg, xCross, originX, originY,
+         signalsJson, trajectoryJson
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      sessionId,
+      shot.id,
+      shot.tStart,
+      shot.tResolved,
+      shot.outcome,
+      shot.corrected ? 1 : 0,
+      shot.rimBounce ? 1 : 0,
+      shot.entryAngleDeg,
+      shot.releaseAngleDeg,
+      shot.xCross,
+      shot.originX,
+      shot.originY,
+      JSON.stringify(shot.signals),
+      JSON.stringify(shot.trajectory),
+    );
+    return res.lastInsertRowId;
+  });
 }
 
 /** One-tap correction: flip a persisted shot's outcome. */
@@ -181,17 +282,21 @@ export async function updateShotOutcome(
   shotRowId: number,
   outcome: ShotOutcome,
 ): Promise<void> {
-  const db = await getDb();
-  await db.runAsync(
-    'UPDATE shots SET outcome = ?, corrected = 1 WHERE id = ?',
-    outcome,
-    shotRowId,
-  );
+  return safe('updateShotOutcome', undefined, async () => {
+    const db = await getDb();
+    await db.runAsync(
+      'UPDATE shots SET outcome = ?, corrected = 1 WHERE id = ?',
+      outcome,
+      shotRowId,
+    );
+  });
 }
 
 export async function setShotClipPath(shotRowId: number, clipPath: string): Promise<void> {
-  const db = await getDb();
-  await db.runAsync('UPDATE shots SET clipPath = ? WHERE id = ?', clipPath, shotRowId);
+  return safe('setShotClipPath', undefined, async () => {
+    const db = await getDb();
+    await db.runAsync('UPDATE shots SET clipPath = ? WHERE id = ?', clipPath, shotRowId);
+  });
 }
 
 export interface ShotRow {
@@ -214,12 +319,16 @@ export interface ShotRow {
 }
 
 export async function sessionShots(sessionId: number): Promise<ShotRow[]> {
-  const db = await getDb();
-  return db.getAllAsync<ShotRow>(
-    'SELECT * FROM shots WHERE sessionId = ? ORDER BY shotIndex ASC',
-    sessionId,
-  );
+  return safe('sessionShots', [], async () => {
+    const db = await getDb();
+    return db.getAllAsync<ShotRow>(
+      'SELECT * FROM shots WHERE sessionId = ? ORDER BY shotIndex ASC',
+      sessionId,
+    );
+  });
 }
+
+const FALLBACK_SIGNALS: ShotSignals = { geo: null, net: null, cls: null };
 
 /** Rebuild a ResolvedShot from its persisted row (for replay/recompute). */
 export function shotFromRow(row: ShotRow): ResolvedShot {
@@ -228,7 +337,7 @@ export function shotFromRow(row: ShotRow): ResolvedShot {
     tStart: row.tStart,
     tResolved: row.tResolved,
     outcome: row.outcome,
-    signals: JSON.parse(row.signalsJson),
+    signals: parseJson<ShotSignals>(row.signalsJson, FALLBACK_SIGNALS),
     rimBounce: row.rimBounce === 1,
     xCross: row.xCross,
     entryAngleDeg: row.entryAngleDeg,
@@ -236,7 +345,7 @@ export function shotFromRow(row: ShotRow): ResolvedShot {
     releasePoint: null,
     originX: row.originX,
     originY: row.originY,
-    trajectory: JSON.parse(row.trajectoryJson),
+    trajectory: parseJson(row.trajectoryJson, []),
     corrected: row.corrected === 1,
   };
 }

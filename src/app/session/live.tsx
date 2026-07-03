@@ -1,15 +1,21 @@
 /**
- * Live session — the flagship screen. Portrait, immersive, keep-awake.
+ * Live session — the flagship screen. Portrait or landscape, immersive,
+ * keep-awake.
  *
  * Layers (bottom → top):
  *   camera feed (or demo court scene) → Skia trajectory overlay → aiming
  *   guidance (until rim lock) → shot flash → glass HUD chips → bottom bar.
  *
+ * Orientation: the HUD relayouts via useWindowDimensions — portrait stacks the
+ * stat strip full-width up top; landscape docks it (plus the mode banner) in a
+ * compact top-left column so the rim stays unobstructed. Safe-area insets are
+ * applied on all four edges for notch / Dynamic Island in both orientations.
+ *
  * The shot engine drives everything; this screen only wires events into the
  * session store and renders store state. No per-frame React updates.
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import { router } from 'expo-router';
 import * as Haptics from 'expo-haptics';
 import { useKeepAwake } from 'expo-keep-awake';
@@ -24,6 +30,7 @@ import Animated, {
 import { Camera } from 'react-native-vision-camera';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { useAppStateGuard } from '../../camera/useAppStateGuard';
 import { useShotEngine, type ShotEngine } from '../../camera/useShotEngine';
 import { playSound, useShotSounds } from '../../camera/useShotSounds';
 import { HudChip } from '../../components/hud/HudChip';
@@ -41,6 +48,9 @@ import { useSession } from '../../state/sessionStore';
 import { useSettings } from '../../state/settingsStore';
 
 const DRIFT_BANNER_MS = 4000;
+const PAUSED_CHIP_MS = 4000;
+/** Width of the docked HUD column in landscape (compact, rim stays clear). */
+const LANDSCAPE_HUD_WIDTH = 300;
 
 /** RN 0.86 dropped StyleSheet.absoluteFillObject — local equivalent. */
 const absoluteFill = {
@@ -55,6 +65,8 @@ export default function LiveSessionScreen() {
   useKeepAwake();
   useShotSounds();
   const insets = useSafeAreaInsets();
+  const { width, height } = useWindowDimensions();
+  const isLandscape = width > height;
 
   const rimLocked = useSession((s) => s.rimLocked);
   const isRecording = useSession((s) => s.isRecording);
@@ -66,9 +78,12 @@ export default function LiveSessionScreen() {
   const [drift, setDrift] = useState(false);
   const [confirmEnd, setConfirmEnd] = useState(false);
   const [ending, setEnding] = useState(false);
+  const [backgrounded, setBackgrounded] = useState(false);
+  const [pausedChip, setPausedChip] = useState(false);
 
   const engineRef = useRef<ShotEngine | null>(null);
   const driftTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pausedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Entering this screen directly (deep link, dev reload) still gets a
   // coherent session.
@@ -131,18 +146,43 @@ export default function LiveSessionScreen() {
   }, [engine]);
   useEffect(() => () => {
     if (driftTimer.current) clearTimeout(driftTimer.current);
+    if (pausedTimer.current) clearTimeout(pausedTimer.current);
   }, []);
+
+  // App backgrounding (call, app switch, lock): stop any active recording
+  // safely — the OS tears the camera down anyway — and freeze the mode-timer
+  // tick loop. On return, show a brief "Session paused" chip so the gap in
+  // tracking is explained. Everything else (rim lock, stats) survives as-is.
+  const onBackground = useCallback(() => {
+    setBackgrounded(true);
+    if (useSession.getState().isRecording) {
+      void engineRef.current
+        ?.stopRecording()
+        .then((path) => useSession.getState().setRecording(false, path))
+        .catch(() => useSession.getState().setRecording(false));
+    }
+  }, []);
+  const onForeground = useCallback(() => {
+    setBackgrounded(false);
+    if (useSession.getState().phase === 'live') {
+      setPausedChip(true);
+      if (pausedTimer.current) clearTimeout(pausedTimer.current);
+      pausedTimer.current = setTimeout(() => setPausedChip(false), PAUSED_CHIP_MS);
+    }
+  }, []);
+  useAppStateGuard({ onBackground, onForeground });
 
   // Timed-mode countdown. Arms + drains the clock on the same wall-clock source
   // as applyShot (see onShot). Only runs while the timed game is live and not
-  // yet finished; tickMode is a no-op for every other mode.
+  // yet finished; tickMode is a no-op for every other mode. Paused while the
+  // app is backgrounded so the clock can't expire mid-phone-call unseen.
   useEffect(() => {
-    if (!isTimedMode || !rimLocked || modeDone || ending) return;
+    if (!isTimedMode || !rimLocked || modeDone || ending || backgrounded) return;
     const id = setInterval(() => {
       useMode.getState().tick(Date.now() / 1000);
     }, 250);
     return () => clearInterval(id);
-  }, [isTimedMode, rimLocked, modeDone, ending]);
+  }, [isTimedMode, rimLocked, modeDone, ending, backgrounded]);
 
   const endSession = useCallback(async () => {
     setEnding(true);
@@ -152,6 +192,9 @@ export default function LiveSessionScreen() {
     } catch {
       path = null;
     }
+    // A recording stopped early (app was backgrounded) already stashed its
+    // file path on the store — don't lose that video.
+    path = path ?? useSession.getState().recordingPath;
     await useSession.getState().finish({ nowMs: Date.now(), videoPath: path });
     // The game ends with the session — clear it so it never leaks into the next
     // run (the hero quick-start also resets, but this covers the mode paths).
@@ -210,9 +253,23 @@ export default function LiveSessionScreen() {
 
       <ShotFlash />
 
-      {/* Top HUD */}
-      <View style={[styles.topHud, { top: insets.top + space.md }]} pointerEvents="none">
-        {rimLocked && <StatStrip />}
+      {/* Top HUD — full-width in portrait, a compact left-docked column in
+          landscape so the hoop (usually center/right of frame) stays clear. */}
+      <View
+        style={[
+          styles.topHud,
+          {
+            top: insets.top + space.md,
+            left: insets.left + space.lg,
+            right: isLandscape ? undefined : insets.right + space.lg,
+            width: isLandscape
+              ? Math.min(LANDSCAPE_HUD_WIDTH, width - insets.left - insets.right - space.lg * 2)
+              : undefined,
+          },
+        ]}
+        pointerEvents="none"
+      >
+        {rimLocked && <StatStrip compact={isLandscape} />}
         {rimLocked && activeMode != null && (
           <View style={styles.modeBanner}>
             <ModeBanner mode={activeMode} />
@@ -230,10 +287,33 @@ export default function LiveSessionScreen() {
             </HudChip>
           </View>
         )}
+        {pausedChip && !drift && (
+          <View style={styles.topCenter}>
+            <HudChip>
+              <Text
+                style={styles.pausedText}
+                accessibilityLiveRegion="polite"
+                accessibilityLabel="Session paused while the app was in the background"
+              >
+                Session paused
+              </Text>
+            </HudChip>
+          </View>
+        )}
       </View>
 
-      {/* Bottom bar */}
-      <View style={[styles.bottomBar, { paddingBottom: insets.bottom + space.lg }]}>
+      {/* Bottom bar — inset on all edges so the End button stays reachable on
+          notched devices in either orientation. */}
+      <View
+        style={[
+          styles.bottomBar,
+          {
+            left: insets.left + space.lg,
+            right: insets.right + space.lg,
+            paddingBottom: insets.bottom + (isLandscape ? space.md : space.lg),
+          },
+        ]}
+      >
         {isRecording ? <RecIndicator /> : <View />}
         <PillButton
           label="End session"
@@ -384,8 +464,6 @@ const styles = StyleSheet.create({
   },
   topHud: {
     position: 'absolute',
-    left: space.lg,
-    right: space.lg,
   },
   topCenter: {
     alignItems: 'center',
@@ -398,10 +476,12 @@ const styles = StyleSheet.create({
     ...type.bodyMedium,
     color: color.unsure,
   },
+  pausedText: {
+    ...type.bodyMedium,
+    color: color.text,
+  },
   bottomBar: {
     position: 'absolute',
-    left: space.lg,
-    right: space.lg,
     bottom: 0,
     flexDirection: 'row',
     alignItems: 'center',
@@ -458,7 +538,10 @@ const styles = StyleSheet.create({
     padding: space.xl,
   },
   confirmCard: {
-    alignSelf: 'stretch',
+    // Full-width in portrait; capped like a dialog in landscape (the scrim's
+    // alignItems: 'center' keeps it centered when clamped).
+    width: '100%',
+    maxWidth: 480,
   },
   confirmTitle: {
     ...type.heading,

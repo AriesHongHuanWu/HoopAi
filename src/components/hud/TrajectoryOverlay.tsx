@@ -14,9 +14,32 @@
  *   4. Ball reticle — a thin tracking ring + crosshair ticks around the ball
  *      when no shot is live, so idle tracking still looks intentional.
  *
- * Coordinate mapping (unchanged): analysis frame → view pixels via the mirrored
- * "cover" transform (scale so the analysis square covers the view, center-crop).
- * All per-frame math lives inside useDerivedValue worklets.
+ * COORDINATE MAPPING (orientation-correct)
+ * ----------------------------------------
+ * Two centered transforms compose between analysis space and view space:
+ *
+ *   camera frame --letterbox--> 640×640 analysis square   (fit, bars on the
+ *                                                          camera's short axis)
+ *   camera frame ----cover----> preview view              (fill, center-crop)
+ *
+ * Both transforms are uniform scales about the shared camera center, so the
+ * composition is a single uniform scale + centering — never a distortion.
+ * With the camera content oriented WITH the view (VisionCamera rotates the
+ * stream with the interface) and aspect `SOURCE_ASPECT` (short/long), the
+ * camera content occupies a centered `contentW × contentH` rect of the
+ * analysis square, and the view covers exactly that rect:
+ *
+ *   portrait :  contentW = S·aspect, contentH = S
+ *   landscape:  contentW = S,        contentH = S·aspect      (S = square side)
+ *   scale = max(viewW / contentW, viewH / contentH)
+ *   offset = viewCenter − frameCenter·scale
+ *
+ * On tall phones this reduces to the old max(w, h)/S "cover the square" rule,
+ * but unlike that rule it stays correct when the view's aspect is LESS extreme
+ * than the camera's (landscape, tablets, split screen). Recomputed from
+ * onLayout on every rotation; a w/h swap only swaps which axis dominates the
+ * max(), so the trail scale stays uniform. All per-frame math lives inside
+ * useDerivedValue worklets.
  */
 import React from 'react';
 import { StyleSheet, type LayoutChangeEvent, type StyleProp, type ViewStyle } from 'react-native';
@@ -47,13 +70,23 @@ const TRAIL_HOT = 2;
 /** Corner-bracket arm length as a fraction of the rim box's shorter side. */
 const BRACKET_FRAC = 0.28;
 const BRACKET_STROKE = 3;
+/**
+ * Camera content aspect ratio as short/long side (16:9 stream → 9/16). Used to
+ * locate the camera content inside the letterboxed analysis square — see the
+ * coordinate-mapping notes above. Overridable per-instance via `sourceAspect`
+ * if a format with a different aspect is ever selected.
+ */
+const DEFAULT_SOURCE_ASPECT = 9 / 16;
 
 export function TrajectoryOverlay({
   overlay,
   style,
+  sourceAspect = DEFAULT_SOURCE_ASPECT,
 }: {
   overlay: SharedValue<OverlayState>;
   style?: StyleProp<ViewStyle>;
+  /** Camera content aspect as short/long (0..1]. Defaults to a 16:9 stream. */
+  sourceAspect?: number;
 }) {
   const viewSize = useSharedValue({ w: 0, h: 0 });
 
@@ -73,19 +106,34 @@ export function TrajectoryOverlay({
     );
   }, [pulse]);
 
-  // --- cover transform helpers (worklet-local) -----------------------------
+  // --- analysis → view transform (worklet-local) ---------------------------
+  // Letterbox (camera → analysis square) composed with cover (camera → view);
+  // both are centered uniform scales, so the result is one uniform scale +
+  // centering. Orientation-aware: the camera content rect inside the analysis
+  // square follows the view's orientation. See the header notes for the math.
   const mapping = useDerivedValue(() => {
     const o = overlay.value;
     const { w, h } = viewSize.value;
     if (w <= 0 || h <= 0 || o.frameW <= 0 || o.frameH <= 0) {
       return { ok: false, scale: 0, ox: 0, oy: 0 };
     }
-    const scale = Math.max(w / o.frameW, h / o.frameH);
+    // Camera short/long ratio, clamped to a sane range (guards a bad prop).
+    const aspect = Math.min(1, Math.max(0.1, sourceAspect));
+    // Side of the (square) analysis frame the camera was letterboxed into.
+    const side = Math.max(o.frameW, o.frameH);
+    // Camera content rect inside the analysis square, oriented with the view:
+    // the camera's long axis fills the square along the view's long axis.
+    const landscape = w > h;
+    const contentW = landscape ? side : side * aspect;
+    const contentH = landscape ? side * aspect : side;
+    // The preview covers the camera content — same crop, in view pixels.
+    const scale = Math.max(w / contentW, h / contentH);
+    // Every stage is center-aligned: map frame center onto view center.
     return {
       ok: true,
       scale,
-      ox: (w - o.frameW * scale) / 2,
-      oy: (h - o.frameH * scale) / 2,
+      ox: w / 2 - (o.frameW / 2) * scale,
+      oy: h / 2 - (o.frameH / 2) * scale,
     };
   });
 

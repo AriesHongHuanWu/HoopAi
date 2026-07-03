@@ -80,6 +80,7 @@ const styles = StyleSheet.create({
   meta: {
     ...type.caption,
     color: color.textFaint,
+    fontVariant: ['tabular-nums'],
     marginTop: space.xs,
   },
   heading: {

@@ -124,6 +124,13 @@ export interface ShotEngine {
   startRecording: () => Promise<void>;
   stopRecording: () => Promise<string | null>;
   isModelLoaded: boolean;
+  /**
+   * Smoke-test inference latency in milliseconds — a simple device-tier hint
+   * (lower = faster phone). 0 until the model finishes loading (or when it
+   * never loads, e.g. demo mode). Also surfaced in the debug SharedValue's
+   * `delegate` label as "<delegate> · <ms>ms".
+   */
+  inferenceMs: number;
   setManualRim: (box: Box) => void;
 }
 
@@ -140,13 +147,15 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
     model: TensorflowModel | null;
     delegate: string;
     error: string;
-  }>({ model: null, delegate: 'loading', error: '' });
+    /** Smoke-test latency (ms) of the winning delegate; 0 until measured. */
+    inferenceMs: number;
+  }>({ model: null, delegate: 'loading', error: '', inferenceMs: 0 });
 
   const detectorModel = useSettings((s) => s.detectorModel);
 
   useEffect(() => {
     let alive = true;
-    setModelState({ model: null, delegate: 'loading', error: '' });
+    setModelState({ model: null, delegate: 'loading', error: '', inferenceMs: 0 });
     void (async () => {
       const fast: { label: string; delegates: ('core-ml' | 'android-gpu')[] } =
         Platform.OS === 'ios'
@@ -180,12 +189,17 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
             throw new Error('smoke test: empty output tensor');
           }
           if (!alive) return;
-          setModelState({ model: m, delegate: `${a.label} · ${ms}ms`, error: lastError });
+          setModelState({
+            model: m,
+            delegate: `${a.label} · ${ms}ms`,
+            error: lastError,
+            inferenceMs: ms,
+          });
           return;
         } catch (e) {
           lastError = `${a.label}: ${String(e).slice(0, 160)}`;
           if (!alive) return;
-          setModelState({ model: null, delegate: a.label, error: lastError });
+          setModelState({ model: null, delegate: a.label, error: lastError, inferenceMs: 0 });
         }
       }
     })();
@@ -400,6 +414,7 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
     startRecording,
     stopRecording,
     isModelLoaded,
+    inferenceMs: modelState.inferenceMs,
     setManualRim: (box: Box) =>
       pipeline.setManualRim(box, {
         width: DETECTION.inputSize,

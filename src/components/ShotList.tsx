@@ -21,6 +21,7 @@ import {
   Pressable,
   StyleSheet,
   Text,
+  TextInput,
   View,
   type StyleProp,
   type ViewStyle,
@@ -42,6 +43,7 @@ import { planClips } from '@/core/clipPlanner';
 import { FORM } from '@/core/config';
 import { recomputeStats } from '@/core/stats';
 import type { ResolvedShot, SessionStats, ShotOutcome, ShotValue } from '@/core/types';
+import * as db from '@/data/db';
 import {
   getSession,
   sessionShots,
@@ -50,6 +52,26 @@ import {
   type SessionRow,
   type ShotRow as DbShotRow,
 } from '@/data/db';
+import { useSettings } from '@/state/settingsStore';
+
+/**
+ * Optional label-rename persistence. The shots/sessions data layer is owned
+ * elsewhere and may not export updateSessionLabel yet — resolve it at runtime
+ * so renames persist automatically once the function lands.
+ */
+const updateSessionLabel = (
+  db as {
+    updateSessionLabel?: (sessionId: number, label: string) => Promise<void>;
+  }
+).updateSessionLabel;
+
+/**
+ * Persist a session rename when the data layer supports it. Safe no-op (with
+ * the optimistic UI already applied) when updateSessionLabel doesn't exist.
+ */
+export function persistSessionLabel(sessionId: number, label: string): void {
+  if (updateSessionLabel) void updateSessionLabel(sessionId, label);
+}
 
 // ---------------------------------------------------------------------------
 // Formatters (no date lib — manual formatting)
@@ -100,6 +122,76 @@ export function BackPill() {
       onPress={() => router.back()}
       style={styles.backPill}
     />
+  );
+}
+
+// ---------------------------------------------------------------------------
+// SessionTitle — tap-to-rename inline session label
+// ---------------------------------------------------------------------------
+
+/**
+ * Session name as a tappable title. Tap → inline TextInput; submit or blur
+ * commits the trimmed name via `onRename` (caller persists). Empty label
+ * shows a placeholder invitation instead.
+ */
+export function SessionTitle({
+  label,
+  onRename,
+  placeholder = 'Name this session',
+}: {
+  label: string;
+  onRename: (label: string) => void;
+  placeholder?: string;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(label);
+
+  const commit = () => {
+    setEditing(false);
+    const next = draft.trim();
+    if (next !== label) onRename(next);
+  };
+
+  if (editing) {
+    return (
+      <TextInput
+        value={draft}
+        onChangeText={setDraft}
+        onSubmitEditing={commit}
+        onBlur={commit}
+        autoFocus
+        maxLength={60}
+        returnKeyType="done"
+        placeholder={placeholder}
+        placeholderTextColor={color.textFaint}
+        accessibilityLabel="Session name"
+        selectionColor={color.accent}
+        style={styles.titleInput}
+      />
+    );
+  }
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={
+        label.length > 0 ? `Session name: ${label}. Rename` : 'Name this session'
+      }
+      accessibilityHint="Opens a text field to rename this session"
+      onPress={() => {
+        void Haptics.selectionAsync();
+        setDraft(label);
+        setEditing(true);
+      }}
+      style={({ pressed }) => [styles.titleWrap, pressed && { opacity: 0.7 }]}
+    >
+      <Text
+        style={[styles.titleText, label.length === 0 && styles.titlePlaceholder]}
+        numberOfLines={1}
+      >
+        {label.length > 0 ? label : placeholder}
+      </Text>
+      <Text style={styles.titleEditHint}>EDIT</Text>
+    </Pressable>
   );
 }
 
@@ -324,14 +416,21 @@ function HighlightsCard({
   shots: readonly ResolvedShot[];
   keepMode: string;
 }) {
+  // User-tunable clip window (Settings > Video). Recomputing from the current
+  // setting keeps the plan live — tweak the window, revisit, new plan.
+  const preRollSec = useSettings((s) => s.clipPreRollSec);
+  const postRollSec = useSettings((s) => s.clipPostRollSec);
   const clips = useMemo(() => {
     if (keepMode === 'none' || shots.length === 0) return [];
-    const sessionDurationSec = shots[shots.length - 1].tResolved + 5;
+    const sessionDurationSec =
+      shots[shots.length - 1].tResolved + postRollSec + 3;
     return planClips(shots, {
       keep: keepMode as 'makes' | 'all' | 'decided',
+      preRollSec,
+      postRollSec,
       sessionDurationSec,
     });
-  }, [shots, keepMode]);
+  }, [shots, keepMode, preRollSec, postRollSec]);
 
   return (
     <Card>
@@ -646,6 +745,34 @@ const styles = StyleSheet.create({
   backPill: {
     alignSelf: 'flex-start',
     paddingHorizontal: space.lg,
+  },
+  titleWrap: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: space.sm,
+    minHeight: touch.minTarget,
+    alignSelf: 'flex-start',
+    maxWidth: '100%',
+  },
+  titleText: {
+    ...type.title,
+    color: color.text,
+    flexShrink: 1,
+  },
+  titlePlaceholder: {
+    color: color.textFaint,
+  },
+  titleEditHint: {
+    ...type.micro,
+    color: color.textFaint,
+  },
+  titleInput: {
+    ...type.title,
+    color: color.text,
+    minHeight: touch.minTarget,
+    paddingVertical: 0,
+    borderBottomWidth: 1,
+    borderBottomColor: color.accent,
   },
   pipRow: {
     flexDirection: 'row',

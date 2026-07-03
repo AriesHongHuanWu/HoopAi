@@ -3,15 +3,27 @@
  * Sections: Feedback (sounds/haptics/voice), Video (record + clip retention),
  * Player (hand, height), About (version + model licenses).
  */
+import { createAudioPlayer, type AudioPlayer } from 'expo-audio';
 import Constants from 'expo-constants';
 import * as Haptics from 'expo-haptics';
 import { router } from 'expo-router';
+import { useEffect } from 'react';
 import { Pressable, StyleSheet, Switch, Text, View } from 'react-native';
 
+import {
+  getSoundSource,
+  SOUND_PACKS,
+  SOUND_PACK_LABELS,
+  type SoundPack,
+} from '@/camera/soundPacks';
 import { Card, Eyebrow, Row, Screen } from '@/components/ui';
 import { color, radius, space, touch, type } from '@/constants/tokens';
 import type { ShootingHand } from '@/core/types';
 import {
+  CLIP_POST_ROLL_MAX,
+  CLIP_POST_ROLL_MIN,
+  CLIP_PRE_ROLL_MAX,
+  CLIP_PRE_ROLL_MIN,
   useSettings,
   type KeepMode,
   type VoiceMetric,
@@ -43,6 +55,23 @@ const HAND_OPTIONS: { value: ShootingHand; label: string }[] = [
 /** Fires selection haptics when the user has them enabled. */
 function tick() {
   if (useSettings.getState().hapticsEnabled) void Haptics.selectionAsync();
+}
+
+// ---------------------------------------------------------------------------
+// Sound pack preview — plays the pack's make sound on select
+// ---------------------------------------------------------------------------
+
+let previewPlayer: AudioPlayer | null = null;
+
+function previewPack(pack: SoundPack) {
+  previewPlayer?.release();
+  previewPlayer = createAudioPlayer(getSoundSource(pack, 'make'));
+  previewPlayer.play();
+}
+
+function releasePreview() {
+  previewPlayer?.release();
+  previewPlayer = null;
 }
 
 function ToggleRow({
@@ -166,17 +195,78 @@ function StepperButton({
   );
 }
 
+/** Stepper row: label + description on the left, − value + on the right. */
+function StepperRow({
+  label,
+  description,
+  value,
+  unit,
+  min,
+  max,
+  disabled,
+  onChange,
+}: {
+  label: string;
+  description: string;
+  value: number;
+  unit: string;
+  min: number;
+  max: number;
+  disabled?: boolean;
+  onChange: (next: number) => void;
+}) {
+  const bump = (delta: number) => {
+    tick();
+    onChange(Math.min(max, Math.max(min, value + delta)));
+  };
+  return (
+    <Row style={[styles.settingRow, disabled === true && styles.disabled]} gap={space.lg}>
+      <View style={styles.settingText}>
+        <Text style={styles.settingLabel}>{label}</Text>
+        <Text style={styles.settingDesc}>{description}</Text>
+      </View>
+      <Row gap={space.sm}>
+        <StepperButton
+          glyph="−"
+          label={`Decrease ${label.toLowerCase()}`}
+          disabled={disabled === true || value <= min}
+          onPress={() => bump(-1)}
+        />
+        <Text
+          style={styles.stepValue}
+          accessibilityLabel={`${label}: ${value} ${unit}`}
+        >
+          {value}
+          <Text style={styles.stepUnit}>{` ${unit}`}</Text>
+        </Text>
+        <StepperButton
+          glyph="+"
+          label={`Increase ${label.toLowerCase()}`}
+          disabled={disabled === true || value >= max}
+          onPress={() => bump(1)}
+        />
+      </Row>
+    </Row>
+  );
+}
+
 export default function SettingsScreen() {
   const soundsEnabled = useSettings((s) => s.soundsEnabled);
   const hapticsEnabled = useSettings((s) => s.hapticsEnabled);
+  const soundPack = useSettings((s) => s.soundPack);
   const recordVideo = useSettings((s) => s.recordVideo);
   const keepMode = useSettings((s) => s.keepMode);
+  const clipPreRollSec = useSettings((s) => s.clipPreRollSec);
+  const clipPostRollSec = useSettings((s) => s.clipPostRollSec);
   const voiceMetric = useSettings((s) => s.voiceMetric);
   const shootingHand = useSettings((s) => s.shootingHand);
   const playerHeightCm = useSettings((s) => s.playerHeightCm);
   const detectorModel = useSettings((s) => s.detectorModel);
   const debugMode = useSettings((s) => s.debugMode);
   const set = useSettings((s) => s.set);
+
+  // Release the sound-pack preview player when leaving the screen.
+  useEffect(() => releasePreview, []);
 
   const goBack = () => {
     if (router.canGoBack()) router.back();
@@ -225,6 +315,27 @@ export default function SettingsScreen() {
               set('soundsEnabled', v);
             }}
           />
+          <View style={styles.divider} />
+          <View style={[styles.settingText, !soundsEnabled && styles.disabled]}>
+            <Text style={styles.settingLabel}>Sound pack</Text>
+            <Text style={styles.settingDesc}>
+              Pick the voice of your feedback sounds. Tap to hear the make.
+            </Text>
+          </View>
+          <View style={[styles.chipWrap, !soundsEnabled && styles.disabled]}>
+            {SOUND_PACKS.map((pack) => (
+              <SelectChip
+                key={pack}
+                label={SOUND_PACK_LABELS[pack]}
+                selected={soundPack === pack}
+                onPress={() => {
+                  tick();
+                  set('soundPack', pack);
+                  if (soundsEnabled) previewPack(pack);
+                }}
+              />
+            ))}
+          </View>
           <View style={styles.divider} />
           <ToggleRow
             label="Haptics"
@@ -324,6 +435,28 @@ export default function SettingsScreen() {
               />
             </View>
           ))}
+          <View style={styles.divider} />
+          <StepperRow
+            label="Seconds before a make"
+            description="How much lead-in each highlight clip keeps."
+            value={clipPreRollSec}
+            unit="s"
+            min={CLIP_PRE_ROLL_MIN}
+            max={CLIP_PRE_ROLL_MAX}
+            disabled={!recordVideo || keepMode === 'none'}
+            onChange={(v) => set('clipPreRollSec', v)}
+          />
+          <View style={styles.divider} />
+          <StepperRow
+            label="Seconds after a make"
+            description="How long each highlight clip runs past the shot."
+            value={clipPostRollSec}
+            unit="s"
+            min={CLIP_POST_ROLL_MIN}
+            max={CLIP_POST_ROLL_MAX}
+            disabled={!recordVideo || keepMode === 'none'}
+            onChange={(v) => set('clipPostRollSec', v)}
+          />
         </Card>
 
         {/* Player */}
@@ -512,6 +645,17 @@ const styles = StyleSheet.create({
     minWidth: 72,
     textAlign: 'center',
     fontVariant: ['tabular-nums'],
+  },
+  stepValue: {
+    ...type.statMedium,
+    color: color.text,
+    minWidth: 56,
+    textAlign: 'center',
+    fontVariant: ['tabular-nums'],
+  },
+  stepUnit: {
+    ...type.caption,
+    color: color.textDim,
   },
   heightUnit: {
     ...type.caption,

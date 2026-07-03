@@ -100,7 +100,15 @@ export const useSession = create<SessionState>((set, get) => ({
   setRimLocked: (locked) => set({ rimLocked: locked }),
 
   goLive: async ({ keepMode, nowMs }) => {
-    const id = await createSession({ startedAt: nowMs, keepMode });
+    // Persistence is best-effort: if the DB is unavailable the session still
+    // goes live in memory (sessionId null ⇒ shots are simply not persisted).
+    let id: number | null = null;
+    try {
+      const rowId = await createSession({ startedAt: nowMs, keepMode });
+      id = rowId >= 0 ? rowId : null;
+    } catch (err) {
+      console.warn('[session] createSession failed; continuing without persistence', err);
+    }
     set({ phase: 'live', sessionId: id, startedAtMs: nowMs });
   },
 
@@ -116,22 +124,35 @@ export const useSession = create<SessionState>((set, get) => ({
     }));
     const sessionId = get().sessionId;
     if (sessionId != null) {
-      void insertShot(sessionId, shot).then((rowId) => {
-        set((s) => ({
-          shots: s.shots.map((e) => (e.shot.id === shot.id ? { ...e, rowId } : e)),
-        }));
-        // If the shot was corrected before its row id arrived, persist now —
-        // otherwise the DB keeps the pre-correction outcome forever.
-        const current = get().shots.find((e) => e.shot.id === shot.id);
-        if (current && current.shot.outcome !== shot.outcome) {
-          void updateShotOutcome(rowId, current.shot.outcome);
-        }
-      });
+      void insertShot(sessionId, shot)
+        .then((rowId) => {
+          // insertShot returns -1 when persistence failed — keep rowId null so
+          // later corrections don't try to update a nonexistent row.
+          if (rowId < 0) return;
+          set((s) => ({
+            shots: s.shots.map((e) => (e.shot.id === shot.id ? { ...e, rowId } : e)),
+          }));
+          // If the shot was corrected before its row id arrived, persist now —
+          // otherwise the DB keeps the pre-correction outcome forever.
+          const current = get().shots.find((e) => e.shot.id === shot.id);
+          if (current && current.shot.outcome !== shot.outcome) {
+            updateShotOutcome(rowId, current.shot.outcome).catch((err) => {
+              console.warn('[session] late outcome sync failed', err);
+            });
+          }
+        })
+        .catch((err) => {
+          // Defensive: db functions shouldn't reject, but an unhandled
+          // rejection here would crash the app mid-session.
+          console.warn('[session] insertShot failed', err);
+        });
     }
   },
 
   correctShot: (shotId, outcome) => {
     set((s) => {
+      // Unknown shot id (stale UI, double correction race): leave state alone.
+      if (!s.shots.some((e) => e.shot.id === shotId)) return s;
       const shots = s.shots.map((e) =>
         e.shot.id === shotId
           ? { ...e, shot: { ...e.shot, outcome, corrected: true } }
@@ -141,13 +162,19 @@ export const useSession = create<SessionState>((set, get) => ({
       // addShot stays consistent (acc otherwise keeps the old outcome).
       acc = shots.reduce((a, e) => pushShot(a, e.shot), createAccumulator());
       const target = shots.find((e) => e.shot.id === shotId);
-      if (target?.rowId != null) void updateShotOutcome(target.rowId, outcome);
+      if (target?.rowId != null && target.rowId >= 0) {
+        updateShotOutcome(target.rowId, outcome).catch((err) => {
+          console.warn('[session] updateShotOutcome failed', err);
+        });
+      }
       return { shots, stats: acc.stats, lastShot: shots[shots.length - 1]?.shot ?? null };
     });
   },
 
   correctShotValue: (shotId, value) => {
     set((s) => {
+      // Unknown shot id: no-op rather than rebuilding stats for nothing.
+      if (!s.shots.some((e) => e.shot.id === shotId)) return s;
       const shots = s.shots.map((e) =>
         e.shot.id === shotId
           ? { ...e, shot: { ...e.shot, shotValue: value, corrected: true } }
@@ -172,11 +199,19 @@ export const useSession = create<SessionState>((set, get) => ({
     set({ isRecording: recording, recordingPath: path ?? null }),
 
   finish: async ({ nowMs, videoPath }) => {
-    const { sessionId } = get();
-    if (sessionId != null) {
-      await endSession(sessionId, { endedAt: nowMs, videoPath: videoPath ?? null });
-    }
+    const { sessionId, phase } = get();
+    // Idempotent: a double-tap on End (or a background/foreground race) must
+    // not end the session twice or overwrite endedAt with a later timestamp.
+    if (phase === 'ended') return;
+    // Flip the phase FIRST so the UI moves on even if persistence fails.
     set({ phase: 'ended', isRecording: false });
+    if (sessionId != null) {
+      try {
+        await endSession(sessionId, { endedAt: nowMs, videoPath: videoPath ?? null });
+      } catch (err) {
+        console.warn('[session] endSession failed', err);
+      }
+    }
   },
 
   resetToIdle: () => {

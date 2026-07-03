@@ -21,7 +21,17 @@ function pct(makes: number, attempts: number): string {
   return attempts > 0 ? `${Math.round((makes / attempts) * 100)}` : '—';
 }
 
-export function StatStrip({ style }: { style?: StyleProp<ViewStyle> }) {
+export function StatStrip({
+  style,
+  compact = false,
+}: {
+  style?: StyleProp<ViewStyle>;
+  /**
+   * Landscape / small-height layout: smaller numerals + tighter padding so the
+   * strip fits a narrow docked column without covering the court.
+   */
+  compact?: boolean;
+}) {
   const makes = useSession((s) => s.stats.makes);
   const attempts = useSession((s) => s.stats.attempts);
   const fgPct = useSession((s) => s.stats.fgPct);
@@ -41,18 +51,21 @@ export function StatStrip({ style }: { style?: StyleProp<ViewStyle> }) {
   return (
     <View accessible accessibilityLabel={a11y} style={style}>
       <Row style={styles.strip} gap={space.sm}>
-        <HudChip deep style={styles.pointsChip}>
-          <StatNumber value={`${points}`} label="Points" size="large" />
+        <HudChip deep style={[styles.pointsChip, compact && styles.pointsChipCompact]}>
+          <StatNumber value={`${points}`} label="Points" size={compact ? 'medium' : 'large'} />
         </HudChip>
         <View style={styles.sideCol}>
-          <HudChip style={styles.sideChip}>
+          <HudChip style={[styles.sideChip, compact && styles.sideChipCompact]}>
             <Row style={styles.sideRow}>
               <StatNumber value={`${makes}/${attempts}`} label="Made" size="medium" />
               <View style={styles.divider} />
               <StatNumber value={pct(makes, attempts)} label="FG%" size="medium" />
             </Row>
           </HudChip>
-          <HudChip style={styles.sideChip} tone={hot ? 'accent' : 'default'}>
+          <HudChip
+            style={[styles.sideChip, compact && styles.sideChipCompact]}
+            tone={hot ? 'accent' : 'default'}
+          >
             <StatNumber
               value={hot ? `🔥 ${streak}` : `${streak}`}
               label="Streak"
@@ -97,12 +110,18 @@ const styles = StyleSheet.create({
     flex: 1.1,
     paddingVertical: space.md,
   },
+  pointsChipCompact: {
+    paddingVertical: space.sm,
+  },
   sideCol: {
     flex: 1,
     gap: space.sm,
   },
   sideChip: {
     paddingVertical: space.sm,
+  },
+  sideChipCompact: {
+    paddingVertical: space.xs,
   },
   sideRow: {
     justifyContent: 'center',

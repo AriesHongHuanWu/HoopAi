@@ -51,7 +51,7 @@ function MeasuredWidth({
   );
 }
 
-/** One bar per session; the latest session gets the full accent. */
+/** One bar per session, rounded caps; the latest session gets the full accent. */
 function TrendBars({
   data,
   width,
@@ -64,8 +64,18 @@ function TrendBars({
   const n = data.length;
   const slot = width / n;
   const barW = Math.min(28, Math.max(4, slot * 0.55));
+  const capR = Math.min(4, barW / 2);
   return (
     <Canvas style={{ width, height }}>
+      {/* 50% reference line, then the baseline. */}
+      <Rect
+        x={0}
+        y={Math.round(height / 2)}
+        width={width}
+        height={1}
+        color={color.border}
+        opacity={0.55}
+      />
       <Rect x={0} y={height - 1} width={width} height={1} color={color.border} />
       {data.map((v, i) => {
         const h = Math.max(3, clamp01(v) * (height - 4));
@@ -77,7 +87,7 @@ function TrendBars({
             y={height - h}
             width={barW}
             height={h}
-            r={2}
+            r={capR}
             color={i === n - 1 ? color.accent : color.accentTint}
           />
         );
@@ -150,7 +160,7 @@ export default function TrendsScreen() {
               />
               <Chip
                 label={`${deltaPct >= 0 ? '+' : ''}${deltaPct}% vs last`}
-                tone={deltaPct > 0 ? 'make' : 'default'}
+                tone={deltaPct > 0 ? 'make' : deltaPct < 0 ? 'miss' : 'default'}
               />
             </Row>
             <View style={{ marginTop: space.lg }}>
@@ -175,9 +185,14 @@ export default function TrendsScreen() {
             >
               {(w) => <TrendBars data={points} width={w} height={BARS_H} />}
             </MeasuredWidth>
-            <Text style={styles.caption}>
-              Each bar is one session&apos;s FG%. The latest is highlighted.
-            </Text>
+            <Row
+              style={{ justifyContent: 'space-between', marginTop: space.xs }}
+            >
+              <Text style={styles.caption}>
+                One bar per session — the latest is highlighted.
+              </Text>
+              <Text style={styles.micro}>50% LINE</Text>
+            </Row>
           </Card>
 
           <Card>
@@ -223,10 +238,11 @@ const styles = StyleSheet.create({
   caption: {
     ...type.caption,
     color: color.textDim,
-    marginTop: space.sm,
+    flexShrink: 1,
   },
   micro: {
     ...type.micro,
     color: color.textFaint,
+    fontVariant: ['tabular-nums'],
   },
 });

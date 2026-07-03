@@ -8,10 +8,15 @@
  * search param so the screen also works after a reload / deep link.
  */
 import { router, useLocalSearchParams } from 'expo-router';
-import React, { useMemo } from 'react';
-import { StyleSheet, Text } from 'react-native';
+import React, { useMemo, useState } from 'react';
+import { StyleSheet, Text, View } from 'react-native';
 
-import { SessionRecap, useSessionRecord } from '@/components/ShotList';
+import {
+  persistSessionLabel,
+  SessionRecap,
+  SessionTitle,
+  useSessionRecord,
+} from '@/components/ShotList';
 import { Card, Eyebrow, PillButton, Row, Screen } from '@/components/ui';
 import { color, space, type } from '@/constants/tokens';
 import type { ResolvedShot, ShotOutcome, ShotValue } from '@/core/types';
@@ -21,6 +26,7 @@ import { useSettings } from '@/state/settingsStore';
 export default function SessionSummaryScreen() {
   const params = useLocalSearchParams<{ id: string }>();
   const phase = useSession((s) => s.phase);
+  const liveSessionId = useSession((s) => s.sessionId);
   const entries = useSession((s) => s.shots);
   const storeStats = useSession((s) => s.stats);
   const recordingPath = useSession((s) => s.recordingPath);
@@ -44,6 +50,16 @@ export default function SessionSummaryScreen() {
     ? recordingPath
     : (record.session?.videoPath ?? null);
   const keepMode = storeMode ? keepSetting : (record.session?.keepMode ?? 'makes');
+
+  // Session label: optimistic local override on top of the persisted value.
+  // persistSessionLabel writes through when the data layer supports it.
+  const [labelOverride, setLabelOverride] = useState<string | null>(null);
+  const sessionId = storeMode ? liveSessionId : (record.session?.id ?? null);
+  const label = labelOverride ?? (storeMode ? '' : (record.session?.label ?? ''));
+  const onRename = (next: string) => {
+    setLabelOverride(next);
+    if (sessionId != null) persistSessionLabel(sessionId, next);
+  };
 
   const onCorrect = (shot: ResolvedShot, outcome: ShotOutcome) => {
     if (storeMode) correctShot(shot.id, outcome);
@@ -83,6 +99,9 @@ export default function SessionSummaryScreen() {
         </Card>
       ) : (
         <>
+          <View style={styles.titleBlock}>
+            <SessionTitle label={label} onRename={onRename} />
+          </View>
           <SessionRecap
             shots={shots}
             stats={stats}
@@ -107,6 +126,9 @@ export default function SessionSummaryScreen() {
 }
 
 const styles = StyleSheet.create({
+  titleBlock: {
+    marginBottom: space.sm,
+  },
   heading: {
     ...type.heading,
     color: color.text,

@@ -1,9 +1,18 @@
 /**
  * Sparkline — tiny Skia line + area chart for a 0..1 series (FG% trend).
- * Accent stroke, accent-tinted fill under the curve, dot on the last point.
- * Purely presentational; parent supplies pixel width/height.
+ * Accent stroke over a vertical gradient fill that fades to nothing at the
+ * baseline, soft halo + dot on the last point. Purely presentational; parent
+ * supplies pixel width/height.
  */
-import { Canvas, Circle, Path, Skia, type SkPath } from '@shopify/react-native-skia';
+import {
+  Canvas,
+  Circle,
+  LinearGradient,
+  Path,
+  Skia,
+  vec,
+  type SkPath,
+} from '@shopify/react-native-skia';
 import React, { useMemo } from 'react';
 import { View } from 'react-native';
 
@@ -13,6 +22,14 @@ import { color } from '@/constants/tokens';
 const PAD = 6;
 /** Radius of the dot on the last point, px. */
 const DOT_R = 4;
+/** Radius of the soft halo behind the last-point dot, px. */
+const HALO_R = 9;
+
+/** Gradient fill under the curve: accent at the crest, nothing at the floor. */
+const FILL_TOP = 'rgba(240, 90, 36, 0.26)';
+const FILL_BOTTOM = 'rgba(240, 90, 36, 0)';
+/** Soft halo tint behind the latest point. */
+const HALO_TINT = 'rgba(240, 90, 36, 0.22)';
 
 function clamp01(v: number): number {
   return v < 0 ? 0 : v > 1 ? 1 : v;
@@ -65,7 +82,15 @@ export function Sparkline({ data, width, height }: SparklineProps) {
 
   return (
     <Canvas style={{ width, height }}>
-      {data.length > 1 && <Path path={geom.area} color={color.accentTint} />}
+      {data.length > 1 && (
+        <Path path={geom.area}>
+          <LinearGradient
+            start={vec(0, 0)}
+            end={vec(0, height)}
+            colors={[FILL_TOP, FILL_BOTTOM]}
+          />
+        </Path>
+      )}
       {data.length > 1 && (
         <Path
           path={geom.line}
@@ -76,6 +101,7 @@ export function Sparkline({ data, width, height }: SparklineProps) {
           color={color.accent}
         />
       )}
+      <Circle cx={geom.last.x} cy={geom.last.y} r={HALO_R} color={HALO_TINT} />
       <Circle cx={geom.last.x} cy={geom.last.y} r={DOT_R} color={color.accent} />
     </Canvas>
   );

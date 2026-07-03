@@ -5,6 +5,7 @@ import Storage from 'expo-sqlite/kv-store';
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
 
+import type { SoundPack } from '../camera/soundPacks';
 import type { ShootingHand } from '../core/types';
 
 /** Which clips survive when a recorded session ends. */
@@ -20,12 +21,24 @@ export type VoiceMetric = 'none' | 'result' | 'entryAngle' | 'fgPct';
  */
 export type DetectorModel = 'standard' | 'precise';
 
+/** Clip window bounds (seconds), used by the Settings > Video steppers. */
+export const CLIP_PRE_ROLL_MIN = 2;
+export const CLIP_PRE_ROLL_MAX = 10;
+export const CLIP_POST_ROLL_MIN = 1;
+export const CLIP_POST_ROLL_MAX = 5;
+
 export interface SettingsState {
   soundsEnabled: boolean;
   hapticsEnabled: boolean;
+  /** Which feedback sound voice plays (see src/camera/soundPacks.ts). */
+  soundPack: SoundPack;
   /** Record video during sessions at all. */
   recordVideo: boolean;
   keepMode: KeepMode;
+  /** Seconds of video kept before a shot resolves in highlight clips (2–10). */
+  clipPreRollSec: number;
+  /** Seconds of video kept after a shot resolves in highlight clips (1–5). */
+  clipPostRollSec: number;
   voiceMetric: VoiceMetric;
   shootingHand: ShootingHand;
   /** For jump/release-height calibration. Null until profile setup. */
@@ -43,8 +56,11 @@ export const useSettings = create<SettingsState>()(
     (set) => ({
       soundsEnabled: true,
       hapticsEnabled: true,
+      soundPack: 'classic',
       recordVideo: true,
       keepMode: 'makes',
+      clipPreRollSec: 6,
+      clipPostRollSec: 2,
       voiceMetric: 'none',
       shootingHand: 'right',
       playerHeightCm: null,

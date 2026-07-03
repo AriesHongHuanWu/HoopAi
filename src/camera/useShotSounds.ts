@@ -31,30 +31,54 @@ let audioModeSet = false;
 async function ensureAudioMode(): Promise<void> {
   if (audioModeSet) return;
   audioModeSet = true;
-  await setAudioModeAsync({
-    playsInSilentMode: true,
-    // Never fight VisionCamera's recording audio session.
-    interruptionMode: 'mixWithOthers',
-    allowsRecording: true,
-  });
+  try {
+    await setAudioModeAsync({
+      playsInSilentMode: true,
+      // Never fight VisionCamera's recording audio session.
+      interruptionMode: 'mixWithOthers',
+      allowsRecording: true,
+    });
+  } catch (err) {
+    // Audio session configuration can fail on some devices (or mid-call);
+    // allow a retry on the next play instead of crashing.
+    audioModeSet = false;
+    console.warn('[sounds] setAudioModeAsync failed', err);
+  }
 }
 
-/** Fire-and-forget playback; safe to call from anywhere on the JS thread. */
+/**
+ * Fire-and-forget playback; safe to call from anywhere on the JS thread.
+ * Never throws — audio failures must not take down a live session.
+ */
 export function playSound(event: keyof typeof SOURCES): void {
-  void ensureAudioMode().then(() => {
-    let p = players[event];
-    if (!p) {
-      p = createAudioPlayer(SOURCES[event]);
-      players[event] = p;
-    }
-    p.seekTo(0);
-    p.play();
-  });
+  void ensureAudioMode()
+    .then(() => {
+      try {
+        let p = players[event];
+        if (!p) {
+          p = createAudioPlayer(SOURCES[event]);
+          players[event] = p;
+        }
+        p.seekTo(0);
+        p.play();
+      } catch (err) {
+        console.warn(`[sounds] playback failed for "${event}"`, err);
+      }
+    })
+    .catch((err) => {
+      console.warn('[sounds] audio unavailable', err);
+    });
 }
 
-/** Release all players (call when leaving the session flow). */
+/** Release all players (call when leaving the session flow). Never throws. */
 export function releaseSounds(): void {
-  for (const p of Object.values(players)) p?.release();
+  for (const p of Object.values(players)) {
+    try {
+      p?.release();
+    } catch (err) {
+      console.warn('[sounds] release failed', err);
+    }
+  }
   players = {};
 }
 

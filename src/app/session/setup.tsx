@@ -28,7 +28,7 @@ const CHECKLIST = [
   },
   {
     title: 'Phone stable',
-    body: 'Use a tripod, or lean the phone against a bag or bottle. A bumped camera pauses tracking.',
+    body: 'Use a tripod, or lean the phone against a bag or bottle — portrait or landscape both work. A bumped camera pauses tracking.',
   },
   {
     title: 'Good light',

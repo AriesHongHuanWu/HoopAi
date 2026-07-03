@@ -22,6 +22,7 @@ import { StatusBar } from 'expo-status-bar';
 import { useEffect, useState } from 'react';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 
+import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { color } from '@/constants/tokens';
 import { useSettings } from '@/state/settingsStore';
 
@@ -82,15 +83,17 @@ export default function RootLayout() {
     <GestureHandlerRootView style={{ flex: 1 }}>
       <ThemeProvider value={navTheme}>
         <StatusBar style="light" />
-        <Stack
-          screenOptions={{
-            headerShown: false,
-            contentStyle: { backgroundColor: color.bg },
-          }}
-        >
-          {/* Onboarding fades in over the splash and can't be swiped away. */}
-          <Stack.Screen name="onboarding" options={{ animation: 'fade', gestureEnabled: false }} />
-        </Stack>
+        <ErrorBoundary>
+          <Stack
+            screenOptions={{
+              headerShown: false,
+              contentStyle: { backgroundColor: color.bg },
+            }}
+          >
+            {/* Onboarding fades in over the splash and can't be swiped away. */}
+            <Stack.Screen name="onboarding" options={{ animation: 'fade', gestureEnabled: false }} />
+          </Stack>
+        </ErrorBoundary>
       </ThemeProvider>
     </GestureHandlerRootView>
   );

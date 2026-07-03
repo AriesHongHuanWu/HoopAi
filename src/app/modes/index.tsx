@@ -1,21 +1,38 @@
 /**
  * Mode picker — choose how you want to play before opening the camera.
  *
- * A scroll of mode cards (emoji, name, tagline, rules). Picking one arms the
- * mode store and routes to /session/setup, which carries the selection into the
- * live session. Free Play is featured first as the default open run.
+ * A scroll of mode cards (emoji badge with a per-mode accent ring, name,
+ * tagline, rules). Picking one arms the mode store and routes to
+ * /session/setup, which carries the selection into the live session. Free
+ * Play is featured first as the default open run. The previously picked mode
+ * wears a solid PICKED tag + accent border so it is unmistakable.
  */
 import { router } from 'expo-router';
 import * as Haptics from 'expo-haptics';
 import React from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
-import Animated, { FadeInDown } from 'react-native-reanimated';
+import Animated, { FadeInDown, ReduceMotion } from 'react-native-reanimated';
 
 import { Eyebrow, Row, Screen } from '@/components/ui';
-import { color, radius, space, type } from '@/constants/tokens';
+import { color, motion, radius, space, type } from '@/constants/tokens';
 import { GAME_MODES, type GameModeDef } from '@/core/gameModes';
+import type { GameModeId } from '@/core/types';
 import { useMode } from '@/state/modeStore';
 import { useSettings } from '@/state/settingsStore';
+
+/**
+ * Per-mode accent for the emoji badge ring — kept subtle (ring + tagline
+ * only; the card itself stays neutral). All colors are tokens.
+ */
+const MODE_ACCENT: Record<GameModeId, string> = {
+  free: color.accent,
+  aroundTheWorld: color.info,
+  spotShooting: color.make,
+  timed: color.unsure,
+  threePoint: color.threePt,
+  ftStreak: color.accent,
+  horse: color.textDim,
+};
 
 export default function ModePickerScreen() {
   const selectMode = useMode((s) => s.selectMode);
@@ -39,7 +56,12 @@ export default function ModePickerScreen() {
 
       <View style={styles.list}>
         {GAME_MODES.map((mode, i) => (
-          <Animated.View key={mode.id} entering={FadeInDown.delay(i * 40).duration(260)}>
+          <Animated.View
+            key={mode.id}
+            entering={FadeInDown.delay(i * 40)
+              .duration(motion.standard)
+              .reduceMotion(ReduceMotion.System)}
+          >
             <ModeCard
               mode={mode}
               selected={activeMode?.modeId === mode.id}
@@ -65,6 +87,7 @@ function ModeCard({
     mode.needsTimer ? 'Timed' : null,
     mode.needsSpots ? '5 spots' : null,
   ].filter(Boolean) as string[];
+  const accent = MODE_ACCENT[mode.id];
 
   return (
     <Pressable
@@ -77,9 +100,10 @@ function ModeCard({
         styles.card,
         selected && styles.cardSelected,
         pressed && styles.cardPressed,
+        pressed && { transform: [{ scale: 0.985 }] },
       ]}
     >
-      <View style={styles.emojiBadge}>
+      <View style={[styles.emojiBadge, { borderColor: accent }]}>
         <Text style={styles.emoji}>{mode.emoji}</Text>
       </View>
       <View style={styles.cardBody}>
@@ -89,7 +113,7 @@ function ModeCard({
           </Text>
           {selected && (
             <View style={styles.selectedTag}>
-              <Text style={styles.selectedTagText}>PICKED</Text>
+              <Text style={styles.selectedTagText}>✓ PICKED</Text>
             </View>
           )}
         </Row>
@@ -135,6 +159,7 @@ const styles = StyleSheet.create({
     padding: space.lg,
   },
   cardSelected: {
+    borderWidth: 1.5,
     borderColor: color.accent,
     backgroundColor: color.surfaceRaised,
   },
@@ -145,7 +170,8 @@ const styles = StyleSheet.create({
     width: 52,
     height: 52,
     borderRadius: radius.md,
-    backgroundColor: color.accentTint,
+    borderWidth: 1.5,
+    backgroundColor: color.surfaceRaised,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -166,13 +192,13 @@ const styles = StyleSheet.create({
   },
   selectedTag: {
     borderRadius: radius.pill,
-    backgroundColor: color.accentTint,
+    backgroundColor: color.accent,
     paddingHorizontal: space.sm,
     paddingVertical: 3,
   },
   selectedTagText: {
     ...type.micro,
-    color: color.accent,
+    color: color.onAccent,
   },
   tagline: {
     ...type.bodyMedium,
