@@ -8,6 +8,11 @@ on:
   push:
     branches: [main]
     tags: ['v*']
+    # Don't rebuild Android for docs or iOS-only workflow changes.
+    paths-ignore:
+      - 'docs/**'
+      - '**.md'
+      - '.github/workflows/ios-*.yml'
   workflow_dispatch:
 
 # Only one APK build at a time; newer pushes cancel older in-flight builds.
