@@ -1,6 +1,6 @@
 # HoopAI detector training - runs on Kaggle cloud GPU (not the user's laptop).
 # Merges two CC BY 4.0 Roboflow basketball datasets into a unified 4-class
-# scheme [ball, rim, ball_in_basket, person], trains YOLO11s ULTRA (10 datasets, ~30k images, blur augs), exports TFLite.
+# scheme [ball, rim, ball_in_basket, person], trains YOLO11n ULTRA (10 datasets, ~35k images, hue+blur augs), exports TFLite.
 # Datasets download to /tmp (NOT /kaggle/working) so the kernel output stays
 # small and the log is easy to read.
 import subprocess, sys, traceback
@@ -98,16 +98,18 @@ def main():
     print("DATA.YAML", data, flush=True)
 
     from ultralytics import YOLO
-    m = YOLO("yolo11s.pt")
-    # Budget check against Kaggle's 9h GPU wall: ~30k images x YOLO11s on a
-    # P100 runs roughly 10-12 min/epoch, so 40 epochs (~7h) fits with margin
-    # while patience=10 lets a converged run stop even earlier. With 13x the
-    # data of the first model, fewer epochs still see far more samples.
+    m = YOLO("yolo11n.pt")
+    # Budget recalc from the observed precise-s run (7k imgs = ~12 min/epoch
+    # on P100): 35k imgs on the s model would be ~50-60 min/epoch -- impossible
+    # inside Kaggle's 9h wall. NANO on 35k with auto-batch lands ~12-15
+    # min/epoch, so 22 epochs (~5h) fits. That still sees ~4x more samples
+    # than the first nano run, and upgrades the STANDARD slot -- the model
+    # iPhone XR/11-class devices actually run.
     # hsv_h=0.3 (default 0.015): aggressive hue augmentation makes the model
     # color-invariant -- blue/green/neon basketballs detect nearly as well as
     # orange ones, since training sees every hue variant of each image.
-    m.train(data=f"{WORK}/data.yaml", epochs=40, imgsz=640, batch=-1,
-            patience=10, cos_lr=True, hsv_h=0.3,
+    m.train(data=f"{WORK}/data.yaml", epochs=22, imgsz=640, batch=-1,
+            patience=8, cos_lr=True, hsv_h=0.3,
             project=f"{WORK}/runs", name="hoopai", exist_ok=True)
 
     best = f"{WORK}/runs/hoopai/weights/best.pt"
