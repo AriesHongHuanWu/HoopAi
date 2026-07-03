@@ -28,6 +28,7 @@ import { useShotEngine, type ShotEngine } from '../../camera/useShotEngine';
 import { playSound, useShotSounds } from '../../camera/useShotSounds';
 import { HudChip } from '../../components/hud/HudChip';
 import { ShotFlash } from '../../components/hud/ShotFlash';
+import { DebugPanel } from '../../components/hud/DebugPanel';
 import { StatStrip } from '../../components/hud/StatStrip';
 import { TrajectoryOverlay } from '../../components/hud/TrajectoryOverlay';
 import { ModeBanner } from '../../components/modes/ModeBanner';
@@ -201,6 +202,8 @@ export default function LiveSessionScreen() {
       )}
 
       <TrajectoryOverlay overlay={engine.overlay} />
+
+      <DebugPanel debug={engine.debug} />
 
       {!rimLocked && <AimingOverlay />}
 

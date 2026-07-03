@@ -57,6 +57,36 @@ export const EMPTY_OVERLAY: OverlayState = {
   frameH: 640,
 };
 
+/** Live diagnostics for the on-screen debug panel (helps fix on-device ML). */
+export interface EngineDebug {
+  mode: 'demo' | 'camera';
+  modelLoaded: boolean;
+  /** Frames the worklet has processed (proves the camera pipeline runs). */
+  frames: number;
+  /** Raw output tensor length + inferred layout/anchors from the parser. */
+  outputLen: number;
+  layout: string;
+  /** Max class score this frame (0 across all frames = bad input/model). */
+  maxScore: number;
+  /** Detections after NMS this frame. */
+  detCount: number;
+  /** Model input value range (should be ~0..1). */
+  inputMin: number;
+  inputMax: number;
+}
+
+export const EMPTY_DEBUG: EngineDebug = {
+  mode: 'demo',
+  modelLoaded: false,
+  frames: 0,
+  outputLen: 0,
+  layout: '-',
+  maxScore: 0,
+  detCount: 0,
+  inputMin: 0,
+  inputMax: 0,
+};
+
 export interface ShotEngineEvents {
   onShot?: (shot: ResolvedShot) => void;
   onRimLocked?: (rim: RimGeometry) => void;
@@ -68,6 +98,8 @@ export interface ShotEngine {
   activeMode: 'demo' | 'camera';
   /** Overlay SharedValue for the Skia canvas. */
   overlay: SharedValue<OverlayState>;
+  /** Live diagnostics for the debug panel. */
+  debug: SharedValue<EngineDebug>;
   /** Camera plumbing (null in demo mode). */
   camera: {
     device: ReturnType<typeof useCameraDevice>;
@@ -98,6 +130,7 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
       : 'camera';
 
   const overlay = useSharedValue<OverlayState>(EMPTY_OVERLAY);
+  const debug = useSharedValue<EngineDebug>({ ...EMPTY_DEBUG });
 
   // Session clock: monotonic seconds since engine mount.
   const t0 = useRef<number>(performance.now());
@@ -134,9 +167,15 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
   useEffect(() => {
     if (activeMode !== 'demo') return;
     const mock = createMockDetector();
+    debug.value = { ...EMPTY_DEBUG, mode: 'demo', modelLoaded: isModelLoaded };
     const id = setInterval(() => {
       const t = nowSec();
-      pipeline.step({ frame: mock.frameAt(t), netMotionScore: 0 });
+      const state = pipeline.step({ frame: mock.frameAt(t), netMotionScore: 0 });
+      debug.value = {
+        ...debug.value,
+        frames: debug.value.frames + 1,
+        detCount: state.ball ? 1 : 0,
+      };
     }, 33);
     return () => {
       clearInterval(id);
@@ -183,11 +222,32 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
         const tflite = boxedModel.unbox();
         const resized = resizer.resize(frame);
         const buffer = resized.getPixelBuffer();
+        // Sample the model input range (should read ~0..1) for the debug panel.
+        const inArr = new Float32Array(buffer);
+        let inMin = 1e9;
+        let inMax = -1e9;
+        for (let k = 0; k < inArr.length; k += 1499) {
+          const v = inArr[k]!;
+          if (v < inMin) inMin = v;
+          if (v > inMax) inMax = v;
+        }
         const outputs = tflite.runSync([buffer]);
         resized.dispose();
         const parsed = parseYoloOutput(new Float32Array(outputs[0]!), 0, {
           inputSize: DETECTION.inputSize,
         });
+        const d = parsed.debug;
+        debug.value = {
+          mode: 'camera',
+          modelLoaded: true,
+          frames: debug.value.frames + 1,
+          outputLen: d ? d.outputLen : 0,
+          layout: d ? d.layout : '-',
+          maxScore: d ? d.maxScore : 0,
+          detCount: parsed.detections.length,
+          inputMin: inMin,
+          inputMax: inMax,
+        };
         scheduleOnRN(onPayload, { frame: parsed, netMotionScore: 0 });
       } finally {
         frame.dispose();
@@ -235,6 +295,7 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
   return {
     activeMode,
     overlay,
+    debug,
     camera:
       activeMode === 'camera'
         ? {

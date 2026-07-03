@@ -46,6 +46,17 @@ export interface Detection {
   box: Box;
 }
 
+/** On-device parser diagnostics (for the live debug panel). */
+export interface FrameDebug {
+  outputLen: number;
+  rows: number;
+  n: number;
+  layout: 'channels-first' | 'channels-last';
+  rawCount: number;
+  maxScore: number;
+  coordMax: number;
+}
+
 /** One analysed camera frame's raw detector output. */
 export interface FrameDetections {
   /** Seconds, from camera frame timestamp. */
@@ -53,6 +64,8 @@ export interface FrameDetections {
   frameWidth: number;
   frameHeight: number;
   detections: Detection[];
+  /** Parser diagnostics, present when running a real model (not the mock). */
+  debug?: FrameDebug;
 }
 
 // ---------------------------------------------------------------------------
