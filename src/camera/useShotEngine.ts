@@ -395,6 +395,14 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
           if (v < inMin) inMin = v;
           if (v > inMax) inMax = v;
         }
+        // Insurance: YOLO expects 0..1 input. If the resizer ever emits
+        // 0..255 floats on some device, normalize in place — a wrong input
+        // range is the classic "model loaded but maxScore stays 0" failure.
+        if (inMax > 1.6) {
+          for (let k = 0; k < inArr.length; k++) inArr[k] = inArr[k]! / 255;
+          inMin /= 255;
+          inMax /= 255;
+        }
         // Net-motion signal: sample a 12×12 grid of green-channel values inside
         // the locked rim's net ROI and diff against the previous frame. A made
         // shot whips the net → a burst of change. Score normalizes mean |Δ|
