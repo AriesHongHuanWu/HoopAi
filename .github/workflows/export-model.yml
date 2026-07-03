@@ -27,23 +27,58 @@ jobs:
       - name: Download weights + export FP16 TFLite
         run: |
           python - <<'PY'
-          import urllib.request, glob, shutil, os
+          import urllib.request, glob, shutil, os, pathlib
           from ultralytics import YOLO
           urllib.request.urlretrieve(
               "https://raw.githubusercontent.com/avishah3/AI-Basketball-Shot-Detection-Tracker/master/best.pt",
               "best.pt")
           m = YOLO("best.pt")
           print("CLASSES:", m.names, flush=True)
-          # FP32 TFLite (newer Ultralytics dropped half=True for litert export;
-          # FP32 runs on the Android GPU + iOS CoreML delegates). NMS external.
-          m.export(format="tflite", imgsz=640, nms=False)
-          cands = (glob.glob("best_saved_model/*float32.tflite")
-                   or glob.glob("best_saved_model/*float16.tflite")
-                   or glob.glob("best_saved_model/*.tflite"))
-          assert cands, "no tflite produced"
-          shutil.copy(cands[0], "hoopai-det.tflite")
-          print("TFLITE_KB:", os.path.getsize("hoopai-det.tflite")//1024, flush=True)
-          # Record the class list for the app side.
+          # FP32 TFLite. Newer Ultralytics renamed tflite->litert and moved the
+          # output, so use the RETURN path + a recursive search, with a direct
+          # TensorFlow SavedModel->TFLite fallback if no .tflite was emitted.
+          out = m.export(format="tflite", imgsz=640, nms=False)
+          print("EXPORT RETURNED:", out, flush=True)
+
+          def collect():
+              c = []
+              p = pathlib.Path(str(out))
+              if p.is_file() and p.suffix == ".tflite":
+                  c = [str(p)]
+              elif p.is_dir():
+                  c = [str(x) for x in p.rglob("*.tflite")]
+              if not c:
+                  c = glob.glob("**/*.tflite", recursive=True)
+              return c
+
+          cands = collect()
+          if not cands:
+              sm = glob.glob("**/saved_model", recursive=True) + \
+                   [d for d in glob.glob("**/*_saved_model", recursive=True) if os.path.isdir(d)]
+              print("SAVED_MODEL DIRS:", sm, flush=True)
+              import tensorflow as tf
+              for d in sm:
+                  try:
+                      conv = tf.lite.TFLiteConverter.from_saved_model(d)
+                      conv.target_spec.supported_ops = [
+                          tf.lite.OpsSet.TFLITE_BUILTINS, tf.lite.OpsSet.SELECT_TF_OPS]
+                      open("hoopai-det.tflite", "wb").write(conv.convert())
+                      print("MANUAL CONVERT OK from", d, flush=True)
+                      cands = ["hoopai-det.tflite"]
+                      break
+                  except Exception as e:
+                      print("manual convert failed:", d, e, flush=True)
+
+          if not cands:
+              print("ALL FILES:", sorted(str(x) for x in pathlib.Path('.').rglob('*') if x.is_file())[:80], flush=True)
+              raise SystemExit("no tflite produced")
+
+          cands.sort(key=lambda c: (0 if "float32" in c else 1 if "float16" in c else 2))
+          src = cands[0]
+          print("PICKED:", src, flush=True)
+          if os.path.abspath(src) != os.path.abspath("hoopai-det.tflite"):
+              shutil.copy(src, "hoopai-det.tflite")
+          print("TFLITE_KB:", os.path.getsize("hoopai-det.tflite") // 1024, flush=True)
           with open("model-classes.txt", "w") as f:
               f.write(str(m.names))
           PY
