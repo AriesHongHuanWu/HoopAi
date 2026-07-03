@@ -373,11 +373,20 @@ export default function SettingsScreen() {
           <View style={styles.settingText}>
             <Text style={styles.settingLabel}>Detector model</Text>
             <Text style={styles.settingDesc}>
-              Standard is fast and battery-friendly. Precise sees more courts
-              and lighting but runs slower — best on recent phones.
+              Auto measures your phone at start and picks the best fit —
+              precise on recent phones, standard on older ones. You can also
+              pin one manually.
             </Text>
           </View>
           <View style={styles.chipWrap}>
+            <SelectChip
+              label="Auto · recommended"
+              selected={detectorModel === 'auto'}
+              onPress={() => {
+                tick();
+                set('detectorModel', 'auto');
+              }}
+            />
             <SelectChip
               label="Standard · fast"
               selected={detectorModel === 'standard'}

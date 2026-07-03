@@ -32,6 +32,13 @@ export const TRACKER = {
   jumpDiameters: 4,
   jumpWindowFrames: 5,
   /**
+   * Max plausible ball speed in diameters/second (~9 m/s over a 0.24 m ball,
+   * with margin). On slow devices detections arrive far apart, so the jump
+   * gate's allowance must scale with elapsed TIME — the larger of the classic
+   * `jumpDiameters` floor and `maxSpeedDiametersPerSec × Δt` wins.
+   */
+  maxSpeedDiametersPerSec: 40,
+  /**
    * Reject clearly non-round boxes (width * 1.4 < height) — likely a body
    * part or netting — unless the sample is flagged as a motion-blur streak.
    */

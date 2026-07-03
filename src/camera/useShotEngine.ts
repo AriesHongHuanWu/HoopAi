@@ -41,6 +41,14 @@ const MODEL_ASSETS = {
 } as const;
 /* eslint-enable @typescript-eslint/no-var-requires */
 
+/**
+ * 'auto' detector budget: keep the precise model only when a smoke-test
+ * inference beats this. ~55ms ≈ 18fps detection — the Kalman tracker
+ * interpolates that to a smooth 30fps overlay; anything slower steps down to
+ * the standard model (iPhone XR/11-class or delegates that fell back to CPU).
+ */
+const AUTO_PRECISE_MAX_MS = 55;
+
 export type EngineMode = 'auto' | 'demo' | 'camera';
 
 /** Overlay state published every analysed frame; consumed by the Skia HUD. */
@@ -161,14 +169,37 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
         Platform.OS === 'ios'
           ? { label: 'core-ml', delegates: ['core-ml'] }
           : { label: 'android-gpu', delegates: ['android-gpu'] };
-      // Selected model with fast delegate → selected on CPU → the OTHER
-      // bundled model on CPU (never strand the user in demo mode).
-      const other = detectorModel === 'standard' ? 'precise' : 'standard';
-      const attempts = [
-        { asset: MODEL_ASSETS[detectorModel], label: `${detectorModel}/${fast.label}`, delegates: fast.delegates },
-        { asset: MODEL_ASSETS[detectorModel], label: `${detectorModel}/cpu`, delegates: [] as ('core-ml' | 'android-gpu')[] },
-        { asset: MODEL_ASSETS[other], label: `${other}/cpu`, delegates: [] as ('core-ml' | 'android-gpu')[] },
-      ];
+      type Delegates = ('core-ml' | 'android-gpu')[];
+      interface Attempt {
+        asset: number;
+        label: string;
+        delegates: Delegates;
+        /** Reject when the measured inference exceeds this (auto stepdown). */
+        maxMs?: number;
+      }
+      // 'auto' (default): try PRECISE on the fast delegate but keep it only
+      // when this device actually runs it fast enough (older phones like the
+      // iPhone XR/11 step down to STANDARD automatically). Manual picks keep
+      // the selected model with delegate→CPU fallback; the last rung is
+      // always "the other model on CPU" so the user is never stranded in demo.
+      const none: Delegates = [];
+      const attempts: Attempt[] =
+        detectorModel === 'auto'
+          ? [
+              { asset: MODEL_ASSETS.precise, label: `precise/${fast.label}`, delegates: fast.delegates, maxMs: AUTO_PRECISE_MAX_MS },
+              { asset: MODEL_ASSETS.standard, label: `standard/${fast.label}`, delegates: fast.delegates },
+              { asset: MODEL_ASSETS.standard, label: 'standard/cpu', delegates: none },
+              { asset: MODEL_ASSETS.precise, label: 'precise/cpu', delegates: none },
+            ]
+          : [
+              { asset: MODEL_ASSETS[detectorModel], label: `${detectorModel}/${fast.label}`, delegates: fast.delegates },
+              { asset: MODEL_ASSETS[detectorModel], label: `${detectorModel}/cpu`, delegates: none },
+              {
+                asset: MODEL_ASSETS[detectorModel === 'standard' ? 'precise' : 'standard'],
+                label: `${detectorModel === 'standard' ? 'precise' : 'standard'}/cpu`,
+                delegates: none,
+              },
+            ];
       let lastError = '';
       for (const a of attempts) {
         try {
@@ -187,6 +218,9 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
           const o0 = out?.[0];
           if (o0 == null || new Float32Array(o0 as ArrayBuffer).length < 8) {
             throw new Error('smoke test: empty output tensor');
+          }
+          if (a.maxMs !== undefined && ms > a.maxMs) {
+            throw new Error(`auto: ${ms}ms > ${a.maxMs}ms budget — stepping down`);
           }
           if (!alive) return;
           setModelState({

@@ -90,6 +90,9 @@ export class BallTracker {
   /** `frameIndex` at which the last real detection was accepted. */
   private lastAcceptFrame = Number.NEGATIVE_INFINITY;
 
+  /** Timestamp (seconds) of the last accepted detection, for the jump gate. */
+  private lastAcceptT: number | null = null;
+
   /** The last accepted (non-predicted) sample, for the jump gate. */
   private lastAccept: BallSample | null = null;
 
@@ -187,6 +190,7 @@ export class BallTracker {
     this.smoothedR = null;
     this.predictedStreak = 0;
     this.lastAcceptFrame = Number.NEGATIVE_INFINITY;
+    this.lastAcceptT = null;
     this.lastAccept = null;
     this.lastSampleT = null;
   }
@@ -242,7 +246,7 @@ export class BallTracker {
       if (det.score < scoreGate) continue;
 
       if (!this.passesAspectGate(det.box, pred, dt)) continue;
-      if (!this.passesJumpGate(center.x, center.y)) continue;
+      if (!this.passesJumpGate(center.x, center.y, t)) continue;
 
       // Score weighted by inverse distance to the Kalman prediction.
       const weight =
@@ -286,18 +290,30 @@ export class BallTracker {
   }
 
   /**
-   * Rejects detections that jumped more than `jumpDiameters` ball diameters
-   * away from the last ACCEPTED sample within `jumpWindowFrames` frames.
-   * Once the last acceptance is older than the window the gate releases so
-   * the track can re-acquire anywhere.
+   * Rejects detections that jumped implausibly far from the last ACCEPTED
+   * sample within `jumpWindowFrames` frames. Once the last acceptance is
+   * older than the window the gate releases so the track can re-acquire
+   * anywhere.
+   *
+   * TIME-AWARE for slow devices: when inference runs below 30fps (older
+   * phones on CPU), consecutive detections are far apart in time and a
+   * legitimately fast ball covers far more ground between them. The allowance
+   * is therefore the larger of the classic `jumpDiameters` floor and a
+   * max-plausible-speed budget (`maxSpeedDiametersPerSec × Δt`).
    */
-  private passesJumpGate(cx: number, cy: number): boolean {
+  private passesJumpGate(cx: number, cy: number, t: number): boolean {
     const last = this.lastAccept;
     if (last === null) return true;
     if (this.frameIndex - this.lastAcceptFrame > TRACKER.jumpWindowFrames) {
       return true;
     }
-    const maxDist = TRACKER.jumpDiameters * (2 * last.r);
+    const elapsedSec =
+      this.lastAcceptT !== null ? Math.max(0, t - this.lastAcceptT) : 0;
+    const allowedDiameters = Math.max(
+      TRACKER.jumpDiameters,
+      TRACKER.maxSpeedDiametersPerSec * elapsedSec,
+    );
+    const maxDist = allowedDiameters * (2 * last.r);
     const dx = cx - last.cx;
     const dy = cy - last.cy;
     return Math.hypot(dx, dy) <= maxDist;
@@ -327,6 +343,7 @@ export class BallTracker {
 
     this.predictedStreak = 0;
     this.lastAcceptFrame = this.frameIndex;
+    this.lastAcceptT = t;
     const sample: BallSample = {
       cx: est.x,
       cy: est.y,

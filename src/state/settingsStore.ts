@@ -15,11 +15,14 @@ export type KeepMode = 'makes' | 'decided' | 'all' | 'none';
 export type VoiceMetric = 'none' | 'result' | 'entryAngle' | 'fgPct';
 
 /**
- * Which detector to run. 'standard' = YOLO11n (fast, lightest battery, best
- * for older phones). 'precise' = YOLO11s trained on more scenes (higher
- * accuracy, slower — best on recent phones).
+ * Which detector to run.
+ * - 'auto' (default): measure the precise model's real speed on THIS device at
+ *   load; keep it when fast enough, otherwise drop to standard automatically —
+ *   new phones get accuracy, older ones (iPhone XR/11 class) get smoothness.
+ * - 'standard' = YOLO11n (fast, lightest battery).
+ * - 'precise'  = YOLO11s (higher accuracy, slower).
  */
-export type DetectorModel = 'standard' | 'precise';
+export type DetectorModel = 'auto' | 'standard' | 'precise';
 
 /** Clip window bounds (seconds), used by the Settings > Video steppers. */
 export const CLIP_PRE_ROLL_MIN = 2;
@@ -65,7 +68,7 @@ export const useSettings = create<SettingsState>()(
       shootingHand: 'right',
       playerHeightCm: null,
       onboardingDone: false,
-      detectorModel: 'standard',
+      detectorModel: 'auto',
       debugMode: false,
       set: (key, value) => set({ [key]: value } as Pick<SettingsState, typeof key>),
     }),

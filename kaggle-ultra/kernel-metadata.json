@@ -1,0 +1,13 @@
+{
+  "id": "honghuanwu/hoopai-train-ultra",
+  "title": "hoopai-train-ultra",
+  "code_file": "hoopai_train_ultra.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_internet": true,
+  "dataset_sources": [],
+  "competition_sources": [],
+  "kernel_sources": []
+}
