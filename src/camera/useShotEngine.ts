@@ -322,11 +322,17 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
 
   // -------------------------------------------------------------------------
   // Camera mode: worklet → detections → JS pipeline.
+  //
+  // CRITICAL: the boxed model rides in a SharedValue, NOT the worklet closure.
+  // useFrameOutput registers the worklet once; a closure would freeze the
+  // "model still loading" undefined forever (observed on-device: frames never
+  // advanced past the demo warm-up). A SharedValue is read fresh every frame.
   // -------------------------------------------------------------------------
-  const boxedModel = useMemo(
-    () => (modelState.model != null ? NitroModules.box(modelState.model) : undefined),
-    [modelState.model],
-  );
+  const boxedModelSv = useSharedValue<ReturnType<typeof NitroModules.box> | null>(null);
+  useEffect(() => {
+    boxedModelSv.value =
+      modelState.model != null ? NitroModules.box(modelState.model) : null;
+  }, [modelState.model, boxedModelSv]);
 
   const { resizer } = useResizer({
     width: DETECTION.inputSize,
@@ -355,8 +361,18 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
     onFrame(frame) {
       'worklet';
       try {
-        if (boxedModel == null || resizer == null) return;
-        const tflite = boxedModel.unbox();
+        const boxed = boxedModelSv.value;
+        if (boxed == null || resizer == null) {
+          // Heartbeat: prove the camera worklet is alive on the debug panel
+          // even while the model is still loading.
+          debug.value = {
+            ...debug.value,
+            mode: 'camera',
+            frames: debug.value.frames + 1,
+          };
+          return;
+        }
+        const tflite = boxed.unbox() as TensorflowModel;
         const resized = resizer.resize(frame);
         const buffer = resized.getPixelBuffer();
         // Sample the model input range (should read ~0..1) for the debug panel.
