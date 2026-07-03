@@ -1,11 +1,22 @@
 name: Export trained model (Path B)
 
-# Converts the Kaggle-trained 4-class YOLO11n weights (kaggle/best.pt) to a
-# FP32 TFLite for the app. Runs on CPU (no P100/torch constraint that broke the
-# in-kernel export), so latest ultralytics + its matching torch export cleanly.
+# Converts Kaggle-trained YOLO11 weights (kaggle/best.pt) to a FP32 TFLite for
+# the app. Runs on CPU (no P100/torch constraint that broke the in-kernel
+# export), so latest ultralytics + its matching torch export cleanly.
+# Inputs let one workflow produce different sizes (640 quality / 320 speed).
 
 on:
   workflow_dispatch:
+    inputs:
+      imgsz:
+        description: 'Input size (640 quality, 320 speed)'
+        default: '640'
+      weights:
+        description: 'Weights path in repo'
+        default: 'kaggle/best.pt'
+      artifact:
+        description: 'Artifact name'
+        default: 'hoopai-det-pathb'
 
 permissions:
   contents: write
@@ -24,14 +35,19 @@ jobs:
       - name: Install Ultralytics
         run: pip install --quiet ultralytics
 
-      - name: Export best.pt -> TFLite
+      - name: Export weights -> TFLite
+        env:
+          IMGSZ: ${{ inputs.imgsz }}
+          WEIGHTS: ${{ inputs.weights }}
         run: |
           python - <<'PY'
           import glob, shutil, os, pathlib
           from ultralytics import YOLO
-          m = YOLO("kaggle/best.pt")
-          print("CLASSES:", m.names, flush=True)
-          out = m.export(format="tflite", imgsz=640, nms=False)
+          imgsz = int(os.environ.get("IMGSZ", "640"))
+          weights = os.environ.get("WEIGHTS", "kaggle/best.pt")
+          m = YOLO(weights)
+          print("CLASSES:", m.names, "IMGSZ:", imgsz, flush=True)
+          out = m.export(format="tflite", imgsz=imgsz, nms=False)
           print("EXPORT RETURNED:", out, flush=True)
           cands = []
           p = pathlib.Path(str(out))
@@ -46,12 +62,12 @@ jobs:
           print("PICKED:", cands[0], flush=True)
           shutil.copy(cands[0], "hoopai-det.tflite")
           print("TFLITE_KB:", os.path.getsize("hoopai-det.tflite") // 1024, flush=True)
-          open("model-classes.txt", "w").write(str(m.names))
+          open("model-classes.txt", "w").write(str(m.names) + f"\nimgsz={imgsz}")
           PY
 
       - uses: actions/upload-artifact@v4
         with:
-          name: hoopai-det-pathb
+          name: ${{ inputs.artifact }}
           path: |
             hoopai-det.tflite
             model-classes.txt
