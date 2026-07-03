@@ -9,6 +9,18 @@
  *
  * TTS is best-effort: every call is guarded so a speech failure can never
  * take down a live session.
+ *
+ * LOCALE: the spoken strings themselves (announcementFor) are English-only —
+ * full i18n of the app's copy is a bigger, app-wide decision outside this
+ * file's scope. But the TTS *voice locale* is cheap to get right with zero
+ * new dependencies: Hermes (RN's JS engine on this New Architecture build)
+ * ships full `Intl` support, so we read the device's resolved locale via
+ * `Intl.DateTimeFormat().resolvedOptions().locale` instead of hardcoding
+ * 'en-US'. This makes the announcer use the right regional English accent/
+ * pronunciation (en-GB, en-AU, en-IN, …) for English speakers outside the US,
+ * and a locale-appropriate voice for non-English devices (the words spoken
+ * are still English text, but at least the TTS engine's phonemizer and voice
+ * selection match the user's device instead of always forcing US English).
  */
 import { useEffect, useRef } from 'react';
 import * as Speech from 'expo-speech';
@@ -20,9 +32,24 @@ import { useSettings, type VoiceMetric } from '../state/settingsStore';
 /** Let the make/miss sound fire first — speak this many ms after the shot. */
 const SPEAK_DELAY_MS = 400;
 
-/** English voice by default; normal rate/pitch reads scores most clearly. */
+/**
+ * Best-effort device locale (e.g. 'en-GB', 'fr-FR') via Hermes' built-in Intl
+ * — no new dependency needed. Falls back to 'en-US' if Intl is unavailable
+ * or reports something the TTS engine can't use (defensive: some very old
+ * engines/OS combos surface a bare language tag with no region).
+ */
+function detectSpeechLocale(): string {
+  try {
+    const locale = Intl.DateTimeFormat().resolvedOptions().locale;
+    return locale && locale.length >= 2 ? locale : 'en-US';
+  } catch {
+    return 'en-US';
+  }
+}
+
+/** Resolved once per process; normal rate/pitch reads scores most clearly. */
 const SPEECH_OPTIONS: Speech.SpeechOptions = {
-  language: 'en-US',
+  language: detectSpeechLocale(),
   rate: 1.0,
   pitch: 1.0,
 };

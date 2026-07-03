@@ -160,7 +160,9 @@ export default function TrendsScreen() {
       <Text style={styles.title}>FG% over time</Text>
 
       {trend === null ? (
-        <Text style={styles.dim}>Loading trends…</Text>
+        <Card>
+          <Text style={styles.dim}>Loading trends…</Text>
+        </Card>
       ) : !enough ? (
         <Card>
           <Text style={styles.heading}>Not enough sessions yet</Text>

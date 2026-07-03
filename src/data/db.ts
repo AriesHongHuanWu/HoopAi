@@ -15,7 +15,8 @@
 import * as SQLite from 'expo-sqlite';
 
 import { emptyTotals, type LifetimeTotals } from '../core/achievements';
-import type { ResolvedShot, SessionStats, ShotOutcome, ShotSignals } from '../core/types';
+import { historyRetentionLimit } from '../core/premium';
+import type { GameModeId, ResolvedShot, SessionStats, ShotOutcome, ShotSignals } from '../core/types';
 import { recomputeStats } from '../core/stats';
 
 export interface SessionRow {
@@ -33,6 +34,19 @@ export interface SessionRow {
    * session wasn't recorded. videoTime = shot.tResolved − recordingStartSec.
    */
   recordingStartSec: number | null;
+  /**
+   * The {@link GameModeId} this session was played under, or null for a
+   * plain Free Play session created before v4 (or one that never went
+   * through a game mode). Additive column — see migration v4.
+   */
+  modeId: string | null;
+  /**
+   * JSON-serialized snapshot of the final {@link ModeState} (from
+   * src/core/gameModes.ts), captured at `finish()` time so History can
+   * reconstruct the ModeComplete-style breakdown (score, letters, spots…)
+   * for a past game. Null when no mode was active or before v4.
+   */
+  modeResultJson: string | null;
 }
 
 export interface SessionSummaryRow extends SessionRow {
@@ -167,6 +181,17 @@ async function migrate(db: SQLite.SQLiteDatabase): Promise<void> {
       PRAGMA user_version = 3;
     `);
   }
+  if (version < 4) {
+    // v4: persist which game mode (if any) a session was played under, plus a
+    // JSON snapshot of the final ModeState, so History can identify past mode
+    // games (vs Free Play) and show their final score/breakdown. NULL on rows
+    // written before v4 ⇒ treated as a plain/unknown-mode session.
+    await db.execAsync(`
+      ALTER TABLE sessions ADD COLUMN modeId TEXT;
+      ALTER TABLE sessions ADD COLUMN modeResultJson TEXT;
+      PRAGMA user_version = 4;
+    `);
+  }
 }
 
 /** Run a DB operation; on ANY failure log + return the fallback (never throw). */
@@ -200,14 +225,17 @@ export async function createSession(opts: {
   startedAt: number;
   label?: string;
   keepMode: string;
+  /** The game mode this session is played under, if any (see SessionRow). */
+  modeId?: GameModeId | null;
 }): Promise<number> {
   return safe('createSession', -1, async () => {
     const db = await getDb();
     const res = await db.runAsync(
-      'INSERT INTO sessions (startedAt, label, keepMode) VALUES (?, ?, ?)',
+      'INSERT INTO sessions (startedAt, label, keepMode, modeId) VALUES (?, ?, ?, ?)',
       opts.startedAt,
       opts.label ?? '',
       opts.keepMode,
+      opts.modeId ?? null,
     );
     return res.lastInsertRowId;
   });
@@ -220,15 +248,23 @@ export async function endSession(
     videoPath?: string | null;
     /** Engine-clock second when the recording started (see SessionRow). */
     recordingStartSec?: number | null;
+    /**
+     * JSON snapshot of the final ModeState, when the session was played under
+     * a game mode (see SessionRow.modeResultJson). Omitted/undefined leaves
+     * the column untouched from createSession-time (there is none to set) —
+     * pass null explicitly only when clearing a previously-set result.
+     */
+    modeResultJson?: string | null;
   },
 ): Promise<void> {
   return safe('endSession', undefined, async () => {
     const db = await getDb();
     await db.runAsync(
-      'UPDATE sessions SET endedAt = ?, videoPath = ?, recordingStartSec = ? WHERE id = ?',
+      'UPDATE sessions SET endedAt = ?, videoPath = ?, recordingStartSec = ?, modeResultJson = COALESCE(?, modeResultJson) WHERE id = ?',
       opts.endedAt,
       opts.videoPath ?? null,
       opts.recordingStartSec ?? null,
+      opts.modeResultJson ?? null,
       sessionId,
     );
   });
@@ -254,6 +290,21 @@ export async function listSessions(limit = 50): Promise<SessionSummaryRow[]> {
       limit,
     );
   });
+}
+
+/**
+ * Sessions the History screen should actually show, with the free-tier
+ * retention cap (src/core/premium.ts historyRetentionLimit) applied on top of
+ * `listSessions`. During beta (or once the user is Pro) the cap is null and
+ * this is identical to `listSessions(requestedLimit)`. `requestedLimit` lets
+ * the caller ask for a larger page than the cap without ever seeing more than
+ * the cap allows once gating is live — this is the pre-launch enforcement
+ * point called out in PRO_FEATURES's 'unlimitedHistory' blurb.
+ */
+export async function listVisibleSessions(requestedLimit = 50): Promise<SessionSummaryRow[]> {
+  const cap = historyRetentionLimit();
+  const effectiveLimit = cap == null ? requestedLimit : Math.min(requestedLimit, cap);
+  return listSessions(effectiveLimit);
 }
 
 export async function getSession(sessionId: number): Promise<SessionRow | null> {

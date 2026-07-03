@@ -235,6 +235,75 @@ export function MakeMissDot({
   );
 }
 
+/**
+ * ErrorCard — the shared "couldn't load" / "not found" card shape, so screens
+ * stop hand-rolling near-identical Card + heading + dim-body markup with
+ * drifting copy and spacing. Optional `onRetry` renders a ghost retry CTA;
+ * omit it for permanent states (e.g. "this session was deleted").
+ */
+export function ErrorCard({
+  title,
+  body,
+  onRetry,
+  retryLabel = 'Try again',
+}: {
+  title: string;
+  body?: string;
+  onRetry?: () => void;
+  retryLabel?: string;
+}) {
+  return (
+    <Card>
+      <Text style={styles.errorTitle} accessibilityRole="header">
+        {title}
+      </Text>
+      {body != null && <Text style={styles.errorBody}>{body}</Text>}
+      {onRetry != null && (
+        <PillButton
+          variant="ghost"
+          label={retryLabel}
+          onPress={onRetry}
+          style={styles.errorRetry}
+        />
+      )}
+    </Card>
+  );
+}
+
+/**
+ * EmptyState — same shape as ErrorCard for the non-error "nothing here yet"
+ * case (distinct name so call sites read intent-first), with an optional
+ * primary action instead of a retry.
+ */
+export function EmptyState({
+  title,
+  body,
+  actionLabel,
+  onAction,
+}: {
+  title: string;
+  body?: string;
+  actionLabel?: string;
+  onAction?: () => void;
+}) {
+  return (
+    <Card>
+      <Text style={styles.errorTitle} accessibilityRole="header">
+        {title}
+      </Text>
+      {body != null && <Text style={styles.errorBody}>{body}</Text>}
+      {actionLabel != null && onAction != null && (
+        <PillButton
+          variant="ghost"
+          label={actionLabel}
+          onPress={onAction}
+          style={styles.errorRetry}
+        />
+      )}
+    </Card>
+  );
+}
+
 /** Row helper. */
 export function Row({
   children,
@@ -296,5 +365,18 @@ const styles = StyleSheet.create({
   },
   chipLabel: {
     ...type.caption,
+  },
+  errorTitle: {
+    ...type.heading,
+    color: color.text,
+  },
+  errorBody: {
+    ...type.body,
+    color: color.textDim,
+    marginTop: space.xs,
+  },
+  errorRetry: {
+    marginTop: space.lg,
+    alignSelf: 'flex-start',
   },
 });

@@ -262,19 +262,27 @@ export class BallTracker {
   }
 
   /**
-   * Rejects clearly non-round boxes (`width * aspectWidthFactor < height`,
-   * likely a limb or netting) UNLESS the box looks like a motion-blur
-   * streak: elongated roughly along the current velocity direction while the
+   * Rejects clearly non-round boxes UNLESS the box looks like a motion-blur
+   * streak elongated roughly along the current velocity direction while the
    * ball moves faster than 2 diameters per frame.
+   *
+   * Symmetric in both axes: a box tall-and-skinny
+   * (`width * aspectWidthFactor < height`, likely a limb or netting) is
+   * gated exactly like a wide-and-short one
+   * (`height * aspectWidthFactor < width`, likely a horizontal limb/arm or a
+   * fast crosscourt-pass motion-blur smear) — each checked against the
+   * blur-streak exception for velocity along its own elongation axis.
    */
   private passesAspectGate(
     box: Box,
     pred: KalmanEstimate | null,
     dtSec: number,
   ): boolean {
-    if (box.width * TRACKER.aspectWidthFactor >= box.height) return true;
+    const tallSkinny = box.width * TRACKER.aspectWidthFactor < box.height;
+    const wideShort = box.height * TRACKER.aspectWidthFactor < box.width;
+    if (!tallSkinny && !wideShort) return true;
 
-    // Tall skinny box. Blur-streak exception requires a known fast velocity.
+    // Elongated box. Blur-streak exception requires a known fast velocity.
     if (pred === null) return false;
     const diameter =
       2 * (this.smoothedR ?? Math.min(box.width, box.height) / 2);
@@ -283,10 +291,10 @@ export class BallTracker {
     if (speedPxPerFrame <= BLUR_STREAK_MIN_DIAMETERS_PER_FRAME * diameter) {
       return false;
     }
-    // Axis-aligned boxes only elongate vertically or horizontally; the gate
-    // above only fires on VERTICALLY elongated boxes, so "along velocity"
-    // means the velocity is within 45° of vertical.
-    return Math.abs(pred.vy) >= Math.abs(pred.vx);
+    // Axis-aligned boxes only elongate vertically or horizontally, so "along
+    // velocity" means the velocity is within 45° of the box's long axis.
+    if (tallSkinny) return Math.abs(pred.vy) >= Math.abs(pred.vx);
+    return Math.abs(pred.vx) >= Math.abs(pred.vy);
   }
 
   /**

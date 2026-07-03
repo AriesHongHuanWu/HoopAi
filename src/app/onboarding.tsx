@@ -201,7 +201,7 @@ function PagerDot({ active }: { active: boolean }) {
       duration: motion.quick,
       reduceMotion: ReduceMotion.System,
     }),
-    opacity: withTiming(active ? 1 : 0.9, {
+    opacity: withTiming(active ? 1 : 0.5, {
       duration: motion.quick,
       reduceMotion: ReduceMotion.System,
     }),
@@ -273,7 +273,9 @@ export default function OnboardingScreen() {
         getItemLayout={(_, index) => ({ length: width, offset: width * index, index })}
         renderItem={({ item }) => (
           <View style={[styles.page, { width }]}>
-            <item.Illustration w={width - space.xl * 2} />
+            <View importantForAccessibility="no-hide-descendants">
+              <item.Illustration w={width - space.xl * 2} />
+            </View>
             {item.key === 'count' && (
               <Row gap={space.lg} style={styles.legend}>
                 <Row gap={space.xs}>

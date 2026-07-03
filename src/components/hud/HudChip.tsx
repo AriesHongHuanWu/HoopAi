@@ -18,12 +18,20 @@ export function HudChip({
   style,
   tone = 'default',
   deep = false,
+  accessible,
+  accessibilityLabel,
+  accessibilityLiveRegion,
 }: {
   children: React.ReactNode;
   style?: StyleProp<ViewStyle>;
   tone?: HudChipTone;
   /** Deeper glass for the primary panel so it sits above the split chips. */
   deep?: boolean;
+  /** Groups the chip's contents into one accessibility element. */
+  accessible?: boolean;
+  accessibilityLabel?: string;
+  /** Announce content changes (e.g. a live score) without manual re-focus. */
+  accessibilityLiveRegion?: 'none' | 'polite' | 'assertive';
 }) {
   const toneStyle =
     tone === 'accent'
@@ -32,7 +40,12 @@ export function HudChip({
         ? { borderColor: color.threePt, backgroundColor: color.threePtTint }
         : null;
   return (
-    <View style={[styles.chip, deep && styles.deep, toneStyle, style]}>
+    <View
+      style={[styles.chip, deep && styles.deep, toneStyle, style]}
+      accessible={accessible}
+      accessibilityLabel={accessibilityLabel}
+      accessibilityLiveRegion={accessibilityLiveRegion}
+    >
       {/* top highlight — the single hairline that sells the glass */}
       <View pointerEvents="none" style={styles.highlight} />
       {children}

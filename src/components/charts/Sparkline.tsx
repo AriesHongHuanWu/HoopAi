@@ -40,6 +40,13 @@ export interface SparklineProps {
   data: readonly number[];
   width: number;
   height: number;
+  /**
+   * Accessible description for this chart. The Canvas itself can't carry a
+   * semantic label, so when provided this wraps the chart in an accessible
+   * View — pass it here instead of relying on the call site to remember its
+   * own wrapper.
+   */
+  accessibilityLabel?: string;
 }
 
 interface SparklineGeometry {
@@ -48,7 +55,7 @@ interface SparklineGeometry {
   last: { x: number; y: number };
 }
 
-export function Sparkline({ data, width, height }: SparklineProps) {
+export function Sparkline({ data, width, height, accessibilityLabel }: SparklineProps) {
   const geom = useMemo<SparklineGeometry | null>(() => {
     if (width <= 0 || height <= 0 || data.length === 0) return null;
     const innerW = width - PAD * 2;
@@ -76,33 +83,43 @@ export function Sparkline({ data, width, height }: SparklineProps) {
 
   if (geom == null) {
     return (
-      <View style={{ width: Math.max(width, 0), height: Math.max(height, 0) }} />
+      <View
+        accessible={accessibilityLabel != null}
+        accessibilityLabel={accessibilityLabel}
+        style={{ width: Math.max(width, 0), height: Math.max(height, 0) }}
+      />
     );
   }
 
   return (
-    <Canvas style={{ width, height }}>
-      {data.length > 1 && (
-        <Path path={geom.area}>
-          <LinearGradient
-            start={vec(0, 0)}
-            end={vec(0, height)}
-            colors={[FILL_TOP, FILL_BOTTOM]}
+    <View
+      accessible={accessibilityLabel != null}
+      accessibilityLabel={accessibilityLabel}
+      style={{ width, height }}
+    >
+      <Canvas style={{ width, height }}>
+        {data.length > 1 && (
+          <Path path={geom.area}>
+            <LinearGradient
+              start={vec(0, 0)}
+              end={vec(0, height)}
+              colors={[FILL_TOP, FILL_BOTTOM]}
+            />
+          </Path>
+        )}
+        {data.length > 1 && (
+          <Path
+            path={geom.line}
+            style="stroke"
+            strokeWidth={2.5}
+            strokeCap="round"
+            strokeJoin="round"
+            color={color.accent}
           />
-        </Path>
-      )}
-      {data.length > 1 && (
-        <Path
-          path={geom.line}
-          style="stroke"
-          strokeWidth={2.5}
-          strokeCap="round"
-          strokeJoin="round"
-          color={color.accent}
-        />
-      )}
-      <Circle cx={geom.last.x} cy={geom.last.y} r={HALO_R} color={HALO_TINT} />
-      <Circle cx={geom.last.x} cy={geom.last.y} r={DOT_R} color={color.accent} />
-    </Canvas>
+        )}
+        <Circle cx={geom.last.x} cy={geom.last.y} r={HALO_R} color={HALO_TINT} />
+        <Circle cx={geom.last.x} cy={geom.last.y} r={DOT_R} color={color.accent} />
+      </Canvas>
+    </View>
   );
 }

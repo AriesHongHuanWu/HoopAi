@@ -426,8 +426,16 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
   const onPayload = useMemo(
     () => (payload: FramePayload) => {
       // Rebase worklet time onto the session clock at arrival (v1 clock; see
-      // BUILDING.md for the camera-timestamp upgrade).
-      pipeline.step({ ...payload, frame: { ...payload.frame, t: nowSec() } });
+      // BUILDING.md for the camera-timestamp upgrade). The pose frame carries
+      // t=0 from the worklet, so it MUST be rebased to the SAME clock as the
+      // detection frame — otherwise FormAnalyzer's release-time / follow-through
+      // durations (which diff pose.t across frames) are computed against 0.
+      const t = nowSec();
+      pipeline.step({
+        ...payload,
+        frame: { ...payload.frame, t },
+        pose: payload.pose ? { ...payload.pose, t } : payload.pose,
+      });
     },
     [pipeline, nowSec],
   );

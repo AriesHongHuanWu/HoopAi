@@ -1,6 +1,11 @@
 /**
  * Low-latency make/miss/streak sounds (expo-audio, preloaded players).
- * Subscribes to the session store's pendingSound and plays it once.
+ * Subscribes to the session store's pendingSound and plays it once, using
+ * whichever sound pack is currently selected in Settings (see
+ * src/camera/soundPacks.ts) — playback resolves sources via
+ * {@link getSoundSource} rather than a single hardcoded set, so switching
+ * packs (classic/arcade/stadium) actually changes what plays in a live
+ * session, not just the settings-screen preview.
  */
 import { useEffect } from 'react';
 import {
@@ -9,23 +14,12 @@ import {
   type AudioPlayer,
 } from 'expo-audio';
 
-import type { SoundEvent } from '../core/types';
 import { useSession } from '../state/sessionStore';
 import { useSettings } from '../state/settingsStore';
+import { getSoundSource, type PackSoundEvent, type SoundPack } from './soundPacks';
 
-/* eslint-disable @typescript-eslint/no-var-requires */
-const SOURCES: Record<SoundEvent | 'session_start' | 'rim_locked', number> = {
-  make: require('../../assets/sounds/make.wav'),
-  miss: require('../../assets/sounds/miss.wav'),
-  streak3: require('../../assets/sounds/streak3.wav'),
-  streak5: require('../../assets/sounds/streak5.wav'),
-  streak10: require('../../assets/sounds/streak10.wav'),
-  session_start: require('../../assets/sounds/session_start.wav'),
-  rim_locked: require('../../assets/sounds/rim_locked.wav'),
-};
-/* eslint-enable @typescript-eslint/no-var-requires */
-
-let players: Partial<Record<keyof typeof SOURCES, AudioPlayer>> = {};
+/** Player cache keyed by `${pack}:${event}` so switching packs mid-session never reuses the wrong clip. */
+let players: Map<string, AudioPlayer> = new Map();
 let audioModeSet = false;
 
 async function ensureAudioMode(): Promise<void> {
@@ -49,20 +43,25 @@ async function ensureAudioMode(): Promise<void> {
 /**
  * Fire-and-forget playback; safe to call from anywhere on the JS thread.
  * Never throws — audio failures must not take down a live session.
+ *
+ * @param pack Sound pack to resolve `event` against; defaults to 'classic'
+ *   for callers that haven't been updated to pass the active pack (keeps
+ *   this a non-breaking addition to the call signature).
  */
-export function playSound(event: keyof typeof SOURCES): void {
+export function playSound(event: PackSoundEvent, pack: SoundPack = 'classic'): void {
   void ensureAudioMode()
     .then(() => {
       try {
-        let p = players[event];
+        const key = `${pack}:${event}`;
+        let p = players.get(key);
         if (!p) {
-          p = createAudioPlayer(SOURCES[event]);
-          players[event] = p;
+          p = createAudioPlayer(getSoundSource(pack, event));
+          players.set(key, p);
         }
         p.seekTo(0);
         p.play();
       } catch (err) {
-        console.warn(`[sounds] playback failed for "${event}"`, err);
+        console.warn(`[sounds] playback failed for "${event}" (pack "${pack}")`, err);
       }
     })
     .catch((err) => {
@@ -72,14 +71,14 @@ export function playSound(event: keyof typeof SOURCES): void {
 
 /** Release all players (call when leaving the session flow). Never throws. */
 export function releaseSounds(): void {
-  for (const p of Object.values(players)) {
+  for (const p of players.values()) {
     try {
-      p?.release();
+      p.release();
     } catch (err) {
       console.warn('[sounds] release failed', err);
     }
   }
-  players = {};
+  players = new Map();
 }
 
 /** Hook: plays the session store's pending sound exactly once per shot. */
@@ -87,12 +86,13 @@ export function useShotSounds(): void {
   const pendingSound = useSession((s) => s.pendingSound);
   const consumeSound = useSession((s) => s.consumeSound);
   const soundsEnabled = useSettings((s) => s.soundsEnabled);
+  const soundPack = useSettings((s) => s.soundPack);
 
   useEffect(() => {
     if (!pendingSound) return;
     const sound = consumeSound();
-    if (sound && soundsEnabled) playSound(sound);
-  }, [pendingSound, consumeSound, soundsEnabled]);
+    if (sound && soundsEnabled) playSound(sound, soundPack);
+  }, [pendingSound, consumeSound, soundsEnabled, soundPack]);
 
   useEffect(() => releaseSounds, []);
 }

@@ -50,6 +50,7 @@ import {
   sessionShots,
   shotFromRow,
   updateShotOutcome,
+  updateShotValue,
   type SessionRow,
   type ShotRow as DbShotRow,
 } from '@/data/db';
@@ -297,7 +298,7 @@ function ValuePill({
   );
 }
 
-function ShotListItem({
+const ShotListItem = React.memo(function ShotListItem({
   shot,
   onCorrect,
   onCorrectValue,
@@ -391,7 +392,7 @@ function ShotListItem({
       )}
     </View>
   );
-}
+});
 
 export function ShotList({
   shots,
@@ -495,8 +496,7 @@ function HighlightsCard({
         </View>
       )}
       <Text style={styles.footnote}>
-        Watch highlights in the replay player. Exporting clip files comes
-        later.
+        Watch highlights in the replay player.
       </Text>
     </Card>
   );
@@ -692,9 +692,9 @@ export interface SessionRecord {
   /** Optimistic correction: flips locally, persists via updateShotOutcome. */
   correct: (shot: ResolvedShot, outcome: ShotOutcome) => void;
   /**
-   * 2↔3 correction for a persisted shot. Applied in-memory only — the shots
-   * table has no value column yet, so this refines the current view (points +
-   * splits recompute) but does not survive a reload.
+   * 2↔3 correction for a persisted shot. Applied optimistically (points +
+   * splits recompute immediately) and persisted via updateShotValue, mirroring
+   * `correct`.
    */
   correctValue: (shot: ResolvedShot, value: ShotValue) => void;
 }
@@ -744,21 +744,27 @@ export function useSessionRecord(sessionId: number | null): SessionRecord {
   );
   const stats = useMemo(() => recomputeStats(shots), [shots]);
 
-  const correct = useCallback(
-    (shot: ResolvedShot, outcome: ShotOutcome) => {
-      const row = rows.find((r) => r.shotIndex === shot.id);
-      if (!row) return;
+  // No `rows` dependency: both callbacks resolve the target row from the
+  // functional setState updater, so their identity stays stable across row
+  // updates instead of being recreated on every correction (which would force
+  // every ShotListItem's memo to bust, not just the corrected one).
+  const correct = useCallback((shot: ResolvedShot, outcome: ShotOutcome) => {
+    setRows((prev) => {
+      const row = prev.find((r) => r.shotIndex === shot.id);
+      if (!row) return prev;
       void updateShotOutcome(row.id, outcome);
-      setRows((prev) =>
-        prev.map((r) =>
-          r.id === row.id ? { ...r, outcome, corrected: 1 } : r,
-        ),
+      return prev.map((r) =>
+        r.id === row.id ? { ...r, outcome, corrected: 1 } : r,
       );
-    },
-    [rows],
-  );
+    });
+  }, []);
 
   const correctValue = useCallback((shot: ResolvedShot, value: ShotValue) => {
+    setRows((prev) => {
+      const row = prev.find((r) => r.shotIndex === shot.id);
+      if (row) void updateShotValue(row.id, value);
+      return prev;
+    });
     setValueOverrides((prev) => ({ ...prev, [shot.id]: value }));
   }, []);
 

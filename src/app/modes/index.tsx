@@ -9,14 +9,16 @@
  */
 import { router } from 'expo-router';
 import * as Haptics from 'expo-haptics';
-import React from 'react';
+import React, { useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
-import Animated, { FadeInDown, ReduceMotion } from 'react-native-reanimated';
+import Animated, { FadeIn, FadeInDown, ReduceMotion } from 'react-native-reanimated';
 
 import { ProBadge } from '@/components/ProBadge';
-import { Eyebrow, Row, Screen } from '@/components/ui';
-import { color, motion, radius, space, type } from '@/constants/tokens';
+import { BackPill } from '@/components/ShotList';
+import { Card, Eyebrow, Row, Screen } from '@/components/ui';
+import { color, motion, radius, space, touch, type } from '@/constants/tokens';
 import { GAME_MODES, type GameModeDef } from '@/core/gameModes';
+import { PRO_FEATURES } from '@/core/premium';
 import type { GameModeId } from '@/core/types';
 import { useMode } from '@/state/modeStore';
 import { useSettings } from '@/state/settingsStore';
@@ -39,6 +41,8 @@ export default function ModePickerScreen() {
   const selectMode = useMode((s) => s.selectMode);
   const activeMode = useMode((s) => s.activeMode);
   const hapticsEnabled = useSettings((s) => s.hapticsEnabled);
+  const [proOpen, setProOpen] = useState(false);
+  const hasProModes = GAME_MODES.some((m) => m.id !== 'free');
 
   const pick = (id: GameModeDef['id']) => {
     if (hapticsEnabled) void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
@@ -48,6 +52,9 @@ export default function ModePickerScreen() {
 
   return (
     <Screen scroll>
+      <Row style={{ marginBottom: space.lg }}>
+        <BackPill />
+      </Row>
       <Eyebrow>Choose a mode</Eyebrow>
       <Text style={styles.title}>How do you want to play?</Text>
       <Text style={styles.lede}>
@@ -71,6 +78,45 @@ export default function ModePickerScreen() {
           </Animated.View>
         ))}
       </View>
+
+      {hasProModes && (
+        <View style={styles.proSection}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel={proOpen ? 'Hide what Pro unlocks' : 'What does Pro unlock?'}
+            accessibilityState={{ expanded: proOpen }}
+            onPress={() => {
+              if (hapticsEnabled) void Haptics.selectionAsync();
+              setProOpen((v) => !v);
+            }}
+            style={({ pressed }) => [styles.proLink, pressed && { opacity: 0.7 }]}
+          >
+            <ProBadge />
+            <Text style={styles.proLinkText}>
+              {proOpen ? 'Hide what Pro unlocks' : 'What does Pro unlock?'}
+            </Text>
+            <Text style={styles.proChevron}>{proOpen ? '︿' : '﹀'}</Text>
+          </Pressable>
+          {proOpen && (
+            <Animated.View entering={FadeIn.duration(motion.quick).reduceMotion(ReduceMotion.System)}>
+              <Card style={styles.proCard}>
+                <Text style={styles.proCardNote}>
+                  Everything below is unlocked and free during beta. This is what stays part of
+                  HoopAI Pro after launch.
+                </Text>
+                <View style={styles.proFeatureList}>
+                  {PRO_FEATURES.map((f) => (
+                    <View key={f.id} style={styles.proFeatureRow}>
+                      <Text style={styles.proFeatureName}>{f.name}</Text>
+                      <Text style={styles.proFeatureBlurb}>{f.blurb}</Text>
+                    </View>
+                  ))}
+                </View>
+              </Card>
+            </Animated.View>
+          )}
+        </View>
+      )}
     </Screen>
   );
 }
@@ -228,5 +274,46 @@ const styles = StyleSheet.create({
   metaText: {
     ...type.micro,
     color: color.textFaint,
+  },
+  proSection: {
+    marginTop: space.xl,
+  },
+  proLink: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: space.sm,
+    alignSelf: 'center',
+    minHeight: touch.minTarget,
+    paddingHorizontal: space.lg,
+  },
+  proLinkText: {
+    ...type.bodyMedium,
+    color: color.textDim,
+  },
+  proChevron: {
+    ...type.caption,
+    color: color.textFaint,
+  },
+  proCard: {
+    marginTop: space.md,
+  },
+  proCardNote: {
+    ...type.body,
+    color: color.textDim,
+    marginBottom: space.md,
+  },
+  proFeatureList: {
+    gap: space.md,
+  },
+  proFeatureRow: {
+    gap: 2,
+  },
+  proFeatureName: {
+    ...type.bodyMedium,
+    color: color.text,
+  },
+  proFeatureBlurb: {
+    ...type.body,
+    color: color.textDim,
   },
 });

@@ -2,7 +2,7 @@
  * Session setup — the pre-flight checklist before opening the camera.
  * No camera renders here; we only check permissions and session options.
  */
-import React from 'react';
+import React, { useState } from 'react';
 import { Linking, Pressable, StyleSheet, Switch, Text, View } from 'react-native';
 import { router } from 'expo-router';
 import {
@@ -10,12 +10,16 @@ import {
   useMicrophonePermission,
 } from 'react-native-vision-camera';
 
-import { Card, Chip, Eyebrow, PillButton, Row, Screen } from '../../components/ui';
-import { color, radius, space, touch, type } from '../../constants/tokens';
-import { getModeDef } from '../../core/gameModes';
-import { useMode } from '../../state/modeStore';
-import { useSession } from '../../state/sessionStore';
-import { useSettings, type KeepMode } from '../../state/settingsStore';
+import { BackPill } from '@/components/ShotList';
+import { Card, Chip, Eyebrow, PillButton, Row, Screen } from '@/components/ui';
+import { color, radius, space, touch, type } from '@/constants/tokens';
+import { getModeDef } from '@/core/gameModes';
+import { useMode } from '@/state/modeStore';
+import { useSession } from '@/state/sessionStore';
+import { useSettings, type KeepMode } from '@/state/settingsStore';
+
+const TIMED_DURATIONS = [30, 60, 90, 120] as const;
+const SPOT_MAKE_TARGETS = [3, 5, 7, 10] as const;
 
 const CHECKLIST = [
   {
@@ -51,7 +55,15 @@ export default function SessionSetupScreen() {
   const set = useSettings((s) => s.set);
   const beginSetup = useSession((s) => s.beginSetup);
   const activeMode = useMode((s) => s.activeMode);
+  const selectMode = useMode((s) => s.selectMode);
   const modeDef = activeMode != null ? getModeDef(activeMode.modeId) : null;
+
+  // Pre-flight config for the modes that need it — duration for Timed
+  // Challenge, makes-per-spot for Spot Shooting. Re-inits the active mode's
+  // running state (fresh clock/spots) whenever the player changes the value,
+  // so this must happen before the camera opens (initMode is a full reset).
+  const [durationSec, setDurationSec] = useState(activeMode?.config?.durationSec ?? 60);
+  const [makesPerSpot, setMakesPerSpot] = useState(activeMode?.config?.makesPerSpot ?? 5);
 
   const openCamera = async () => {
     if (!camera.hasPermission && camera.canRequestPermission) {
@@ -68,6 +80,9 @@ export default function SessionSetupScreen() {
 
   return (
     <Screen scroll>
+      <Row style={styles.backRow}>
+        <BackPill />
+      </Row>
       <Eyebrow>New session</Eyebrow>
       <Text style={styles.title}>Get the hoop in frame</Text>
       <Text style={styles.lede}>
@@ -94,6 +109,70 @@ export default function SessionSetupScreen() {
             style={styles.modeChange}
           />
         </Row>
+
+        {modeDef?.needsTimer && (
+          <View style={styles.configBlock}>
+            <Eyebrow>Duration</Eyebrow>
+            <View style={styles.keepWrap}>
+              {TIMED_DURATIONS.map((sec) => {
+                const selected = durationSec === sec;
+                return (
+                  <Pressable
+                    key={sec}
+                    accessibilityRole="button"
+                    accessibilityLabel={`${sec} seconds`}
+                    accessibilityState={{ selected }}
+                    onPress={() => {
+                      setDurationSec(sec);
+                      selectMode('timed', { durationSec: sec });
+                    }}
+                    style={({ pressed }) => [
+                      styles.keepChip,
+                      selected && styles.keepChipSelected,
+                      pressed && styles.keepChipPressed,
+                    ]}
+                  >
+                    <Text style={[styles.keepChipLabel, selected && styles.keepChipLabelSelected]}>
+                      {sec}s
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+          </View>
+        )}
+
+        {modeDef?.id === 'spotShooting' && (
+          <View style={styles.configBlock}>
+            <Eyebrow>Makes per spot</Eyebrow>
+            <View style={styles.keepWrap}>
+              {SPOT_MAKE_TARGETS.map((n) => {
+                const selected = makesPerSpot === n;
+                return (
+                  <Pressable
+                    key={n}
+                    accessibilityRole="button"
+                    accessibilityLabel={`${n} makes per spot`}
+                    accessibilityState={{ selected }}
+                    onPress={() => {
+                      setMakesPerSpot(n);
+                      selectMode('spotShooting', { makesPerSpot: n });
+                    }}
+                    style={({ pressed }) => [
+                      styles.keepChip,
+                      selected && styles.keepChipSelected,
+                      pressed && styles.keepChipPressed,
+                    ]}
+                  >
+                    <Text style={[styles.keepChipLabel, selected && styles.keepChipLabelSelected]}>
+                      {n}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+          </View>
+        )}
       </Card>
 
       <Card style={styles.card}>
@@ -197,6 +276,9 @@ export default function SessionSetupScreen() {
 }
 
 const styles = StyleSheet.create({
+  backRow: {
+    marginBottom: space.md,
+  },
   title: {
     ...type.title,
     color: color.text,
@@ -212,6 +294,9 @@ const styles = StyleSheet.create({
   },
   modeRow: {
     alignItems: 'center',
+  },
+  configBlock: {
+    marginTop: space.lg,
   },
   modeBadge: {
     width: 48,

@@ -130,6 +130,14 @@ export const useSettings = create<SettingsState>()(
       name: 'hoopai-settings',
       storage: createJSONStorage(() => Storage),
       partialize: ({ set: _set, ...rest }) => rest,
+      // Bump this whenever a persisted key is renamed or removed, and extend
+      // `migrate` to translate the old shape forward. Starting at 1 (rather
+      // than leaving it unset) gives every future schema change a concrete
+      // "from version N" to branch on instead of relying on zustand's default
+      // shallow-merge rehydration, which silently keeps stale/renamed keys
+      // around forever.
+      version: 1,
+      migrate: (persisted) => persisted as SettingsState,
     },
   ),
 );

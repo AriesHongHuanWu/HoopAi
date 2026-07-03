@@ -174,6 +174,15 @@ export class RimLock {
   private drift = false;
 
   /**
+   * Locked box size at the moment drift was first flagged, captured once so
+   * a post-drift re-lock candidate can be sanity-checked against the size of
+   * the rim we actually lost, not a shifting running value. 0 while no drift
+   * has occurred since the last lock.
+   */
+  private preDriftW = 0;
+  private preDriftH = 0;
+
+  /**
    * Consumes one frame of detections and returns the current locked geometry,
    * or null while no lock is held.
    *
@@ -226,6 +235,8 @@ export class RimLock {
     this.clearCluster();
     this.consecutiveRejects = 0;
     this.drift = false;
+    this.preDriftW = 0;
+    this.preDriftH = 0;
     this.refreshGeometry();
   }
 
@@ -240,6 +251,8 @@ export class RimLock {
     this.clearCluster();
     this.consecutiveRejects = 0;
     this.drift = false;
+    this.preDriftW = 0;
+    this.preDriftH = 0;
   }
 
   // -------------------------------------------------------------------------
@@ -268,6 +281,8 @@ export class RimLock {
       this.lockH += a * (box.height - this.lockH);
       this.consecutiveRejects = 0;
       this.drift = false;
+      this.preDriftW = 0;
+      this.preDriftH = 0;
       this.clearCluster();
       this.refreshGeometry();
       return;
@@ -275,12 +290,46 @@ export class RimLock {
 
     // Reject.
     this.consecutiveRejects++;
-    if (this.consecutiveRejects >= DRIFT_REJECT_COUNT) this.drift = true;
+    if (this.consecutiveRejects >= DRIFT_REJECT_COUNT && !this.drift) {
+      this.drift = true;
+      // Capture the size of the rim we just lost, once, for the re-lock
+      // sanity check below.
+      this.preDriftW = this.lockW;
+      this.preDriftH = this.lockH;
+    }
     if (this.drift) {
       // Re-verify: accumulate a consistent cluster at the new location.
       this.feedCluster(box);
-      if (this.clusterCount >= LOCK_CLUSTER_SIZE) this.lockAtClusterMean();
+      if (this.clusterCount >= LOCK_CLUSTER_SIZE) {
+        if (this.clusterSizeMatchesPreDrift()) {
+          this.lockAtClusterMean();
+        } else {
+          // Cluster is internally consistent but a size mismatch against the
+          // pre-drift lock (e.g. a similarly-shaped decoy object) — refuse to
+          // re-lock onto it and keep accumulating for a fresh candidate.
+          this.clearCluster();
+        }
+      }
     }
+  }
+
+  /**
+   * True when the current cluster's mean box size is plausibly the same rim
+   * as the pre-drift lock (both width and height ratios within
+   * RIM.relockMaxSizeRatio). Always true if no pre-drift size was captured
+   * (defensive; should not happen once locked).
+   */
+  private clusterSizeMatchesPreDrift(): boolean {
+    if (this.preDriftW <= 0 || this.preDriftH <= 0) return true;
+    const n = this.clusterCount;
+    const meanW = this.clusterSumW / n;
+    const meanH = this.clusterSumH / n;
+    if (meanW <= 0 || meanH <= 0) return false;
+    const wRatio = Math.max(meanW / this.preDriftW, this.preDriftW / meanW);
+    const hRatio = Math.max(meanH / this.preDriftH, this.preDriftH / meanH);
+    return (
+      wRatio <= RIM.relockMaxSizeRatio && hRatio <= RIM.relockMaxSizeRatio
+    );
   }
 
   /**
@@ -321,6 +370,8 @@ export class RimLock {
     this.clearCluster();
     this.consecutiveRejects = 0;
     this.drift = false;
+    this.preDriftW = 0;
+    this.preDriftH = 0;
     this.refreshGeometry();
   }
 

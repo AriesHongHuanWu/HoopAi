@@ -244,6 +244,52 @@ describe('BallTracker', () => {
     expect(out!.predicted).toBe(true);
   });
 
+  test('aspect gate rejects a wide short box at slow speed and falls back to prediction', () => {
+    const tracker = new BallTracker({});
+    // Slow vertical drift: 1 px/frame — far below the blur-streak speed.
+    for (let i = 0; i < 3; i++) {
+      tracker.step(frameAt(i * DT, [ballDet(200, 200 + i)]), null);
+    }
+    // h * 1.4 = 28 < 60 = w → non-round (wide/short); speed too low for the exception.
+    const wide = ballDet(200, 203, { w: 60, h: 20, score: 0.9 });
+    const out = tracker.step(frameAt(3 * DT, [wide]), null);
+    expect(out).not.toBeNull();
+    expect(out!.predicted).toBe(true);
+    expect(out!.score).toBe(0);
+    // Prediction continues the slow drift, not the rejected box's position.
+    expect(out!.cx).toBeCloseTo(200, 0);
+    expect(out!.cy).toBeCloseTo(203, 0);
+  });
+
+  test('blur-streak exception applies to a wide/short box along a fast horizontal velocity', () => {
+    const tracker = new BallTracker({});
+    // Fast horizontal fall: 100 px/frame (3000 px/s) — over 2 diameters (60 px) per frame.
+    tracker.step(frameAt(0, [ballDet(100, 300)]), null);
+    tracker.step(frameAt(DT, [ballDet(200, 300)]), null);
+
+    // Horizontally elongated streak on the predicted path (crosscourt pass blur).
+    const streak = ballDet(300, 300, { w: 80, h: 20, score: 0.5 });
+    const out = tracker.step(frameAt(2 * DT, [streak]), null);
+    expect(out).not.toBeNull();
+    expect(out!.predicted).toBe(false);
+    expect(out!.cx).toBeCloseTo(300);
+    expect(out!.cy).toBeCloseTo(300);
+  });
+
+  test('wide/short blur-streak exception does NOT apply across the velocity direction', () => {
+    const tracker = new BallTracker({});
+    // Fast VERTICAL motion: 100 px/frame.
+    tracker.step(frameAt(0, [ballDet(300, 100)]), null);
+    tracker.step(frameAt(DT, [ballDet(300, 200)]), null);
+
+    // Wide (horizontally elongated) box across the vertical velocity —
+    // e.g. a horizontal limb/arm across the ball, not a real blur streak.
+    const wide = ballDet(300, 300, { w: 80, h: 20, score: 0.9 });
+    const out = tracker.step(frameAt(2 * DT, [wide]), null);
+    expect(out).not.toBeNull();
+    expect(out!.predicted).toBe(true);
+  });
+
   test('jump gate rejects a teleporting box, then re-acquires after the window', () => {
     const tracker = new BallTracker({});
     warmUp(tracker, 3, 100, 100);

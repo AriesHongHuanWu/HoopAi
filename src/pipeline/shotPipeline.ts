@@ -9,7 +9,7 @@
  * v2 upgrade path: move this whole class into the worklet runtime and swap
  * the scheduleOnRN hop for direct SharedValue writes (docs/ARCHITECTURE.md §2).
  */
-import { SHOT_FSM } from '../core/config';
+import { DETECTION, SHOT_FSM } from '../core/config';
 import { BallTracker } from '../core/ballTracker';
 import { estimateShotValue } from '../core/court';
 import { FormAnalyzer, coachingTips } from '../core/formAnalysis';
@@ -211,7 +211,13 @@ export class ShotPipeline {
 function bestPerson(frame: FrameDetections): Box | null {
   let best: { score: number; box: Box } | null = null;
   for (const d of frame.detections) {
-    if (d.cls === 'person' && (best == null || d.score > best.score)) {
+    // Gate on personScoreMin: a low-confidence spurious 'person' box (~0.15)
+    // must not arm phantom layups or corrupt the shooter-origin 2/3 estimate.
+    if (
+      d.cls === 'person' &&
+      d.score >= DETECTION.personScoreMin &&
+      (best == null || d.score > best.score)
+    ) {
       best = { score: d.score, box: d.box };
     }
   }

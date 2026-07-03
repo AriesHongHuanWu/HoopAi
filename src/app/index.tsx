@@ -30,7 +30,7 @@ import {
 
 import { Sparkline } from '@/components/charts/Sparkline';
 import { CoachMarks, useCoachMarks, type CoachStep } from '@/components/coach/CoachMarks';
-import { Card, Eyebrow, Row, Screen, StatNumber } from '@/components/ui';
+import { Card, EmptyState, ErrorCard, Eyebrow, Row, Screen, StatNumber } from '@/components/ui';
 import { color, radius, space, touch, type } from '@/constants/tokens';
 import { listSessions, type SessionSummaryRow } from '@/data/db';
 import { useMode } from '@/state/modeStore';
@@ -208,9 +208,16 @@ export default function HomeScreen() {
       <View style={styles.stack}>
         {/* Header: wordmark + settings */}
         <Row style={styles.header}>
-          <Text style={styles.wordmark} accessibilityRole="header">
-            HOOP <Text style={styles.wordmarkAccent}>AI</Text>
-          </Text>
+          <View
+            accessible
+            accessibilityRole="header"
+            accessibilityLabel="Hoop AI. Beta — everything unlocked."
+          >
+            <Text style={styles.wordmark}>
+              HOOP <Text style={styles.wordmarkAccent}>AI</Text>
+            </Text>
+            <Text style={styles.betaNote}>Beta — everything unlocked</Text>
+          </View>
           <Link href="/settings" asChild>
             <Pressable
               accessibilityRole="button"
@@ -222,7 +229,6 @@ export default function HomeScreen() {
             </Pressable>
           </Link>
         </Row>
-        <Text style={styles.betaNote}>Beta — everything unlocked</Text>
 
         {/* Hero Start CTA */}
         <View ref={heroRef} onLayout={() => measure(heroRef, setHeroRect)}>
@@ -273,13 +279,19 @@ export default function HomeScreen() {
         </View>
 
         {/* Last session */}
-        {lastSession === undefined ? null : dbFailed ? (
+        {lastSession === undefined ? (
           <Card>
             <Eyebrow>Last session</Eyebrow>
-            <Text style={styles.emptyBody}>
-              Couldn't load your sessions. Your stats are safe — try again after a restart.
-            </Text>
+            <Text style={styles.emptyBody}>Loading…</Text>
           </Card>
+        ) : dbFailed ? (
+          <View>
+            <Eyebrow>Last session</Eyebrow>
+            <ErrorCard
+              title="Couldn't load your sessions"
+              body="Your stats are safe — try again after a restart."
+            />
+          </View>
         ) : lastSession ? (
           <Pressable
             accessibilityRole="button"
@@ -325,13 +337,13 @@ export default function HomeScreen() {
             )}
           </Pressable>
         ) : (
-          <Card>
+          <View>
             <Eyebrow>First session</Eyebrow>
-            <Text style={styles.emptyTitle}>Prop your phone up. We'll count every shot.</Text>
-            <Text style={styles.emptyBody}>
-              Makes, misses, streaks and FG% land here after your first run.
-            </Text>
-          </Card>
+            <EmptyState
+              title="Prop your phone up. We'll count every shot."
+              body="Makes, misses, streaks and FG% land here after your first run."
+            />
+          </View>
         )}
 
         {/* Quick links */}
@@ -401,7 +413,6 @@ const styles = StyleSheet.create({
   betaNote: {
     ...type.caption,
     color: color.textFaint,
-    marginTop: -space.md,
   },
   hero: {
     minHeight: HERO_HEIGHT,

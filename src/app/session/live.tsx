@@ -15,8 +15,8 @@
  * session store and renders store state. No per-frame React updates.
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { StyleSheet, Text, View, useWindowDimensions } from 'react-native';
-import { router } from 'expo-router';
+import { Linking, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
+import { router, useNavigation } from 'expo-router';
 import * as Haptics from 'expo-haptics';
 import { useKeepAwake } from 'expo-keep-awake';
 import { Canvas, Path, Skia } from '@shopify/react-native-skia';
@@ -27,10 +27,11 @@ import Animated, {
   withRepeat,
   withTiming,
 } from 'react-native-reanimated';
-import { Camera } from 'react-native-vision-camera';
+import { Camera, useCameraPermission } from 'react-native-vision-camera';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { useAppStateGuard } from '../../camera/useAppStateGuard';
+import { ErrorBoundary } from '../../components/ErrorBoundary';
 import { useShotEngine, type ShotEngine } from '../../camera/useShotEngine';
 import { playSound, useShotSounds } from '../../camera/useShotSounds';
 import { useVoiceAnnouncements } from '../../camera/useVoiceAnnouncements';
@@ -53,6 +54,13 @@ const DRIFT_BANNER_MS = 4000;
 const PAUSED_CHIP_MS = 4000;
 /** Width of the docked HUD column in landscape (compact, rim stays clear). */
 const LANDSCAPE_HUD_WIDTH = 300;
+/**
+ * Floor for the docked column so its internal chips/buttons never compress
+ * below a usable width on a small landscape viewport (older phone rotated,
+ * split-screen multitasking). Below this the column scrolls instead of
+ * shrinking further.
+ */
+const LANDSCAPE_HUD_MIN_WIDTH = 220;
 
 /**
  * First-run HUD intro — shown once before the rim locks on, teaching the
@@ -87,7 +95,22 @@ const absoluteFill = {
   bottom: 0,
 } as const;
 
-export default function LiveSessionScreen() {
+/**
+ * Wrapped in its own {@link ErrorBoundary} so a crash mid-session (camera
+ * frame processor, Skia overlay, mode logic) shows a local recovery screen
+ * and lets the player restart the live screen fresh, instead of unwinding the
+ * whole app tree and losing the root navigation/splash state too — the root
+ * boundary in app/_layout.tsx still catches anything that escapes this one.
+ */
+export default function LiveSessionScreenBoundary() {
+  return (
+    <ErrorBoundary>
+      <LiveSessionScreen />
+    </ErrorBoundary>
+  );
+}
+
+function LiveSessionScreen() {
   useKeepAwake();
   useShotSounds();
   useVoiceAnnouncements();
@@ -123,6 +146,22 @@ export default function LiveSessionScreen() {
     if (useSession.getState().phase === 'idle') useSession.getState().beginSetup();
   }, []);
 
+  // Guard against leaving mid-session via swipe-back / hardware back button:
+  // a live session (rim locked, maybe recording) should never vanish silently.
+  // Intercept every pop attempt and surface the same confirm-end sheet the
+  // "End session" button uses; `endSession` itself calls router.replace, which
+  // is not a "back" navigation and passes straight through untouched.
+  const navigation = useNavigation();
+  useEffect(() => {
+    const sub = navigation.addListener('beforeRemove', (e) => {
+      if (ending) return; // already saving + navigating away on purpose
+      if (!rimLocked) return; // nothing to lose yet — let the back gesture through
+      e.preventDefault();
+      setConfirmEnd(true);
+    });
+    return sub;
+  }, [navigation, rimLocked, ending]);
+
   const onShot = useCallback((shot: ResolvedShot) => {
     useSession.getState().addShot(shot);
     // Fold the same resolved shot into the active game mode (no-op when none).
@@ -146,12 +185,18 @@ export default function LiveSessionScreen() {
     const store = useSession.getState();
     if (store.rimLocked) return; // re-lock after drift — already live
     store.setRimLocked(true);
-    if (useSettings.getState().soundsEnabled) playSound('rim_locked');
+    if (useSettings.getState().soundsEnabled) {
+      playSound('rim_locked', useSettings.getState().soundPack);
+    }
 
     const { recordVideo, keepMode } = useSettings.getState();
     void (async () => {
       // Stats-only sessions still go live; recording is additive.
-      await store.goLive({ keepMode: recordVideo ? keepMode : 'none', nowMs: Date.now() });
+      await store.goLive({
+        keepMode: recordVideo ? keepMode : 'none',
+        nowMs: Date.now(),
+        modeId: useMode.getState().activeMode?.modeId,
+      });
       const engine = engineRef.current;
       if (recordVideo && engine?.activeMode === 'camera') {
         try {
@@ -229,7 +274,16 @@ export default function LiveSessionScreen() {
     // A recording stopped early (app was backgrounded) already stashed its
     // file path on the store — don't lose that video.
     path = path ?? useSession.getState().recordingPath;
-    await useSession.getState().finish({ nowMs: Date.now(), videoPath: path });
+    // Snapshot the finished mode's final state (score, letters, spots…) so
+    // History can reconstruct its breakdown later. Omit entirely for Free
+    // Play / no mode so endSession leaves any previously persisted result
+    // untouched rather than clearing it.
+    const finishedMode = useMode.getState().activeMode;
+    await useSession.getState().finish({
+      nowMs: Date.now(),
+      videoPath: path,
+      ...(finishedMode != null ? { modeResultJson: JSON.stringify(finishedMode) } : {}),
+    });
     // The game ends with the session — clear it so it never leaks into the next
     // run (the hero quick-start also resets, but this covers the mode paths).
     useMode.getState().reset();
@@ -246,19 +300,28 @@ export default function LiveSessionScreen() {
 
   // ---------------------------------------------------------------------
   // Camera permission gate (camera mode only; demo mode needs nothing).
+  // `canRequestPermission` comes straight from VisionCamera's own hook (same
+  // underlying permission state the engine reads) so a permanently-denied
+  // permission (user tapped "Don't allow" twice, or toggled it off in
+  // Settings) offers a path to Settings instead of a request that silently
+  // no-ops.
   // ---------------------------------------------------------------------
   const cam = engine.camera;
+  const { canRequestPermission } = useCameraPermission();
   if (cam != null && !cam.hasPermission) {
     return (
       <Screen style={styles.permissionScreen}>
         <Text style={styles.permissionTitle}>Camera access needed</Text>
         <Text style={styles.permissionBody}>
-          The live view watches the rim to count makes and misses. Everything stays on this
-          phone.
+          {canRequestPermission
+            ? 'The live view watches the rim to count makes and misses. Everything stays on this phone.'
+            : 'Camera access is off. Turn it on in system settings to track shots.'}
         </Text>
         <PillButton
-          label="Allow camera access"
-          onPress={() => void cam.requestPermission()}
+          label={canRequestPermission ? 'Allow camera access' : 'Open settings'}
+          onPress={() =>
+            canRequestPermission ? void cam.requestPermission() : void Linking.openSettings()
+          }
           style={styles.permissionCta}
         />
         <PillButton label="Back to setup" variant="ghost" onPress={() => router.back()} />
@@ -296,7 +359,10 @@ export default function LiveSessionScreen() {
       <ShotFlash />
 
       {/* Top HUD — full-width in portrait, a compact left-docked column in
-          landscape so the hoop (usually center/right of frame) stays clear. */}
+          landscape so the hoop (usually center/right of frame) stays clear.
+          Width is clamped between a usable floor (so internal chips/buttons
+          never crush below a comfortable tap size) and whatever the viewport
+          actually has available — never wider than the screen itself. */}
       <View
         style={[
           styles.topHud,
@@ -305,8 +371,15 @@ export default function LiveSessionScreen() {
             left: insets.left + space.lg,
             right: isLandscape ? undefined : insets.right + space.lg,
             width: isLandscape
-              ? Math.min(LANDSCAPE_HUD_WIDTH, width - insets.left - insets.right - space.lg * 2)
+              ? Math.min(
+                  LANDSCAPE_HUD_WIDTH,
+                  Math.max(
+                    LANDSCAPE_HUD_MIN_WIDTH,
+                    width - insets.left - insets.right - space.lg * 2,
+                  ),
+                )
               : undefined,
+            maxWidth: isLandscape ? width - insets.left - insets.right - space.lg * 2 : undefined,
           },
         ]}
         pointerEvents="none"
@@ -325,7 +398,13 @@ export default function LiveSessionScreen() {
         {drift && (
           <View style={styles.topCenter}>
             <HudChip>
-              <Text style={styles.driftText}>Camera moved — re-aiming…</Text>
+              <Text
+                style={styles.driftText}
+                accessibilityLiveRegion="polite"
+                accessibilityLabel="Camera moved, re-aiming"
+              >
+                Camera moved — re-aiming…
+              </Text>
             </HudChip>
           </View>
         )}
@@ -421,7 +500,12 @@ function AimingOverlay() {
   }));
 
   return (
-    <View style={styles.aiming} pointerEvents="none">
+    <View
+      style={styles.aiming}
+      pointerEvents="none"
+      accessibilityLiveRegion="polite"
+      accessibilityLabel="Point the camera at the hoop. Hold steady, the rim locks in automatically."
+    >
       <Animated.View style={[styles.rimPlaceholder, boxStyle]} />
       <Text style={styles.aimTitle}>Point the camera at the hoop</Text>
       <Text style={styles.aimSub}>Hold steady — the rim locks in automatically</Text>
@@ -488,7 +572,11 @@ function RecIndicator() {
     <HudChip style={styles.recChip}>
       <Row gap={space.sm}>
         <View style={styles.recDot} accessibilityLabel="Recording" />
-        <Text style={styles.recText}>{`REC ${mm}:${ss}`}</Text>
+        <Text
+          style={styles.recText}
+          accessibilityLiveRegion="polite"
+          accessibilityLabel={`Recording, ${mm} minutes ${ss} seconds`}
+        >{`REC ${mm}:${ss}`}</Text>
       </Row>
     </HudChip>
   );

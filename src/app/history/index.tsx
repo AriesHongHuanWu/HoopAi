@@ -25,6 +25,7 @@ import {
   StatNumber,
 } from '@/components/ui';
 import { color, radius, space, type } from '@/constants/tokens';
+import { getModeDef } from '@/core/gameModes';
 import type { ShotOutcome } from '@/core/types';
 import { deleteSession, listSessions, sessionShots, type SessionSummaryRow } from '@/data/db';
 import { deleteLocalVideo } from '@/data/videoLibrary';
@@ -33,6 +34,27 @@ interface HistoryItem {
   row: SessionSummaryRow;
   /** Shot outcome sequence for the mini pip row. */
   pips: ShotOutcome[];
+}
+
+/**
+ * Small emoji + name chip for a session played under a game mode. `null`
+ * modeId (Free Play / pre-v4 rows) renders nothing so plain sessions keep
+ * their existing card shape.
+ */
+function ModeChip({ modeId }: { modeId: string | null }) {
+  if (modeId == null || modeId === 'free') return null;
+  let def;
+  try {
+    def = getModeDef(modeId as Parameters<typeof getModeDef>[0]);
+  } catch {
+    return null;
+  }
+  return (
+    <View style={styles.modeChip}>
+      <Text style={styles.modeChipEmoji}>{def.emoji}</Text>
+      <Text style={styles.modeChipLabel}>{def.name}</Text>
+    </View>
+  );
 }
 
 const EMPTY_ILLO_H = 120;
@@ -45,7 +67,11 @@ function EmptyArc() {
   const rimY = h * 0.36;
   const path = `M ${w * 0.08} ${h - 18} Q ${w * 0.45} ${-h * 0.28} ${rimX} ${rimY - 10}`;
   return (
-    <View onLayout={(e) => setW(e.nativeEvent.layout.width)} style={{ height: h }}>
+    <View
+      onLayout={(e) => setW(e.nativeEvent.layout.width)}
+      style={{ height: h }}
+      importantForAccessibility="no-hide-descendants"
+    >
       {w > 0 && (
         <Canvas style={{ width: w, height: h }}>
           <Line p1={vec(space.sm, h - 12)} p2={vec(w - space.sm, h - 12)} color={color.border} strokeWidth={2} />
@@ -114,7 +140,9 @@ export default function HistoryScreen() {
       <Text style={styles.title}>History</Text>
 
       {items === null ? (
-        <Text style={styles.dim}>Loading sessions…</Text>
+        <Card>
+          <Text style={styles.dim}>Loading sessions…</Text>
+        </Card>
       ) : items.length === 0 ? (
         <Card>
           <EmptyArc />
@@ -137,11 +165,21 @@ export default function HistoryScreen() {
             const makes = row.makes ?? 0;
             const fg = Math.round(row.fgPct * 100);
             const hasVideo = row.videoPath != null;
+            const modeName =
+              row.modeId != null && row.modeId !== 'free'
+                ? (() => {
+                    try {
+                      return getModeDef(row.modeId as Parameters<typeof getModeDef>[0]).name;
+                    } catch {
+                      return null;
+                    }
+                  })()
+                : null;
             return (
               <Pressable
                 key={row.id}
                 accessibilityRole="button"
-                accessibilityLabel={`Session on ${formatSessionDate(row.startedAt)}, ${fg} percent field goals${hasVideo ? ', has replay video' : ''}`}
+                accessibilityLabel={`Session on ${formatSessionDate(row.startedAt)}${modeName != null ? `, ${modeName}` : ''}, ${fg} percent field goals${hasVideo ? ', has replay video' : ''}`}
                 accessibilityHint="Opens the session detail. Long press to delete."
                 onPress={() =>
                   router.push({
@@ -167,6 +205,7 @@ export default function HistoryScreen() {
                             <Text style={styles.videoGlyph}>▶</Text>
                           </View>
                         )}
+                        <ModeChip modeId={row.modeId} />
                       </Row>
                       <Text style={[styles.meta, { marginTop: space.sm }]}>
                         {row.attempts} {row.attempts === 1 ? 'shot' : 'shots'} ·{' '}
@@ -233,6 +272,21 @@ const styles = StyleSheet.create({
     backgroundColor: color.accentTint,
   },
   videoGlyph: {
+    ...type.micro,
+    color: color.accent,
+  },
+  modeChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    paddingHorizontal: space.xs,
+    borderRadius: radius.sm,
+    backgroundColor: color.accentTint,
+  },
+  modeChipEmoji: {
+    fontSize: 11,
+  },
+  modeChipLabel: {
     ...type.micro,
     color: color.accent,
   },

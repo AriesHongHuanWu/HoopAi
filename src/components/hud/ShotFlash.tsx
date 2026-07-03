@@ -12,7 +12,7 @@
  * state). Auto-dismisses after motion.celebrate + fade headroom.
  */
 import React, { useEffect, useState } from 'react';
-import { StyleSheet, Text, View } from 'react-native';
+import { AccessibilityInfo, StyleSheet, Text, View } from 'react-native';
 import Animated, {
   Easing,
   FadeIn,
@@ -141,6 +141,20 @@ function ValueBadge({ value }: { value: 2 | 3 }) {
   );
 }
 
+/** Spoken confirmation for a resolved shot — independent of the Settings
+ * "voice announcements" toggle, since this is the only screen-reader signal
+ * for the core make/miss/unsure result. */
+function announcement(shot: ResolvedShot, streak: number): string {
+  if (shot.outcome === 'make') {
+    const value = shot.shotValue ?? 2;
+    const parts = [value === 3 ? 'Splash. Three pointer made.' : 'Splash. Shot made.'];
+    if (streak >= 3) parts.push(`${streak} in a row.`);
+    return parts.join(' ');
+  }
+  if (shot.outcome === 'miss') return 'Miss.';
+  return 'Unsure — review this shot later.';
+}
+
 export function ShotFlash() {
   const lastShot = useSession((s) => s.lastShot);
   const streak = useSession((s) => s.stats.currentStreak);
@@ -149,8 +163,10 @@ export function ShotFlash() {
   useEffect(() => {
     if (!lastShot) return;
     setShot(lastShot);
+    AccessibilityInfo.announceForAccessibility(announcement(lastShot, streak));
     const id = setTimeout(() => setShot(null), FLASH_MS);
     return () => clearTimeout(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lastShot]);
 
   if (!shot) return null;
@@ -159,7 +175,13 @@ export function ShotFlash() {
     const value = shot.shotValue ?? 2;
     const is3 = value === 3;
     return (
-      <View style={styles.fill} pointerEvents="none">
+      <View
+        style={styles.fill}
+        pointerEvents="none"
+        accessible
+        accessibilityLiveRegion="polite"
+        accessibilityLabel={announcement(shot, streak)}
+      >
         <Animated.View
           key={`wash-${shot.id}`}
           entering={FadeIn.duration(motion.instant)}
@@ -176,9 +198,7 @@ export function ShotFlash() {
           style={styles.center}
         >
           <View style={styles.splashRow}>
-            <Text style={styles.splash} accessibilityLabel={is3 ? 'Make, three' : 'Make'}>
-              SPLASH
-            </Text>
+            <Text style={styles.splash}>SPLASH</Text>
             <ValueBadge value={value} />
           </View>
           {is3 && <Text style={styles.downtownTag}>DOWNTOWN · +3</Text>}
@@ -190,7 +210,13 @@ export function ShotFlash() {
 
   const isMiss = shot.outcome === 'miss';
   return (
-    <View style={styles.fill} pointerEvents="none">
+    <View
+      style={styles.fill}
+      pointerEvents="none"
+      accessible
+      accessibilityLiveRegion="polite"
+      accessibilityLabel={announcement(shot, streak)}
+    >
       <Animated.View
         key={`${shot.outcome}-${shot.id}`}
         entering={FadeIn.duration(motion.quick)}

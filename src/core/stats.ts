@@ -108,8 +108,24 @@ const hiddenStates = new WeakMap<SessionStats, HiddenState>();
  * Best-effort state for a foreign stats object: assumes every decided shot
  * contributed an angle sample and derives per-zone decided counts from the
  * visible zone fgPct (falling back to zone attempts).
+ *
+ * This is an intentional, documented approximation (see module doc) for
+ * stats objects this module didn't produce itself — but it should be RARE:
+ * every object from emptyStats/applyShot/recomputeStats/pushShot carries its
+ * own exact state in the WeakMap. A non-empty stats object landing here
+ * usually means the WeakMap association was lost (e.g. structuredClone, a
+ * JSON round-trip, or a persisted/rehydrated store), which silently degrades
+ * precision — so flag it in dev builds to make that discoverable instead of
+ * silent.
  */
 function reconstructHidden(stats: SessionStats): HiddenState {
+  if (process.env.NODE_ENV !== 'production' && stats.attempts > 0) {
+    console.warn(
+      '[stats] reconstructHidden: rebuilding approximate angle/zone state ' +
+        'for a stats object this module did not produce (WeakMap association ' +
+        'lost?). Prefer objects from emptyStats/applyShot/recomputeStats/pushShot.',
+    );
+  }
   const decided = stats.makes + stats.misses;
   const zoneDecided: Record<ChartZone, number> = {
     left: 0,

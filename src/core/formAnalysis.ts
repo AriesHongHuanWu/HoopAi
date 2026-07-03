@@ -216,6 +216,27 @@ export class FormAnalyzer {
         break;
       }
       case 'PICKUP': {
+        // Re-pickup check: if the ball separates far from the wrist again
+        // (beyond the pickup reach) without a confirmed release, this was a
+        // false pickup (pump-fake, dribble/hold) — go back to WAIT so a
+        // stale, arbitrarily-deep dip baseline from the abandoned hold isn't
+        // carried into the real shot-prep dip.
+        if (ball && wrist && shoulder && hip) {
+          const reach =
+            PICKUP_REACH_FACTOR *
+            Math.hypot(shoulder.x - hip.x, shoulder.y - hip.y);
+          const dBallWrist = Math.hypot(ball.cx - wrist.x, ball.cy - wrist.y);
+          if (dBallWrist > reach) {
+            this.stage = 'WAIT';
+            this.currentPhase = null;
+            this.tPickup = null;
+            this.dipMaxWristY = -Infinity;
+            this.dipElbowDeg = null;
+            this.dipKneeDeg = null;
+            this.sepStreak = 0;
+            break;
+          }
+        }
         if (wrist) {
           if (wrist.y >= this.dipMaxWristY) {
             // Still dipping (or holding): track the lowest wrist point.

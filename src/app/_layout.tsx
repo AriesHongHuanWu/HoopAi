@@ -92,6 +92,13 @@ export default function RootLayout() {
           >
             {/* Onboarding fades in over the splash and can't be swiped away. */}
             <Stack.Screen name="onboarding" options={{ animation: 'fade', gestureEnabled: false }} />
+            {/* Live session: swipe-back would silently drop an in-progress
+                (possibly recording) session. The screen's own beforeRemove
+                listener shows a confirm-end sheet instead, but disabling the
+                iOS swipe gesture here removes the one-motion "flick and it's
+                gone" path entirely — Android hardware back still routes
+                through beforeRemove and gets the same confirmation. */}
+            <Stack.Screen name="session/live" options={{ gestureEnabled: false }} />
           </Stack>
         </ErrorBoundary>
       </ThemeProvider>

@@ -71,6 +71,16 @@ export const RIM = {
   netRoiHeightFactor: 1.2,
   /** Rebound buffer: widen the crossing span by this many px on each side. */
   crossingBufferPx: 10,
+  /**
+   * Sanity bound for a post-drift re-lock: the new cluster's box width and
+   * height must each be within this factor of the PRE-drift lock's
+   * corresponding dimension (both `new/old` and `old/new` <= factor) to be
+   * accepted as the same rim. Guards against silently re-locking onto a
+   * differently-shaped/sized object (scoreboard, hole in signage, a
+   * similarly dark circular decoy) that happens to produce 5 mutually
+   * consistent detections during a drift window.
+   */
+  relockMaxSizeRatio: 1.8,
 } as const;
 
 export const SHOT_FSM = {
@@ -90,6 +100,17 @@ export const SHOT_FSM = {
   releaseAngleSamples: 5,
   /** Max seconds a shot may stay live before force-resolving as unsure. */
   maxLiveSec: 4.0,
+  /**
+   * Layup-arm velocity gate: max downward ball speed (rim heights/sec, +y
+   * down) tolerated when arming the layup path. Rejects phantom arms from a
+   * ball that is clearly falling fast (rebound, pass, loose ball dropping
+   * past a player boxing out/retrieving it) rather than being carried/laid
+   * up near the hoop. Soft layups routinely have the ball drifting down
+   * gently in the hand right before the lay-in motion takes over, so the
+   * allowance is generous (rim heights, not ball diameters) — this is a
+   * sanity backstop against clearly-falling balls, not a tight gate.
+   */
+  layupMaxFallVyRimHeightsPerSec: 10,
 } as const;
 
 export const FORM = {

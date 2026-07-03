@@ -46,11 +46,20 @@ export function parseMoveNet(
 ): PoseFrame {
   'worklet';
   const keypoints: PoseFrame['keypoints'] = {};
-  const n = MOVENET_KEYPOINTS.length;
+  // Bounds guard: a truncated/mismatched output buffer (wrong model loaded,
+  // delegate returning a short tensor) must never index past the end of
+  // `data` — Float32Array reads out of range return `undefined`, which would
+  // otherwise flow into the NaN guard below anyway, but computing `n` from
+  // the buffer keeps the loop from doing pointless out-of-range work.
+  const n = Math.min(MOVENET_KEYPOINTS.length, Math.floor(data.length / 3));
   for (let i = 0; i < n; i++) {
     const y = data[i * 3]!;
     const x = data[i * 3 + 1]!;
     const s = data[i * 3 + 2]!;
+    // NaN/bounds guard: a corrupted tensor read must never produce a
+    // keypoint with non-finite coordinates — FormAnalyzer's angle math
+    // (src/core/formAnalysis.ts) has no defense of its own against that.
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(s)) continue;
     if (s >= scoreMin) {
       keypoints[MOVENET_KEYPOINTS[i]!] = { x: x * frameW, y: y * frameH, score: s };
     }

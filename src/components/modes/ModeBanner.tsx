@@ -38,6 +38,21 @@ function scoreLabel(mode: ModeState): string {
   }
 }
 
+/** Composed a11y string for the whole banner, mirroring StatStrip's `a11y`. */
+function bannerA11yLabel(mode: ModeState, def: ReturnType<typeof getModeDef>): string {
+  const scoreValue =
+    mode.modeId === 'horse' ? (mode.letters?.length ?? 0) : mode.score;
+  const parts = [`${def.name}.`, `${scoreLabel(mode)}: ${scoreValue}.`];
+  if (mode.modeId === 'timed') {
+    parts.push(`${Math.max(0, Math.round(mode.timeLeftSec ?? 0))} seconds left.`);
+  }
+  if (mode.modeId === 'horse' && mode.letters) {
+    parts.push(`Letters: ${mode.letters.split('').join(' ')}.`);
+  }
+  if (mode.message) parts.push(mode.message);
+  return parts.join(' ');
+}
+
 export function ModeBanner({ mode }: { mode: ModeState }) {
   const def = getModeDef(mode.modeId);
 
@@ -49,7 +64,12 @@ export function ModeBanner({ mode }: { mode: ModeState }) {
     !def.needsTimer && !def.needsSpots && mode.modeId !== 'horse' && mode.modeId !== 'threePoint';
 
   return (
-    <HudChip style={styles.chip}>
+    <HudChip
+      style={styles.chip}
+      accessible
+      accessibilityLiveRegion="polite"
+      accessibilityLabel={bannerA11yLabel(mode, def)}
+    >
       {/* Header: emoji + mode name + score numeral */}
       <View style={styles.header}>
         <View style={styles.title}>

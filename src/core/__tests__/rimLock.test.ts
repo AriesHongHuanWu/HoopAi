@@ -245,6 +245,60 @@ describe('RimLock drift and re-lock', () => {
     expect(lock.driftDetected).toBe(true);
     expect(lock.geometry!.cx).toBe(120); // still the original lock
   });
+
+  test('a mutually-consistent cluster with implausible size (decoy object) does not re-lock', () => {
+    const lock = new RimLock();
+    feed(lock, rimBox, 5); // lock at 40x20
+
+    // A much larger, mutually-consistent object (e.g. a scoreboard) at a new
+    // location — internally consistent but not plausibly the same rim.
+    // First 5 observations are rejects (flag drift); the cluster only starts
+    // accumulating once drift is flagged, so a full re-lock attempt needs 5
+    // more beyond that.
+    const decoy: Box = { x: 300, y: 150, width: 40 * 3, height: 20 * 3 };
+    for (let i = 0; i < 20; i++) {
+      lock.step(frame((5 + i) / FPS, [rimDet(decoy)]), (5 + i) / FPS);
+    }
+    expect(lock.driftDetected).toBe(true);
+    // Must NOT have re-locked onto the decoy: still the original lock.
+    expect(lock.geometry!.cx).toBe(120);
+    expect(lock.geometry!.box.width).toBe(40);
+  });
+
+  test('a mutually-consistent cluster with plausible size re-locks normally', () => {
+    const lock = new RimLock();
+    feed(lock, rimBox, 5);
+
+    // Same size as the original, just moved — plausible re-lock. Needs
+    // DRIFT_REJECT_COUNT (5) rejects to flag drift, THEN LOCK_CLUSTER_SIZE
+    // (5) more consistent observations to re-lock.
+    const moved: Box = { x: 300, y: 150, width: 40, height: 20 };
+    let g = null;
+    for (let i = 0; i < 9; i++) {
+      g = lock.step(frame((5 + i) / FPS, [rimDet(moved)]), (5 + i) / FPS);
+    }
+    expect(g).not.toBeNull();
+    expect(g!.cx).toBe(320);
+    expect(g!.cy).toBe(160);
+    expect(lock.driftDetected).toBe(false);
+  });
+
+  test('a moderately different but still plausible size re-locks (within relockMaxSizeRatio)', () => {
+    const lock = new RimLock();
+    feed(lock, rimBox, 5); // 40x20
+
+    // 1.5x size, under RIM.relockMaxSizeRatio (1.8) — perspective/parallax
+    // change from a camera bump should still be allowed to re-lock. 5 rejects
+    // to flag drift, then 5 more consistent observations to re-lock.
+    const moved: Box = { x: 300, y: 150, width: 60, height: 30 };
+    let g = null;
+    for (let i = 0; i < 10; i++) {
+      g = lock.step(frame((5 + i) / FPS, [rimDet(moved)]), (5 + i) / FPS);
+    }
+    expect(g).not.toBeNull();
+    expect(g!.box.width).toBe(60);
+    expect(lock.driftDetected).toBe(false);
+  });
 });
 
 describe('RimLock manual override and reset', () => {

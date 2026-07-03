@@ -129,3 +129,27 @@ export function getProFeature(id: ProFeatureId): ProFeature {
 export function isUnlocked(_id: ProFeatureId): boolean {
   return true;
 }
+
+/**
+ * Number of sessions a free (non-Pro) user keeps in History — the
+ * 'unlimitedHistory' Pro feature's free-tier floor (see PRO_FEATURES above).
+ *
+ * PRE-LAUNCH CHECKLIST ITEM (not enforced during beta): once IS_BETA flips to
+ * false, callers that list/prune History (e.g. src/data/db.ts listSessions,
+ * or the History screen itself) should check `isUnlocked('unlimitedHistory')`
+ * and, if false, cap the visible/retained list to this many most-recent
+ * sessions — warning the user before deleting older local video files. This
+ * constant exists now so that enforcement point has a single source of truth
+ * to reference; it intentionally does nothing on its own.
+ */
+export const FREE_HISTORY_LIMIT = 10;
+
+/**
+ * How many of `totalSessions` should be visible/retained right now, given
+ * Pro status. Beta (isUnlocked always true) ⇒ unlimited. Pure helper, no I/O —
+ * callers decide what to do with sessions beyond the returned count (e.g.
+ * hide them from History, or delete their videos before dropping the rows).
+ */
+export function historyRetentionLimit(): number | null {
+  return isUnlocked('unlimitedHistory') ? null : FREE_HISTORY_LIMIT;
+}

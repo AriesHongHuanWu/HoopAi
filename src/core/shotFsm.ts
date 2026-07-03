@@ -210,9 +210,19 @@ export class ShotFsm {
     const rim = this.rim;
     // Jump shot: ball rising through the up-zone.
     if (ball.vy < 0 && pointInBox(rim.upZone, ball.cx, ball.cy)) return true;
-    // Layup: ball above the rim plane while a person overlaps the hoop ROI.
+    // Layup: ball above the rim plane while a player carries/lays it in near
+    // the hoop. Gated on vy to reject phantom arms on a ball that is clearly
+    // falling FAST (rebound, pass, loose ball retrieved near the rim) rather
+    // than being carried up in a controlled layup motion — a soft layup can
+    // still have the ball drifting down gently in the hand right at the
+    // hoop, so the allowance (SHOT_FSM.layupMaxFallVyRimHeightsPerSec) is a
+    // generous sanity backstop, not a tight vy < 0 requirement like the
+    // jump-shot branch.
+    const maxFallVy =
+      SHOT_FSM.layupMaxFallVyRimHeightsPerSec * rim.box.height;
     if (
       ball.cy < rim.planeY &&
+      ball.vy <= maxFallVy &&
       input.personBox !== null &&
       boxesIntersect(input.personBox, rim.hoopRoi)
     ) {
@@ -274,10 +284,22 @@ export class ShotFsm {
     const traj = this.trajectory;
 
     // --- geo: FINAL descending crossing of the rim plane -----------------
+    // Prefer the final crossing whose BOTH samples are real detections (not
+    // Kalman-predicted coasts through occlusion) over a later but predicted
+    // crossing: a brief occlusion right at the rim plane — common, since the
+    // ball is frequently hidden by the rim/net at exactly this moment — can
+    // otherwise fabricate a crossing or misplace it from extrapolated
+    // positions rather than observed ones, degrading geo/entry-angle
+    // precision exactly when it matters most.
     let crossIdx = -1;
+    let realCrossIdx = -1;
     for (let i = 0; i + 1 < traj.length; i++) {
-      if (traj[i].cy <= rim.planeY && traj[i + 1].cy > rim.planeY) crossIdx = i;
+      if (traj[i].cy <= rim.planeY && traj[i + 1].cy > rim.planeY) {
+        crossIdx = i;
+        if (!traj[i].predicted && !traj[i + 1].predicted) realCrossIdx = i;
+      }
     }
+    if (realCrossIdx >= 0) crossIdx = realCrossIdx;
     let xCross: number | null = null;
     let tCross: number | null = null;
     let entryAngleDeg: number | null = null;
@@ -330,8 +352,16 @@ export class ShotFsm {
     // --- fusion -------------------------------------------------------------
     let outcome = fuse(geo, net, cls, occluded);
     if (reason === 'timeout') outcome = 'unsure';
-    // Double-count guard: a make too soon after the previous make ⇒ unsure.
-    if (outcome === 'make' && t < this.lastMakeT + SHOT_FSM.basketCooldownSec) {
+    // Double-count guard: ANY decided resolve too soon after the previous
+    // make ⇒ unsure. Residual net/ball motion trailing a real make can still
+    // produce a geo/net-agreeing 'miss' classification for a phantom second
+    // attempt within the same basket-cooldown window; demoting misses too
+    // (not just makes) avoids a spurious currentStreak reset right after a
+    // make from that trailing motion.
+    if (
+      (outcome === 'make' || outcome === 'miss') &&
+      t < this.lastMakeT + SHOT_FSM.basketCooldownSec
+    ) {
       outcome = 'unsure';
     }
     if (outcome === 'make') this.lastMakeT = t;

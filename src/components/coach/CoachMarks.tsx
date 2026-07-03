@@ -12,6 +12,17 @@
  *
  * Pair with useCoachMarks(screenKey, steps) to auto-show on first visit and
  * persist "seen" state via the settings store.
+ *
+ * A11Y CAVEAT: `accessibilityViewIsModal` (below) is iOS-only and only hides
+ * OTHER top-level siblings of this element from VoiceOver — it cannot reach
+ * into a sibling screen's own subtree, and Android has no equivalent prop at
+ * all. Because CoachMarks is mounted as a sibling of the screen content (see
+ * call sites in app/index.tsx, app/session/live.tsx, app/session/summary.tsx)
+ * rather than wrapping it, fully hiding the dimmed background from
+ * TalkBack/VoiceOver-while-scrimmed requires each host screen to also set
+ * `importantForAccessibility="no-hide-descendants"` (Android) / fold its root
+ * into this modal boundary (iOS) on its own content while `visible` is true —
+ * that wiring lives in the screen files, not here.
  */
 import React, { useState } from 'react';
 import {

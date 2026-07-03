@@ -152,6 +152,25 @@ function TopCue({ tip }: { tip: CoachingTip }) {
 // Metric row
 // ---------------------------------------------------------------------------
 
+/**
+ * Verdict glyph shown ahead of the metric value — the same colorblind-safe
+ * color + SHAPE convention as MakeMissDot: a filled check for in-range, a
+ * warning triangle for out-of-range, nothing for not-measured.
+ */
+function VerdictGlyph({ verdict }: { verdict: Verdict }) {
+  if (verdict === 'good') {
+    return (
+      <Text style={[styles.verdictGlyph, { color: VERDICT_COLOR.good }]}>✓</Text>
+    );
+  }
+  if (verdict === 'bad') {
+    return (
+      <Text style={[styles.verdictGlyph, { color: VERDICT_COLOR.bad }]}>▲</Text>
+    );
+  }
+  return null;
+}
+
 function MetricRow({ row, metrics }: { row: Row; metrics: FormMetrics }) {
   const display = row.format(metrics);
   const verdict = display == null ? 'neutral' : row.verdict(metrics);
@@ -169,9 +188,12 @@ function MetricRow({ row, metrics }: { row: Row; metrics: FormMetrics }) {
         <Text style={styles.metricLabel}>{row.label}</Text>
         <Text style={styles.metricBand}>{row.bandHint}</Text>
       </View>
-      <Text style={[styles.metricValue, { color: VERDICT_COLOR[verdict] }]}>
-        {display ?? '—'}
-      </Text>
+      <View style={styles.metricValueRow}>
+        <VerdictGlyph verdict={verdict} />
+        <Text style={[styles.metricValue, { color: VERDICT_COLOR[verdict] }]}>
+          {display ?? '—'}
+        </Text>
+      </View>
     </View>
   );
 }
@@ -185,14 +207,14 @@ function Legend() {
     <View
       style={styles.legend}
       accessible
-      accessibilityLabel="Legend: green means in the optimal range, orange means outside it, dash means not measured."
+      accessibilityLabel="Legend: check mark, green, means in the optimal range. Triangle, orange, means outside it. Dash means not measured."
     >
       <View style={styles.legendItem}>
-        <View style={[styles.legendDot, { backgroundColor: color.make }]} />
+        <VerdictGlyph verdict="good" />
         <Text style={styles.legendLabel}>In range</Text>
       </View>
       <View style={styles.legendItem}>
-        <View style={[styles.legendDot, { backgroundColor: color.accent }]} />
+        <VerdictGlyph verdict="bad" />
         <Text style={styles.legendLabel}>Out of range</Text>
       </View>
       <View style={styles.legendItem}>
@@ -287,9 +309,18 @@ const styles = StyleSheet.create({
     ...type.micro,
     color: color.textFaint,
   },
+  metricValueRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: space.xs,
+  },
   metricValue: {
     ...type.bodyMedium,
     fontVariant: ['tabular-nums'],
+  },
+  verdictGlyph: {
+    fontSize: 13,
+    lineHeight: 16,
   },
   divider: {
     height: StyleSheet.hairlineWidth,

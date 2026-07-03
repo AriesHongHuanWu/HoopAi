@@ -342,6 +342,32 @@ describe('ShotFsm', () => {
     expect(s.outcome).toBe('unsure');
   });
 
+  test('(6c) a geo-miss resolving within basketCooldownSec of a make downgrades to unsure', () => {
+    const fsm = newFsm();
+    const first = run(fsm, arcFrames({ x0: X0_CENTER, net: swishNet }));
+    expect(first.resolved[0].outcome).toBe('make');
+    const t1 = first.resolved[0].tResolved; // lastMakeT
+
+    // Second shot arms after the 1.5s shot cooldown and crosses OUTSIDE the
+    // span (a real geo-miss) at t1 + 1.7 < t1 + 2.0 (basket cooldown) — the
+    // extended guard should still demote it to unsure rather than letting it
+    // count as a genuine miss (residual motion/false crossing so soon after
+    // a real make shouldn't zero the streak).
+    const a = t1 + 1.6;
+    const seq: FsmFrameInput[] = [
+      fin(a, tb(250, 180, a, -100)),
+      fin(a + 1 / 30, tb(250, 195, a + 1 / 30, 300)),
+      fin(a + 2 / 30, tb(250, 210, a + 2 / 30, 400)),
+      fin(a + 3 / 30, tb(250, 232, a + 3 / 30, 450)),
+    ];
+    const second = run(fsm, seq);
+
+    expect(second.resolved).toHaveLength(1);
+    const s = second.resolved[0];
+    expect(s.signals.geo).toBe(false); // crossing was a genuine geo-miss
+    expect(s.outcome).toBe('unsure'); // but demoted by the cooldown guard
+  });
+
   test('(7) netless hoop (all netMotionScore = 0): geo-only make still scores make', () => {
     const fsm = newFsm();
     const { resolved } = run(fsm, arcFrames({ x0: X0_CENTER }));
@@ -368,6 +394,73 @@ describe('ShotFsm', () => {
     expect(s.outcome).toBe('unsure');
     expect(s.tResolved - s.tStart).toBeGreaterThan(4);
     expect(s.signals.geo).toBeNull();
+  });
+
+  test('(10) layup arming gate rejects a clearly falling ball near the hoop (rebound/pass), even with person overlap', () => {
+    const fsm = newFsm();
+    const person: Box = { x: 280, y: 180, width: 60, height: 120 };
+    // Ball above the plane but falling fast (vy=300 >> maxFallVy = 10 * rimHeight(20) = 200 px/s)
+    // while a person overlaps the hoop ROI — must NOT arm as a layup.
+    const frames: FsmFrameInput[] = [];
+    for (let i = 0; i < 10; i++) {
+      const t = i / FPS;
+      frames.push(fin(t, tb(310, 190 + i, t, 300), { personBox: person }));
+    }
+    const { resolved, results } = run(fsm, frames);
+    expect(resolved).toHaveLength(0);
+    for (const r of results) {
+      expect(r.phase).toBe('IDLE');
+    }
+  });
+
+  test('(11) layup arming gate allows a slowly-rising or gently-descending ball near the hoop with person overlap', () => {
+    const fsm = newFsm();
+    const person: Box = { x: 280, y: 180, width: 60, height: 120 };
+    // Ball above the plane, still descending well past the fall-fast gate
+    // (vy=250 > maxFallVy=200) — must NOT arm.
+    const notArmed = fsm.step(fin(0, tb(310, 190, 0, 250), { personBox: person }));
+    expect(notArmed.phase).toBe('IDLE');
+
+    // A soft layup: ball gently descending in the hand right at the hoop
+    // (vy=80, well under the fall-fast gate) — arms normally.
+    const fsm2 = newFsm();
+    const armed = fsm2.step(fin(0, tb(310, 190, 0, 80), { personBox: person }));
+    expect(armed.phase).toBe('SHOT_LIVE');
+
+    // A controlled rising layup (vy < 0) above the plane near the hoop also arms.
+    const fsm3 = newFsm();
+    const armedRising = fsm3.step(fin(0, tb(310, 190, 0, -50), { personBox: person }));
+    expect(armedRising.phase).toBe('SHOT_LIVE');
+  });
+
+  test('(12) resolve prefers a real (non-predicted) descending crossing over a later predicted one', () => {
+    const fsm = newFsm();
+    // Arm, then a REAL descending crossing well inside the span (cx=320,
+    // planeY=200), followed by a brief occlusion right at the rim producing
+    // Kalman-predicted samples that would (if treated identically to real
+    // detections) fabricate a LATER "crossing" via extrapolated jitter
+    // outside the span. The FINAL-real-crossing preference should still
+    // score geo from the real, in-span crossing.
+    const seq: FsmFrameInput[] = [
+      fin(0 / 30, tb(320, 180, 0 / 30, -100)), // arm (up-zone)
+      fin(1 / 30, tb(320, 190, 1 / 30, 250)),
+      fin(2 / 30, tb(320, 210, 2 / 30, 300)), // REAL descending crossing, cx=320 (in span)
+      // Occlusion begins: predicted samples drift horizontally outside the
+      // span while still hovering near the plane, then dip back above and
+      // below the plane again — a fabricated crossing from extrapolation.
+      fin(3 / 30, tb(400, 195, 3 / 30, -50, { predicted: true, score: 0 })),
+      fin(4 / 30, tb(400, 205, 4 / 30, 50, { predicted: true, score: 0 })),
+      fin(5 / 30, tb(400, 232, 5 / 30, 400, { predicted: true, score: 0 })), // below belowY → resolve
+    ];
+    const { resolved } = run(fsm, seq);
+
+    expect(resolved).toHaveLength(1);
+    const s = resolved[0];
+    // Must have used the REAL crossing (cx≈320, in span) not the predicted
+    // one further out (cx=400, outside span).
+    expect(s.xCross).not.toBeNull();
+    expect(Math.abs((s.xCross as number) - 320)).toBeLessThan(5);
+    expect(s.signals.geo).toBe(true);
   });
 
   test('(9) origin captured normalized from the person foot midpoint at arming', () => {

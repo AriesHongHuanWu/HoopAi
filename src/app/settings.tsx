@@ -9,7 +9,7 @@ import Constants from 'expo-constants';
 import * as Haptics from 'expo-haptics';
 import { router } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
-import { Pressable, StyleSheet, Switch, Text, View } from 'react-native';
+import { Linking, Pressable, StyleSheet, Switch, Text, View } from 'react-native';
 
 import {
   getSoundSource,
@@ -17,6 +17,7 @@ import {
   SOUND_PACK_LABELS,
   type SoundPack,
 } from '@/camera/soundPacks';
+import { BackPill } from '@/components/ShotList';
 import { Card, Eyebrow, Row, Screen } from '@/components/ui';
 import { color, radius, space, touch, type } from '@/constants/tokens';
 import type { ShootingHand } from '@/core/types';
@@ -34,6 +35,21 @@ import {
 const MIN_HEIGHT_CM = 120;
 const MAX_HEIGHT_CM = 230;
 const DEFAULT_HEIGHT_CM = 175;
+
+/**
+ * Privacy policy + support links, required by App Store Connect / Play
+ * Console before submission.
+ *
+ * TODO(launch, blocking): PRIVACY_POLICY_URL currently points at the repo
+ * root, NOT a real policy page — there isn't one yet. Publish an actual
+ * privacy policy (what the camera/mic/photo-library permissions are used
+ * for, that video stays on-device unless the user shares it, whether any
+ * analytics/crash reporting is added later) and repoint this before
+ * submitting to App Store Connect / Play Console, which also require this
+ * same URL in their listing metadata.
+ */
+const PRIVACY_POLICY_URL = 'https://github.com/AriesHongHuanWu/HoopAi';
+const SUPPORT_EMAIL_URL = 'mailto:support@hoopai.app?subject=HoopAI%20support';
 
 const VOICE_OPTIONS: { value: VoiceMetric; label: string }[] = [
   { value: 'none', label: 'Off' },
@@ -125,6 +141,14 @@ function ToggleRow({
   );
 }
 
+/**
+ * Single-choice pickers on this screen use one of two patterns — pick by
+ * content shape, not preference:
+ * - SelectChip: short, single-word-ish options with no blurb needed
+ *   (sound pack, voice metric, detector model, shooting hand).
+ * - OptionRow: options that need a one-line explanation per choice
+ *   (detection rate, clip keep mode).
+ */
 function SelectChip({
   label,
   selected,
@@ -349,11 +373,6 @@ export default function SettingsScreen() {
     router.push('/onboarding');
   };
 
-  const goBack = () => {
-    if (router.canGoBack()) router.back();
-    else router.replace('/');
-  };
-
   const bumpHeight = (delta: number) => {
     tick();
     // First tap lands on a sensible default; later taps step by 1 cm.
@@ -369,20 +388,12 @@ export default function SettingsScreen() {
   return (
     <Screen scroll>
       <View style={styles.stack}>
-        <Row gap={space.sm} style={styles.header}>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Back"
-            onPress={goBack}
-            hitSlop={space.sm}
-            style={({ pressed }) => [styles.backButton, pressed && { backgroundColor: color.surfaceRaised }]}
-          >
-            <Text style={styles.backGlyph}>{'‹'}</Text>
-          </Pressable>
-          <Text style={styles.title} accessibilityRole="header">
-            Settings
-          </Text>
+        <Row style={styles.header}>
+          <BackPill />
         </Row>
+        <Text style={styles.title} accessibilityRole="header">
+          Settings
+        </Text>
 
         {/* Feedback */}
         <Card>
@@ -627,7 +638,10 @@ export default function SettingsScreen() {
           <Row style={styles.settingRow} gap={space.lg}>
             <View style={styles.settingText}>
               <Text style={styles.settingLabel}>Height</Text>
-              <Text style={styles.settingDesc}>Calibrates release height and arc estimates.</Text>
+              <Text style={styles.settingDesc}>
+                Saved to your profile. Not yet used to calibrate estimates — coming in a future
+                update.
+              </Text>
             </View>
             <Row gap={space.sm}>
               <StepperButton
@@ -686,6 +700,18 @@ export default function SettingsScreen() {
               josephattalla/Basketball-Shot-Detection and Ed-Zh/Basketball-Analytics.
             </Text>
           </View>
+          <View style={styles.divider} />
+          <ActionRow
+            label="Privacy policy"
+            description="How your camera, video and session data are used and stored."
+            onPress={() => void Linking.openURL(PRIVACY_POLICY_URL)}
+          />
+          <View style={styles.divider} />
+          <ActionRow
+            label="Contact support"
+            description="Questions or an issue with a session? We read every email."
+            onPress={() => void Linking.openURL(SUPPORT_EMAIL_URL)}
+          />
         </Card>
       </View>
     </Screen>
@@ -700,20 +726,10 @@ const styles = StyleSheet.create({
   header: {
     marginBottom: space.sm,
   },
-  backButton: {
-    width: touch.minTarget,
-    height: touch.minTarget,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderRadius: radius.pill,
-  },
-  backGlyph: {
-    ...type.statMedium,
-    color: color.text,
-  },
   title: {
     ...type.title,
     color: color.text,
+    marginBottom: space.lg,
   },
   settingRow: {
     minHeight: touch.minTarget,

@@ -165,7 +165,7 @@ export default function SessionSummaryScreen() {
                 label={
                   saveStatus === 'saved'
                     ? 'Saved to Photos'
-                    : 'Couldn’t save — check permissions'
+                    : "Couldn't save — check permissions"
                 }
                 tone={saveStatus === 'saved' ? 'make' : 'unsure'}
               />
@@ -194,7 +194,7 @@ export default function SessionSummaryScreen() {
           />
           {shareFailed && (
             <View style={{ marginTop: space.lg }}>
-              <Chip label="Couldn’t share — try again" tone="unsure" />
+              <Chip label="Couldn't share — try again" tone="unsure" />
             </View>
           )}
           <Row gap={space.md} style={{ marginTop: shareFailed ? space.md : space.xl }}>

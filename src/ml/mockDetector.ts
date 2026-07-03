@@ -8,7 +8,7 @@
 import { DETECTION } from '../core/config';
 import type { Detection, FrameDetections } from '../core/types';
 
-const SIZE = 640;
+const SIZE = DETECTION.inputSize;
 const RIM = { x: 420, y: 180, width: 80, height: 24 };
 const PERSON = { x: 80, y: 300, width: 90, height: 260 };
 const G = 900; // px/s²

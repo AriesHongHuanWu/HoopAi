@@ -36,7 +36,7 @@ import {
   formatSessionDate,
   useSessionRecord,
 } from '@/components/ShotList';
-import { Card, Chip, Eyebrow, PillButton, Row, Screen } from '@/components/ui';
+import { Chip, ErrorCard, Eyebrow, PillButton, Row, Screen } from '@/components/ui';
 import { ShotInfoStrip } from '@/components/video/ShotInfoStrip';
 import { ShotTimeline, type TimelineMarker } from '@/components/video/ShotTimeline';
 import { color, radius, space, touch, type } from '@/constants/tokens';
@@ -190,16 +190,14 @@ export default function VideoReplayScreen() {
           <BackPill />
         </Row>
         <Eyebrow>Replay</Eyebrow>
-        <Card>
-          <Text style={styles.heading}>
-            {session == null ? 'Session not found' : 'No recording for this session'}
-          </Text>
-          <Text style={[styles.dim, { marginTop: space.xs }]}>
-            {session == null
+        <ErrorCard
+          title={session == null ? 'Session not found' : 'No recording for this session'}
+          body={
+            session == null
               ? 'This session may have been deleted. Head back to your history.'
-              : 'This session was saved without video. Turn on video recording in settings to capture your next one.'}
-          </Text>
-        </Card>
+              : 'This session was saved without video. Turn on video recording in settings to capture your next one.'
+          }
+        />
       </Screen>
     );
   }

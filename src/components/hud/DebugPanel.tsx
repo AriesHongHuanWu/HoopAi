@@ -19,13 +19,34 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { EngineDebug } from '../../camera/useShotEngine';
 import { color, radius, space, type } from '../../constants/tokens';
 
+/** Fields worth a re-render — a static frame between detections shouldn't
+ * force React to redraw the panel 4x/second. */
+function debugChanged(a: EngineDebug, b: EngineDebug): boolean {
+  return (
+    a.frames !== b.frames ||
+    a.maxScore !== b.maxScore ||
+    a.detCount !== b.detCount ||
+    a.delegate !== b.delegate ||
+    a.modelLoaded !== b.modelLoaded ||
+    a.modelError !== b.modelError ||
+    a.mode !== b.mode ||
+    a.outputLen !== b.outputLen ||
+    a.layout !== b.layout ||
+    a.inputMin !== b.inputMin ||
+    a.inputMax !== b.inputMax
+  );
+}
+
 export function DebugPanel({ debug }: { debug: SharedValue<EngineDebug> }) {
   const [d, setD] = useState<EngineDebug>(debug.value);
   const insets = useSafeAreaInsets();
   const { width, height } = useWindowDimensions();
   const isLandscape = width > height;
   useEffect(() => {
-    const id = setInterval(() => setD({ ...debug.value }), 250);
+    const id = setInterval(() => {
+      const next = debug.value;
+      setD((prev) => (debugChanged(prev, next) ? { ...next } : prev));
+    }, 250);
     return () => clearInterval(id);
   }, [debug]);
 

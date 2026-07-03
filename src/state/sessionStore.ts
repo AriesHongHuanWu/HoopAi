@@ -11,6 +11,7 @@ import {
   updateShotOutcome,
   updateShotValue,
 } from '../data/db';
+import { getModeDef } from '../core/gameModes';
 import {
   createAccumulator,
   pushShot,
@@ -18,6 +19,7 @@ import {
   type StatsAccumulator,
 } from '../core/stats';
 import type {
+  GameModeId,
   ResolvedShot,
   SessionStats,
   ShotOutcome,
@@ -31,6 +33,14 @@ interface ShotEntry {
   shot: ResolvedShot;
   /** DB row id (assigned async after insert). */
   rowId: number | null;
+  /**
+   * The outcome value already flushed to the DB for this row (or null before
+   * insertShot resolves). Used so a correction made while the row id was
+   * still in flight is guaranteed to be persisted exactly once, against the
+   * LATEST outcome, rather than only when it happens to differ from the
+   * outcome captured at addShot-call time.
+   */
+  syncedOutcome: ShotOutcome | null;
 }
 
 export interface SessionState {
@@ -55,7 +65,7 @@ export interface SessionState {
   beginSetup: () => void;
   setRimLocked: (locked: boolean) => void;
   /** Creates the DB session row and flips to live. */
-  goLive: (opts: { keepMode: string; nowMs: number }) => Promise<void>;
+  goLive: (opts: { keepMode: string; nowMs: number; modeId?: GameModeId | null }) => Promise<void>;
   addShot: (shot: ResolvedShot) => void;
   /** One-tap make↔miss correction by shot id (in-session index). */
   correctShot: (shotId: number, outcome: ShotOutcome) => void;
@@ -67,13 +77,34 @@ export interface SessionState {
   correctShotValue: (shotId: number, value: ShotValue) => void;
   consumeSound: () => SoundEvent | null;
   setRecording: (recording: boolean, path?: string | null, startSec?: number | null) => void;
-  finish: (opts: { nowMs: number; videoPath?: string | null }) => Promise<void>;
+  /**
+   * `modeResultJson`, when supplied, is a JSON snapshot of the final
+   * ModeState (src/core/gameModes.ts ModeState) so History can reconstruct
+   * the mode's final breakdown later. Omit entirely for Free Play / no mode
+   * — passing undefined leaves the persisted column untouched rather than
+   * clearing it.
+   */
+  finish: (opts: {
+    nowMs: number;
+    videoPath?: string | null;
+    modeResultJson?: string | null;
+  }) => Promise<void>;
   resetToIdle: () => void;
 }
 
 const emptyAcc = (): StatsAccumulator => createAccumulator();
 
 let acc: StatsAccumulator = emptyAcc();
+
+/**
+ * Bumped every time the session identity changes (beginSetup / goLive /
+ * resetToIdle). addShot captures the generation live at call time and its
+ * async insertShot callback checks it before mutating the store, so a shot
+ * from a stale (already-reset or superseded) session can never leak into the
+ * next one — closing the cross-session race the module-level `acc` singleton
+ * would otherwise be exposed to.
+ */
+let sessionGeneration = 0;
 
 export const useSession = create<SessionState>((set, get) => ({
   phase: 'idle',
@@ -90,6 +121,7 @@ export const useSession = create<SessionState>((set, get) => ({
 
   beginSetup: () => {
     acc = emptyAcc();
+    sessionGeneration += 1;
     set({
       phase: 'setup',
       sessionId: null,
@@ -107,23 +139,34 @@ export const useSession = create<SessionState>((set, get) => ({
 
   setRimLocked: (locked) => set({ rimLocked: locked }),
 
-  goLive: async ({ keepMode, nowMs }) => {
+  goLive: async ({ keepMode, nowMs, modeId }) => {
     // Persistence is best-effort: if the DB is unavailable the session still
     // goes live in memory (sessionId null ⇒ shots are simply not persisted).
     let id: number | null = null;
+    // Auto-label the session with the mode's display name (e.g. "H-O-R-S-E")
+    // so History can identify a mode game vs Free Play without a join;
+    // getModeDef is a static lookup over GAME_MODES, never throws for a valid
+    // GameModeId. Free Play / no mode keeps the historical '' default.
+    const label = modeId != null && modeId !== 'free' ? getModeDef(modeId).name : undefined;
     try {
-      const rowId = await createSession({ startedAt: nowMs, keepMode });
+      const rowId = await createSession({
+        startedAt: nowMs,
+        keepMode,
+        modeId: modeId ?? null,
+        label,
+      });
       id = rowId >= 0 ? rowId : null;
     } catch (err) {
       console.warn('[session] createSession failed; continuing without persistence', err);
     }
+    sessionGeneration += 1;
     set({ phase: 'live', sessionId: id, startedAtMs: nowMs });
   },
 
   addShot: (shot) => {
     acc = pushShot(acc, shot);
     const sound = streakSoundFor(acc.stats.currentStreak, shot.outcome);
-    const entry: ShotEntry = { shot, rowId: null };
+    const entry: ShotEntry = { shot, rowId: null, syncedOutcome: null };
     set((s) => ({
       shots: [...s.shots, entry],
       stats: acc.stats,
@@ -131,22 +174,40 @@ export const useSession = create<SessionState>((set, get) => ({
       lastShot: shot,
     }));
     const sessionId = get().sessionId;
+    // Capture the session identity NOW: if beginSetup/resetToIdle/goLive run
+    // again before insertShot resolves, this closure must not touch the new
+    // session's state (the module-level `acc` and the store's `shots` array
+    // would otherwise leak a shot from the old session into the new one).
+    const generation = sessionGeneration;
     if (sessionId != null) {
       void insertShot(sessionId, shot)
         .then((rowId) => {
+          if (sessionGeneration !== generation) return;
           // insertShot returns -1 when persistence failed — keep rowId null so
           // later corrections don't try to update a nonexistent row.
           if (rowId < 0) return;
           set((s) => ({
             shots: s.shots.map((e) => (e.shot.id === shot.id ? { ...e, rowId } : e)),
           }));
-          // If the shot was corrected before its row id arrived, persist now —
-          // otherwise the DB keeps the pre-correction outcome forever.
+          // Always flush the CURRENT outcome once the row id is known — not
+          // just when it differs from the outcome captured at addShot time —
+          // so a second correction that lands while rowId was still null is
+          // guaranteed to be persisted exactly once, with the latest value,
+          // rather than racing a diff against a stale snapshot.
           const current = get().shots.find((e) => e.shot.id === shot.id);
-          if (current && current.shot.outcome !== shot.outcome) {
-            updateShotOutcome(rowId, current.shot.outcome).catch((err) => {
-              console.warn('[session] late outcome sync failed', err);
-            });
+          if (current) {
+            updateShotOutcome(rowId, current.shot.outcome)
+              .then(() => {
+                if (sessionGeneration !== generation) return;
+                set((s) => ({
+                  shots: s.shots.map((e) =>
+                    e.shot.id === shot.id ? { ...e, syncedOutcome: current.shot.outcome } : e,
+                  ),
+                }));
+              })
+              .catch((err) => {
+                console.warn('[session] late outcome sync failed', err);
+              });
           }
         })
         .catch((err) => {
@@ -158,6 +219,7 @@ export const useSession = create<SessionState>((set, get) => ({
   },
 
   correctShot: (shotId, outcome) => {
+    const generation = sessionGeneration;
     set((s) => {
       // Unknown shot id (stale UI, double correction race): leave state alone.
       if (!s.shots.some((e) => e.shot.id === shotId)) return s;
@@ -171,9 +233,19 @@ export const useSession = create<SessionState>((set, get) => ({
       acc = shots.reduce((a, e) => pushShot(a, e.shot), createAccumulator());
       const target = shots.find((e) => e.shot.id === shotId);
       if (target?.rowId != null && target.rowId >= 0) {
-        updateShotOutcome(target.rowId, outcome).catch((err) => {
-          console.warn('[session] updateShotOutcome failed', err);
-        });
+        const rowId = target.rowId;
+        updateShotOutcome(rowId, outcome)
+          .then(() => {
+            if (sessionGeneration !== generation) return;
+            set((s2) => ({
+              shots: s2.shots.map((e) =>
+                e.shot.id === shotId ? { ...e, syncedOutcome: outcome } : e,
+              ),
+            }));
+          })
+          .catch((err) => {
+            console.warn('[session] updateShotOutcome failed', err);
+          });
       }
       return { shots, stats: acc.stats, lastShot: shots[shots.length - 1]?.shot ?? null };
     });
@@ -217,7 +289,7 @@ export const useSession = create<SessionState>((set, get) => ({
       recordingStartSec: startSec !== undefined ? startSec : s.recordingStartSec,
     })),
 
-  finish: async ({ nowMs, videoPath }) => {
+  finish: async ({ nowMs, videoPath, modeResultJson }) => {
     const { sessionId, phase, recordingStartSec } = get();
     // Idempotent: a double-tap on End (or a background/foreground race) must
     // not end the session twice or overwrite endedAt with a later timestamp.
@@ -230,6 +302,10 @@ export const useSession = create<SessionState>((set, get) => ({
           endedAt: nowMs,
           videoPath: videoPath ?? null,
           recordingStartSec,
+          // Only include the key when the caller actually has a mode result —
+          // omitting it (rather than passing null) leaves any previously
+          // persisted result untouched (see endSession's COALESCE).
+          ...(modeResultJson !== undefined ? { modeResultJson } : {}),
         });
       } catch (err) {
         console.warn('[session] endSession failed', err);
@@ -239,6 +315,7 @@ export const useSession = create<SessionState>((set, get) => ({
 
   resetToIdle: () => {
     acc = emptyAcc();
+    sessionGeneration += 1;
     set({
       phase: 'idle',
       sessionId: null,

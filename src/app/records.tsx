@@ -77,7 +77,9 @@ export default function RecordsScreen() {
         </Row>
         <Eyebrow>Records</Eyebrow>
         <Text style={styles.title}>Lifetime</Text>
-        <Text style={styles.dim}>Loading your records…</Text>
+        <Card>
+          <Text style={styles.dim}>Loading your records…</Text>
+        </Card>
       </Screen>
     );
   }
@@ -137,7 +139,9 @@ export default function RecordsScreen() {
         {unlocked.length > 0 && (
           <View>
             <Row style={styles.sectionHeader}>
-              <Eyebrow>Unlocked</Eyebrow>
+              <View style={styles.eyebrowTrim}>
+                <Eyebrow>Unlocked</Eyebrow>
+              </View>
               <Chip label={`${unlocked.length} of ${ACHIEVEMENTS.length}`} tone="accent" />
             </Row>
             <BadgeList defs={unlocked} totals={totals} unlocked />
@@ -179,9 +183,15 @@ const styles = StyleSheet.create({
   },
   sectionHeader: {
     justifyContent: 'space-between',
-    // Eyebrow carries its own bottom margin; align the chip with the text.
-    alignItems: 'flex-start',
+    alignItems: 'center',
     marginBottom: space.xs,
+  },
+  // Eyebrow (src/components/ui.tsx) bakes in its own marginBottom: space.sm,
+  // which pushes its text off-center against a trailing Chip in this Row.
+  // Cancel it locally so the Row's `alignItems: 'center'` aligns the actual
+  // text baseline against the Chip instead of the Eyebrow's padded box.
+  eyebrowTrim: {
+    marginBottom: -space.sm,
   },
   badgeList: {
     gap: space.sm,
