@@ -125,6 +125,7 @@ export default function LiveSessionScreen() {
   }, []);
 
   const engine = useShotEngine('auto', { onShot, onRimLocked, onRimDrift });
+  const debugMode = useSettings((s) => s.debugMode);
   useEffect(() => {
     engineRef.current = engine;
   }, [engine]);
@@ -203,7 +204,7 @@ export default function LiveSessionScreen() {
 
       <TrajectoryOverlay overlay={engine.overlay} />
 
-      <DebugPanel debug={engine.debug} />
+      {debugMode && <DebugPanel debug={engine.debug} />}
 
       {!rimLocked && <AimingOverlay />}
 

@@ -13,6 +13,13 @@ export type KeepMode = 'makes' | 'decided' | 'all' | 'none';
 /** Metric read aloud after each shot (HomeCourt-style voice announcements). */
 export type VoiceMetric = 'none' | 'result' | 'entryAngle' | 'fgPct';
 
+/**
+ * Which detector to run. 'standard' = YOLO11n (fast, lightest battery, best
+ * for older phones). 'precise' = YOLO11s trained on more scenes (higher
+ * accuracy, slower — best on recent phones).
+ */
+export type DetectorModel = 'standard' | 'precise';
+
 export interface SettingsState {
   soundsEnabled: boolean;
   hapticsEnabled: boolean;
@@ -24,6 +31,9 @@ export interface SettingsState {
   /** For jump/release-height calibration. Null until profile setup. */
   playerHeightCm: number | null;
   onboardingDone: boolean;
+  detectorModel: DetectorModel;
+  /** Show the on-screen detection diagnostics panel. Default off. */
+  debugMode: boolean;
 
   set: <K extends keyof SettingsState>(key: K, value: SettingsState[K]) => void;
 }
@@ -39,6 +49,8 @@ export const useSettings = create<SettingsState>()(
       shootingHand: 'right',
       playerHeightCm: null,
       onboardingDone: false,
+      detectorModel: 'standard',
+      debugMode: false,
       set: (key, value) => set({ [key]: value } as Pick<SettingsState, typeof key>),
     }),
     {

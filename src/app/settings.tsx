@@ -174,6 +174,8 @@ export default function SettingsScreen() {
   const voiceMetric = useSettings((s) => s.voiceMetric);
   const shootingHand = useSettings((s) => s.shootingHand);
   const playerHeightCm = useSettings((s) => s.playerHeightCm);
+  const detectorModel = useSettings((s) => s.detectorModel);
+  const debugMode = useSettings((s) => s.debugMode);
   const set = useSettings((s) => s.set);
 
   const goBack = () => {
@@ -252,6 +254,46 @@ export default function SettingsScreen() {
               />
             ))}
           </View>
+        </Card>
+
+        {/* Detection */}
+        <Card>
+          <Eyebrow>Detection</Eyebrow>
+          <View style={styles.settingText}>
+            <Text style={styles.settingLabel}>Detector model</Text>
+            <Text style={styles.settingDesc}>
+              Standard is fast and battery-friendly. Precise sees more courts
+              and lighting but runs slower — best on recent phones.
+            </Text>
+          </View>
+          <View style={styles.chipWrap}>
+            <SelectChip
+              label="Standard · fast"
+              selected={detectorModel === 'standard'}
+              onPress={() => {
+                tick();
+                set('detectorModel', 'standard');
+              }}
+            />
+            <SelectChip
+              label="Precise · accurate"
+              selected={detectorModel === 'precise'}
+              onPress={() => {
+                tick();
+                set('detectorModel', 'precise');
+              }}
+            />
+          </View>
+          <View style={styles.divider} />
+          <ToggleRow
+            label="Debug mode"
+            description="Show live detector diagnostics over the camera."
+            value={debugMode}
+            onValueChange={(v) => {
+              tick();
+              set('debugMode', v);
+            }}
+          />
         </Card>
 
         {/* Video */}

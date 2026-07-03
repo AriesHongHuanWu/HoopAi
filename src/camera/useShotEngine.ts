@@ -30,10 +30,16 @@ import type { Box, ResolvedShot, RimGeometry } from '../core/types';
 import { createMockDetector } from '../ml/mockDetector';
 import { parseYoloOutput } from '../ml/yoloParser';
 import { ShotPipeline, type FramePayload } from '../pipeline/shotPipeline';
+import { useSettings } from '../state/settingsStore';
 
-// Placeholder until a trained model replaces it (load failure → demo mode).
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const MODEL_ASSET = require('../../assets/models/hoopai-det.tflite');
+// Bundled detectors (user-selectable in Settings). 'standard' = YOLO11n
+// (fast); 'precise' = YOLO11s trained on more scenes (accurate, slower).
+/* eslint-disable @typescript-eslint/no-var-requires */
+const MODEL_ASSETS = {
+  standard: require('../../assets/models/hoopai-det.tflite'),
+  precise: require('../../assets/models/hoopai-det-precise.tflite'),
+} as const;
+/* eslint-enable @typescript-eslint/no-var-requires */
 
 export type EngineMode = 'auto' | 'demo' | 'camera';
 
@@ -136,19 +142,30 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
     error: string;
   }>({ model: null, delegate: 'loading', error: '' });
 
+  const detectorModel = useSettings((s) => s.detectorModel);
+
   useEffect(() => {
     let alive = true;
+    setModelState({ model: null, delegate: 'loading', error: '' });
     void (async () => {
-      const attempts: { label: string; delegates: ('core-ml' | 'android-gpu')[] }[] =
+      const fast: { label: string; delegates: ('core-ml' | 'android-gpu')[] } =
         Platform.OS === 'ios'
-          ? [{ label: 'core-ml', delegates: ['core-ml'] }, { label: 'cpu', delegates: [] }]
-          : [{ label: 'android-gpu', delegates: ['android-gpu'] }, { label: 'cpu', delegates: [] }];
+          ? { label: 'core-ml', delegates: ['core-ml'] }
+          : { label: 'android-gpu', delegates: ['android-gpu'] };
+      // Selected model with fast delegate → selected on CPU → the OTHER
+      // bundled model on CPU (never strand the user in demo mode).
+      const other = detectorModel === 'standard' ? 'precise' : 'standard';
+      const attempts = [
+        { asset: MODEL_ASSETS[detectorModel], label: `${detectorModel}/${fast.label}`, delegates: fast.delegates },
+        { asset: MODEL_ASSETS[detectorModel], label: `${detectorModel}/cpu`, delegates: [] as ('core-ml' | 'android-gpu')[] },
+        { asset: MODEL_ASSETS[other], label: `${other}/cpu`, delegates: [] as ('core-ml' | 'android-gpu')[] },
+      ];
       let lastError = '';
       for (const a of attempts) {
         try {
-          const m = await loadTensorflowModel(MODEL_ASSET, a.delegates);
+          const m = await loadTensorflowModel(a.asset, a.delegates);
           if (!alive) return;
-          setModelState({ model: m, delegate: a.label, error: '' });
+          setModelState({ model: m, delegate: a.label, error: lastError });
           return;
         } catch (e) {
           lastError = `${a.label}: ${String(e).slice(0, 160)}`;
@@ -160,7 +177,7 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
     return () => {
       alive = false;
     };
-  }, []);
+  }, [detectorModel]);
 
   const isModelLoaded = modelState.model != null;
   const activeMode: 'demo' | 'camera' =
