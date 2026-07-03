@@ -5,12 +5,7 @@
  */
 import { describe, expect, test, beforeEach } from '@jest/globals';
 
-import {
-  __resetLayoutCacheForTests,
-  CLASS_ORDER,
-  nmsPerClass,
-  parseYoloOutput,
-} from '../yoloParser';
+import { CLASS_ORDER, nmsPerClass, parseYoloOutput } from '../yoloParser';
 import type { Detection } from '../../core/types';
 
 const NC = CLASS_ORDER.length; // 4: ball, rim, ball_in_basket, person
@@ -47,10 +42,6 @@ function buildChannelsLast(
   }
   return data;
 }
-
-beforeEach(() => {
-  __resetLayoutCacheForTests();
-});
 
 describe('parseYoloOutput — layout auto-detection', () => {
   test('detects channels-first pixel-space boxes', () => {
@@ -89,43 +80,17 @@ describe('parseYoloOutput — layout auto-detection', () => {
     expect(out.detections[0]!.box.y).toBeCloseTo(160 - 16);
   });
 
-  test('locks the winning layout after enough confident frames and skips the second parse', () => {
+  test('picks the correct layout per frame (pure, no cross-frame state)', () => {
     const n = 100;
     const clData = buildChannelsLast(n, [
       { i: 20, cx: 300, cy: 300, w: 20, h: 20, cls: 0, score: 0.95 },
     ]);
-    // Feed 5 confident channels-last frames to cross the lock threshold.
-    let last;
-    for (let k = 0; k < 5; k++) {
-      last = parseYoloOutput(clData, k, { inputSize: 640 });
-      expect(last.debug?.layout).toBe('channels-last');
-    }
-    // Now feed a frame that, if BOTH layouts were tried, would actually score
-    // higher under channels-first (i.e. self-detection would flip away from
-    // channels-last) — but since the layout is now locked, it must still be
-    // reported as channels-last.
+    expect(parseYoloOutput(clData, 0, { inputSize: 640 }).debug?.layout).toBe('channels-last');
+    // A later channels-first frame is judged on its own merits (no lock-in).
     const cfData = buildChannelsFirst(n, [
       { i: 20, cx: 300, cy: 300, w: 20, h: 20, cls: 0, score: 0.99 },
     ]);
-    const afterLock = parseYoloOutput(cfData, 10, { inputSize: 640 });
-    expect(afterLock.debug?.layout).toBe('channels-last');
-  });
-
-  test('does not lock the layout on all-empty warm-up frames', () => {
-    const n = 50;
-    const empty = new Float32Array(ROWS * n); // all zeros, no detections
-    for (let k = 0; k < 10; k++) {
-      parseYoloOutput(empty, k, { inputSize: 640 });
-    }
-    // Now a confident channels-last frame should still be correctly detected,
-    // proving the empty frames never locked in a (possibly wrong) layout.
-    const n2 = 50;
-    const clData = buildChannelsLast(n2, [
-      { i: 3, cx: 100, cy: 100, w: 20, h: 20, cls: 3, score: 0.8 },
-    ]);
-    const out = parseYoloOutput(clData, 11, { inputSize: 640 });
-    expect(out.debug?.layout).toBe('channels-last');
-    expect(out.detections[0]!.cls).toBe('person');
+    expect(parseYoloOutput(cfData, 1, { inputSize: 640 }).debug?.layout).toBe('channels-first');
   });
 });
 

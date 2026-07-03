@@ -141,23 +141,11 @@ export function nmsPerClass(dets: Detection[], iouThreshold: number): Detection[
   return out;
 }
 
-// Layout self-detection is a per-BUILD constant (the exported model's output
-// tensor shape never changes frame to frame at runtime), so we only need to
-// run the expensive double-parse until we've seen a handful of confident
-// frames, then lock the winning layout in for the rest of the session. This
-// lives as worklet-module state: each Reanimated worklet runtime keeps its
-// own copy, which is exactly what we want (persists across calls on the
-// frame-processor thread, doesn't leak into the JS-thread module instance).
-let cachedChannelsFirst: boolean | null = null;
-/** How many confident (non-empty) frames to self-detect over before locking. */
-const LAYOUT_LOCK_AFTER_FRAMES = 5;
-let confidentFrameCount = 0;
-
-/** Test-only: reset the cached layout decision between unrelated test cases. */
-export function __resetLayoutCacheForTests(): void {
-  cachedChannelsFirst = null;
-  confidentFrameCount = 0;
-}
+// NOTE: parseYoloOutput is a WORKLET. It MUST stay pure — no module-level
+// mutable state. Reanimated captures module vars by value (readonly) into the
+// frame-processor runtime, so writing to a module `let` from inside the worklet
+// throws/crashes on the first frame (this exact "layout lock cache" once did).
+// Parsing both layouts every frame is cheap (~2×33k ops) and always correct.
 
 // IMPORTANT: this function calls nmsPerClass (and extract, above), and must
 // be declared AFTER both. Reanimated's worklet Babel plugin turns every
@@ -186,32 +174,14 @@ export function parseYoloOutput(
   const rows = 4 + nc;
   const n = Math.floor(data.length / rows);
 
-  let useCf: boolean;
-  let chosen: Extracted;
-
-  if (cachedChannelsFirst !== null) {
-    // Layout already locked in for this session — skip the second parse.
-    useCf = cachedChannelsFirst;
-    chosen = extract(data, nc, n, rows, useCf, inputSize, scoreMin, normalized);
-  } else {
-    // Parse under both layouts; keep whichever found more valid boxes (tie ->
-    // the higher-confidence one; final tie -> channels-first default).
-    const cf = extract(data, nc, n, rows, true, inputSize, scoreMin, normalized);
-    const cl = extract(data, nc, n, rows, false, inputSize, scoreMin, normalized);
-    useCf =
-      cf.raw.length > cl.raw.length ||
-      (cf.raw.length === cl.raw.length && cf.maxScore >= cl.maxScore);
-    chosen = useCf ? cf : cl;
-
-    // Only count frames that actually found something toward the lock — an
-    // all-empty warm-up frame (camera still settling) shouldn't win the race.
-    if (chosen.raw.length > 0) {
-      confidentFrameCount++;
-      if (confidentFrameCount >= LAYOUT_LOCK_AFTER_FRAMES) {
-        cachedChannelsFirst = useCf;
-      }
-    }
-  }
+  // Parse under both layouts; keep whichever found more valid boxes (tie ->
+  // the higher-confidence one; final tie -> channels-first default).
+  const cf = extract(data, nc, n, rows, true, inputSize, scoreMin, normalized);
+  const cl = extract(data, nc, n, rows, false, inputSize, scoreMin, normalized);
+  const useCf =
+    cf.raw.length > cl.raw.length ||
+    (cf.raw.length === cl.raw.length && cf.maxScore >= cl.maxScore);
+  const chosen = useCf ? cf : cl;
 
   const debug: FrameDebug = {
     outputLen: data.length,
