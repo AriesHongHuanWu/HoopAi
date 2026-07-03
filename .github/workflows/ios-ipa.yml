@@ -62,12 +62,24 @@ jobs:
         run: |
           set -eo pipefail
           WS=$(ls -d *.xcworkspace | head -1)
-          SCHEME=$(xcodebuild -list -json -workspace "$WS" | node -e "
+          # Expo prebuild names the APP scheme after the project, i.e. the
+          # workspace basename (hoopai.xcworkspace -> scheme "hoopai"). The old
+          # filter-first-scheme logic wrongly picked a pod scheme (EXConstants),
+          # which built a framework and produced no .app.
+          SCHEME=$(basename "$WS" .xcworkspace)
+          # Sanity-check it exists in the workspace; otherwise fall back to the
+          # first non-pod scheme.
+          if ! xcodebuild -list -json -workspace "$WS" | node -e "
             const j=JSON.parse(require('fs').readFileSync(0,'utf8'));
-            const schemes=(j.workspace&&j.workspace.schemes)||(j.project&&j.project.schemes)||[];
-            const s=schemes.filter(x=>!/Pods|expo-dev/i.test(x));
-            console.log(s[0]||schemes[0]||'');
-          ")
+            const s=((j.workspace&&j.workspace.schemes)||[]);
+            process.exit(s.includes(process.argv[1])?0:1);
+          " "$SCHEME"; then
+            SCHEME=$(xcodebuild -list -json -workspace "$WS" | node -e "
+              const j=JSON.parse(require('fs').readFileSync(0,'utf8'));
+              const s=((j.workspace&&j.workspace.schemes)||[]).filter(x=>!/^(EX|RN|React|Expo|Yoga|Pods|hermes|RCT|DoubleConversion|glog|fmt|SocketRocket|boost)/i.test(x));
+              console.log(s[0]||'');
+            ")
+          fi
           if [ -z "$SCHEME" ]; then echo '::error::Could not determine Xcode scheme'; exit 1; fi
           echo "Workspace: $WS  Scheme: $SCHEME"
           # Pre-resolve Swift packages into a stable, shared clone dir first —
