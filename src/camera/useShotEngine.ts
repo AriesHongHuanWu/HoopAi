@@ -39,6 +39,8 @@ import { useSettings } from '../state/settingsStore';
 const MODEL_ASSETS = {
   standard: require('../../assets/models/hoopai-det.tflite'),
   precise: require('../../assets/models/hoopai-det-precise.tflite'),
+  // 320-input nano for 'speed' perf mode (~4× faster on older phones).
+  fast: require('../../assets/models/hoopai-det-fast.tflite'),
 } as const;
 // MoveNet SinglePose Lightning (Apache-2.0) for opt-in form analysis.
 const POSE_ASSET = require('../../assets/models/movenet-pose.tflite');
@@ -46,6 +48,8 @@ const POSE_ASSET = require('../../assets/models/movenet-pose.tflite');
 
 /** MoveNet input side (square). Separate from the detector's 640. */
 const POSE_INPUT = 192;
+/** Detector input side for the 'speed' perf mode (matches the fast model export). */
+const SPEED_INPUT = 320;
 
 /**
  * 'auto' detector budget: keep the precise model only when a smoke-test
@@ -185,6 +189,11 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
   }>({ model: null, delegate: 'loading', error: '', inferenceMs: 0 });
 
   const detectorModel = useSettings((s) => s.detectorModel);
+  const perfMode = useSettings((s) => s.perfMode);
+  // Detector input side: 'speed' uses a 320-exported nano (~4× faster); every
+  // consumer (resizer, parser, net-motion, pose scaling) reads this, so quality
+  // mode is byte-identical to the previous fixed-640 path.
+  const detInputSize = perfMode === 'speed' ? SPEED_INPUT : DETECTION.inputSize;
 
   useEffect(() => {
     let alive = true;
@@ -209,7 +218,12 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
       // always "the other model on CPU" so the user is never stranded in demo.
       const none: Delegates = [];
       const attempts: Attempt[] =
-        detectorModel === 'auto'
+        perfMode === 'speed'
+          ? [
+              { asset: MODEL_ASSETS.fast, label: `fast/${fast.label}`, delegates: fast.delegates },
+              { asset: MODEL_ASSETS.fast, label: 'fast/cpu', delegates: none },
+            ]
+          : detectorModel === 'auto'
           ? [
               { asset: MODEL_ASSETS.precise, label: `precise/${fast.label}`, delegates: fast.delegates, maxMs: AUTO_PRECISE_MAX_MS },
               { asset: MODEL_ASSETS.standard, label: `standard/${fast.label}`, delegates: fast.delegates },
@@ -233,9 +247,7 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
           // crawl) at inference. First run warms the delegate up (CoreML
           // compiles here), the second one is timed for the debug panel. Any
           // throw or empty output drops us to the next fallback level.
-          const dummy = new Float32Array(
-            DETECTION.inputSize * DETECTION.inputSize * 3,
-          );
+          const dummy = new Float32Array(detInputSize * detInputSize * 3);
           await m.run([dummy.buffer]);
           const t1 = performance.now();
           const out = await m.run([dummy.buffer]);
@@ -268,7 +280,7 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
     return () => {
       alive = false;
     };
-  }, [detectorModel]);
+  }, [detectorModel, perfMode, detInputSize]);
 
   const isModelLoaded = modelState.model != null;
   const activeMode: 'demo' | 'camera' =
@@ -425,8 +437,8 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
   const lastRunMs = useSharedValue(0);
 
   const { resizer } = useResizer({
-    width: DETECTION.inputSize,
-    height: DETECTION.inputSize,
+    width: detInputSize,
+    height: detInputSize,
     channelOrder: 'rgb',
     dataType: 'float32',
     scaleMode: 'cover',
@@ -545,7 +557,7 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
         // (0..1 floats) so ~0.12 saturates to 1. Costs ~144 reads/frame.
         const roi = netRoiSv.value;
         if (roi != null) {
-          const S = DETECTION.inputSize;
+          const S = detInputSize;
           const N = 12;
           // PLANAR buffer: the green channel plane starts at offset S*S (after
           // the full red plane), so green(px,py) = inArr[S*S + py*S + px].
@@ -578,7 +590,7 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
         const outputs = tflite.runSync([rawBuffer]);
         resized.dispose();
         parsed = parseYoloOutput(new Float32Array(outputs[0]!), 0, {
-          inputSize: DETECTION.inputSize,
+          inputSize: detInputSize,
         });
         } catch (e) {
           detErr = `detect: ${String(e).slice(0, 130)}`;
@@ -620,8 +632,8 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
             pResized.dispose();
             pose = parseMoveNet(
               new Float32Array(pOut[0]!),
-              DETECTION.inputSize,
-              DETECTION.inputSize,
+              detInputSize,
+              detInputSize,
               0,
             );
           } catch {
@@ -693,8 +705,8 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
     inferenceMs: modelState.inferenceMs,
     setManualRim: (box: Box) =>
       pipeline.setManualRim(box, {
-        width: DETECTION.inputSize,
-        height: DETECTION.inputSize,
+        width: detInputSize,
+        height: detInputSize,
       }),
   };
 }

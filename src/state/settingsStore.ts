@@ -32,6 +32,14 @@ export type DetectorModel = 'auto' | 'standard' | 'precise';
  */
 export type DetectionRate = 'auto' | 'battery' | 'max';
 
+/**
+ * Detector input resolution — the biggest speed lever (cost ∝ pixels²).
+ * - 'quality' (default): 640px — best accuracy, ~13fps detection on iPhone XR.
+ * - 'speed': 320px — ~4× faster (30-60fps on XR), slightly weaker on a tiny/
+ *   far ball. Uses a dedicated 320-exported nano model.
+ */
+export type PerfMode = 'quality' | 'speed';
+
 /** Clip window bounds (seconds), used by the Settings > Video steppers. */
 export const CLIP_PRE_ROLL_MIN = 2;
 export const CLIP_PRE_ROLL_MAX = 10;
@@ -72,6 +80,8 @@ export interface SettingsState {
   detectorModel: DetectorModel;
   /** Detection frame-rate budget (see DetectionRate). */
   detectionRate: DetectionRate;
+  /** Detector input resolution / speed tradeoff (see PerfMode). */
+  perfMode: PerfMode;
   /**
    * Last on-device model smoke-test result — delegate label (e.g.
    * "precise/core-ml") + measured latency in ms. Written by useShotEngine
@@ -117,6 +127,7 @@ export const useSettings = create<SettingsState>()(
       onboardingDone: false,
       detectorModel: 'auto',
       detectionRate: 'auto',
+      perfMode: 'quality',
       lastBenchmark: null,
       debugMode: false,
       formAnalysis: false,

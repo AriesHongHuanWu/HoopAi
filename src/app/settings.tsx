@@ -340,6 +340,7 @@ export default function SettingsScreen() {
   const playerHeightCm = useSettings((s) => s.playerHeightCm);
   const detectorModel = useSettings((s) => s.detectorModel);
   const detectionRate = useSettings((s) => s.detectionRate);
+  const perfMode = useSettings((s) => s.perfMode);
   const lastBenchmark = useSettings((s) => s.lastBenchmark);
   const debugMode = useSettings((s) => s.debugMode);
   const formAnalysis = useSettings((s) => s.formAnalysis);
@@ -504,6 +505,33 @@ export default function SettingsScreen() {
           <Text style={styles.tierCaption}>
             Standard: every iPhone since XR · Precise: iPhone 13 and newer recommended.
           </Text>
+          <View style={styles.divider} />
+          <View style={styles.settingText}>
+            <Text style={styles.settingLabel}>Performance</Text>
+            <Text style={styles.settingDesc}>
+              Input resolution — the biggest speed lever. Speed runs a 320px
+              model (~4× faster, 30–60fps on iPhone XR) with a small hit on a
+              tiny or far ball. Quality keeps full 640px accuracy.
+            </Text>
+          </View>
+          <View style={styles.chipWrap}>
+            <SelectChip
+              label="Quality · 640"
+              selected={perfMode === 'quality'}
+              onPress={() => {
+                tick();
+                set('perfMode', 'quality');
+              }}
+            />
+            <SelectChip
+              label="Speed · 320"
+              selected={perfMode === 'speed'}
+              onPress={() => {
+                tick();
+                set('perfMode', 'speed');
+              }}
+            />
+          </View>
           <View style={styles.divider} />
           <View style={styles.settingText}>
             <Text style={styles.settingLabel}>Detection rate</Text>
