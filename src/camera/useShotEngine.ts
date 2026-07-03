@@ -362,7 +362,12 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
     channelOrder: 'rgb',
     dataType: 'float32',
     scaleMode: 'cover',
-    pixelLayout: 'interleaved',
+    // PLANAR (NCHW): the exported YOLO tflite input tensor is [1,3,640,640],
+    // channels-first. Verified empirically — interleaved (NHWC) feeds the model
+    // scrambled pixels and every score collapses to ~0 (no detections), planar
+    // produces real detections (scores up to 0.7). fast-tflite does NOT
+    // transpose; the buffer layout must match the tensor exactly.
+    pixelLayout: 'planar',
   });
 
   const onPayload = useMemo(
@@ -431,6 +436,9 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
         if (roi != null) {
           const S = DETECTION.inputSize;
           const N = 12;
+          // PLANAR buffer: the green channel plane starts at offset S*S (after
+          // the full red plane), so green(px,py) = inArr[S*S + py*S + px].
+          const gPlane = S * S;
           const samples: number[] = new Array(N * N);
           let si = 0;
           for (let gy = 0; gy < N; gy++) {
@@ -441,7 +449,7 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
               let px = Math.round(roi.x + ((gx + 0.5) / N) * roi.width);
               if (px < 0) px = 0;
               if (px > S - 1) px = S - 1;
-              samples[si++] = inArr[(py * S + px) * 3 + 1]!;
+              samples[si++] = inArr[gPlane + py * S + px]!;
             }
           }
           const prev = prevNetSamples.value;
