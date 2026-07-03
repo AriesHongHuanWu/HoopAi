@@ -33,10 +33,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Select newest Xcode 16
+      - name: Select newest Xcode
         run: |
-          sudo xcode-select -s "$(ls -d /Applications/Xcode_16*.app | sort -V | tail -1)/Contents/Developer"
+          # Pick the newest Xcode overall (e.g. Xcode 26 with Swift 6.2), not
+          # just 16.x — a dependency ('apple' package) needs Swift tools 6.2,
+          # and Xcode 16 only ships Swift 6.1.
+          sudo xcode-select -s "$(ls -d /Applications/Xcode_*.app | sort -V | tail -1)/Contents/Developer"
           xcodebuild -version
+          swift --version
 
       - uses: actions/setup-node@v4
         with:
