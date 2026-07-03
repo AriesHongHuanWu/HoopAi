@@ -271,13 +271,24 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
   const eventsRef = useRef(events);
   eventsRef.current = events;
 
+  // Net ROI (analysis-frame px) published to the frame worklet so it can
+  // compute the net-motion make/miss signal; previous samples live worklet-side.
+  const netRoiSv = useSharedValue<Box | null>(null);
+  const prevNetSamples = useSharedValue<number[]>([]);
+
   const pipeline = useMemo(() => {
     const p = new ShotPipeline();
+    let lastRimRef: unknown = null;
     p.setEvents({
       onShot: (s) => eventsRef.current.onShot?.(s),
       onRimLocked: (r) => eventsRef.current.onRimLocked?.(r),
       onRimDrift: () => eventsRef.current.onRimDrift?.(),
       onFrame: (state) => {
+        // Keep the worklet's net ROI in sync with the locked rim (rare writes).
+        if (state.rim !== lastRimRef) {
+          lastRimRef = state.rim;
+          netRoiSv.value = state.rim ? { ...state.rim.netRoi } : null;
+        }
         overlay.value = {
           ball: state.ball ? { x: state.ball.cx, y: state.ball.cy, r: state.ball.r } : null,
           rim: state.rim?.box ?? null,
@@ -384,6 +395,40 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
           if (v < inMin) inMin = v;
           if (v > inMax) inMax = v;
         }
+        // Net-motion signal: sample a 12×12 grid of green-channel values inside
+        // the locked rim's net ROI and diff against the previous frame. A made
+        // shot whips the net → a burst of change. Score normalizes mean |Δ|
+        // (0..1 floats) so ~0.12 saturates to 1. Costs ~144 reads/frame.
+        let netMotionScore = 0;
+        const roi = netRoiSv.value;
+        if (roi != null) {
+          const S = DETECTION.inputSize;
+          const N = 12;
+          const samples: number[] = new Array(N * N);
+          let si = 0;
+          for (let gy = 0; gy < N; gy++) {
+            let py = Math.round(roi.y + ((gy + 0.5) / N) * roi.height);
+            if (py < 0) py = 0;
+            if (py > S - 1) py = S - 1;
+            for (let gx = 0; gx < N; gx++) {
+              let px = Math.round(roi.x + ((gx + 0.5) / N) * roi.width);
+              if (px < 0) px = 0;
+              if (px > S - 1) px = S - 1;
+              samples[si++] = inArr[(py * S + px) * 3 + 1]!;
+            }
+          }
+          const prev = prevNetSamples.value;
+          if (prev.length === samples.length) {
+            let acc = 0;
+            for (let i = 0; i < samples.length; i++) {
+              acc += Math.abs(samples[i]! - prev[i]!);
+            }
+            const meanDiff = acc / samples.length;
+            netMotionScore = Math.min(1, meanDiff / 0.12);
+          }
+          prevNetSamples.value = samples;
+        }
+
         const outputs = tflite.runSync([buffer]);
         resized.dispose();
         const parsed = parseYoloOutput(new Float32Array(outputs[0]!), 0, {
@@ -403,7 +448,7 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
           delegate: debug.value.delegate,
           modelError: '',
         };
-        scheduleOnRN(onPayload, { frame: parsed, netMotionScore: 0 });
+        scheduleOnRN(onPayload, { frame: parsed, netMotionScore });
       } finally {
         frame.dispose();
       }
