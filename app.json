@@ -66,6 +66,17 @@
           "photosPermission": "HoopAI saves your made-shot highlight clips to your library.",
           "savePhotosPermission": "HoopAI saves your made-shot highlight clips to your library."
         }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "minSdkVersion": 26
+          },
+          "ios": {
+            "deploymentTarget": "15.1"
+          }
+        }
       ]
     ],
     "experiments": {
