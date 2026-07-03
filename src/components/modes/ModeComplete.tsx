@@ -61,7 +61,7 @@ function headlineFor(mode: ModeState): Headline {
         value: `${mode.score}`,
         unit: mode.score === 1 ? 'make' : 'makes',
         sub: `${mode.config?.durationSec ?? 60}s on the clock.`,
-        share: `⏱️ Timed Challenge: ${mode.score} makes in ${mode.config?.durationSec ?? 60}s on HoopAI.`,
+        share: `⏱️ Timed Challenge: ${mode.score} makes in ${mode.config?.durationSec ?? 60}s on Hoopilot.`,
       };
     case 'aroundTheWorld':
       return {
@@ -69,7 +69,7 @@ function headlineFor(mode: ModeState): Headline {
         value: `${mode.spots?.length ?? 5}`,
         unit: 'spots',
         sub: 'Corner to corner — you cleared them all.',
-        share: '🌍 Around the World — all five spots on HoopAI.',
+        share: '🌍 Around the World — all five spots on Hoopilot.',
       };
     case 'spotShooting': {
       const makes = mode.spots?.reduce((a, s) => a + s.makes, 0) ?? mode.score;
@@ -79,7 +79,7 @@ function headlineFor(mode: ModeState): Headline {
         value: `${makes}`,
         unit: 'makes',
         sub: attempts > 0 ? `${makes}/${attempts} across five spots.` : 'Every spot cleared.',
-        share: `🎯 Spot Shooting: ${makes}/${attempts} on HoopAI.`,
+        share: `🎯 Spot Shooting: ${makes}/${attempts} on Hoopilot.`,
       };
     }
     case 'threePoint':
@@ -88,7 +88,7 @@ function headlineFor(mode: ModeState): Headline {
         value: `${mode.score}`,
         unit: 'points',
         sub: '25 balls, money on the fifth. 30 possible.',
-        share: `💰 3-Point Contest: ${mode.score} points on HoopAI.`,
+        share: `💰 3-Point Contest: ${mode.score} points on Hoopilot.`,
       };
     case 'ftStreak':
       return {
@@ -96,7 +96,7 @@ function headlineFor(mode: ModeState): Headline {
         value: `${mode.bestStreak ?? mode.score}`,
         unit: 'in a row',
         sub: 'Free throws, back to back.',
-        share: `🔥 ${mode.bestStreak ?? mode.score} free throws in a row on HoopAI.`,
+        share: `🔥 ${mode.bestStreak ?? mode.score} free throws in a row on Hoopilot.`,
       };
     case 'horse':
       return {
@@ -104,7 +104,7 @@ function headlineFor(mode: ModeState): Headline {
         value: mode.letters ?? 'HORSE',
         unit: '',
         sub: 'Spelled the whole word. Run it back?',
-        share: '🐴 Played myself in H-O-R-S-E on HoopAI.',
+        share: '🐴 Played myself in H-O-R-S-E on Hoopilot.',
       };
     case 'free':
     default:
@@ -113,7 +113,7 @@ function headlineFor(mode: ModeState): Headline {
         value: `${mode.score}`,
         unit: 'points',
         sub: 'Nice session.',
-        share: `🏀 ${mode.score} points on HoopAI.`,
+        share: `🏀 ${mode.score} points on Hoopilot.`,
       };
   }
 }

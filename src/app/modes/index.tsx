@@ -102,7 +102,7 @@ export default function ModePickerScreen() {
               <Card style={styles.proCard}>
                 <Text style={styles.proCardNote}>
                   Everything below is unlocked and free during beta. This is what stays part of
-                  HoopAI Pro after launch.
+                  Hoopilot Pro after launch.
                 </Text>
                 <View style={styles.proFeatureList}>
                   {PRO_FEATURES.map((f) => (

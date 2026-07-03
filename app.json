@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "hoop-ai",
+    "name": "Hoopilot",
     "slug": "hoop-ai",
     "version": "1.0.0",
     "orientation": "default",
@@ -11,8 +11,8 @@
       "icon": "./assets/images/icon.png",
       "bundleIdentifier": "com.arieswu.hoopai",
       "infoPlist": {
-        "NSCameraUsageDescription": "HoopAI uses the camera to track your shots in real time.",
-        "NSMicrophoneUsageDescription": "HoopAI records court audio with your session videos."
+        "NSCameraUsageDescription": "Hoopilot uses the camera to track your shots in real time.",
+        "NSMicrophoneUsageDescription": "Hoopilot records court audio with your session videos."
       }
     },
     "android": {
@@ -63,8 +63,8 @@
       [
         "expo-media-library",
         {
-          "photosPermission": "HoopAI saves your made-shot highlight clips to your library.",
-          "savePhotosPermission": "HoopAI saves your made-shot highlight clips to your library."
+          "photosPermission": "Hoopilot saves your made-shot highlight clips to your library.",
+          "savePhotosPermission": "Hoopilot saves your made-shot highlight clips to your library."
         }
       ],
       [

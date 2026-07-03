@@ -211,10 +211,10 @@ export default function HomeScreen() {
           <View
             accessible
             accessibilityRole="header"
-            accessibilityLabel="Hoop AI. Beta — everything unlocked."
+            accessibilityLabel="Hoopilot. Beta — everything unlocked."
           >
             <Text style={styles.wordmark}>
-              HOOP <Text style={styles.wordmarkAccent}>AI</Text>
+              HOOP<Text style={styles.wordmarkAccent}>ILOT</Text>
             </Text>
             <Text style={styles.betaNote}>Beta — everything unlocked</Text>
           </View>

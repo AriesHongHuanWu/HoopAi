@@ -410,7 +410,7 @@ export function ShareCardGraphic({ data }: { data: ShareCardData }) {
 
       {/* Header: wordmark + date, hairline divider. */}
       <TrackedText
-        text="HOOPAI"
+        text="HOOPILOT"
         x={PAD}
         y={148}
         font={wordmarkFont}
@@ -575,6 +575,6 @@ export async function shareSessionCard(opts: {
   const { stats } = opts;
   const decided = stats.makes + stats.misses;
   const pct = decided > 0 ? Math.round(stats.fgPct * 100) : 0;
-  const fallback = `🏀 ${stats.makes}/${stats.attempts} makes (${pct}% FG), best run ${stats.bestStreak} — tracked on HoopAI.`;
+  const fallback = `🏀 ${stats.makes}/${stats.attempts} makes (${pct}% FG), best run ${stats.bestStreak} — tracked on Hoopilot.`;
   return shareCardImage(sessionCardData(opts), fallback);
 }
