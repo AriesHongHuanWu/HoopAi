@@ -103,9 +103,12 @@ def main():
     # P100 runs roughly 10-12 min/epoch, so 40 epochs (~7h) fits with margin
     # while patience=10 lets a converged run stop even earlier. With 13x the
     # data of the first model, fewer epochs still see far more samples.
+    # hsv_h=0.3 (default 0.015): aggressive hue augmentation makes the model
+    # color-invariant -- blue/green/neon basketballs detect nearly as well as
+    # orange ones, since training sees every hue variant of each image.
     m.train(data=f"{WORK}/data.yaml", epochs=40, imgsz=640, batch=-1,
-            patience=10, cos_lr=True, project=f"{WORK}/runs", name="hoopai",
-            exist_ok=True)
+            patience=10, cos_lr=True, hsv_h=0.3,
+            project=f"{WORK}/runs", name="hoopai", exist_ok=True)
 
     best = f"{WORK}/runs/hoopai/weights/best.pt"
     mm = YOLO(best)
