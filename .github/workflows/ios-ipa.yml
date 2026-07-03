@@ -76,14 +76,16 @@ jobs:
           xcodebuild -resolvePackageDependencies \
             -workspace "$WS" -scheme "$SCHEME" \
             -clonedSourcePackagesDirPath build/SourcePackages || true
-          # `archive` + generic/platform=iOS is the correct device build.
-          # No pipe → xcodebuild's own exit code (and full log) propagate.
-          xcodebuild archive \
+          # Use `build` (not `archive`): archiving with signing fully disabled
+          # doesn't reliably place the .app into the archive. `build` produces
+          # a plain device .app in Products/Release-iphoneos, which is exactly
+          # what a sideload tool re-signs.
+          xcodebuild build \
             -workspace "$WS" \
             -scheme "$SCHEME" \
             -configuration Release \
             -destination 'generic/platform=iOS' \
-            -archivePath build/HoopAI.xcarchive \
+            -derivedDataPath build \
             -clonedSourcePackagesDirPath build/SourcePackages \
             -scmProvider system \
             SWIFT_VERSION=5.0 \
@@ -97,8 +99,14 @@ jobs:
       - name: Package unsigned .ipa
         working-directory: ios
         run: |
-          APP=$(find build/HoopAI.xcarchive/Products/Applications -maxdepth 1 -name "*.app" | head -1)
-          if [ -z "$APP" ]; then echo "::error::No .app in archive"; exit 1; fi
+          APP=$(find build/Build/Products -maxdepth 2 -name "*.app" -type d | head -1)
+          # Fallback: search the whole build tree + DerivedData for a device app.
+          if [ -z "$APP" ]; then
+            APP=$(find build ~/Library/Developer/Xcode/DerivedData -name "*.app" -type d -path "*iphoneos*" 2>/dev/null | head -1)
+          fi
+          if [ -z "$APP" ]; then
+            echo "::error::No .app produced"; find build -name "*.app" -type d 2>/dev/null; exit 1
+          fi
           echo "Packaging $APP"
           rm -rf Payload && mkdir Payload
           cp -R "$APP" Payload/
