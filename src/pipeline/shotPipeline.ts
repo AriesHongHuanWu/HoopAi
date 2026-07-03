@@ -17,6 +17,7 @@ import { RimLock } from '../core/rimLock';
 import { ShotFsm } from '../core/shotFsm';
 import type {
   Box,
+  Detection,
   FrameDetections,
   PoseFrame,
   ResolvedShot,
@@ -57,6 +58,8 @@ export interface PipelineFrameState {
   liveTrajectory: readonly { cx: number; cy: number }[];
   frameWidth: number;
   frameHeight: number;
+  /** Raw model detections this frame (analysis px) — for the debug box overlay. */
+  detections: readonly Detection[];
 }
 
 export class ShotPipeline {
@@ -151,6 +154,7 @@ export class ShotPipeline {
       liveTrajectory,
       frameWidth: frame.frameWidth,
       frameHeight: frame.frameHeight,
+      detections: frame.detections,
     };
     this.events.onFrame?.(state);
     if (resolved) {

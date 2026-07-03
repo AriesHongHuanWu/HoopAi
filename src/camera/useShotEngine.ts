@@ -58,6 +58,16 @@ const AUTO_PRECISE_MAX_MS = 55;
 export type EngineMode = 'auto' | 'demo' | 'camera';
 
 /** Overlay state published every analysed frame; consumed by the Skia HUD. */
+/** One raw model detection for the debug box overlay (analysis px). */
+export interface OverlayDet {
+  cls: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  score: number;
+}
+
 export interface OverlayState {
   ball: { x: number; y: number; r: number } | null;
   rim: Box | null;
@@ -66,6 +76,8 @@ export interface OverlayState {
   phase: 'IDLE' | 'SHOT_LIVE' | 'COOLDOWN';
   frameW: number;
   frameH: number;
+  /** Every raw detection this frame (for the debug box overlay). */
+  dets: OverlayDet[];
 }
 
 export const EMPTY_OVERLAY: OverlayState = {
@@ -75,6 +87,7 @@ export const EMPTY_OVERLAY: OverlayState = {
   phase: 'IDLE',
   frameW: 640,
   frameH: 640,
+  dets: [],
 };
 
 /** Live diagnostics for the on-screen debug panel (helps fix on-device ML). */
@@ -305,6 +318,14 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
           phase: state.phase,
           frameW: state.frameWidth,
           frameH: state.frameHeight,
+          dets: state.detections.map((d) => ({
+            cls: d.cls,
+            x: d.box.x,
+            y: d.box.y,
+            w: d.box.width,
+            h: d.box.height,
+            score: d.score,
+          })),
         };
       },
     });

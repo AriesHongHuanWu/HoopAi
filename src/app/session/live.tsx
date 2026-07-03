@@ -39,6 +39,7 @@ import { CoachMarks, useCoachMarks, type CoachStep } from '../../components/coac
 import { HudChip } from '../../components/hud/HudChip';
 import { ShotFlash } from '../../components/hud/ShotFlash';
 import { DebugPanel } from '../../components/hud/DebugPanel';
+import { DetectionBoxes } from '../../components/hud/DetectionBoxes';
 import { StatStrip } from '../../components/hud/StatStrip';
 import { TrajectoryOverlay } from '../../components/hud/TrajectoryOverlay';
 import { ModeBanner } from '../../components/modes/ModeBanner';
@@ -344,6 +345,7 @@ function LiveSessionScreen() {
 
       <TrajectoryOverlay overlay={engine.overlay} />
 
+      {debugMode && <DetectionBoxes overlay={engine.overlay} />}
       {debugMode && <DebugPanel debug={engine.debug} />}
 
       {!rimLocked && <AimingOverlay />}
