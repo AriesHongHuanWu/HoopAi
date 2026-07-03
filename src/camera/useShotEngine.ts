@@ -106,9 +106,13 @@ export interface EngineDebug {
   /** Model input value range (should be ~0..1). */
   inputMin: number;
   inputMax: number;
+  /** Resizer output buffer size in bytes (640*640*3*4 = 4915200 for float32). */
+  bufBytes: number;
+  /** % of sampled input pixels that are non-zero (0 = black/empty input). */
+  nonZeroPct: number;
   /** Which delegate the model loaded with ('core-ml' | 'android-gpu' | 'cpu' | 'loading'). */
   delegate: string;
-  /** Load failure reason, empty when loaded. */
+  /** Load failure reason OR per-frame detect-path error, empty when fine. */
   modelError: string;
 }
 
@@ -122,6 +126,8 @@ export const EMPTY_DEBUG: EngineDebug = {
   detCount: 0,
   inputMin: 0,
   inputMax: 0,
+  bufBytes: 0,
+  nonZeroPct: 0,
   delegate: 'loading',
   modelError: '',
 };
@@ -489,31 +495,54 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
           };
           return;
         }
+        // Everything from resize → runSync is wrapped so any native failure
+        // (unsupported pixel format, buffer handoff) is CAPTURED to the debug
+        // panel instead of silently producing no detections.
+        let inMin = 0;
+        let inMax = 0;
+        let bufBytes = 0;
+        let nonZeroPct = 0;
+        let detErr = '';
+        let parsed: ReturnType<typeof parseYoloOutput> | null = null;
+        let netMotionScore = 0;
+        try {
         const tflite = boxed.unbox() as TensorflowModel;
         const resized = resizer.resize(frame);
-        const buffer = resized.getPixelBuffer();
-        // Sample the model input range (should read ~0..1) for the debug panel.
-        const inArr = new Float32Array(buffer);
-        let inMin = 1e9;
-        let inMax = -1e9;
+        const rawBuffer = resized.getPixelBuffer();
+        bufBytes = rawBuffer.byteLength;
+        // IMPORTANT: the MODEL is fed the RAW zero-copy buffer (native code reads
+        // it directly). The JS Float32Array below is ONLY for debug sampling —
+        // if the JS view can't read the Nitro buffer it reads 0 (nonZeroPct 0),
+        // which tells us the JS/native discrepancy WITHOUT breaking the model.
+        const inArr = new Float32Array(rawBuffer);
+        let mn = 1e9;
+        let mx = -1e9;
+        let nz = 0;
+        let sampled = 0;
         for (let k = 0; k < inArr.length; k += 1499) {
           const v = inArr[k]!;
-          if (v < inMin) inMin = v;
-          if (v > inMax) inMax = v;
+          if (v < mn) mn = v;
+          if (v > mx) mx = v;
+          if (v !== 0) nz++;
+          sampled++;
         }
-        // Insurance: YOLO expects 0..1 input. If the resizer ever emits
-        // 0..255 floats on some device, normalize in place — a wrong input
-        // range is the classic "model loaded but maxScore stays 0" failure.
-        if (inMax > 1.6) {
+        if (mn === 1e9) mn = 0;
+        if (mx === -1e9) mx = 0;
+        nonZeroPct = sampled > 0 ? Math.round((100 * nz) / sampled) : 0;
+        // Insurance: YOLO expects 0..1 input. If the resizer emits 0..255 floats
+        // on some device, normalize — a wrong input range is the classic
+        // "model loaded but maxScore stays 0" failure.
+        if (mx > 1.6) {
           for (let k = 0; k < inArr.length; k++) inArr[k] = inArr[k]! / 255;
-          inMin /= 255;
-          inMax /= 255;
+          mn /= 255;
+          mx /= 255;
         }
+        inMin = mn;
+        inMax = mx;
         // Net-motion signal: sample a 12×12 grid of green-channel values inside
         // the locked rim's net ROI and diff against the previous frame. A made
         // shot whips the net → a burst of change. Score normalizes mean |Δ|
         // (0..1 floats) so ~0.12 saturates to 1. Costs ~144 reads/frame.
-        let netMotionScore = 0;
         const roi = netRoiSv.value;
         if (roi != null) {
           const S = DETECTION.inputSize;
@@ -546,12 +575,15 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
           prevNetSamples.value = samples;
         }
 
-        const outputs = tflite.runSync([buffer]);
+        const outputs = tflite.runSync([rawBuffer]);
         resized.dispose();
-        const parsed = parseYoloOutput(new Float32Array(outputs[0]!), 0, {
+        parsed = parseYoloOutput(new Float32Array(outputs[0]!), 0, {
           inputSize: DETECTION.inputSize,
         });
-        const d = parsed.debug;
+        } catch (e) {
+          detErr = `detect: ${String(e).slice(0, 130)}`;
+        }
+        const d = parsed ? parsed.debug : null;
         debug.value = {
           mode: 'camera',
           modelLoaded: true,
@@ -559,12 +591,19 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
           outputLen: d ? d.outputLen : 0,
           layout: d ? d.layout : '-',
           maxScore: d ? d.maxScore : 0,
-          detCount: parsed.detections.length,
+          detCount: parsed ? parsed.detections.length : 0,
           inputMin: inMin,
           inputMax: inMax,
+          bufBytes,
+          nonZeroPct,
           delegate: debug.value.delegate,
-          modelError: '',
+          modelError: detErr,
         };
+        if (!parsed) {
+          // Detection threw this frame — still disposed via finally; skip the
+          // pipeline hop (nothing to send).
+          return;
+        }
 
         // Opt-in form analysis: run the pose model on a separate 192×192 uint8
         // resize and attach the keypoints. Entirely skipped unless the pose

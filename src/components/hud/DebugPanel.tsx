@@ -75,6 +75,8 @@ export function DebugPanel({ debug }: { debug: SharedValue<EngineDebug> }) {
       <Row k="maxScore" v={d.maxScore.toFixed(3)} vc={scoreColor} />
       <Row k="dets" v={String(d.detCount)} vc={d.detCount > 0 ? color.make : color.textDim} />
       <Row k="input" v={`${d.inputMin.toFixed(2)}..${d.inputMax.toFixed(2)}`} vc={inputOk ? color.text : color.miss} />
+      <Row k="pixels" v={`${d.nonZeroPct}% nz`} vc={d.nonZeroPct > 5 ? color.make : color.miss} />
+      <Row k="buf" v={`${Math.round(d.bufBytes / 1024)} KB`} vc={d.bufBytes > 0 ? color.text : color.miss} />
     </View>
   );
 }
