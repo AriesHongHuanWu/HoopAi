@@ -22,7 +22,14 @@ jobs:
   build:
     # macos-15 ships Xcode 16.x; React Native 0.86 requires Xcode >= 16.1.
     runs-on: macos-15
-    timeout-minutes: 90
+    # Building RN from source (no prebuilt) is slower than the xcframework path.
+    timeout-minutes: 120
+    env:
+      # Force React Native + Expo modules to build FROM SOURCE. Expo 57's
+      # prebuilt path spawns an ExpoModulesJSI xcframework build that fails
+      # Swift Package resolution in unsigned CI. Must be set for pod install
+      # AND the xcodebuild archive, so it lives at the job level.
+      RCT_USE_PREBUILT_RNCORE: '0'
     steps:
       - uses: actions/checkout@v4
 
