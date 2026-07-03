@@ -164,8 +164,23 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
       for (const a of attempts) {
         try {
           const m = await loadTensorflowModel(a.asset, a.delegates);
+          // Runtime smoke test — a delegate can load fine yet still fail (or
+          // crawl) at inference. First run warms the delegate up (CoreML
+          // compiles here), the second one is timed for the debug panel. Any
+          // throw or empty output drops us to the next fallback level.
+          const dummy = new Float32Array(
+            DETECTION.inputSize * DETECTION.inputSize * 3,
+          );
+          await m.run([dummy.buffer]);
+          const t1 = performance.now();
+          const out = await m.run([dummy.buffer]);
+          const ms = Math.round(performance.now() - t1);
+          const o0 = out?.[0];
+          if (o0 == null || new Float32Array(o0 as ArrayBuffer).length < 8) {
+            throw new Error('smoke test: empty output tensor');
+          }
           if (!alive) return;
-          setModelState({ model: m, delegate: a.label, error: lastError });
+          setModelState({ model: m, delegate: `${a.label} · ${ms}ms`, error: lastError });
           return;
         } catch (e) {
           lastError = `${a.label}: ${String(e).slice(0, 160)}`;
