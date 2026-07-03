@@ -24,13 +24,32 @@ cut a versioned release by pushing a tag: `git tag v0.1.0 && git push --tags`.
 
 Apple does **not** allow a freely-downloadable, tap-to-install file like an APK.
 An app that installs on a normal (non-jailbroken) iPhone must be signed with an
-**Apple Developer account ($99/yr)**. There are three real paths:
+**Apple Developer account ($99/yr)**, or you sideload an unsigned build with
+your own free Apple ID. Four real paths:
 
 | Path | Installs on a real iPhone? | Needs Apple Developer acct | How |
 |---|---|---|---|
-| **TestFlight** (recommended) | ✅ up to 10k testers | ✅ | `ios-eas.yml` workflow, profile `production`, submit on |
-| **Ad-hoc IPA** | ✅ only pre-registered device UDIDs | ✅ | `ios-eas.yml` workflow, profile `preview` |
+| **Unsigned IPA + sideload** | ✅ (re-signed on device) | ❌ (free Apple ID) | `ios-ipa.yml` workflow → sideload with AltStore/Sideloadly |
+| **TestFlight** | ✅ up to 10k testers, tap-to-install | ✅ | `ios-eas.yml`, profile `production`, submit on |
+| **Ad-hoc IPA** | ✅ only pre-registered device UDIDs | ✅ | `ios-eas.yml`, profile `preview` |
 | **Simulator build** | ❌ Mac Simulator only | ❌ (free) | `ios-simulator.yml` workflow |
+
+### Unsigned IPA + sideload (free, no $99 account)
+
+This is the only "download it yourself" path that doesn't cost money.
+
+1. Actions → **iOS IPA (unsigned, for sideloading)** → Run workflow. The result
+   `HoopAI-unsigned.ipa` publishes to the **`ios-ipa-latest`** release.
+2. Download `HoopAI-unsigned.ipa` to a **Mac or Windows PC**.
+3. Install a sideload tool and sign in with your **free Apple ID**:
+   - **AltStore** (altstore.io) — Mac/PC companion app; can auto-refresh over Wi-Fi.
+   - **Sideloadly** (sideloadly.io) — Mac/Windows; drag the `.ipa`, enter Apple ID, install.
+4. On the iPhone: Settings → General → VPN & Device Management → trust your Apple ID.
+
+**Caveats of a free Apple ID:** the app **expires after 7 days** (re-sideload or let
+AltStore auto-refresh), you can have at most **3** sideloaded apps, and camera/mic
+still prompt for permission as normal. Pay for the Developer Program (below) and
+these limits disappear.
 
 ### TestFlight / ad-hoc (real iPhone install)
 

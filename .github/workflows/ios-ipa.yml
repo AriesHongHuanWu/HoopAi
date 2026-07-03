@@ -1,0 +1,87 @@
+name: iOS IPA (unsigned, for sideloading)
+
+# Builds an UNSIGNED .ipa for a real iPhone and publishes it to the
+# `ios-ipa-latest` release. It is not signed, so it will NOT install by
+# double-clicking — install it with AltStore or Sideloadly using your own
+# (free) Apple ID, which re-signs it on device. Free-Apple-ID apps expire
+# after 7 days; AltStore can auto-refresh. See docs/BUILDS.md.
+#
+# Manual only (macOS runners are ~10x Linux cost); public repos get free
+# macOS minutes. Runs on push only when this workflow file itself changes.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, ci/ios-ipa]
+    paths: ['.github/workflows/ios-ipa.yml']
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Prebuild native iOS project
+        run: npx expo prebuild --platform ios --no-install
+
+      - name: Install CocoaPods
+        working-directory: ios
+        run: pod install
+
+      - name: Build unsigned .app for device
+        working-directory: ios
+        run: |
+          SCHEME=$(xcodebuild -list -json | node -e "const j=JSON.parse(require('fs').readFileSync(0));const s=j.workspace.schemes.filter(x=>!/Pods|expo-dev/i.test(x));console.log(s[0]||j.workspace.schemes[0])")
+          echo "Building scheme: $SCHEME"
+          xcodebuild build \
+            -workspace *.xcworkspace \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            AD_HOC_CODE_SIGNING_ALLOWED=YES \
+            | tail -60
+
+      - name: Package unsigned .ipa
+        working-directory: ios
+        run: |
+          APP=$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name "*.app" | head -1)
+          if [ -z "$APP" ]; then echo "::error::No .app produced"; exit 1; fi
+          echo "Packaging $APP"
+          rm -rf Payload && mkdir Payload
+          cp -R "$APP" Payload/
+          cd "$(dirname "$APP")" >/dev/null 2>&1 || true
+          cd "$GITHUB_WORKSPACE/ios"
+          zip -qry "$GITHUB_WORKSPACE/HoopAI-unsigned.ipa" Payload
+          ls -la "$GITHUB_WORKSPACE/HoopAI-unsigned.ipa"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: HoopAI-ios-ipa
+          path: HoopAI-unsigned.ipa
+          if-no-files-found: error
+
+      - name: Publish to rolling release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete ios-ipa-latest --yes --cleanup-tag 2>/dev/null || true
+          gh release create ios-ipa-latest HoopAI-unsigned.ipa \
+            --title "HoopAI — iOS IPA (unsigned, sideload)" \
+            --notes "UNSIGNED iOS build from ${{ github.sha }}. It will NOT install by tapping — sideload it with AltStore or Sideloadly using your free Apple ID (it re-signs on device). Free-Apple-ID apps expire after 7 days; AltStore auto-refreshes. Steps in docs/BUILDS.md. Runs in demo mode until a trained model is bundled."
