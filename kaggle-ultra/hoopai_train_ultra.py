@@ -99,10 +99,12 @@ def main():
 
     from ultralytics import YOLO
     m = YOLO("yolo11s.pt")
-    # ~30k images on a ~9h Kaggle session: 60 epochs fits with headroom.
-    # batch=-1 auto-sizes for the GPU; cosine LR for a smooth final descent.
-    m.train(data=f"{WORK}/data.yaml", epochs=60, imgsz=640, batch=-1,
-            patience=15, cos_lr=True, project=f"{WORK}/runs", name="hoopai",
+    # Budget check against Kaggle's 9h GPU wall: ~30k images x YOLO11s on a
+    # P100 runs roughly 10-12 min/epoch, so 40 epochs (~7h) fits with margin
+    # while patience=10 lets a converged run stop even earlier. With 13x the
+    # data of the first model, fewer epochs still see far more samples.
+    m.train(data=f"{WORK}/data.yaml", epochs=40, imgsz=640, batch=-1,
+            patience=10, cos_lr=True, project=f"{WORK}/runs", name="hoopai",
             exist_ok=True)
 
     best = f"{WORK}/runs/hoopai/weights/best.pt"
