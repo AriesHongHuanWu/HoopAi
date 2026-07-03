@@ -7,7 +7,11 @@
  */
 import type { DetClass, Detection, FrameDetections } from '../core/types';
 
-export const CLASS_ORDER: readonly DetClass[] = ['ball', 'rim', 'ball_in_basket', 'person'];
+// Path A model (avishah3) is 2-class: Basketball, Basketball Hoop. Make/miss
+// falls back to trajectory + rim geometry (no ball_in_basket / person signals).
+// Restore ['ball','rim','ball_in_basket','person'] when the 4-class Path B
+// model is trained.
+export const CLASS_ORDER: readonly DetClass[] = ['ball', 'rim'];
 
 export interface YoloParseOptions {
   /** Detector input side in px (boxes are emitted in this pixel space). */
