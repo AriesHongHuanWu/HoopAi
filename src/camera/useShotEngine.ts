@@ -118,6 +118,10 @@ export interface EngineDebug {
   delegate: string;
   /** Load failure reason OR per-frame detect-path error, empty when fine. */
   modelError: string;
+  /** Live EMA of inference time (ms) — rises as the chip thermally throttles. */
+  avgMs: number;
+  /** Effective detection fps after the adaptive thermal gate. */
+  fps: number;
 }
 
 export const EMPTY_DEBUG: EngineDebug = {
@@ -134,6 +138,8 @@ export const EMPTY_DEBUG: EngineDebug = {
   nonZeroPct: 0,
   delegate: 'loading',
   modelError: '',
+  avgMs: 0,
+  fps: 0,
 };
 
 export interface ShotEngineEvents {
@@ -435,6 +441,12 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
   const detectionRate = useSettings((s) => s.detectionRate);
   const gateMs = detectionRate === 'battery' ? 66 : detectionRate === 'max' ? 0 : 33;
   const lastRunMs = useSharedValue(0);
+  // Rolling avg of measured inference time. Doubles as a THERMAL PROXY: a hot
+  // chip clocks down, so inference slows — when it does, the adaptive gate
+  // below backs the detection rate off to shed sustained load and let the phone
+  // cool (the Kalman tracker keeps the overlay smooth through the gaps). No
+  // native thermal API needed.
+  const avgInferMs = useSharedValue(0);
 
   const { resizer } = useResizer({
     width: detInputSize,
@@ -488,12 +500,15 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
     onFrame(frame) {
       'worklet';
       try {
-        // Detection-rate gate: skip frames beyond the budget. Skipped frames
-        // still dispose (finally below) and return early WITHOUT bumping the
-        // debug heartbeat — only processed frames count.
-        if (gateMs > 0) {
+        // Adaptive thermal gate: run no faster than the base rate AND no faster
+        // than ~1.4× the current inference time — so a hot, throttled chip (slow
+        // inference) gets idle time between frames to cool, while a cool chip
+        // runs at the full requested rate. 'max' (gateMs 0) still self-limits by
+        // inference time to avoid pinning the chip at 100% in the sun.
+        const effGate = Math.max(gateMs, avgInferMs.value * 1.4);
+        if (effGate > 0) {
           const nowMs = Date.now();
-          if (nowMs - lastRunMs.value < gateMs) return;
+          if (nowMs - lastRunMs.value < effGate) return;
           lastRunMs.value = nowMs;
         }
         const boxed = boxedModelSv.value;
@@ -587,7 +602,11 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
           prevNetSamples.value = samples;
         }
 
+        const t0 = performance.now();
         const outputs = tflite.runSync([rawBuffer]);
+        const infMs = performance.now() - t0;
+        // EMA of inference time — feeds the adaptive thermal gate next frame.
+        avgInferMs.value = avgInferMs.value === 0 ? infMs : avgInferMs.value * 0.85 + infMs * 0.15;
         resized.dispose();
         parsed = parseYoloOutput(new Float32Array(outputs[0]!), 0, {
           inputSize: detInputSize,
@@ -610,6 +629,8 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
           nonZeroPct,
           delegate: debug.value.delegate,
           modelError: detErr,
+          avgMs: Math.round(avgInferMs.value),
+          fps: Math.round(1000 / Math.max(gateMs, avgInferMs.value * 1.4, 1)),
         };
         if (!parsed) {
           // Detection threw this frame — still disposed via finally; skip the

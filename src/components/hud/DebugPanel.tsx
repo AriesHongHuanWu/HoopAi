@@ -77,6 +77,11 @@ export function DebugPanel({ debug }: { debug: SharedValue<EngineDebug> }) {
       <Row k="input" v={`${d.inputMin.toFixed(2)}..${d.inputMax.toFixed(2)}`} vc={inputOk ? color.text : color.miss} />
       <Row k="pixels" v={`${d.nonZeroPct}% nz`} vc={d.nonZeroPct > 5 ? color.make : color.miss} />
       <Row k="buf" v={`${Math.round(d.bufBytes / 1024)} KB`} vc={d.bufBytes > 0 ? color.text : color.miss} />
+      <Row
+        k="speed"
+        v={`${d.fps} fps · ${d.avgMs}ms`}
+        vc={d.fps >= 25 ? color.make : d.fps >= 12 ? color.unsure : color.miss}
+      />
     </View>
   );
 }
