@@ -34,6 +34,7 @@ import { useAppStateGuard } from '../../camera/useAppStateGuard';
 import { useShotEngine, type ShotEngine } from '../../camera/useShotEngine';
 import { playSound, useShotSounds } from '../../camera/useShotSounds';
 import { useVoiceAnnouncements } from '../../camera/useVoiceAnnouncements';
+import { CoachMarks, useCoachMarks, type CoachStep } from '../../components/coach/CoachMarks';
 import { HudChip } from '../../components/hud/HudChip';
 import { ShotFlash } from '../../components/hud/ShotFlash';
 import { DebugPanel } from '../../components/hud/DebugPanel';
@@ -52,6 +53,30 @@ const DRIFT_BANNER_MS = 4000;
 const PAUSED_CHIP_MS = 4000;
 /** Width of the docked HUD column in landscape (compact, rim stays clear). */
 const LANDSCAPE_HUD_WIDTH = 300;
+
+/**
+ * First-run HUD intro — shown once before the rim locks on, teaching the
+ * physical setup and what's about to happen. Centered cards (no camera UI
+ * exists yet to anchor to); always dismissible via Skip.
+ */
+const LIVE_STEPS: CoachStep[] = [
+  {
+    title: 'Prop your phone',
+    text: 'Set it on a tripod, a bench or a water bottle 15–30 feet to the side of the court, low enough that the whole rim is visible in frame.',
+  },
+  {
+    title: 'The rim locks automatically',
+    text: 'Hold the camera steady on the hoop. A bracket reticle will lock onto the rim by itself — that\'s your cue everything is tracking.',
+  },
+  {
+    title: 'Your HUD',
+    text: 'Once locked, the strip up top shows points, FG% and your current streak, updated live after every shot.',
+  },
+  {
+    title: 'Sounds tell the story',
+    text: 'A make, a miss and a streak each get their own sound. If a call looks wrong, you can fix it with one tap on the summary screen after.',
+  },
+];
 
 /** RN 0.86 dropped StyleSheet.absoluteFillObject — local equivalent. */
 const absoluteFill = {
@@ -82,6 +107,11 @@ export default function LiveSessionScreen() {
   const [ending, setEnding] = useState(false);
   const [backgrounded, setBackgrounded] = useState(false);
   const [pausedChip, setPausedChip] = useState(false);
+
+  // First-run HUD intro — teaches setup before the rim locks. Independent of
+  // the camera permission flow (it renders in the same tree either way, and
+  // only actually shows once permission is granted and the camera mounts).
+  const liveCoach = useCoachMarks('live', LIVE_STEPS);
 
   const engineRef = useRef<ShotEngine | null>(null);
   const driftTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -254,6 +284,14 @@ export default function LiveSessionScreen() {
       {debugMode && <DebugPanel debug={engine.debug} />}
 
       {!rimLocked && <AimingOverlay />}
+
+      {!rimLocked && liveCoach.visible && (
+        <CoachMarks
+          steps={liveCoach.steps}
+          onFinish={liveCoach.finish}
+          onSkip={liveCoach.finish}
+        />
+      )}
 
       <ShotFlash />
 

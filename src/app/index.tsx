@@ -10,13 +10,14 @@
 import { Canvas, Circle, Path } from '@shopify/react-native-skia';
 import * as Haptics from 'expo-haptics';
 import { Link, Redirect, router, useFocusEffect } from 'expo-router';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Pressable,
   StyleSheet,
   Text,
   View,
   useWindowDimensions,
+  type LayoutRectangle,
 } from 'react-native';
 import {
   Easing,
@@ -28,6 +29,7 @@ import {
 } from 'react-native-reanimated';
 
 import { Sparkline } from '@/components/charts/Sparkline';
+import { CoachMarks, useCoachMarks, type CoachStep } from '@/components/coach/CoachMarks';
 import { Card, Eyebrow, Row, Screen, StatNumber } from '@/components/ui';
 import { color, radius, space, touch, type } from '@/constants/tokens';
 import { listSessions, type SessionSummaryRow } from '@/data/db';
@@ -129,6 +131,39 @@ export default function HomeScreen() {
   const [recentTrend, setRecentTrend] = useState<number[]>([]);
   const [dbFailed, setDbFailed] = useState(false);
 
+  // Coach marks: measured target rects for the hero CTA, mode row and quick
+  // links, filled in as each view lays out. Steps render centered until a
+  // rect is known, then the card re-anchors near it.
+  const heroRef = useRef<View>(null);
+  const modeRowRef = useRef<View>(null);
+  const quickLinksRef = useRef<View>(null);
+  const [heroRect, setHeroRect] = useState<LayoutRectangle | undefined>();
+  const [modeRowRect, setModeRowRect] = useState<LayoutRectangle | undefined>();
+  const [quickLinksRect, setQuickLinksRect] = useState<LayoutRectangle | undefined>();
+
+  const measure = (ref: React.RefObject<View | null>, set: (r: LayoutRectangle) => void) => {
+    ref.current?.measureInWindow((x, y, w, h) => set({ x, y, width: w, height: h }));
+  };
+
+  const homeSteps: CoachStep[] = [
+    {
+      title: 'Start a session',
+      text: 'Tap Start session to open the camera. Prop your phone up, and once the rim locks on, every shot you take gets counted automatically.',
+      targetRect: heroRect,
+    },
+    {
+      title: 'Or play a mode',
+      text: 'Around the World, Timed Challenge, HORSE and more — structured games with their own rules and a finish line, all tracked the same way.',
+      targetRect: modeRowRect,
+    },
+    {
+      title: 'Your data lives here',
+      text: 'History holds every past session, Trends charts your FG% over time, and Records keeps your best streaks and lifetime badges.',
+      targetRect: quickLinksRect,
+    },
+  ];
+  const coach = useCoachMarks('home', homeSteps);
+
   // Reload whenever the dashboard regains focus (e.g. after a session ends).
   useFocusEffect(
     useCallback(() => {
@@ -168,6 +203,7 @@ export default function HomeScreen() {
   };
 
   return (
+    <View style={styles.root}>
     <Screen scroll>
       <View style={styles.stack}>
         {/* Header: wordmark + settings */}
@@ -186,32 +222,36 @@ export default function HomeScreen() {
             </Pressable>
           </Link>
         </Row>
+        <Text style={styles.betaNote}>Beta — everything unlocked</Text>
 
         {/* Hero Start CTA */}
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Start session"
-          accessibilityHint="Opens camera setup to track your shots"
-          onPress={startSession}
-          style={({ pressed }) => [
-            styles.hero,
-            { backgroundColor: pressed ? color.accentPressed : color.accent },
-          ]}
-        >
-          <HeroArc width={contentWidth} />
-          <Text style={styles.heroEyebrow}>READY WHEN YOU ARE</Text>
-          <Text
-            style={styles.heroLabel}
-            numberOfLines={1}
-            adjustsFontSizeToFit
-            minimumFontScale={0.6}
+        <View ref={heroRef} onLayout={() => measure(heroRef, setHeroRect)}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Start session"
+            accessibilityHint="Opens camera setup to track your shots"
+            onPress={startSession}
+            style={({ pressed }) => [
+              styles.hero,
+              { backgroundColor: pressed ? color.accentPressed : color.accent },
+            ]}
           >
-            START SESSION
-          </Text>
-          <Text style={styles.heroSub}>Point your phone at the hoop — we do the counting.</Text>
-        </Pressable>
+            <HeroArc width={contentWidth} />
+            <Text style={styles.heroEyebrow}>READY WHEN YOU ARE</Text>
+            <Text
+              style={styles.heroLabel}
+              numberOfLines={1}
+              adjustsFontSizeToFit
+              minimumFontScale={0.6}
+            >
+              START SESSION
+            </Text>
+            <Text style={styles.heroSub}>Point your phone at the hoop — we do the counting.</Text>
+          </Pressable>
+        </View>
 
         {/* Choose a game mode */}
+        <View ref={modeRowRef} onLayout={() => measure(modeRowRef, setModeRowRect)}>
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="Choose a mode"
@@ -230,6 +270,7 @@ export default function HomeScreen() {
           </View>
           <Text style={styles.modeChevron}>{'›'}</Text>
         </Pressable>
+        </View>
 
         {/* Last session */}
         {lastSession === undefined ? null : dbFailed ? (
@@ -294,32 +335,41 @@ export default function HomeScreen() {
         )}
 
         {/* Quick links */}
-        <Row gap={space.md}>
-          <QuickLink
-            glyph="≣"
-            label="History"
-            hint="Browse your past sessions"
-            onPress={() => router.push('/history')}
-          />
-          <QuickLink
-            glyph="↗"
-            label="Trends"
-            hint="See your FG% over time"
-            onPress={() => router.push('/trends')}
-          />
-          <QuickLink
-            glyph="★"
-            label="Records"
-            hint="See your lifetime records and badges"
-            onPress={() => router.push('/records')}
-          />
-        </Row>
+        <View ref={quickLinksRef} onLayout={() => measure(quickLinksRef, setQuickLinksRect)}>
+          <Row gap={space.md}>
+            <QuickLink
+              glyph="≣"
+              label="History"
+              hint="Browse your past sessions"
+              onPress={() => router.push('/history')}
+            />
+            <QuickLink
+              glyph="↗"
+              label="Trends"
+              hint="See your FG% over time"
+              onPress={() => router.push('/trends')}
+            />
+            <QuickLink
+              glyph="★"
+              label="Records"
+              hint="See your lifetime records and badges"
+              onPress={() => router.push('/records')}
+            />
+          </Row>
+        </View>
       </View>
     </Screen>
+    {coach.visible && (
+      <CoachMarks steps={coach.steps} onFinish={coach.finish} onSkip={coach.finish} />
+    )}
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
+  root: {
+    flex: 1,
+  },
   stack: {
     gap: space.xl,
     paddingTop: space.md,
@@ -347,6 +397,11 @@ const styles = StyleSheet.create({
   gearGlyph: {
     fontSize: type.title.fontSize,
     color: color.textDim,
+  },
+  betaNote: {
+    ...type.caption,
+    color: color.textFaint,
+    marginTop: -space.md,
   },
   hero: {
     minHeight: HERO_HEIGHT,

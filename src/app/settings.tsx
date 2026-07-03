@@ -1,13 +1,14 @@
 /**
  * Settings — grouped cards wired straight to the persisted settings store.
- * Sections: Feedback (sounds/haptics/voice), Video (record + clip retention),
- * Player (hand, height), About (version + model licenses).
+ * Sections: Feedback (sounds/haptics/voice), Detection (model/rate/debug),
+ * Video (record + clip retention), Player (hand, height),
+ * Help (restart tutorial / replay onboarding), About (version + model licenses).
  */
 import { createAudioPlayer, type AudioPlayer } from 'expo-audio';
 import Constants from 'expo-constants';
 import * as Haptics from 'expo-haptics';
 import { router } from 'expo-router';
-import { useEffect } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Switch, Text, View } from 'react-native';
 
 import {
@@ -25,6 +26,7 @@ import {
   CLIP_PRE_ROLL_MAX,
   CLIP_PRE_ROLL_MIN,
   useSettings,
+  type DetectionRate,
   type KeepMode,
   type VoiceMetric,
 } from '@/state/settingsStore';
@@ -52,10 +54,26 @@ const HAND_OPTIONS: { value: ShootingHand; label: string }[] = [
   { value: 'right', label: 'Right' },
 ];
 
+const DETECTION_RATE_OPTIONS: { value: DetectionRate; label: string; blurb: string }[] = [
+  { value: 'auto', label: 'Auto · recommended', blurb: 'Smooth tracking on every supported phone.' },
+  { value: 'battery', label: 'Battery saver', blurb: 'Cooler phone, longer sessions.' },
+  { value: 'max', label: 'Maximum', blurb: 'Newest phones only.' },
+];
+
 /** Fires selection haptics when the user has them enabled. */
 function tick() {
   if (useSettings.getState().hapticsEnabled) void Haptics.selectionAsync();
 }
+
+/** Human copy for the measured device tier, from the last on-device benchmark. */
+function benchmarkSummary(bench: { delegate: string; ms: number } | null): string {
+  if (bench == null) return 'Run a session once to benchmark this phone.';
+  const tier = bench.ms <= AUTO_PRECISE_MAX_MS ? 'Precise recommended' : 'Standard recommended';
+  return `Your phone: ${bench.delegate} · ${bench.ms}ms — ${tier}`;
+}
+
+/** Mirrors AUTO_PRECISE_MAX_MS in src/camera/useShotEngine.ts (auto step-down budget). */
+const AUTO_PRECISE_MAX_MS = 55;
 
 // ---------------------------------------------------------------------------
 // Sound pack preview — plays the pack's make sound on select
@@ -171,6 +189,36 @@ function OptionRow({
   );
 }
 
+/** Tappable row for a navigational/one-shot action (chevron affordance). */
+function ActionRow({
+  label,
+  description,
+  onPress,
+}: {
+  label: string;
+  description: string;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      accessibilityHint={description}
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.optionRow,
+        pressed && { backgroundColor: color.surfaceRaised },
+      ]}
+    >
+      <View style={styles.settingText}>
+        <Text style={styles.settingLabel}>{label}</Text>
+        <Text style={styles.settingDesc}>{description}</Text>
+      </View>
+      <Text style={styles.chevron}>{'›'}</Text>
+    </Pressable>
+  );
+}
+
 function StepperButton({
   glyph,
   label,
@@ -267,11 +315,38 @@ export default function SettingsScreen() {
   const shootingHand = useSettings((s) => s.shootingHand);
   const playerHeightCm = useSettings((s) => s.playerHeightCm);
   const detectorModel = useSettings((s) => s.detectorModel);
+  const detectionRate = useSettings((s) => s.detectionRate);
+  const lastBenchmark = useSettings((s) => s.lastBenchmark);
   const debugMode = useSettings((s) => s.debugMode);
   const set = useSettings((s) => s.set);
+  const resetTutorial = useSettings((s) => s.resetTutorial);
+
+  // Transient caption shown after "Restart tutorial" is tapped.
+  const [tutorialNotice, setTutorialNotice] = useState(false);
+  const tutorialNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Release the sound-pack preview player when leaving the screen.
   useEffect(() => releasePreview, []);
+  // Clear the pending notice timer on unmount.
+  useEffect(() => () => {
+    if (tutorialNoticeTimer.current != null) clearTimeout(tutorialNoticeTimer.current);
+  }, []);
+
+  const restartTutorial = () => {
+    if (useSettings.getState().hapticsEnabled) {
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    }
+    resetTutorial();
+    setTutorialNotice(true);
+    if (tutorialNoticeTimer.current != null) clearTimeout(tutorialNoticeTimer.current);
+    tutorialNoticeTimer.current = setTimeout(() => setTutorialNotice(false), 3000);
+  };
+
+  const replayOnboarding = () => {
+    tick();
+    set('onboardingDone', false);
+    router.push('/onboarding');
+  };
 
   const goBack = () => {
     if (router.canGoBack()) router.back();
@@ -376,6 +451,11 @@ export default function SettingsScreen() {
         <Card>
           <Eyebrow>Detection</Eyebrow>
           <View style={styles.settingText}>
+            <Text style={styles.settingLabel}>Device benchmark</Text>
+            <Text style={styles.settingDesc}>{benchmarkSummary(lastBenchmark)}</Text>
+          </View>
+          <View style={styles.divider} />
+          <View style={styles.settingText}>
             <Text style={styles.settingLabel}>Detector model</Text>
             <Text style={styles.settingDesc}>
               Auto measures your phone at start and picks the best fit —
@@ -409,6 +489,30 @@ export default function SettingsScreen() {
               }}
             />
           </View>
+          <Text style={styles.tierCaption}>
+            Standard: every iPhone since XR · Precise: iPhone 13 and newer recommended.
+          </Text>
+          <View style={styles.divider} />
+          <View style={styles.settingText}>
+            <Text style={styles.settingLabel}>Detection rate</Text>
+            <Text style={styles.settingDesc}>
+              How often each camera frame is analyzed. Lower rates save battery.
+            </Text>
+          </View>
+          {DETECTION_RATE_OPTIONS.map((opt, i) => (
+            <View key={opt.value}>
+              {i > 0 && <View style={styles.divider} />}
+              <OptionRow
+                label={opt.label}
+                blurb={opt.blurb}
+                selected={detectionRate === opt.value}
+                onPress={() => {
+                  tick();
+                  set('detectionRate', opt.value);
+                }}
+              />
+            </View>
+          ))}
           <View style={styles.divider} />
           <ToggleRow
             label="Debug mode"
@@ -531,6 +635,25 @@ export default function SettingsScreen() {
           </Row>
         </Card>
 
+        {/* Help */}
+        <Card>
+          <Eyebrow>Help</Eyebrow>
+          <ActionRow
+            label="Restart tutorial"
+            description="Replay the coach marks on Home, Live and Summary."
+            onPress={restartTutorial}
+          />
+          {tutorialNotice && (
+            <Text style={styles.tutorialNotice}>Tutorial will replay on each screen.</Text>
+          )}
+          <View style={styles.divider} />
+          <ActionRow
+            label="Replay onboarding"
+            description="See the welcome walkthrough again from the start."
+            onPress={replayOnboarding}
+          />
+        </Card>
+
         {/* About */}
         <Card>
           <Eyebrow>About</Eyebrow>
@@ -597,6 +720,20 @@ const styles = StyleSheet.create({
   aboutBody: {
     ...type.body,
     color: color.textDim,
+  },
+  tierCaption: {
+    ...type.caption,
+    color: color.textFaint,
+    marginTop: space.md,
+  },
+  chevron: {
+    ...type.statMedium,
+    color: color.textFaint,
+  },
+  tutorialNotice: {
+    ...type.caption,
+    color: color.accent,
+    marginTop: space.sm,
   },
   divider: {
     height: StyleSheet.hairlineWidth,

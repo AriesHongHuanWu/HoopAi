@@ -9,7 +9,7 @@
  */
 import { router, useLocalSearchParams } from 'expo-router';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, View, type LayoutRectangle } from 'react-native';
 
 import { shareSessionCard } from '@/components/ShareCard';
 import {
@@ -18,6 +18,7 @@ import {
   SessionTitle,
   useSessionRecord,
 } from '@/components/ShotList';
+import { CoachMarks, useCoachMarks, type CoachStep } from '@/components/coach/CoachMarks';
 import { Card, Chip, Eyebrow, PillButton, Row, Screen } from '@/components/ui';
 import { color, space, type } from '@/constants/tokens';
 import type { ResolvedShot, ShotOutcome, ShotValue } from '@/core/types';
@@ -118,7 +119,25 @@ export default function SessionSummaryScreen() {
   const empty =
     !storeMode && (dbId == null || (record.loaded && record.session == null));
 
+  // Coach marks: teach shot correction (in the shared ShotList below, so no
+  // target rect — centered) and the replay button (owned here, so anchored).
+  const replayRef = useRef<View>(null);
+  const [replayRect, setReplayRect] = useState<LayoutRectangle | undefined>();
+  const summarySteps: CoachStep[] = [
+    {
+      title: 'Fix a make, miss or 2/3',
+      text: "Tap any shot in the list below to correct it — make, miss, unsure, or 2-point vs. 3-point. Every correction you make trains sharper detection for next time.",
+    },
+    {
+      title: 'Watch the replay',
+      text: 'Your recorded clips and highlight reel are one tap away — see the exact makes and misses the camera caught, in order.',
+      targetRect: replayRect,
+    },
+  ];
+  const coach = useCoachMarks('summary', summarySteps);
+
   return (
+    <View style={styles.root}>
     <Screen scroll>
       <Eyebrow>Session complete</Eyebrow>
       {loading ? (
@@ -153,11 +172,17 @@ export default function SessionSummaryScreen() {
             </View>
           )}
           {videoPath != null && sessionId != null && (
-            <PillButton
-              label="Watch replay"
-              onPress={() => router.push(`/video/${sessionId}`)}
-              style={styles.replayButton}
-            />
+            <View ref={replayRef} onLayout={() => {
+              replayRef.current?.measureInWindow((x, y, w, h) =>
+                setReplayRect({ x, y, width: w, height: h }),
+              );
+            }}>
+              <PillButton
+                label="Watch replay"
+                onPress={() => router.push(`/video/${sessionId}`)}
+                style={styles.replayButton}
+              />
+            </View>
           )}
           <SessionRecap
             shots={shots}
@@ -191,10 +216,17 @@ export default function SessionSummaryScreen() {
         </>
       )}
     </Screen>
+    {!loading && !empty && coach.visible && (
+      <CoachMarks steps={coach.steps} onFinish={coach.finish} onSkip={coach.finish} />
+    )}
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
+  root: {
+    flex: 1,
+  },
   titleBlock: {
     marginBottom: space.sm,
   },

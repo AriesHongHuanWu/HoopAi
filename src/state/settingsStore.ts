@@ -24,11 +24,31 @@ export type VoiceMetric = 'none' | 'result' | 'entryAngle' | 'fgPct';
  */
 export type DetectorModel = 'auto' | 'standard' | 'precise';
 
+/**
+ * How often the detector analyzes camera frames.
+ * - 'auto' (default): ~30fps gate — smooth tracking on every supported phone.
+ * - 'battery': ~15fps gate — cooler phone, longer sessions.
+ * - 'max': every camera frame — newest phones only.
+ */
+export type DetectionRate = 'auto' | 'battery' | 'max';
+
 /** Clip window bounds (seconds), used by the Settings > Video steppers. */
 export const CLIP_PRE_ROLL_MIN = 2;
 export const CLIP_PRE_ROLL_MAX = 10;
 export const CLIP_POST_ROLL_MIN = 1;
 export const CLIP_POST_ROLL_MAX = 5;
+
+/** Screens with an in-app coach-marks walkthrough. */
+export type TutorialScreen = 'home' | 'live' | 'summary';
+
+/** Has the walkthrough for each screen been seen (and dismissed) once? */
+export type TutorialSeen = Record<TutorialScreen, boolean>;
+
+const TUTORIAL_SEEN_DEFAULT: TutorialSeen = {
+  home: false,
+  live: false,
+  summary: false,
+};
 
 export interface SettingsState {
   soundsEnabled: boolean;
@@ -50,10 +70,29 @@ export interface SettingsState {
   playerHeightCm: number | null;
   onboardingDone: boolean;
   detectorModel: DetectorModel;
+  /** Detection frame-rate budget (see DetectionRate). */
+  detectionRate: DetectionRate;
+  /**
+   * Last on-device model smoke-test result — delegate label (e.g.
+   * "precise/core-ml") + measured latency in ms. Written by useShotEngine
+   * after each successful model load so Settings can show real device
+   * numbers without running the camera. Null until the first session.
+   */
+  lastBenchmark: { delegate: string; ms: number } | null;
   /** Show the on-screen detection diagnostics panel. Default off. */
   debugMode: boolean;
+  /** Per-screen "has the coach-marks walkthrough been shown once?" flags. */
+  tutorialSeen: TutorialSeen;
 
   set: <K extends keyof SettingsState>(key: K, value: SettingsState[K]) => void;
+  /** Mark one screen's walkthrough as seen (called on finish/skip). */
+  markTutorialSeen: (screen: TutorialScreen) => void;
+  /**
+   * Clear all tutorial-seen flags so every walkthrough re-triggers.
+   * onboardingDone is left untouched — only the in-app coach marks reset.
+   * Exposed for Settings > "Restart tutorial".
+   */
+  resetTutorial: () => void;
 }
 
 export const useSettings = create<SettingsState>()(
@@ -72,8 +111,14 @@ export const useSettings = create<SettingsState>()(
       playerHeightCm: null,
       onboardingDone: false,
       detectorModel: 'auto',
+      detectionRate: 'auto',
+      lastBenchmark: null,
       debugMode: false,
+      tutorialSeen: TUTORIAL_SEEN_DEFAULT,
       set: (key, value) => set({ [key]: value } as Pick<SettingsState, typeof key>),
+      markTutorialSeen: (screen) =>
+        set((s) => ({ tutorialSeen: { ...s.tutorialSeen, [screen]: true } })),
+      resetTutorial: () => set({ tutorialSeen: { ...TUTORIAL_SEEN_DEFAULT } }),
     }),
     {
       name: 'hoopai-settings',

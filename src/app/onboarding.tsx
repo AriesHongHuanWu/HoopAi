@@ -189,7 +189,7 @@ const PAGES: PageDef[] = [
     key: 'clips',
     eyebrow: 'Step 3 · Highlights',
     title: 'Your clips, your stats',
-    body: 'Record your session and keep the clips you want — makes only by default. FG%, streaks and entry angle land on your dashboard.',
+    body: "Record your session and keep the clips you want — makes only by default. FG%, streaks and entry angle land on your dashboard. Each screen will show you around the first time — look for the Skip if you'd rather dive in.",
     Illustration: ClipsIllustration,
   },
 ];

@@ -223,6 +223,9 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
             throw new Error(`auto: ${ms}ms > ${a.maxMs}ms budget — stepping down`);
           }
           if (!alive) return;
+          // Persist the measured tier so Settings can show real device
+          // numbers ("precise/core-ml · 42ms") without running the camera.
+          useSettings.getState().set('lastBenchmark', { delegate: a.label, ms });
           setModelState({
             model: m,
             delegate: `${a.label} · ${ms}ms`,
@@ -345,6 +348,14 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
       modelState.model != null ? NitroModules.box(modelState.model) : null;
   }, [modelState.model, boxedModelSv]);
 
+  // Detection-rate budget (Settings > Detection). Captured as a plain const —
+  // changing the setting re-renders and re-registers the frame worklet with
+  // the new gate. 'battery' ~15fps (66ms), 'auto' ~30fps (33ms), 'max' = every
+  // frame (0 = no gate, current behavior).
+  const detectionRate = useSettings((s) => s.detectionRate);
+  const gateMs = detectionRate === 'battery' ? 66 : detectionRate === 'max' ? 0 : 33;
+  const lastRunMs = useSharedValue(0);
+
   const { resizer } = useResizer({
     width: DETECTION.inputSize,
     height: DETECTION.inputSize,
@@ -372,6 +383,14 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
     onFrame(frame) {
       'worklet';
       try {
+        // Detection-rate gate: skip frames beyond the budget. Skipped frames
+        // still dispose (finally below) and return early WITHOUT bumping the
+        // debug heartbeat — only processed frames count.
+        if (gateMs > 0) {
+          const nowMs = Date.now();
+          if (nowMs - lastRunMs.value < gateMs) return;
+          lastRunMs.value = nowMs;
+        }
         const boxed = boxedModelSv.value;
         if (boxed == null || resizer == null) {
           // Heartbeat: prove the camera worklet is alive on the debug panel

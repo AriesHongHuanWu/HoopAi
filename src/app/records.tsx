@@ -13,6 +13,7 @@ import { StyleSheet, Text, View } from 'react-native';
 import Animated, { FadeInDown, useReducedMotion } from 'react-native-reanimated';
 
 import { AchievementRow } from '@/components/AchievementRow';
+import { ProBadge } from '@/components/ProBadge';
 import { BackPill } from '@/components/ShotList';
 import { Card, Chip, Eyebrow, PillButton, Row, Screen, StatNumber } from '@/components/ui';
 import { color, motion, space, type } from '@/constants/tokens';
@@ -94,7 +95,10 @@ export default function RecordsScreen() {
       <Row style={styles.headerRow}>
         <BackPill />
       </Row>
-      <Eyebrow>Records</Eyebrow>
+      <Row gap={space.sm} style={styles.titleRow}>
+        <Eyebrow>Records</Eyebrow>
+        <ProBadge long />
+      </Row>
       <Text style={styles.title}>Lifetime</Text>
 
       <View style={styles.stack}>
@@ -157,6 +161,9 @@ export default function RecordsScreen() {
 const styles = StyleSheet.create({
   headerRow: {
     marginBottom: space.lg,
+  },
+  titleRow: {
+    justifyContent: 'space-between',
   },
   title: {
     ...type.title,

@@ -13,6 +13,7 @@ import React from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import Animated, { FadeInDown, ReduceMotion } from 'react-native-reanimated';
 
+import { ProBadge } from '@/components/ProBadge';
 import { Eyebrow, Row, Screen } from '@/components/ui';
 import { color, motion, radius, space, type } from '@/constants/tokens';
 import { GAME_MODES, type GameModeDef } from '@/core/gameModes';
@@ -111,11 +112,14 @@ function ModeCard({
           <Text style={styles.name} numberOfLines={1}>
             {mode.name}
           </Text>
-          {selected && (
-            <View style={styles.selectedTag}>
-              <Text style={styles.selectedTagText}>✓ PICKED</Text>
-            </View>
-          )}
+          <Row gap={space.xs}>
+            {mode.id !== 'free' && <ProBadge />}
+            {selected && (
+              <View style={styles.selectedTag}>
+                <Text style={styles.selectedTagText}>✓ PICKED</Text>
+              </View>
+            )}
+          </Row>
         </Row>
         <Text style={styles.tagline}>{mode.tagline}</Text>
         <Text style={styles.rules} numberOfLines={2}>
