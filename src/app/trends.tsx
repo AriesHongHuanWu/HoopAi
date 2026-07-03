@@ -1,6 +1,7 @@
 /**
  * Trends — FG% across the last 30 sessions: hero sparkline, per-session bars
- * (Skia rects, latest highlighted in the hot accent) and an averages row.
+ * (Skia rects, latest highlighted in the hot accent), an averages row, the
+ * entry-angle histogram of the last session and a lifetime strip.
  * Empty state until at least two sessions exist.
  */
 import { Canvas, Rect, RoundedRect } from '@shopify/react-native-skia';
@@ -9,6 +10,10 @@ import React, { useCallback, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
 import { BackPill } from '@/components/ShotList';
+import {
+  AngleHistogram,
+  decidedEntryAngles,
+} from '@/components/charts/AngleHistogram';
 import { Sparkline } from '@/components/charts/Sparkline';
 import {
   Card,
@@ -20,7 +25,7 @@ import {
   StatNumber,
 } from '@/components/ui';
 import { color, space, type } from '@/constants/tokens';
-import { fgTrend } from '@/data/db';
+import { fgTrend, listSessions, sessionShots } from '@/data/db';
 
 type TrendPoint = Awaited<ReturnType<typeof fgTrend>>[number];
 
@@ -98,12 +103,35 @@ function TrendBars({
 
 export default function TrendsScreen() {
   const [trend, setTrend] = useState<TrendPoint[] | null>(null);
+  /** Entry angles of the LAST session's decided shots (null = loading). */
+  const [lastAngles, setLastAngles] = useState<number[] | null>(null);
+  const [lifetime, setLifetime] = useState<{
+    sessions: number;
+    makes: number;
+  } | null>(null);
 
   useFocusEffect(
     useCallback(() => {
       let alive = true;
-      void fgTrend(30).then((t) => {
-        if (alive) setTrend(t);
+      void fgTrend(30).then(async (t) => {
+        if (!alive) return;
+        setTrend(t);
+        const last = t[t.length - 1];
+        if (last == null) {
+          setLastAngles([]);
+          return;
+        }
+        const rows = await sessionShots(last.sessionId);
+        if (alive) setLastAngles(decidedEntryAngles(rows));
+      });
+      void listSessions(1000).then((rows) => {
+        if (!alive) return;
+        const tracked = rows.filter((r) => r.attempts > 0);
+        setLifetime({
+          sessions: tracked.length,
+          // SUM over a shot-less session can surface as null — guard it.
+          makes: tracked.reduce((sum, r) => sum + (r.makes ?? 0), 0),
+        });
       });
       return () => {
         alive = false;
@@ -215,6 +243,31 @@ export default function TrendsScreen() {
               />
             </Row>
           </Card>
+
+          {lastAngles != null && (
+            <Card>
+              <Eyebrow>Entry angles — last session</Eyebrow>
+              <AngleHistogram angles={lastAngles} />
+            </Card>
+          )}
+
+          {lifetime != null && lifetime.sessions > 0 && (
+            <Card>
+              <Eyebrow>Lifetime</Eyebrow>
+              <Row style={{ justifyContent: 'space-around' }}>
+                <StatNumber
+                  value={String(lifetime.sessions)}
+                  size="medium"
+                  label="sessions"
+                />
+                <StatNumber
+                  value={String(lifetime.makes)}
+                  size="medium"
+                  label="total makes"
+                />
+              </Row>
+            </Card>
+          )}
         </View>
       )}
     </Screen>

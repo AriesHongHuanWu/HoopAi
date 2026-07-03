@@ -14,6 +14,7 @@
  */
 import * as SQLite from 'expo-sqlite';
 
+import { emptyTotals, type LifetimeTotals } from '../core/achievements';
 import type { ResolvedShot, SessionStats, ShotOutcome, ShotSignals } from '../core/types';
 import { recomputeStats } from '../core/stats';
 
@@ -158,6 +159,14 @@ async function migrate(db: SQLite.SQLiteDatabase): Promise<void> {
       PRAGMA user_version = 2;
     `);
   }
+  if (version < 3) {
+    // v3: persist the estimated 2/3-point value so lifetime records (career
+    // threes) survive restarts. NULL on rows written before v3 ⇒ treated as 2.
+    await db.execAsync(`
+      ALTER TABLE shots ADD COLUMN shotValue INTEGER;
+      PRAGMA user_version = 3;
+    `);
+  }
 }
 
 /** Run a DB operation; on ANY failure log + return the fallback (never throw). */
@@ -276,8 +285,8 @@ export async function insertShot(sessionId: number, shot: ResolvedShot): Promise
       `INSERT INTO shots (
          sessionId, shotIndex, tStart, tResolved, outcome, corrected, rimBounce,
          entryAngleDeg, releaseAngleDeg, xCross, originX, originY,
-         signalsJson, trajectoryJson
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         signalsJson, trajectoryJson, shotValue
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       sessionId,
       shot.id,
       shot.tStart,
@@ -292,6 +301,7 @@ export async function insertShot(sessionId: number, shot: ResolvedShot): Promise
       shot.originY,
       JSON.stringify(shot.signals),
       JSON.stringify(shot.trajectory),
+      shot.shotValue ?? null,
     );
     return res.lastInsertRowId;
   });
@@ -307,6 +317,18 @@ export async function updateShotOutcome(
     await db.runAsync(
       'UPDATE shots SET outcome = ?, corrected = 1 WHERE id = ?',
       outcome,
+      shotRowId,
+    );
+  });
+}
+
+/** One-tap 2↔3 correction: persist a shot's corrected point value. */
+export async function updateShotValue(shotRowId: number, value: 2 | 3): Promise<void> {
+  return safe('updateShotValue', undefined, async () => {
+    const db = await getDb();
+    await db.runAsync(
+      'UPDATE shots SET shotValue = ?, corrected = 1 WHERE id = ?',
+      value,
       shotRowId,
     );
   });
@@ -336,6 +358,12 @@ export interface ShotRow {
   signalsJson: string;
   trajectoryJson: string;
   clipPath: string | null;
+  /**
+   * Estimated 2/3-point value; null on pre-v3 rows or when estimation didn't
+   * run. Optional so hand-built rows (tests, fixtures) predating v3 still
+   * typecheck — SELECTed rows always carry the column.
+   */
+  shotValue?: number | null;
 }
 
 export async function sessionShots(sessionId: number): Promise<ShotRow[]> {
@@ -367,12 +395,100 @@ export function shotFromRow(row: ShotRow): ResolvedShot {
     originY: row.originY,
     trajectory: parseJson(row.trajectoryJson, []),
     corrected: row.corrected === 1,
+    shotValue: row.shotValue === 3 ? 3 : row.shotValue === 2 ? 2 : undefined,
   };
 }
 
 export async function sessionStatsFromDb(sessionId: number): Promise<SessionStats> {
   const rows = await sessionShots(sessionId);
   return recomputeStats(rows.map(shotFromRow));
+}
+
+// ---------------------------------------------------------------------------
+// Lifetime records
+// ---------------------------------------------------------------------------
+
+/** Sessions scanned for the best-streak walk (newest first). */
+const LIFETIME_STREAK_SESSION_CAP = 200;
+
+/**
+ * Career totals for the Records screen (src/core/achievements.ts).
+ *
+ * - `sessions` counts sessions with at least one tracked shot.
+ * - `threes` counts makes persisted with shotValue = 3 (pre-v3 rows count as 2).
+ * - `bestSessionFgPct` runs over decided shots (make|miss) of sessions with
+ *   ≥ 10 attempts, matching the Sharpshooter badge's floor.
+ * - `bestStreak` walks each session's shots in order (misses reset, unsure
+ *   shots are skipped — same semantics as src/core/stats.ts), scanning only
+ *   the {@link LIFETIME_STREAK_SESSION_CAP} most recent sessions.
+ *
+ * Never throws: any failure returns all-zero totals.
+ */
+export async function lifetimeTotals(): Promise<LifetimeTotals> {
+  return safe('lifetimeTotals', emptyTotals(), async () => {
+    const db = await getDb();
+
+    const agg = await db.getFirstAsync<{
+      sessions: number;
+      attempts: number;
+      makes: number;
+      threes: number;
+    }>(
+      `SELECT COUNT(DISTINCT sessionId) AS sessions,
+              COUNT(*) AS attempts,
+              COALESCE(SUM(CASE WHEN outcome = 'make' THEN 1 ELSE 0 END), 0) AS makes,
+              COALESCE(SUM(CASE WHEN outcome = 'make' AND shotValue = 3 THEN 1 ELSE 0 END), 0) AS threes
+       FROM shots`,
+    );
+
+    const best = await db.getFirstAsync<{ best: number | null }>(
+      `SELECT MAX(CAST(makes AS REAL) / decided) AS best FROM (
+         SELECT COUNT(*) AS attempts,
+                SUM(CASE WHEN outcome = 'make' THEN 1 ELSE 0 END) AS makes,
+                SUM(CASE WHEN outcome IN ('make','miss') THEN 1 ELSE 0 END) AS decided
+         FROM shots
+         GROUP BY sessionId
+       )
+       WHERE attempts >= 10 AND decided > 0`,
+    );
+
+    // Best streak: one query, per-session walk in JS (streaks never span
+    // sessions). Ordered by session then shot index; capped at recent sessions.
+    const rows = await db.getAllAsync<{ sessionId: number; outcome: ShotOutcome }>(
+      `SELECT sh.sessionId, sh.outcome
+       FROM shots sh
+       WHERE sh.sessionId IN (
+         SELECT id FROM sessions ORDER BY startedAt DESC LIMIT ?
+       )
+       ORDER BY sh.sessionId ASC, sh.shotIndex ASC`,
+      LIFETIME_STREAK_SESSION_CAP,
+    );
+    let bestStreak = 0;
+    let streak = 0;
+    let currentSession: number | null = null;
+    for (const row of rows) {
+      if (row.sessionId !== currentSession) {
+        currentSession = row.sessionId;
+        streak = 0;
+      }
+      if (row.outcome === 'make') {
+        streak += 1;
+        if (streak > bestStreak) bestStreak = streak;
+      } else if (row.outcome === 'miss') {
+        streak = 0;
+      }
+      // 'unsure' leaves the streak untouched (see src/core/stats.ts).
+    }
+
+    return {
+      sessions: agg?.sessions ?? 0,
+      attempts: agg?.attempts ?? 0,
+      makes: agg?.makes ?? 0,
+      bestStreak,
+      bestSessionFgPct: best?.best ?? 0,
+      threes: agg?.threes ?? 0,
+    };
+  });
 }
 
 /** Per-session FG% series for the trends screen (oldest first). */

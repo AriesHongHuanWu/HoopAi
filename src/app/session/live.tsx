@@ -33,6 +33,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAppStateGuard } from '../../camera/useAppStateGuard';
 import { useShotEngine, type ShotEngine } from '../../camera/useShotEngine';
 import { playSound, useShotSounds } from '../../camera/useShotSounds';
+import { useVoiceAnnouncements } from '../../camera/useVoiceAnnouncements';
 import { HudChip } from '../../components/hud/HudChip';
 import { ShotFlash } from '../../components/hud/ShotFlash';
 import { DebugPanel } from '../../components/hud/DebugPanel';
@@ -64,6 +65,7 @@ const absoluteFill = {
 export default function LiveSessionScreen() {
   useKeepAwake();
   useShotSounds();
+  useVoiceAnnouncements();
   const insets = useSafeAreaInsets();
   const { width, height } = useWindowDimensions();
   const isLandscape = width > height;

@@ -9,6 +9,7 @@ import {
   endSession,
   insertShot,
   updateShotOutcome,
+  updateShotValue,
 } from '../data/db';
 import {
   createAccumulator,
@@ -188,6 +189,13 @@ export const useSession = create<SessionState>((set, get) => ({
           : e,
       );
       acc = shots.reduce((a, e) => pushShot(a, e.shot), createAccumulator());
+      // Persist so lifetime records (career threes) reflect corrections.
+      const target = shots.find((e) => e.shot.id === shotId);
+      if (target?.rowId != null && target.rowId >= 0) {
+        updateShotValue(target.rowId, value).catch((err) => {
+          console.warn('[session] updateShotValue failed', err);
+        });
+      }
       return {
         shots,
         stats: acc.stats,

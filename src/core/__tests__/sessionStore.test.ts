@@ -10,6 +10,7 @@ jest.mock('../../data/db', () => ({
   endSession: jest.fn(),
   insertShot: jest.fn(),
   updateShotOutcome: jest.fn(),
+  updateShotValue: jest.fn().mockResolvedValue(undefined),
 }));
 
 import {
@@ -17,6 +18,7 @@ import {
   endSession,
   insertShot,
   updateShotOutcome,
+  updateShotValue,
 } from '../../data/db';
 import { useSession } from '../../state/sessionStore';
 
@@ -24,6 +26,7 @@ const mockCreateSession = createSession as jest.Mock;
 const mockEndSession = endSession as jest.Mock;
 const mockInsertShot = insertShot as jest.Mock;
 const mockUpdateShotOutcome = updateShotOutcome as jest.Mock;
+const mockUpdateShotValue = updateShotValue as jest.Mock;
 
 function makeShot(id: number, outcome: ResolvedShot['outcome'] = 'make'): ResolvedShot {
   return {
@@ -55,6 +58,7 @@ beforeEach(() => {
   mockEndSession.mockResolvedValue(undefined);
   mockInsertShot.mockResolvedValue(1);
   mockUpdateShotOutcome.mockResolvedValue(undefined);
+  mockUpdateShotValue.mockResolvedValue(undefined);
   useSession.getState().resetToIdle();
 });
 

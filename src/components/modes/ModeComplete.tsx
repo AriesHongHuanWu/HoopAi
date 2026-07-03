@@ -4,8 +4,8 @@
  * Fades up a scrim with a glass card: the mode's headline result, a springy
  * hero numeral under a Skia arc-and-sparks flourish (the signature shot arc —
  * no confetti), an optional per-spot or contest breakdown, and three actions —
- * share the result (native share sheet), play the mode again, or exit to the
- * session summary. All entering animations respect the system reduce-motion
+ * share the result (a rendered ShareCard image, text share as fallback), play
+ * the mode again, or exit to the session summary. All entering animations respect the system reduce-motion
  * setting.
  *
  * Presentation only; the live screen owns when to mount it and what the buttons
@@ -13,7 +13,7 @@
  */
 import { BlurMask, Canvas, Circle, Path, Skia } from '@shopify/react-native-skia';
 import React, { useMemo, useState } from 'react';
-import { Share, StyleSheet, Text, View } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
 import Animated, {
   FadeIn,
   FadeInDown,
@@ -21,9 +21,11 @@ import Animated, {
   ZoomIn,
 } from 'react-native-reanimated';
 
+import { modeCardData, shareCardImage } from '../ShareCard';
 import { Card, PillButton, Row } from '../ui';
 import { color, motion, space, type } from '../../constants/tokens';
 import { getModeDef, type ModeState } from '../../core/gameModes';
+import { useSession } from '../../state/sessionStore';
 
 /** RN 0.86 dropped StyleSheet.absoluteFillObject — local equivalent. */
 const absoluteFill = {
@@ -204,10 +206,23 @@ export function ModeComplete({
   const def = getModeDef(mode.modeId);
   const h = headlineFor(mode);
 
+  // Share the score-led image card (session stats/shots from the live store);
+  // shareCardImage falls back to the plain-text caption itself and never
+  // throws, so failure here just re-enables the button.
+  const stats = useSession((s) => s.stats);
+  const shotEntries = useSession((s) => s.shots);
+  const [sharing, setSharing] = useState(false);
   const onShare = () => {
-    void Share.share({ message: h.share }).catch(() => {
-      // User dismissed the sheet or share failed — nothing to recover.
+    if (sharing) return;
+    setSharing(true);
+    const data = modeCardData({
+      modeName: def.name,
+      value: h.value,
+      unit: h.unit !== '' ? h.unit : h.banner,
+      stats,
+      shots: shotEntries.map((e) => e.shot),
     });
+    void shareCardImage(data, h.share).then(() => setSharing(false));
   };
 
   return (
@@ -258,7 +273,11 @@ export function ModeComplete({
           )}
 
           <View style={styles.actions}>
-            <PillButton label="Share result" onPress={onShare} />
+            <PillButton
+              label={sharing ? 'Preparing…' : 'Share result'}
+              onPress={onShare}
+              disabled={sharing}
+            />
             <Row gap={space.md} style={styles.secondaryRow}>
               <PillButton
                 label="Play again"

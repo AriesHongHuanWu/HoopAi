@@ -2,10 +2,12 @@
  * Session detail — loads one persisted session + its shots from the database
  * and renders the same hero/chart/list composition as the post-session
  * summary (shared SessionRecap). Corrections persist via updateShotOutcome
- * with an optimistic local flip.
+ * with an optimistic local flip. Below the recap: a "vs previous session"
+ * comparison (against the next older session with shots) and the entry-angle
+ * histogram.
  */
 import { router, useLocalSearchParams } from 'expo-router';
-import React from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
 import {
@@ -15,8 +17,20 @@ import {
   formatSessionTime,
   useSessionRecord,
 } from '@/components/ShotList';
+import {
+  AngleHistogram,
+  decidedEntryAngles,
+} from '@/components/charts/AngleHistogram';
+import { CompareBars } from '@/components/charts/CompareBars';
 import { Card, Eyebrow, PillButton, Row, Screen } from '@/components/ui';
 import { color, space, type } from '@/constants/tokens';
+import type { SessionStats } from '@/core/types';
+import { listSessions, sessionStatsFromDb } from '@/data/db';
+
+interface PreviousSession {
+  startedAt: number;
+  stats: SessionStats;
+}
 
 export default function SessionDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -24,6 +38,44 @@ export default function SessionDetailScreen() {
   const sessionId = Number.isInteger(parsed) ? parsed : null;
   const record = useSessionRecord(sessionId);
   const session = record.session;
+
+  /**
+   * The next older session that actually has shots, for the comparison card.
+   * undefined = still loading, null = none found (card skipped either way).
+   */
+  const [prev, setPrev] = useState<PreviousSession | null | undefined>(undefined);
+
+  useEffect(() => {
+    let alive = true;
+    setPrev(undefined);
+    if (session == null) return;
+    const { id: currentId, startedAt } = session;
+    void (async () => {
+      // listSessions is ordered newest-first, so the first older match wins.
+      const rows = await listSessions(200);
+      const candidate = rows.find(
+        (r) =>
+          r.id !== currentId &&
+          r.attempts > 0 &&
+          (r.startedAt < startedAt ||
+            (r.startedAt === startedAt && r.id < currentId)),
+      );
+      if (candidate == null) {
+        if (alive) setPrev(null);
+        return;
+      }
+      const stats = await sessionStatsFromDb(candidate.id);
+      if (alive) setPrev({ startedAt: candidate.startedAt, stats });
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [session]);
+
+  const entryAngles = useMemo(
+    () => decidedEntryAngles(record.shots),
+    [record.shots],
+  );
 
   const meta =
     session != null
@@ -73,6 +125,21 @@ export default function SessionDetailScreen() {
               keepMode={session.keepMode}
             />
           </View>
+          <View style={{ marginTop: space.lg, gap: space.lg }}>
+            {prev != null && (
+              <Card>
+                <Eyebrow>Vs previous session</Eyebrow>
+                <Text style={styles.compareMeta}>
+                  Compared with {formatSessionDate(prev.startedAt)}
+                </Text>
+                <CompareBars current={record.stats} previous={prev.stats} />
+              </Card>
+            )}
+            <Card>
+              <Eyebrow>Entry angles</Eyebrow>
+              <AngleHistogram angles={entryAngles} />
+            </Card>
+          </View>
         </View>
       )}
     </Screen>
@@ -97,5 +164,11 @@ const styles = StyleSheet.create({
   dim: {
     ...type.body,
     color: color.textDim,
+  },
+  compareMeta: {
+    ...type.caption,
+    color: color.textFaint,
+    marginTop: -space.xs,
+    marginBottom: space.md,
   },
 });

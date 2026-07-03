@@ -307,6 +307,12 @@ export default function HomeScreen() {
             hint="See your FG% over time"
             onPress={() => router.push('/trends')}
           />
+          <QuickLink
+            glyph="★"
+            label="Records"
+            hint="See your lifetime records and badges"
+            onPress={() => router.push('/records')}
+          />
         </Row>
       </View>
     </Screen>

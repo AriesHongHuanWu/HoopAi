@@ -11,6 +11,7 @@ import { router, useLocalSearchParams } from 'expo-router';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
+import { shareSessionCard } from '@/components/ShareCard';
 import {
   persistSessionLabel,
   SessionRecap,
@@ -28,6 +29,7 @@ export default function SessionSummaryScreen() {
   const params = useLocalSearchParams<{ id: string }>();
   const phase = useSession((s) => s.phase);
   const liveSessionId = useSession((s) => s.sessionId);
+  const startedAtMs = useSession((s) => s.startedAtMs);
   const entries = useSession((s) => s.shots);
   const storeStats = useSession((s) => s.stats);
   const recordingPath = useSession((s) => s.recordingPath);
@@ -90,6 +92,28 @@ export default function SessionSummaryScreen() {
     router.replace('/');
   };
 
+  // Share-card generation: disabled while the snapshot renders; failure shows
+  // a quiet chip (shareSessionCard itself never throws).
+  const [sharing, setSharing] = useState(false);
+  const [shareFailed, setShareFailed] = useState(false);
+  const onShareCard = () => {
+    if (sharing) return;
+    setSharing(true);
+    setShareFailed(false);
+    const dateMs = storeMode
+      ? (startedAtMs ?? Date.now())
+      : (record.session?.startedAt ?? Date.now());
+    void shareSessionCard({
+      stats,
+      shots,
+      label: label.trim() !== '' ? label : 'Shooting session',
+      dateMs,
+    }).then((ok) => {
+      setSharing(false);
+      if (!ok) setShareFailed(true);
+    });
+  };
+
   const loading = !storeMode && dbId != null && !record.loaded;
   const empty =
     !storeMode && (dbId == null || (record.loaded && record.session == null));
@@ -143,15 +167,27 @@ export default function SessionSummaryScreen() {
             videoPath={videoPath}
             keepMode={keepMode}
           />
-          <Row gap={space.md} style={{ marginTop: space.xl }}>
+          {shareFailed && (
+            <View style={{ marginTop: space.lg }}>
+              <Chip label="Couldn’t share — try again" tone="unsure" />
+            </View>
+          )}
+          <Row gap={space.md} style={{ marginTop: shareFailed ? space.md : space.xl }}>
             <PillButton label="Done" onPress={onDone} style={{ flex: 1 }} />
             <PillButton
               variant="ghost"
-              label="View history"
-              onPress={() => router.push('/history')}
+              label={sharing ? 'Preparing…' : 'Share card'}
+              onPress={onShareCard}
+              disabled={sharing || shots.length === 0}
               style={{ flex: 1 }}
             />
           </Row>
+          <PillButton
+            variant="ghost"
+            label="View history"
+            onPress={() => router.push('/history')}
+            style={{ marginTop: space.md }}
+          />
         </>
       )}
     </Screen>
