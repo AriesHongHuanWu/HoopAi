@@ -1,0 +1,58 @@
+name: Export trained model (Path B)
+
+# Converts the Kaggle-trained 4-class YOLO11n weights (kaggle/best.pt) to a
+# FP32 TFLite for the app. Runs on CPU (no P100/torch constraint that broke the
+# in-kernel export), so latest ultralytics + its matching torch export cleanly.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Ultralytics
+        run: pip install --quiet ultralytics
+
+      - name: Export best.pt -> TFLite
+        run: |
+          python - <<'PY'
+          import glob, shutil, os, pathlib
+          from ultralytics import YOLO
+          m = YOLO("kaggle/best.pt")
+          print("CLASSES:", m.names, flush=True)
+          out = m.export(format="tflite", imgsz=640, nms=False)
+          print("EXPORT RETURNED:", out, flush=True)
+          cands = []
+          p = pathlib.Path(str(out))
+          if p.is_file() and p.suffix == ".tflite":
+              cands = [str(p)]
+          elif p.is_dir():
+              cands = [str(x) for x in p.rglob("*.tflite")]
+          if not cands:
+              cands = glob.glob("**/*.tflite", recursive=True)
+          cands.sort(key=lambda c: (0 if "float32" in c else 1 if "float16" in c else 2))
+          assert cands, "no tflite produced"
+          print("PICKED:", cands[0], flush=True)
+          shutil.copy(cands[0], "hoopai-det.tflite")
+          print("TFLITE_KB:", os.path.getsize("hoopai-det.tflite") // 1024, flush=True)
+          open("model-classes.txt", "w").write(str(m.names))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hoopai-det-pathb
+          path: |
+            hoopai-det.tflite
+            model-classes.txt
+          if-no-files-found: error
