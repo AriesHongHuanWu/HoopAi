@@ -69,6 +69,18 @@ export const TRACKER = {
 export const RIM = {
   /** Damping factor for the rim lock (EMA weight of the NEW observation). */
   lockAlpha: 0.05,
+  /**
+   * Reject a rim box larger than this fraction of the frame side before it can
+   * feed the lock cluster. Mirrors DETECTION.ballMaxSizeFraction: the ball added
+   * a 0.22 cap for exactly the "half-frame box blooms over the whole screen"
+   * symptom, but the rim had NO analogue — so a spurious ~half-frame 'rim' box
+   * at score >= rimScoreMin could seed a lock that is then republished every
+   * frame (shotPipeline caches lastRim), producing a HUGE, persistent phantom
+   * reticle stuck wherever the junk box sat. A real 15-30 ft rim is tens of px
+   * on the 640 square (well under 0.30*640 = 192 px); no legitimate close-up rim
+   * approaches a third of the frame.
+   */
+  rimMaxSizeFraction: 0.3,
   /** Re-verify rim position every N seconds. */
   reverifySec: 5,
   /** A rim "moving" more than this × its diagonal in 5 frames is rejected. */

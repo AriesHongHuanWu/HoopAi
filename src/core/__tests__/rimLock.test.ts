@@ -375,3 +375,40 @@ describe('RimLock manual override and reset', () => {
     expect(feed(lock, rimBox, 1, 42)).toEqual(computeRimGeometry(rimBox));
   });
 });
+
+describe('RimLock oversized-box admission gate', () => {
+  test('a huge bottom-right rim box (> rimMaxSizeFraction) never locks', () => {
+    // 220px on a 640 square = 0.34 of the side, above rimMaxSizeFraction (0.30).
+    // Bottom-right corner, mimicking the reported phantom.
+    const huge: Box = { x: 400, y: 400, width: 220, height: 220 };
+    const lock = new RimLock();
+    // Far more frames than LOCK_CLUSTER_SIZE(3): must still never lock.
+    for (let i = 0; i < 10; i++) {
+      const g = lock.step(frame(i / FPS, [rimDet(huge, 0.9)]), i / FPS);
+      expect(g).toBeNull();
+    }
+    expect(lock.geometry).toBeNull();
+    expect(lock.driftDetected).toBe(false);
+  });
+
+  test('a huge box cannot hijack or corrupt an existing good lock', () => {
+    const lock = new RimLock();
+    feed(lock, rimBox, 5); // lock at the small 40x20 rim, cx=120
+    const huge: Box = { x: 400, y: 400, width: 220, height: 220 };
+    for (let i = 0; i < 10; i++) {
+      const g = lock.step(frame((5 + i) / FPS, [rimDet(huge, 0.95)]), (5 + i) / FPS);
+      // Held geometry stays the original small rim, never the huge corner box.
+      expect(g!.box.width).toBe(40);
+      expect(g!.cx).toBe(120);
+    }
+    expect(lock.driftDetected).toBe(false);
+  });
+
+  test('a normal-sized rim box just under the cap still locks', () => {
+    // 180px = 0.28 of 640, under rimMaxSizeFraction(0.30): admitted normally.
+    const ok: Box = { x: 200, y: 200, width: 180, height: 180 };
+    const g = feed(new RimLock(), ok, 3);
+    expect(g).not.toBeNull();
+    expect(g!.box.width).toBe(180);
+  });
+});

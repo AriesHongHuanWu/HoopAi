@@ -235,6 +235,11 @@ export async function detectImageToBoxes(
   const result: DetBox[] = [];
   for (const d of parsed.detections) {
     if (!passesGate(d.cls, d.score)) continue;
+    // Defensive size gate for the verification surface: drop any box covering
+    // ~the whole frame (a mis-scaled/degenerate detector box). Parser boxes are
+    // in INPUT (640) px; reject width or height >= 0.9 of the frame side so the
+    // screen meant to PROVE detection never renders a screen-covering phantom.
+    if (d.box.width >= 0.9 * INPUT || d.box.height >= 0.9 * INPUT) continue;
     result.push({
       cls: d.cls,
       score: d.score,

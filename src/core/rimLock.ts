@@ -201,9 +201,17 @@ export class RimLock {
     void t;
     let best: Detection | null = null;
     const dets = frame.detections;
+    // Frame side the boxes are authored in (square analysis frame, 640).
+    const side = Math.max(frame.frameWidth, frame.frameHeight);
+    const maxRimSide = RIM.rimMaxSizeFraction * side;
     for (let i = 0; i < dets.length; i++) {
       const d = dets[i];
       if (d.cls !== 'rim' || d.score < DETECTION.rimScoreMin) continue;
+      // Size sanity: a rim box wider or taller than rimMaxSizeFraction of the
+      // frame is not a real rim (it is a mis-scaled/degenerate detector box).
+      // Drop it BEFORE it can seed or EMA the lock, so an oversized corner box
+      // can never latch into a persistent phantom reticle.
+      if (d.box.width > maxRimSide || d.box.height > maxRimSide) continue;
       if (best === null || d.score > best.score) best = d;
     }
     if (best !== null) this.observe(best.box, best.score);
