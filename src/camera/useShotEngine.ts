@@ -532,9 +532,14 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
         let detErr = '';
         let parsed: ReturnType<typeof parseYoloOutput> | null = null;
         let netMotionScore = 0;
+        // Hoisted so the finally can ALWAYS dispose it — otherwise a throw
+        // between resize() and the old dispose() call (e.g. runSync failing on
+        // one frame) leaks the GPU buffer, and leaked buffers accumulate until
+        // the app slows to a freeze / gets OOM-killed.
+        let resized: { getPixelBuffer(): ArrayBuffer; dispose(): void } | null = null;
         try {
         const tflite = boxed.unbox() as TensorflowModel;
-        const resized = resizer.resize(frame);
+        resized = resizer.resize(frame);
         const rawBuffer = resized.getPixelBuffer();
         bufBytes = rawBuffer.byteLength;
         // IMPORTANT: the MODEL is fed the RAW zero-copy buffer (native code reads
@@ -607,12 +612,14 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
         const infMs = performance.now() - t0;
         // EMA of inference time — feeds the adaptive thermal gate next frame.
         avgInferMs.value = avgInferMs.value === 0 ? infMs : avgInferMs.value * 0.85 + infMs * 0.15;
-        resized.dispose();
         parsed = parseYoloOutput(new Float32Array(outputs[0]!), 0, {
           inputSize: detInputSize,
         });
         } catch (e) {
           detErr = `detect: ${String(e).slice(0, 130)}`;
+        } finally {
+          // ALWAYS free the resized GPU buffer, success or throw.
+          if (resized != null) resized.dispose();
         }
         const d = parsed ? parsed.debug : null;
         debug.value = {
@@ -645,12 +652,12 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
         let pose = null;
         const poseBox = boxedPoseSv.value;
         if (poseBox != null && poseResizer != null) {
+          let pResized: { getPixelBuffer(): ArrayBuffer; dispose(): void } | null = null;
           try {
             const pModel = poseBox.unbox() as TensorflowModel;
-            const pResized = poseResizer.resize(frame);
+            pResized = poseResizer.resize(frame);
             const pBuf = pResized.getPixelBuffer();
             const pOut = pModel.runSync([pBuf]);
-            pResized.dispose();
             pose = parseMoveNet(
               new Float32Array(pOut[0]!),
               detInputSize,
@@ -659,6 +666,8 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
             );
           } catch {
             pose = null;
+          } finally {
+            if (pResized != null) pResized.dispose();
           }
         }
 

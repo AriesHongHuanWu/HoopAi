@@ -521,6 +521,10 @@ export default function SettingsScreen() {
           <Text style={styles.tierCaption}>
             Standard: every iPhone since XR · Precise: iPhone 13 and newer recommended.
           </Text>
+          <Text style={styles.tierCaption}>
+            Current models are Ultra-Max (Temp) — a temporary build. A
+            clean-license detector is in training and will replace them.
+          </Text>
           <View style={styles.divider} />
           <View style={styles.settingText}>
             <Text style={styles.settingLabel}>Performance</Text>

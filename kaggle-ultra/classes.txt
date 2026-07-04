@@ -1,0 +1,1 @@
+ball,rim,ball_in_basket,person

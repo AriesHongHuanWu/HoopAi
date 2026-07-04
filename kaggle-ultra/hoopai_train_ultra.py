@@ -24,7 +24,7 @@ def main():
     import os, glob, shutil, pathlib, yaml
     from roboflow import Roboflow
 
-    RF_KEY = "4wYE6hxRLYRBQWE7DEkz"
+    RF_KEY = os.environ.get("ROBOFLOW_API_KEY", "")  # export ROBOFLOW_API_KEY before running
     TARGET = ["ball", "rim", "ball_in_basket", "person"]
     # Comprehensive class-name -> target mapping across all 26 datasets. Anything
     # NOT listed here (referee, number, court, net, backboard, "0", scoreboard,
