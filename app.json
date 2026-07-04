@@ -68,6 +68,12 @@
         }
       ],
       [
+        "expo-image-picker",
+        {
+          "photosPermission": "Hoopilot reads a basketball video you pick so it can run the shot detector on it."
+        }
+      ],
+      [
         "expo-build-properties",
         {
           "android": {

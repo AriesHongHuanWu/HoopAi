@@ -425,6 +425,12 @@ export default function HomeScreen() {
               hint="Track a live head-to-head score"
               onPress={() => router.push('/scoreboard')}
             />
+            <QuickLink
+              glyph="◎"
+              label="Test AI"
+              hint="Run the shot detector on a video from your library"
+              onPress={() => router.push('/session/analyze')}
+            />
           </Row>
         </View>
       </View>
