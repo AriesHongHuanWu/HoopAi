@@ -144,6 +144,18 @@ DATASETS = [
     ("public-0stx0", "made-baskets", 3),
     ("tickstrike", "basketball-players-and-ball1", 4),
     ("ntu-nw2om", "tracking-players-and-balls", 3),
+    # --- ADDED 2026-07-04: verified high-quality Roboflow sets (Roboflow API
+    # class counts confirmed) chosen to reinforce the WEAK rim + made classes.
+    # All are object-detection, CC-licensed, and NOT duplicates of the 26 above.
+    ("the-university-of-arizona-th1yv", "basketball-shooting-robot", 1),  # rim10140 made339 ball person
+    ("test-datset", "player_detect-0spfb", 1),                            # ball9377 rim6445 made507 person
+    ("devin-ross-g0rqc", "basketball-ls818", 71),                         # made-basket 3792 (rare class!)
+    ("queenmary", "basketball-poeple-rin", 1),                            # rim2828 made171 ball person
+    ("woo-lgxdg", "final-aops8", 3),                                      # rim2786 ball person
+    ("hotshot", "basketball-detection-tqwcs", 7),                         # ball5658 hoop4994
+    ("abc-bvosr", "automated-basketball-scoreboard", 2),                  # ball24352 net6968
+    ("amrita-hlhw6", "basketball-and-hoop-detection", 1),                 # ball10103 net2885
+    ("cv-8scak", "cv-cnfd4", 1),                                          # ball2913 rim2645 people3735
 ]
 
 
@@ -563,6 +575,61 @@ def merge_datasets(downloaded):
     return copied["train"], copied["val"]
 
 
+# Non-basketball background images (Intel Image Classification: streets,
+# buildings, forests, mountains, sea) mounted read-only via kernel dataset
+# sources. Used as HARD NEGATIVES to teach the model "no basketball here".
+NEG_DIR = "/kaggle/input/intel-image-classification"
+NEG_CAP = 8000
+
+
+def add_negatives():
+    """Append non-basketball background images as NEGATIVES — image entries with
+    ZERO annotations — to the TRAIN COCO json. A basketball-only training set
+    never shows the model an empty/irrelevant scene, so it over-fires on court
+    clutter (rim-on-trees, ball-on-fences). Negatives directly teach "predict
+    nothing here", cutting those false positives. Best-effort: if the dataset
+    isn't mounted or has no images, skip cleanly (never fatal).
+
+    Note: YOLOX's COCODataset keeps images with empty annotations (they train
+    the background/no-object path), so these take effect as true negatives.
+    """
+    import glob as _glob
+    from PIL import Image
+    print("=== STEP 2c: adding non-basketball negatives ===", flush=True)
+    if not os.path.isdir(NEG_DIR):
+        print("  !! negatives not mounted at %s — skipping (add it via "
+              "kernel dataset_sources)" % NEG_DIR, flush=True)
+        return
+    imgs = sorted(_glob.glob(os.path.join(NEG_DIR, "**", "*.jpg"), recursive=True))
+    imgs = imgs[:NEG_CAP]
+    if not imgs:
+        print("  !! no .jpg negatives under %s — skipping" % NEG_DIR, flush=True)
+        return
+    ann_path = os.path.join(ANN_DIR, TRAIN_ANN)
+    with open(ann_path, "r", encoding="utf-8") as f:
+        doc = json.load(f)
+    next_id = max((im["id"] for im in doc["images"]), default=0) + 1
+    added = 0
+    for src in imgs:
+        try:
+            with Image.open(src) as im:
+                w, h = im.size
+            if w <= 0 or h <= 0:
+                continue
+            fn = "neg_%06d.jpg" % added
+            shutil.copyfile(src, os.path.join(TRAIN_IMG_DIR, fn))
+            doc["images"].append(
+                {"id": next_id, "file_name": fn, "width": w, "height": h, "license": 0})
+            next_id += 1
+            added += 1
+        except Exception:
+            continue  # unreadable/odd image — skip, never fatal
+    with open(ann_path, "w", encoding="utf-8") as f:
+        json.dump(doc, f)
+    print("  added %d negative (empty-annotation) images — train images now %d"
+          % (added, len(doc["images"])), flush=True)
+
+
 # --------------------------------------------------------------------------- #
 #  Step 3 — write custom YOLOX-Nano Exp
 # --------------------------------------------------------------------------- #
@@ -909,6 +976,8 @@ def main():
         raise RuntimeError("no datasets downloaded — cannot proceed")
 
     merge_datasets(downloaded)
+
+    add_negatives()   # non-basketball backgrounds → fewer false positives
 
     write_exp()
 
