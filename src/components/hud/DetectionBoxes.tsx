@@ -19,9 +19,20 @@ import {
 } from 'react-native-reanimated';
 
 import type { OverlayState } from '../../camera/useShotEngine';
+import { DETECTION } from '../../core/config';
 import { color } from '../../constants/tokens';
 
 const DEFAULT_SOURCE_ASPECT = 9 / 16;
+
+// Per-class score gates — draw only detections the app ACTUALLY acts on, not
+// the raw 0.15 parser floor. On a degraded input (e.g. filming a screen) the
+// model emits many low-confidence junk boxes; showing them all made the debug
+// overlay look like "a mess of boxes" that doesn't reflect real tracking. Plain
+// number consts so the worklet captures them cleanly.
+const BALL_MIN = DETECTION.ballScoreMin;
+const RIM_MIN = DETECTION.rimScoreMin;
+const MADE_MIN = DETECTION.ballInBasketScoreMin;
+const PERSON_MIN = DETECTION.personScoreMin;
 
 interface Mapping {
   ok: boolean;
@@ -31,7 +42,7 @@ interface Mapping {
 }
 
 /** Build a Skia path of all detection boxes for one class. Pure worklet. */
-function classPath(o: OverlayState, m: Mapping, cls: string) {
+function classPath(o: OverlayState, m: Mapping, cls: string, minScore: number) {
   'worklet';
   const p = Skia.Path.Make();
   if (!m.ok) return p;
@@ -40,6 +51,9 @@ function classPath(o: OverlayState, m: Mapping, cls: string) {
   for (let i = 0; i < dets.length; i++) {
     const d = dets[i];
     if (d == null || d.cls !== cls) continue;
+    // Only draw boxes at/above the class gate the app acts on — hides raw
+    // low-confidence noise so the debug view reflects real tracking.
+    if (!(d.score >= minScore)) continue;
     const x = d.x * m.scale + m.ox;
     const y = d.y * m.scale + m.oy;
     const w = d.w * m.scale;
@@ -79,10 +93,10 @@ export function DetectionBoxes({
   });
 
   // Explicit top-level derived values (no hooks-in-a-helper).
-  const ballPath = useDerivedValue(() => classPath(overlay.value, mapping.value, 'ball'));
-  const rimPath = useDerivedValue(() => classPath(overlay.value, mapping.value, 'rim'));
-  const madePath = useDerivedValue(() => classPath(overlay.value, mapping.value, 'ball_in_basket'));
-  const personPath = useDerivedValue(() => classPath(overlay.value, mapping.value, 'person'));
+  const ballPath = useDerivedValue(() => classPath(overlay.value, mapping.value, 'ball', BALL_MIN));
+  const rimPath = useDerivedValue(() => classPath(overlay.value, mapping.value, 'rim', RIM_MIN));
+  const madePath = useDerivedValue(() => classPath(overlay.value, mapping.value, 'ball_in_basket', MADE_MIN));
+  const personPath = useDerivedValue(() => classPath(overlay.value, mapping.value, 'person', PERSON_MIN));
 
   return (
     <Canvas style={StyleSheet.absoluteFill} onLayout={onLayout} pointerEvents="none">
