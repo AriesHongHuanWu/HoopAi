@@ -70,13 +70,13 @@ describe('computeRimGeometry', () => {
 });
 
 describe('RimLock locking', () => {
-  test('locks after 5 stable frames, null before', () => {
+  test('locks after 3 stable frames, null before', () => {
     const lock = new RimLock();
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < 2; i++) {
       expect(lock.step(frame(i / FPS, [rimDet(rimBox)]), i / FPS)).toBeNull();
       expect(lock.geometry).toBeNull();
     }
-    const g = lock.step(frame(4 / FPS, [rimDet(rimBox)]), 4 / FPS);
+    const g = lock.step(frame(2 / FPS, [rimDet(rimBox)]), 2 / FPS);
     expect(g).not.toBeNull();
     // Mean of five identical boxes == the box; geometry matches the pure fn.
     expect(g).toEqual(computeRimGeometry(rimBox));
@@ -93,7 +93,7 @@ describe('RimLock locking', () => {
     };
     for (let i = 0; i < 20; i++) {
       const out = lock.step(
-        frame(i / FPS, [ball, rimDet(rimBox, 0.49)]), // 0.49 < rimScoreMin 0.5
+        frame(i / FPS, [ball, rimDet(rimBox, 0.34)]), // 0.34 < rimScoreMin 0.35
         i / FPS,
       );
       expect(out).toBeNull();
@@ -123,20 +123,20 @@ describe('RimLock locking', () => {
       const dets = i % 2 === 0 ? [rimDet(rimBox)] : []; // rim on even frames only
       if (i % 2 === 0) count++;
       g = lock.step(frame(i / FPS, dets), i / FPS);
-      if (count < 5) expect(g).toBeNull();
+      if (count < 3) expect(g).toBeNull();
     }
-    expect(g).not.toBeNull(); // 5th observation arrived on frame index 8
+    expect(g).not.toBeNull(); // 3rd observation arrived on frame index 4
   });
 
   test('an inconsistent observation restarts the pre-lock cluster', () => {
     const lock = new RimLock();
     const elsewhere: Box = { x: 400, y: 300, width: 40, height: 20 };
-    feed(lock, rimBox, 4, 0); // 4 consistent
-    expect(lock.step(frame(4 / FPS, [rimDet(elsewhere)]), 4 / FPS)).toBeNull();
-    // Needs a fresh run of 5 at the original spot; 4 more are not enough...
-    expect(feed(lock, rimBox, 4, 5)).toBeNull();
-    // ...the 5th consistent observation locks.
-    const g = feed(lock, rimBox, 1, 9);
+    feed(lock, rimBox, 2, 0); // 2 consistent (not yet locked — needs 3)
+    expect(lock.step(frame(2 / FPS, [rimDet(elsewhere)]), 2 / FPS)).toBeNull();
+    // Needs a fresh run of 3 at the original spot; 2 more are not enough...
+    expect(feed(lock, rimBox, 2, 3)).toBeNull();
+    // ...the 3rd consistent observation locks.
+    const g = feed(lock, rimBox, 1, 5);
     expect(g).not.toBeNull();
     expect(g!.cx).toBe(120);
   });
@@ -336,8 +336,8 @@ describe('RimLock manual override and reset', () => {
     expect(lock.driftDetected).toBe(false);
     expect(lock.step(frame(1, []), 1)).toBeNull();
 
-    // Fresh 5-frame cluster locks again.
-    expect(feed(lock, rimBox, 4, 40)).toBeNull();
-    expect(feed(lock, rimBox, 1, 44)).toEqual(computeRimGeometry(rimBox));
+    // Fresh 3-frame cluster locks again.
+    expect(feed(lock, rimBox, 2, 40)).toBeNull();
+    expect(feed(lock, rimBox, 1, 42)).toEqual(computeRimGeometry(rimBox));
   });
 });

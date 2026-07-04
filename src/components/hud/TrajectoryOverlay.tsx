@@ -193,7 +193,7 @@ export function TrajectoryOverlay({
   });
   const coreR = useDerivedValue(() => ballR.value * 0.62);
   const haloR = useDerivedValue(() => ballR.value * 1.05);
-  const bloomR = useDerivedValue(() => ballR.value * 2.3);
+  const bloomR = useDerivedValue(() => ballR.value * 1.6);
   const ballBloomOpacity = useDerivedValue(() =>
     ballR.value > 0 ? (overlay.value.phase === 'SHOT_LIVE' ? 0.6 : 0.4) : 0,
   );

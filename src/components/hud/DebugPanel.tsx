@@ -25,7 +25,9 @@ function debugChanged(a: EngineDebug, b: EngineDebug): boolean {
   return (
     a.frames !== b.frames ||
     a.dropped !== b.dropped ||
-    a.maxScore !== b.maxScore ||
+    // Compare the DISPLAYED precision of maxScore, not the raw float — a
+    // jittering 4th decimal otherwise forces a re-render every tick.
+    a.maxScore.toFixed(3) !== b.maxScore.toFixed(3) ||
     a.detCount !== b.detCount ||
     a.delegate !== b.delegate ||
     a.modelLoaded !== b.modelLoaded ||
@@ -110,7 +112,9 @@ const styles = StyleSheet.create({
     borderRadius: radius.sm,
     paddingVertical: space.sm,
     paddingHorizontal: space.md,
-    minWidth: 168,
+    // Fixed width (not minWidth): with a stable value column, the panel never
+    // grows/shrinks as numbers change, so nothing under it shifts.
+    width: 188,
   },
   title: {
     ...type.micro,
@@ -129,6 +133,12 @@ const styles = StyleSheet.create({
   val: {
     ...type.micro,
     color: color.text,
+    // Tabular figures keep every digit the same width, so the right-anchored
+    // value column doesn't re-lay-out / shimmer as numbers tick 4x/sec (this
+    // was the flicker). Fixed column width stops long strings widening the panel.
+    fontVariant: ['tabular-nums'],
+    minWidth: 92,
+    textAlign: 'right',
   },
   err: {
     ...type.micro,

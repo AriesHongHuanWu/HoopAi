@@ -202,9 +202,12 @@ function LiveSessionScreen() {
       if (recordVideo && engine?.activeMode === 'camera') {
         try {
           await engine.startRecording();
-          // Engine-clock start so shot timestamps map onto the video timeline
-          // (videoTime = shot.tResolved − recordingStartSec).
-          useSession.getState().setRecording(true, null, engine.nowSec());
+          // Anchor recordingStartSec to the CAMERA MEDIA CLOCK (the same clock
+          // shot.tResolved is stamped with, and the clock the MP4 is authored
+          // on) — NOT the JS engine clock. engine.nowSec() put the start on a
+          // different clock than the video timeline, so every replay marker
+          // overshot the file duration and clamped to the end.
+          useSession.getState().setRecording(true, null, engine.nowCameraSec());
         } catch {
           // Recording failed (storage, codec) — session continues stats-only.
           useSession.getState().setRecording(false);

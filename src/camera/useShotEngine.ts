@@ -170,8 +170,15 @@ export interface ShotEngine {
     hasPermission: boolean;
     requestPermission: () => Promise<boolean>;
   } | null;
-  /** Session-relative seconds (same clock as shot timestamps). */
+  /** Session-relative seconds on the JS clock (fallback only). */
   nowSec: () => number;
+  /**
+   * Latest camera presentation-timestamp second — the SAME media clock the
+   * recorded MP4 uses and that shot.tResolved is now stamped with. Sample this
+   * (not nowSec) for recordingStartSec so videoTime = tResolved − recordingStart
+   * is true seconds into the video. Returns nowSec() until the first frame.
+   */
+  nowCameraSec: () => number;
   startRecording: () => Promise<void>;
   stopRecording: () => Promise<string | null>;
   isModelLoaded: boolean;
@@ -317,9 +324,23 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [modelState, isModelLoaded]);
 
-  // Session clock: monotonic seconds since engine mount.
+  // Session clock: monotonic seconds since engine mount. Fallback only (used
+  // when a frame carries no valid presentation timestamp).
   const t0 = useRef<number>(performance.now());
   const nowSec = useMemo(() => () => (performance.now() - t0.current) / 1000, []);
+
+  // CAMERA MEDIA CLOCK — the presentation timestamp of the most recent frame,
+  // in the SAME timebase the recorded MP4 is authored on. Shot times AND the
+  // recording start must both be sampled from THIS clock so that
+  //   videoTime = shot.tResolved − recordingStartSec
+  // is true seconds into the video file (not the JS performance.now() clock,
+  // whose offset from the media clock is unbounded → every replay marker was
+  // clamped to the END of the video).
+  const lastFrameSec = useRef<number>(0);
+  const nowCameraSec = useMemo(
+    () => () => (lastFrameSec.current > 0 ? lastFrameSec.current : nowSec()),
+    [nowSec],
+  );
 
   // Keep latest events in a ref so the pipeline never holds stale closures.
   const eventsRef = useRef(events);
@@ -329,6 +350,12 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
   // compute the net-motion make/miss signal; previous samples live worklet-side.
   const netRoiSv = useSharedValue<Box | null>(null);
   const prevNetSamples = useSharedValue<number[]>([]);
+  // Sticky YOLO output layout — read fresh in the worklet, updated each frame.
+  // Stops the parser's dual-layout tie-break from flipping on noise (which
+  // scrambles class labels/coords on degraded input).
+  const prevLayoutSv = useSharedValue<'channels-first' | 'channels-last' | undefined>(
+    undefined,
+  );
 
   const pipeline = useMemo(() => {
     const p = new ShotPipeline();
@@ -486,12 +513,15 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
 
   const onPayload = useMemo(
     () => (payload: FramePayload) => {
-      // Rebase worklet time onto the session clock at arrival (v1 clock; see
-      // BUILDING.md for the camera-timestamp upgrade). The pose frame carries
-      // t=0 from the worklet, so it MUST be rebased to the SAME clock as the
-      // detection frame — otherwise FormAnalyzer's release-time / follow-through
-      // durations (which diff pose.t across frames) are computed against 0.
-      const t = nowSec();
+      // Use the CAMERA presentation timestamp (payload.frame.t, carried from the
+      // worklet's frame.timestamp) as the shot clock so tResolved aligns with the
+      // recorded video timeline. Fall back to nowSec() only when the frame had no
+      // valid timestamp (t <= 0). The pose frame is rebased to the SAME value so
+      // FormAnalyzer's cross-frame durations stay consistent.
+      const t = payload.frame.t > 0 ? payload.frame.t : nowSec();
+      // Publish this second as the camera media clock so recordingStartSec
+      // (sampled in live.tsx via engine.nowCameraSec()) shares the exact clock.
+      lastFrameSec.current = t;
       pipeline.step({
         ...payload,
         frame: { ...payload.frame, t },
@@ -632,14 +662,28 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
           prevNetSamples.value = samples;
         }
 
+        // Camera presentation timestamp for THIS frame, in seconds, so
+        // tResolved and recordingStartSec share identical units (iOS reports
+        // seconds; Android a nanosecond-scale value — the >1e6 test normalizes
+        // it). 0 for an invalid frame → onPayload falls back to nowSec().
+        const frameTsSec = frame.timestamp > 1e6 ? frame.timestamp / 1e9 : frame.timestamp;
         const t0 = performance.now();
         const outputs = tflite.runSync([rawBuffer]);
         const infMs = performance.now() - t0;
         // EMA of inference time — feeds the adaptive thermal gate next frame.
         avgInferMs.value = avgInferMs.value === 0 ? infMs : avgInferMs.value * 0.85 + infMs * 0.15;
-        parsed = parseYoloOutput(new Float32Array(outputs[0]!), 0, {
+        parsed = parseYoloOutput(new Float32Array(outputs[0]!), frameTsSec, {
           inputSize: detInputSize,
+          prevLayout: prevLayoutSv.value,
         });
+        // Persist the chosen layout so next frame's tie-break sticks instead of
+        // flipping on noise (which scrambles labels). Only lock in a real layout.
+        if (
+          parsed.debug?.layout === 'channels-first' ||
+          parsed.debug?.layout === 'channels-last'
+        ) {
+          prevLayoutSv.value = parsed.debug.layout;
+        }
         } catch (e) {
           detErr = `detect: ${String(e).slice(0, 130)}`;
         } finally {
@@ -767,6 +811,7 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
           }
         : null,
     nowSec,
+    nowCameraSec,
     startRecording,
     stopRecording,
     isModelLoaded,

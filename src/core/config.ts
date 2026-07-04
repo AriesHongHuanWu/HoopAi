@@ -14,19 +14,27 @@ export const DETECTION = {
   ballScoreMin: 0.3,
   /** Relaxed ball gate inside the hoop ROI (occlusion/blur near the rim). */
   ballScoreMinHoopRoi: 0.15,
-  /** Rim confidence gate. */
-  rimScoreMin: 0.5,
+  /**
+   * Rim confidence gate. The rim is a small, static, net-occluded object a nano
+   * detector scores in the 0.3-0.5 band from a 15-30 ft side view — gating at
+   * 0.5 discarded most of those frames and made the lock finicky. 0.35 lets that
+   * real rim signal feed the lock; it's still cross-validated by 3-way spatial
+   * consistency + the post-drift size-ratio guard, so a stray box can't lock.
+   */
+  rimScoreMin: 0.35,
   /** 'ball_in_basket' class gate. */
   ballInBasketScoreMin: 0.35,
   /** Person confidence gate. */
   personScoreMin: 0.4,
   /**
    * Reject a ball box larger than this fraction of the frame on either side.
-   * A real basketball never fills half the frame in shot-tracking framing; a
-   * near-frame-size "ball" is a false positive that would otherwise pass the
-   * round-aspect gate and paint a giant circle over the whole screen.
+   * A real ball is ~20-40px on the 640 analysis square (~0.03-0.06 of a side);
+   * even a close-up drive stays well under 0.22. 0.5 was far too loose — it let
+   * a half-frame box (r≈160px) through, which the overlay bloomed over the whole
+   * screen. 0.22 caps the box at ~141px (r≈70px): above any real ball, far below
+   * screen-covering.
    */
-  ballMaxSizeFraction: 0.5,
+  ballMaxSizeFraction: 0.22,
 } as const;
 
 export const TRACKER = {

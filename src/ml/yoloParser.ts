@@ -28,6 +28,14 @@ export interface YoloParseOptions {
   maxDetections?: number;
   /** Model emits normalized 0..1 coords instead of pixels (auto when undefined). */
   normalized?: boolean;
+  /**
+   * Sticky layout hint from the PREVIOUS frame. When the two tensor layouts tie
+   * on valid-box count this frame, keep the previous layout instead of letting a
+   * noise-dominated maxScore flip the pick (which scrambles class labels and box
+   * coordinates on degraded input). Thread it forward by reading `debug.layout`
+   * back. The worklet stays pure — the caller owns this state (a SharedValue).
+   */
+  prevLayout?: 'channels-first' | 'channels-last';
 }
 
 interface Extracted {
@@ -169,6 +177,7 @@ export function parseYoloOutput(
     iouThreshold = 0.45,
     maxDetections = 16,
     normalized,
+    prevLayout,
   } = opts;
   const nc = CLASS_ORDER.length;
   const rows = 4 + nc;
@@ -178,9 +187,21 @@ export function parseYoloOutput(
   // the higher-confidence one; final tie -> channels-first default).
   const cf = extract(data, nc, n, rows, true, inputSize, scoreMin, normalized);
   const cl = extract(data, nc, n, rows, false, inputSize, scoreMin, normalized);
-  const useCf =
-    cf.raw.length > cl.raw.length ||
-    (cf.raw.length === cl.raw.length && cf.maxScore >= cl.maxScore);
+  // Layout pick. A strict valid-box-count winner always wins (self-healing). On
+  // a TIE the maxScore tie-break is noise-dominated on degraded input and flips
+  // the transposed (wrong) read frame-to-frame, scrambling class labels and
+  // coordinates — so on a tie STICK to the previous frame's layout when given,
+  // and only fall back to maxScore when there is no prior.
+  let useCf: boolean;
+  if (cf.raw.length !== cl.raw.length) {
+    useCf = cf.raw.length > cl.raw.length;
+  } else if (prevLayout === 'channels-first') {
+    useCf = true;
+  } else if (prevLayout === 'channels-last') {
+    useCf = false;
+  } else {
+    useCf = cf.maxScore >= cl.maxScore;
+  }
   const chosen = useCf ? cf : cl;
 
   const debug: FrameDebug = {

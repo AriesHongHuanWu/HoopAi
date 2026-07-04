@@ -28,7 +28,16 @@ import type {
 } from './types';
 
 /** EMA weight of the NEW observation when smoothing the radius estimate. */
-const RADIUS_EMA_ALPHA = 0.3;
+const RADIUS_EMA_ALPHA = 0.12;
+
+/**
+ * Hard clamp on how much the smoothed radius may change in a single accepted
+ * frame, as a fraction of the current smoothed radius. Box sizes are noisy
+ * frame-to-frame; without this clamp even a well-behaved EMA lets one oversized
+ * box visibly pump the drawn circle. A real ball's apparent size changes slowly,
+ * so 12%/frame is generous for genuine motion while killing the balloon/jitter.
+ */
+const RADIUS_MAX_STEP_FRAC = 0.12;
 
 /**
  * Motion-blur streak exception: an elongated box is accepted only when the
@@ -341,12 +350,18 @@ export class BallTracker {
   private accept(candidate: Candidate, t: number): TrackedBall {
     const { det, cx, cy } = candidate;
 
-    // Radius: EMA-smoothed half of the mean of width/height.
+    // Radius: EMA-smoothed half of the mean of width/height, with a hard
+    // per-frame change clamp so one noisy/oversized box can't pump the drawn
+    // circle (the balloon/jitter fix). First detection seeds directly.
     const rRaw = (det.box.width + det.box.height) / 4;
-    this.smoothedR =
-      this.smoothedR === null
-        ? rRaw
-        : this.smoothedR + RADIUS_EMA_ALPHA * (rRaw - this.smoothedR);
+    if (this.smoothedR === null) {
+      this.smoothedR = rRaw;
+    } else {
+      const target = this.smoothedR + RADIUS_EMA_ALPHA * (rRaw - this.smoothedR);
+      const maxStep = this.smoothedR * RADIUS_MAX_STEP_FRAC;
+      const delta = Math.max(-maxStep, Math.min(maxStep, target - this.smoothedR));
+      this.smoothedR += delta;
+    }
 
     let est: KalmanEstimate;
     if (!this.kalman.initialized) {

@@ -16,10 +16,12 @@ import type { Box, Detection, FrameDetections, RimGeometry } from './types';
 
 /**
  * Number of mutually consistent observations required to (re-)lock the rim.
- * Not in config (contract gap) — kept local, mirrors the "5 frames" used in
- * the RIM.maxDriftDiagFactor doc comment.
+ * Lowered 5 → 3: three spatially-agreeing detections of a STATIC object is
+ * ample evidence and roughly halves acquisition time, which is what made the
+ * lock feel finicky. DRIFT_REJECT_COUNT stays at 5 so an established lock is
+ * still lost conservatively (fast to acquire, slow to drop).
  */
-const LOCK_CLUSTER_SIZE = 5;
+const LOCK_CLUSTER_SIZE = 3;
 
 /**
  * Number of CONSECUTIVE rejected observations after which we declare the
