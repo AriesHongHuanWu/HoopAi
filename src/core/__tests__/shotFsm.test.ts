@@ -180,6 +180,26 @@ describe('ShotFsm', () => {
     expect(Math.abs((s.xCross as number) - 290)).toBeLessThan(1);
   });
 
+  test('(2b) netless brick + phantom ball_in_basket stays a MISS (geometry overrides noisy cls)', () => {
+    const fsm = newFsm();
+    // Same front-rim brick as (2): descending crossing at x=290, outside the
+    // span (304..336), net silent — but the detector falsely fires the
+    // ball_in_basket class the whole flight. Geometry (geo=false) must win, or
+    // a noisy cls fabricates a phantom "make" on an obvious miss (the
+    // "shot becomes a make" bug on netless outdoor hoops).
+    const frames = arcFrames({ x0: 290 - VX * T_CROSS_DOWN }).map((f) => ({
+      ...f,
+      ballInBasketScore: 0.5,
+    }));
+    const { resolved } = run(fsm, frames);
+
+    expect(resolved).toHaveLength(1);
+    const s = resolved[0];
+    expect(s.outcome).toBe('miss');
+    expect(s.signals.geo).toBe(false);
+    expect(s.signals.cls).toBe(true);
+  });
+
   test('(3) rim-rattler: bounce then drop through + late net burst above raised threshold → make, rimBounce', () => {
     const fsm = newFsm();
     // [t, cx, cy, vy, net] — arm in up-zone, touch rim, re-ascend above the

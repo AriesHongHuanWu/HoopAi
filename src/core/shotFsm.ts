@@ -433,12 +433,22 @@ function fuse(
   cls: boolean,
   occludedAtRim: boolean,
 ): ShotOutcome {
+  // Geometry is the most reliable channel. A clear FINAL descending crossing
+  // OUTSIDE the rim span (geo === false) means the ball missed — trust that
+  // over the noisy 'ball_in_basket' class and trailing net motion. Checking it
+  // first prevents a false ball_in_basket from fabricating a phantom "make" on
+  // an obvious miss (the "shot becomes a make" bug, worst on netless outdoor
+  // hoops where cls alone used to decide it).
+  if (geo === false) return 'miss';
   if (net === null) {
-    if (geo === true || cls) return 'make';
-    if (geo === false) return 'miss';
+    // Netless hoop: a tracked make (geo) counts; an occluded ball that
+    // vanished into the basket with ball_in_basket firing counts; cls ALONE
+    // (no geometry, ball not even at the rim) is too weak to call a make.
+    if (geo === true) return 'make';
+    if (cls && occludedAtRim) return 'make';
     return 'unsure';
   }
   if ((geo === true && net) || (net && cls) || (cls && occludedAtRim)) return 'make';
-  if (geo === false || (geo === true && !net)) return 'miss';
+  if (geo === true && !net) return 'miss';
   return 'unsure';
 }
