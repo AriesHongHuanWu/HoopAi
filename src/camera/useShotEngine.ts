@@ -232,18 +232,19 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
     let alive = true;
     setModelState({ model: null, delegate: 'loading', error: '', inferenceMs: 0 });
     void (async () => {
-      // iOS: use the METAL (GPU) delegate, NOT core-ml (Apple Neural Engine).
-      // The CoreML/ANE path mis-runs this YOLO model — it partitions the graph
-      // and returns CORRUPTED output, which shows up on device as a pile of
-      // jumping / mis-placed phantom boxes, even though the model itself is
-      // correct (verified: the CPU path detects the ball cleanly off-line and in
-      // the Test-AI screen). Metal is GPU-accelerated (fast enough for real-time)
-      // but numerically reliable — it doesn't do the ANE graph surgery that
-      // corrupts the result. Plain CPU ([]) stays the guaranteed-correct final
-      // fallback below.
+      // iOS: use the plain CPU (XNNPACK) delegate. BOTH iOS accelerators mis-run
+      // this YOLO model on device: CoreML (Apple Neural Engine) partitions the
+      // graph and corrupts the output, and the Metal (GPU) delegate does the same
+      // — producing a pile of jumping / mis-placed phantom boxes. Only the CPU
+      // path is numerically correct here (verified on device: the Test-AI screen,
+      // which runs on CPU, detects the ball cleanly; both accelerators do not).
+      // CPU is slower, but correctness is the whole point, and the model-selection
+      // chain below still steps down to a lighter model / smaller input to stay
+      // real-time. (A future standard-conv model such as YOLOX should run
+      // correctly on Metal for acceleration; this model cannot.)
       const fast: { label: string; delegates: TensorflowModelDelegate[] } =
         Platform.OS === 'ios'
-          ? { label: 'metal', delegates: ['metal'] }
+          ? { label: 'cpu', delegates: [] }
           : { label: 'android-gpu', delegates: ['android-gpu'] };
       type Delegates = TensorflowModelDelegate[];
       interface Attempt {

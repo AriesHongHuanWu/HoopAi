@@ -292,7 +292,7 @@ export default function SessionSetupScreen() {
                 ]}
               >
                 <Text style={[styles.keepChipLabel, selected && styles.keepChipLabelSelected]}>
-                  {o === 'portrait' ? '直式 Portrait' : '橫式 Landscape'}
+                  {o === 'portrait' ? 'Portrait' : 'Landscape'}
                 </Text>
               </Pressable>
             );
