@@ -24,6 +24,7 @@ import { color, radius, space, type } from '../../constants/tokens';
 function debugChanged(a: EngineDebug, b: EngineDebug): boolean {
   return (
     a.frames !== b.frames ||
+    a.dropped !== b.dropped ||
     a.maxScore !== b.maxScore ||
     a.detCount !== b.detCount ||
     a.delegate !== b.delegate ||
@@ -71,6 +72,11 @@ export function DebugPanel({ debug }: { debug: SharedValue<EngineDebug> }) {
         </Text>
       )}
       <Row k="frames" v={String(d.frames)} vc={running ? color.text : color.miss} />
+      <Row
+        k="dropped"
+        v={String(d.dropped)}
+        vc={d.dropped > 0 && !running ? color.miss : color.textDim}
+      />
       <Row k="output" v={`${d.outputLen} · ${d.layout}`} />
       <Row k="maxScore" v={d.maxScore.toFixed(3)} vc={scoreColor} />
       <Row k="dets" v={String(d.detCount)} vc={d.detCount > 0 ? color.make : color.textDim} />

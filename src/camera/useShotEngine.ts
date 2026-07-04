@@ -122,6 +122,13 @@ export interface EngineDebug {
   avgMs: number;
   /** Effective detection fps after the adaptive thermal gate. */
   fps: number;
+  /**
+   * Frames the camera delivered but DROPPED before onFrame ran (VisionCamera
+   * backpressure). Diagnostic: frames=0 AND dropped=0 ⇒ the camera output never
+   * streamed; dropped climbing ⇒ frames arrive but every one is dropped
+   * (processing too slow / worklet failing); frames climbing ⇒ we're live.
+   */
+  dropped: number;
 }
 
 export const EMPTY_DEBUG: EngineDebug = {
@@ -140,6 +147,7 @@ export const EMPTY_DEBUG: EngineDebug = {
   modelError: '',
   avgMs: 0,
   fps: 0,
+  dropped: 0,
 };
 
 export interface ShotEngineEvents {
@@ -447,6 +455,8 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
   // cool (the Kalman tracker keeps the overlay smooth through the gaps). No
   // native thermal API needed.
   const avgInferMs = useSharedValue(0);
+  // Diagnostic: how many delivered frames VisionCamera dropped before onFrame.
+  const droppedFrames = useSharedValue(0);
 
   const { resizer } = useResizer({
     width: detInputSize,
@@ -497,9 +507,24 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
     enablePreviewSizedOutputBuffers: true,
     // Backpressure: drop frames while the detector is still running.
     dropFramesWhileBusy: true,
+    // Diagnostic: count drops so the debug panel can tell "camera never
+    // streamed" (frames=0, dropped=0) apart from "every frame dropped"
+    // (dropped climbing). Runs on the JS thread — a plain callback, not a
+    // worklet — so touching debug.value here is safe.
+    onFrameDropped() {
+      droppedFrames.value += 1;
+      debug.value = { ...debug.value, dropped: droppedFrames.value, mode: 'camera' };
+    },
     onFrame(frame) {
       'worklet';
       try {
+        // Diagnostic: mark that the frame processor entered at least once, even
+        // if the gate skips this frame below. If the debug panel still shows
+        // mode:demo after a live session, onFrame NEVER ran (camera output not
+        // streaming) — vs mode:camera + low frames (entering but gated/erroring).
+        if (debug.value.mode !== 'camera') {
+          debug.value = { ...debug.value, mode: 'camera' };
+        }
         // Adaptive thermal gate: run no faster than the base rate AND no faster
         // than ~1.4× the current inference time — so a hot, throttled chip (slow
         // inference) gets idle time between frames to cool, while a cool chip
@@ -638,6 +663,7 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
           modelError: detErr,
           avgMs: Math.round(avgInferMs.value),
           fps: Math.round(1000 / Math.max(gateMs, avgInferMs.value * 1.4, 1)),
+          dropped: droppedFrames.value,
         };
         if (!parsed) {
           // Detection threw this frame — still disposed via finally; skip the
@@ -672,6 +698,18 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
         }
 
         scheduleOnRN(onPayload, { frame: parsed, netMotionScore, pose });
+      } catch (outerErr) {
+        // A throw ANYWHERE in the frame worklet outside the inner detect
+        // try/catch (the gate, a debug write, scheduleOnRN, the pose path)
+        // used to propagate uncaught — and an uncaught worklet exception can
+        // make VisionCamera stop delivering frames for the rest of the session
+        // (frame processor stuck after a few frames). Swallow it, surface it to
+        // the debug panel, and keep the processor alive for the next frame.
+        debug.value = {
+          ...debug.value,
+          mode: 'camera',
+          modelError: `frame: ${String(outerErr).slice(0, 120)}`,
+        };
       } finally {
         frame.dispose();
       }
