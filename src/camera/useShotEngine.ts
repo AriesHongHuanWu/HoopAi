@@ -22,7 +22,11 @@ import {
   type CameraOutput,
 } from 'react-native-vision-camera';
 import { useResizer } from 'react-native-vision-camera-resizer';
-import { loadTensorflowModel, type TensorflowModel } from 'react-native-fast-tflite';
+import {
+  loadTensorflowModel,
+  type TensorflowModel,
+  type TensorflowModelDelegate,
+} from 'react-native-fast-tflite';
 import { NitroModules } from 'react-native-nitro-modules';
 
 import { DETECTION } from '../core/config';
@@ -228,11 +232,20 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
     let alive = true;
     setModelState({ model: null, delegate: 'loading', error: '', inferenceMs: 0 });
     void (async () => {
-      const fast: { label: string; delegates: ('core-ml' | 'android-gpu')[] } =
+      // iOS: use the METAL (GPU) delegate, NOT core-ml (Apple Neural Engine).
+      // The CoreML/ANE path mis-runs this YOLO model — it partitions the graph
+      // and returns CORRUPTED output, which shows up on device as a pile of
+      // jumping / mis-placed phantom boxes, even though the model itself is
+      // correct (verified: the CPU path detects the ball cleanly off-line and in
+      // the Test-AI screen). Metal is GPU-accelerated (fast enough for real-time)
+      // but numerically reliable — it doesn't do the ANE graph surgery that
+      // corrupts the result. Plain CPU ([]) stays the guaranteed-correct final
+      // fallback below.
+      const fast: { label: string; delegates: TensorflowModelDelegate[] } =
         Platform.OS === 'ios'
-          ? { label: 'core-ml', delegates: ['core-ml'] }
+          ? { label: 'metal', delegates: ['metal'] }
           : { label: 'android-gpu', delegates: ['android-gpu'] };
-      type Delegates = ('core-ml' | 'android-gpu')[];
+      type Delegates = TensorflowModelDelegate[];
       interface Attempt {
         asset: number;
         label: string;
