@@ -22,24 +22,25 @@
  *                                                          camera's short axis)
  *   camera frame ----cover----> preview view              (fill, center-crop)
  *
- * Both transforms are uniform scales about the shared camera center, so the
- * composition is a single uniform scale + centering — never a distortion.
- * With the camera content oriented WITH the view (VisionCamera rotates the
- * stream with the interface) and aspect `SOURCE_ASPECT` (short/long), the
- * camera content occupies a centered `contentW × contentH` rect of the
- * analysis square, and the view covers exactly that rect:
+ * The detector input is produced with scaleMode:'cover' (useShotEngine), so the
+ * S×S analysis square is the CENTER-SQUARE CROP of the camera frame (full
+ * short-axis, centered on the long axis) — it is NOT a letterbox of the whole
+ * frame. The <Camera> preview (default resizeMode 'cover', oriented WITH the
+ * view since VisionCamera rotates the stream with the interface) fills the view
+ * with that same frame, so the analysis square appears as a CENTERED SQUARE in
+ * the view. Its on-screen side is:
  *
- *   portrait :  contentW = S·aspect, contentH = S
- *   landscape:  contentW = S,        contentH = S·aspect      (S = square side)
- *   scale = max(viewW / contentW, viewH / contentH)
- *   offset = viewCenter − frameCenter·scale
+ *   portrait :  sq = max(viewW, aspect · viewH)
+ *   landscape:  sq = max(viewH, aspect · viewW)      (aspect = short/long)
+ *   scale  = sq / S       (analysis-px → view-px, same on both axes)
+ *   offset = (viewDim − sq) / 2   (center the square in the view)
  *
- * On tall phones this reduces to the old max(w, h)/S "cover the square" rule,
- * but unlike that rule it stays correct when the view's aspect is LESS extreme
- * than the camera's (landscape, tablets, split screen). Recomputed from
- * onLayout on every rotation; a w/h swap only swaps which axis dominates the
- * max(), so the trail scale stays uniform. All per-frame math lives inside
- * useDerivedValue worklets.
+ * An earlier version modeled the square as a 'contain'/letterbox of the whole
+ * frame (contentW = S·aspect), which over-scaled every box by 1/aspect ≈ 1.78×
+ * and threw the ball/rim boxes far off the actual objects. Recomputed from
+ * onLayout on every rotation; a w/h swap only swaps which term wins the max(),
+ * so the scale stays uniform. All per-frame math lives inside useDerivedValue
+ * worklets.
  */
 import React from 'react';
 import { StyleSheet, type LayoutChangeEvent, type StyleProp, type ViewStyle } from 'react-native';
@@ -127,21 +128,26 @@ export function TrajectoryOverlay({
     }
     // Camera short/long ratio, clamped to a sane range (guards a bad prop).
     const aspect = Math.min(1, Math.max(0.1, sourceAspect));
-    // Side of the (square) analysis frame the camera was letterboxed into.
+    // Side of the (square) analysis frame.
     const side = Math.max(o.frameW, o.frameH);
-    // Camera content rect inside the analysis square, oriented with the view:
-    // the camera's long axis fills the square along the view's long axis.
+    // The detector input uses scaleMode:'cover' (see useShotEngine), so the
+    // analysis square is the CENTER-SQUARE CROP of the camera frame — full
+    // short-axis, centered on the long axis — NOT a letterbox of the whole
+    // frame. The <Camera> preview (default resizeMode 'cover') fills the view
+    // with that same frame, so the analysis square lands as a CENTERED SQUARE
+    // in the view whose on-screen side `sq` equals the view's SHORT axis,
+    // widened by the frame's long/short ratio (aspect) along the view's LONG
+    // axis. (The previous 'contain'/letterbox model over-scaled every box by
+    // 1/aspect ≈ 1.78×, throwing boxes far off the ball and rim.)
     const landscape = w > h;
-    const contentW = landscape ? side : side * aspect;
-    const contentH = landscape ? side * aspect : side;
-    // The preview covers the camera content — same crop, in view pixels.
-    const scale = Math.max(w / contentW, h / contentH);
-    // Every stage is center-aligned: map frame center onto view center.
+    const sq = landscape ? Math.max(h, aspect * w) : Math.max(w, aspect * h);
+    // analysis-px → view-px, plus centering of the square in the view.
+    const scale = sq / side;
     return {
       ok: true,
       scale,
-      ox: w / 2 - (o.frameW / 2) * scale,
-      oy: h / 2 - (o.frameH / 2) * scale,
+      ox: (w - sq) / 2,
+      oy: (h - sq) / 2,
     };
   });
 

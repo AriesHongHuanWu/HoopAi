@@ -85,11 +85,15 @@ export function DetectionBoxes({
     }
     const aspect = Math.min(1, Math.max(0.1, sourceAspect));
     const side = Math.max(o.frameW, o.frameH);
+    // scaleMode:'cover' → the analysis square is the CENTER-SQUARE crop of the
+    // frame, and the preview ('cover') shows it as a CENTERED SQUARE in the view
+    // whose side is the view's short axis widened by `aspect` on the long axis.
+    // (Must match TrajectoryOverlay exactly; the old letterbox math over-scaled
+    // every box by 1/aspect ≈ 1.78×.)
     const landscape = w > h;
-    const contentW = landscape ? side : side * aspect;
-    const contentH = landscape ? side * aspect : side;
-    const scale = Math.max(w / contentW, h / contentH);
-    return { ok: true, scale, ox: w / 2 - (o.frameW / 2) * scale, oy: h / 2 - (o.frameH / 2) * scale };
+    const sq = landscape ? Math.max(h, aspect * w) : Math.max(w, aspect * h);
+    const scale = sq / side;
+    return { ok: true, scale, ox: (w - sq) / 2, oy: (h - sq) / 2 };
   });
 
   // Explicit top-level derived values (no hooks-in-a-helper).
