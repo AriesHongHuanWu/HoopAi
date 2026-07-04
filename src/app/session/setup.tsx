@@ -64,6 +64,10 @@ export default function SessionSetupScreen() {
   // so this must happen before the camera opens (initMode is a full reset).
   const [durationSec, setDurationSec] = useState(activeMode?.config?.durationSec ?? 60);
   const [makesPerSpot, setMakesPerSpot] = useState(activeMode?.config?.makesPerSpot ?? 5);
+  // Orientation the live session LOCKS to (chosen here). Locking it in live.tsx
+  // means the camera never rotates mid-session, so the detection overlay can't
+  // dislocate on a portrait/landscape flip. Defaults to portrait.
+  const [orient, setOrient] = useState<'portrait' | 'landscape'>('portrait');
 
   const openCamera = async () => {
     if (!camera.hasPermission && camera.canRequestPermission) {
@@ -75,7 +79,7 @@ export default function SessionSetupScreen() {
       await mic.requestPermission();
     }
     beginSetup();
-    router.push('/session/live');
+    router.push(`/session/live?orient=${orient}`);
   };
 
   return (
@@ -265,6 +269,37 @@ export default function SessionSetupScreen() {
         )}
       </Card>
 
+      <Card style={styles.card}>
+        <Eyebrow>Orientation</Eyebrow>
+        <Text style={styles.itemBody}>
+          Lock the camera to how you'll prop your phone — it won't rotate mid-session.
+        </Text>
+        <Row gap={space.sm} style={styles.orientRow}>
+          {(['portrait', 'landscape'] as const).map((o) => {
+            const selected = orient === o;
+            return (
+              <Pressable
+                key={o}
+                accessibilityRole="button"
+                accessibilityLabel={o === 'portrait' ? 'Portrait' : 'Landscape'}
+                accessibilityState={{ selected }}
+                onPress={() => setOrient(o)}
+                style={({ pressed }) => [
+                  styles.keepChip,
+                  styles.orientChip,
+                  selected && styles.keepChipSelected,
+                  pressed && styles.keepChipPressed,
+                ]}
+              >
+                <Text style={[styles.keepChipLabel, selected && styles.keepChipLabelSelected]}>
+                  {o === 'portrait' ? '直式 Portrait' : '橫式 Landscape'}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </Row>
+      </Card>
+
       <PillButton
         label="Open camera"
         onPress={() => void openCamera()}
@@ -364,6 +399,13 @@ const styles = StyleSheet.create({
   keepChipSelected: {
     borderColor: color.accent,
     backgroundColor: color.accentTint,
+  },
+  orientRow: {
+    marginTop: space.md,
+  },
+  orientChip: {
+    flex: 1,
+    alignItems: 'center',
   },
   keepChipPressed: {
     backgroundColor: color.surfaceRaised,

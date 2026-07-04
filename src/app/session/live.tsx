@@ -16,7 +16,8 @@
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Linking, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
-import { router, useNavigation } from 'expo-router';
+import { router, useLocalSearchParams, useNavigation } from 'expo-router';
+import * as ScreenOrientation from 'expo-screen-orientation';
 import * as Haptics from 'expo-haptics';
 import { useKeepAwake } from 'expo-keep-awake';
 import { Canvas, Path, Skia } from '@shopify/react-native-skia';
@@ -118,6 +119,7 @@ function LiveSessionScreen() {
   const insets = useSafeAreaInsets();
   const { width, height } = useWindowDimensions();
   const isLandscape = width > height;
+  const { orient } = useLocalSearchParams<{ orient?: string }>();
 
   const rimLocked = useSession((s) => s.rimLocked);
   const isRecording = useSession((s) => s.isRecording);
@@ -146,6 +148,21 @@ function LiveSessionScreen() {
   useEffect(() => {
     if (useSession.getState().phase === 'idle') useSession.getState().beginSetup();
   }, []);
+
+  // Lock the session to the orientation chosen at setup. A FIXED orientation is
+  // what makes the live detection overlay reliable: the camera frame and the
+  // preview never rotate mid-session, so the boxes can't dislocate on a
+  // portrait/landscape flip. Unlock back to the app default on leave.
+  useEffect(() => {
+    const target =
+      orient === 'landscape'
+        ? ScreenOrientation.OrientationLock.LANDSCAPE
+        : ScreenOrientation.OrientationLock.PORTRAIT_UP;
+    ScreenOrientation.lockAsync(target).catch(() => {});
+    return () => {
+      ScreenOrientation.unlockAsync().catch(() => {});
+    };
+  }, [orient]);
 
   // Guard against leaving mid-session via swipe-back / hardware back button:
   // a live session (rim locked, maybe recording) should never vanish silently.
