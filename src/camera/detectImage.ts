@@ -89,22 +89,27 @@ function passesGate(cls: DetClass, score: number): boolean {
 
 /**
  * Load the detector with the SAME delegate fallback chain the live engine uses:
- * try the platform accelerator first (CoreML on iOS / GPU on Android), then fall
- * back to the plain CPU delegate (`[]`), which is always compatible. Returns
- * null if every attempt fails (e.g. the placeholder asset hasn't been replaced
- * by a trained model yet).
+ * Uses the plain CPU (XNNPACK) delegate — NOT CoreML/GPU — ON PURPOSE. This is
+ * an OFFLINE verification screen (a few frames), so accelerator speed is
+ * irrelevant, and the CoreML delegate can produce INCORRECT output for this YOLO
+ * model (it partitions the graph and mishandles some ops), which shows up as a
+ * pile of phantom boxes on device even though the model + parser are correct —
+ * the CPU path here matches the off-line reference exactly. Correctness wins on
+ * the screen whose entire job is to show the model's true output. The platform
+ * accelerator is kept only as a last-resort fallback if plain CPU ever fails to
+ * load. Returns null if every attempt fails.
  */
 export async function loadDetector(): Promise<TensorflowModel | null> {
   const accel: ('core-ml' | 'android-gpu')[] =
     Platform.OS === 'ios' ? ['core-ml'] : ['android-gpu'];
-  // Accelerator first, then plain CPU (empty delegate list) as the final rung.
-  const attempts: ('core-ml' | 'android-gpu')[][] = [accel, []];
+  // Plain CPU FIRST (correct + always compatible); accelerator only as fallback.
+  const attempts: ('core-ml' | 'android-gpu')[][] = [[], accel];
   for (const delegates of attempts) {
     try {
       const model = await loadTensorflowModel(MODEL_ASSET, delegates);
       return model;
     } catch {
-      // Try the next (less accelerated) rung.
+      // Try the next delegate list.
     }
   }
   return null;
