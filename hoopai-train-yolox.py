@@ -191,7 +191,12 @@ def setup_env():
         kept = []
         for ln in lines:
             base = re.split(r"[<>=!~ ]", ln.strip().lower(), 1)[0]
-            if base in ("numpy", "opencv_python", "opencv-python"):
+            # Also drop onnx-simplifier: YOLOX pins ==0.4.10 which FAILS to build
+            # metadata on Kaggle's Python 3.12 (setup.py egg_info error) and
+            # aborted the whole install. It's only used for ONNX-export
+            # simplification (best-effort), NOT for training.
+            if base in ("numpy", "opencv_python", "opencv-python",
+                        "onnx-simplifier", "onnx_simplifier", "onnxsim"):
                 continue
             kept.append(ln)
         with open(req_out, "w", encoding="utf-8") as f:
@@ -202,8 +207,11 @@ def setup_env():
               % e, flush=True)
         sh("pip install -q -r %s || true" % req_in, check=False)
 
-    # Install YOLOX itself (editable).
-    sh("pip install -q -v -e %s" % YOLOX_DIR)
+    # Install YOLOX itself (editable), --no-deps: every runtime dep was already
+    # installed above (core deps + filtered requirements), and --no-deps stops
+    # the editable install from re-resolving YOLOX's pinned onnx-simplifier==
+    # 0.4.10, which build-fails on Python 3.12 and aborted the whole run.
+    sh("pip install -q -v -e %s --no-deps" % YOLOX_DIR)
 
     # RE-ASSERT the numpy<2 + headless-opencv pins AFTER YOLOX's requirements,
     # in case anything above nudged them.
