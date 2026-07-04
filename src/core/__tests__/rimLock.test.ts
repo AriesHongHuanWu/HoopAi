@@ -188,7 +188,10 @@ describe('RimLock damping and outliers', () => {
 });
 
 describe('RimLock drift and re-lock', () => {
-  const movedBox: Box = { x: 300, y: 150, width: 40, height: 20 }; // cx=320, cy=160
+  // MODERATE displacement: past the reject threshold (~22px) but UNDER the
+  // large-jump/pan threshold (largeJumpDiagFactor 2.5 · diag ≈ 112px), so these
+  // tests exercise the SLOW 5-reject drift path (not the fast pan path).
+  const movedBox: Box = { x: 160, y: 50, width: 40, height: 20 }; // cx=180, cy=60, dist 60
 
   test('sustained new position: driftDetected after 5 rejects, then re-lock', () => {
     const lock = new RimLock();
@@ -211,14 +214,14 @@ describe('RimLock drift and re-lock', () => {
     for (let i = 0; i < 4; i++) {
       g = lock.step(frame((10 + i) / FPS, [rimDet(movedBox)]), (10 + i) / FPS);
     }
-    expect(g!.cx).toBe(320);
-    expect(g!.cy).toBe(160);
+    expect(g!.cx).toBe(180);
+    expect(g!.cy).toBe(60);
     expect(g).toEqual(computeRimGeometry(movedBox));
     expect(lock.driftDetected).toBe(false);
 
     // The new lock behaves normally: old-spot detections are now the outliers.
     const back = lock.step(frame(14 / FPS, [rimDet(rimBox)]), 14 / FPS);
-    expect(back!.cx).toBe(320);
+    expect(back!.cx).toBe(180);
   });
 
   test('an accepted observation at the old spot clears drift (camera came back)', () => {
@@ -299,6 +302,35 @@ describe('RimLock drift and re-lock', () => {
     expect(g!.box.width).toBe(60);
     expect(lock.driftDetected).toBe(false);
   });
+
+  test('a LARGE strong-confidence jump re-locks fast (no 5 rejects needed)', () => {
+    const lock = new RimLock();
+    feed(lock, rimBox, 5); // lock at cx=120
+    const pan: Box = { x: 300, y: 150, width: 40, height: 20 }; // cx=320, far (dist ~226 > large-jump ~112)
+    // One strong far detection flags drift immediately (not after 5 rejects).
+    lock.step(frame(5 / FPS, [rimDet(pan, 0.9)]), 5 / FPS);
+    expect(lock.driftDetected).toBe(true);
+    expect(lock.geometry!.cx).toBe(120); // not re-locked yet — still needs a full cluster
+    // Two more consistent frames complete the LOCK_CLUSTER_SIZE(3) cluster → re-lock.
+    let g = lock.geometry;
+    for (let i = 0; i < 2; i++) {
+      g = lock.step(frame((6 + i) / FPS, [rimDet(pan, 0.9)]), (6 + i) / FPS);
+    }
+    expect(g!.cx).toBe(320); // re-locked in 3 frames total, not 8
+    expect(lock.driftDetected).toBe(false);
+  });
+
+  test('a large jump with WEAK score does NOT fast-path (falls to the slow 5-reject path)', () => {
+    const lock = new RimLock();
+    feed(lock, rimBox, 5);
+    const farWeak: Box = { x: 300, y: 150, width: 40, height: 20 }; // far but low score
+    for (let i = 0; i < 4; i++) {
+      lock.step(frame((5 + i) / FPS, [rimDet(farWeak, 0.5)]), (5 + i) / FPS); // 0.5 < relockStrongScore 0.6
+      expect(lock.driftDetected).toBe(false);
+    }
+    lock.step(frame(9 / FPS, [rimDet(farWeak, 0.5)]), 9 / FPS);
+    expect(lock.driftDetected).toBe(true); // drift only after the 5th slow reject
+  });
 });
 
 describe('RimLock manual override and reset', () => {
@@ -314,7 +346,9 @@ describe('RimLock manual override and reset', () => {
   test('setManual overrides an existing lock and clears drift', () => {
     const lock = new RimLock();
     feed(lock, rimBox, 5);
-    const moved: Box = { x: 300, y: 150, width: 40, height: 20 };
+    // Moderate displacement → slow 5-reject drift (no re-lock), so drift is
+    // still set when setManual overrides it.
+    const moved: Box = { x: 160, y: 50, width: 40, height: 20 };
     for (let i = 0; i < 5; i++) {
       lock.step(frame((5 + i) / FPS, [rimDet(moved)]), (5 + i) / FPS);
     }

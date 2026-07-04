@@ -73,7 +73,15 @@ export interface OverlayDet {
 }
 
 export interface OverlayState {
-  ball: { x: number; y: number; r: number } | null;
+  /**
+   * Latest tracked ball. x,y,r are analysis-frame px. vx,vy are the Kalman
+   * velocity in analysis-frame px/SECOND and t is the camera-clock sample time
+   * (seconds). The overlay carries velocity + t so it can GLIDE the drawn ball
+   * between processed frames (which arrive at only ~15-30fps) — the HUD
+   * extrapolates x+vx*dt each display frame. t is used only as a change key to
+   * detect a new sample, never subtracted from the UI display clock.
+   */
+  ball: { x: number; y: number; r: number; vx: number; vy: number; t: number } | null;
   rim: Box | null;
   /** Flattened x,y pairs of the live shot trajectory (analysis px). */
   traj: number[];
@@ -304,10 +312,14 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
   }, [detectorModel, perfMode, detInputSize]);
 
   const isModelLoaded = modelState.model != null;
+  // 'camera' as soon as a real device exists and we're not in EXPLICIT demo
+  // mode — independent of model load. The preview + frame processor mount
+  // immediately; detection just stays pending until the model finishes loading
+  // (the worklet's boxed==null heartbeat branch safely no-ops — it does NOT run
+  // the scripted mock). Scripted demo / DemoCourt only for a true demo:
+  // mode==='demo', or genuinely no camera device (simulator).
   const activeMode: 'demo' | 'camera' =
-    mode === 'demo' || (mode === 'auto' && !isModelLoaded) || device == null
-      ? 'demo'
-      : 'camera';
+    mode === 'demo' || device == null ? 'demo' : 'camera';
 
 
   const overlay = useSharedValue<OverlayState>(EMPTY_OVERLAY);
@@ -371,7 +383,18 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
           netRoiSv.value = state.rim ? { ...state.rim.netRoi } : null;
         }
         overlay.value = {
-          ball: state.ball ? { x: state.ball.cx, y: state.ball.cy, r: state.ball.r } : null,
+          ball: state.ball
+            ? {
+                x: state.ball.cx,
+                y: state.ball.cy,
+                r: state.ball.r,
+                // Kalman velocity (analysis px/s) + camera-clock sample time,
+                // carried so the HUD can glide the ball between processed frames.
+                vx: state.ball.vx,
+                vy: state.ball.vy,
+                t: state.ball.t,
+              }
+            : null,
           rim: state.rim?.box ?? null,
           traj: flattenTrajectory(state.liveTrajectory),
           phase: state.phase,

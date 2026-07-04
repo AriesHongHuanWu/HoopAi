@@ -53,6 +53,7 @@ import {
 } from '@shopify/react-native-skia';
 import {
   useDerivedValue,
+  useFrameCallback,
   useSharedValue,
   withRepeat,
   withTiming,
@@ -67,6 +68,13 @@ import { color, glow } from '../../constants/tokens';
 const TRAIL_BLOOM = 16;
 const TRAIL_CORE = 5;
 const TRAIL_HOT = 2;
+/**
+ * Max time (seconds) to extrapolate the ball forward from its last processed
+ * sample. Bounds the glide so a lost/occluded ball can't fly off screen: at
+ * most ~120ms of (x+vx*dt), then it holds. Detection frames arrive every
+ * ~33-66ms, so 120ms comfortably covers the gap between two samples.
+ */
+const MAX_EXTRAPOLATION_SEC = 0.12;
 /** Corner-bracket arm length as a fraction of the rim box's shorter side. */
 const BRACKET_FRAC = 0.28;
 const BRACKET_STROKE = 3;
@@ -172,18 +180,52 @@ export function TrajectoryOverlay({
   });
   const bloomOpacity = useDerivedValue(() => trailOpacity.value * 0.5);
 
+  // --- ball glide clock ----------------------------------------------------
+  // The ball's x,y,vx,vy arrive only on each PROCESSED detection frame
+  // (~15-30fps). To track smoothly at display rate we extrapolate every UI
+  // frame from the Kalman velocity: drawn = pos + vel·dt (dt = time since this
+  // sample landed). overlay.ball.t is on the camera clock (unrelated to the UI
+  // clock), so we never subtract it — we treat a CHANGE in ball.t as "new
+  // sample" and stamp the UI-clock instant it became visible; dt is then a pure
+  // UI-clock delta. displayNowMs advances every frame so the position worklets
+  // below re-run at display rate. Cheap + worklet-side.
+  const displayNowMs = useSharedValue(0);
+  const sampleArrivalMs = useSharedValue(0);
+  const lastSampleKey = useSharedValue(-1);
+  useFrameCallback((frameInfo) => {
+    'worklet';
+    const nowMs = frameInfo.timestamp;
+    displayNowMs.value = nowMs;
+    const key = overlay.value.ball?.t ?? -1;
+    if (key !== lastSampleKey.value) {
+      lastSampleKey.value = key;
+      sampleArrivalMs.value = nowMs;
+    }
+  });
+
+  // Seconds since the current sample landed, clamped to the cap. Only glide
+  // while a shot is live — a settled/lost ball holds its last position.
+  const extrapSec = useDerivedValue(() => {
+    if (overlay.value.phase !== 'SHOT_LIVE') return 0;
+    const dt = (displayNowMs.value - sampleArrivalMs.value) / 1000;
+    if (!(dt > 0)) return 0;
+    return dt < MAX_EXTRAPOLATION_SEC ? dt : MAX_EXTRAPOLATION_SEC;
+  });
+
   // --- ball comet ----------------------------------------------------------
+  // Extrapolate in ANALYSIS px (x + vx·dt) BEFORE the *scale+offset view
+  // mapping — vx,vy are analysis px/s, so one m.scale converts the whole thing.
   const ballCx = useDerivedValue(() => {
     const o = overlay.value;
     const m = mapping.value;
     if (o.ball == null || !m.ok) return -100;
-    return o.ball.x * m.scale + m.ox;
+    return (o.ball.x + o.ball.vx * extrapSec.value) * m.scale + m.ox;
   });
   const ballCy = useDerivedValue(() => {
     const o = overlay.value;
     const m = mapping.value;
     if (o.ball == null || !m.ok) return -100;
-    return o.ball.y * m.scale + m.oy;
+    return (o.ball.y + o.ball.vy * extrapSec.value) * m.scale + m.oy;
   });
   const ballR = useDerivedValue(() => {
     const o = overlay.value;

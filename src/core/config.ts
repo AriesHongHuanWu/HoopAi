@@ -73,6 +73,18 @@ export const RIM = {
   reverifySec: 5,
   /** A rim "moving" more than this × its diagonal in 5 frames is rejected. */
   maxDriftDiagFactor: 0.5,
+  /**
+   * LARGE-jump fast re-lock: a single strong-confidence rim detection whose
+   * center is at least this × the locked rim's diagonal away is treated as a
+   * probable camera PAN (new hoop), not shake. It flags drift immediately and
+   * starts the re-verify cluster that frame instead of waiting for
+   * DRIFT_REJECT_COUNT slow rejects. Well above maxDriftDiagFactor (0.5) so
+   * ordinary jitter never trips it; a full cluster + size guard are still
+   * required before it actually re-locks, so one stray far box can't re-lock.
+   */
+  largeJumpDiagFactor: 2.5,
+  /** Min detector score for the large-jump fast path to fire (confident rim). */
+  relockStrongScore: 0.6,
   /** Crossing span = central fraction of rim width. */
   spanFraction: 0.8,
   /** Up-zone size relative to rim box. */

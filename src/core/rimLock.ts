@@ -206,7 +206,7 @@ export class RimLock {
       if (d.cls !== 'rim' || d.score < DETECTION.rimScoreMin) continue;
       if (best === null || d.score > best.score) best = d;
     }
-    if (best !== null) this.observe(best.box);
+    if (best !== null) this.observe(best.box, best.score);
     return this.locked ? this.geom : null;
   }
 
@@ -262,7 +262,7 @@ export class RimLock {
   // -------------------------------------------------------------------------
 
   /** Routes one accepted-class rim observation through the lock state. */
-  private observe(box: Box): void {
+  private observe(box: Box, score: number): void {
     if (!this.locked) {
       this.feedCluster(box);
       if (this.clusterCount >= LOCK_CLUSTER_SIZE) this.lockAtClusterMean();
@@ -272,7 +272,31 @@ export class RimLock {
     const diag = Math.hypot(this.lockW, this.lockH);
     const dx = box.x + box.width / 2 - (this.lockX + this.lockW / 2);
     const dy = box.y + box.height / 2 - (this.lockY + this.lockH / 2);
-    const displaced = Math.hypot(dx, dy) > RIM.maxDriftDiagFactor * diag;
+    const dist = Math.hypot(dx, dy);
+    const displaced = dist > RIM.maxDriftDiagFactor * diag;
+
+    // LARGE-jump fast path: a confident rim landing far outside the lock is a
+    // probable camera pan, not shake. Flag drift and start the re-verify cluster
+    // on THIS frame instead of waiting for DRIFT_REJECT_COUNT slow rejects. It
+    // still needs a full consistent cluster + the size guard below before it
+    // re-locks, so a single stray far box can't re-lock.
+    if (
+      displaced &&
+      !this.drift &&
+      score >= RIM.relockStrongScore &&
+      dist >= RIM.largeJumpDiagFactor * diag
+    ) {
+      this.drift = true;
+      this.preDriftW = this.lockW;
+      this.preDriftH = this.lockH;
+      this.consecutiveRejects++;
+      this.feedCluster(box);
+      if (this.clusterCount >= LOCK_CLUSTER_SIZE) {
+        if (this.clusterSizeMatchesPreDrift()) this.lockAtClusterMean();
+        else this.clearCluster();
+      }
+      return;
+    }
 
     if (!displaced) {
       // Accept: EMA-damp the lock toward the observation.
