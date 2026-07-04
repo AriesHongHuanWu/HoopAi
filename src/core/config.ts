@@ -20,6 +20,13 @@ export const DETECTION = {
   ballInBasketScoreMin: 0.35,
   /** Person confidence gate. */
   personScoreMin: 0.4,
+  /**
+   * Reject a ball box larger than this fraction of the frame on either side.
+   * A real basketball never fills half the frame in shot-tracking framing; a
+   * near-frame-size "ball" is a false positive that would otherwise pass the
+   * round-aspect gate and paint a giant circle over the whole screen.
+   */
+  ballMaxSizeFraction: 0.5,
 } as const;
 
 export const TRACKER = {

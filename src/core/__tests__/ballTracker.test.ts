@@ -129,6 +129,20 @@ describe('BallTracker', () => {
     expect(tracker.getHistory()).toHaveLength(0);
   });
 
+  test('rejects a giant near-frame-size ball box (no phantom track / screen-covering circle)', () => {
+    const tracker = new BallTracker({});
+    // A false "ball" filling most of a 640 frame (600×600): round aspect and
+    // high score, so ONLY the max-size gate can stop it. Must not start a track
+    // (otherwise r=(w+h)/4 → a huge overlay circle covering the screen).
+    const giant = ballDet(320, 320, { score: 0.9, w: 600, h: 600 });
+    expect(tracker.step(frameAt(0, [giant]), null)).toBeNull();
+    expect(tracker.getHistory()).toHaveLength(0);
+    // A normal-size ball right after is still tracked fine.
+    const ok = tracker.step(frameAt(DT, [ballDet(320, 320, { w: 30, h: 30 })]), null);
+    expect(ok).not.toBeNull();
+    expect(ok!.predicted).toBe(false);
+  });
+
   test('relaxed confidence gate applies only inside the hoop ROI', () => {
     const hoopRoi: Box = { x: 300, y: 100, width: 100, height: 100 };
     const score = 0.2; // between ballScoreMinHoopRoi (0.15) and ballScoreMin (0.3)

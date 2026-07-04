@@ -245,6 +245,16 @@ export class BallTracker {
         : DETECTION.ballScoreMin;
       if (det.score < scoreGate) continue;
 
+      // Reject an implausibly LARGE ball box (a near-frame-size false positive
+      // that the round-aspect gate lets through and that paints a giant circle
+      // over the whole screen). A real basketball never fills half the frame.
+      if (
+        det.box.width > frame.frameWidth * DETECTION.ballMaxSizeFraction ||
+        det.box.height > frame.frameHeight * DETECTION.ballMaxSizeFraction
+      ) {
+        continue;
+      }
+
       if (!this.passesAspectGate(det.box, pred, dt)) continue;
       if (!this.passesJumpGate(center.x, center.y, t)) continue;
 
