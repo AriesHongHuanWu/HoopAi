@@ -226,6 +226,8 @@ export function parseYoloOutput(
     rawCount: chosen.raw.length,
     maxScore: chosen.maxScore,
     coordMax: chosen.coordMax,
+    // Both layouts garbage ⇒ the delegate returned a corrupted tensor.
+    corrupt: cfGarbage && clGarbage,
   };
 
   return {

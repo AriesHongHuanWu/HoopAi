@@ -221,31 +221,41 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
     inferenceMs: number;
   }>({ model: null, delegate: 'loading', error: '', inferenceMs: 0 });
 
+  // Self-healing delegate. The detector starts on the fast accelerator (Metal
+  // GPU on iOS). If its output comes back CORRUPT — both tensor layouts read as
+  // garbage, the iOS CoreML/Metal-on-YOLO failure mode — `forceCpu` flips and
+  // the model reloads on the plain CPU delegate (always numerically correct)
+  // with the lighter 320px model, so it stays real-time. Set once per session.
+  const [forceCpu, setForceCpu] = useState(false);
+  const forceCpuRef = useRef(false);
+  const corruptStreak = useRef(0);
+
   const detectorModel = useSettings((s) => s.detectorModel);
   const perfMode = useSettings((s) => s.perfMode);
   // Detector input side: 'speed' uses a 320-exported nano (~4× faster); every
   // consumer (resizer, parser, net-motion, pose scaling) reads this, so quality
   // mode is byte-identical to the previous fixed-640 path.
-  const detInputSize = perfMode === 'speed' ? SPEED_INPUT : DETECTION.inputSize;
+  const detInputSize = perfMode === 'speed' || forceCpu ? SPEED_INPUT : DETECTION.inputSize;
 
   useEffect(() => {
     let alive = true;
     setModelState({ model: null, delegate: 'loading', error: '', inferenceMs: 0 });
     void (async () => {
-      // iOS: use the plain CPU (XNNPACK) delegate. BOTH iOS accelerators mis-run
-      // this YOLO model on device: CoreML (Apple Neural Engine) partitions the
-      // graph and corrupts the output, and the Metal (GPU) delegate does the same
-      // — producing a pile of jumping / mis-placed phantom boxes. Only the CPU
-      // path is numerically correct here (verified on device: the Test-AI screen,
-      // which runs on CPU, detects the ball cleanly; both accelerators do not).
-      // CPU is slower, but correctness is the whole point, and the model-selection
-      // chain below still steps down to a lighter model / smaller input to stay
-      // real-time. (A future standard-conv model such as YOLOX should run
-      // correctly on Metal for acceleration; this model cannot.)
+      // Self-healing delegate. Start on the FAST accelerator (Metal GPU on iOS /
+      // GPU on Android) for real-time speed. Both iOS accelerators can mis-run
+      // this YOLO model — CoreML (ANE), and on some devices Metal, partition the
+      // graph and return a CORRUPT output tensor (jumping / phantom boxes). The
+      // smoke test below rejects a delegate whose output reads as corrupt, and at
+      // runtime a sustained corrupt streak flips `forceCpu`, reloading on the
+      // plain CPU (XNNPACK) delegate — always numerically correct — with the
+      // lighter 320px model so it stays usable. (A standard-conv model like YOLOX
+      // should run correctly on Metal; this one may not.)
       const fast: { label: string; delegates: TensorflowModelDelegate[] } =
-        Platform.OS === 'ios'
+        forceCpu
           ? { label: 'cpu', delegates: [] }
-          : { label: 'android-gpu', delegates: ['android-gpu'] };
+          : Platform.OS === 'ios'
+            ? { label: 'metal', delegates: ['metal'] }
+            : { label: 'android-gpu', delegates: ['android-gpu'] };
       type Delegates = TensorflowModelDelegate[];
       interface Attempt {
         asset: number;
@@ -261,7 +271,7 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
       // always "the other model on CPU" so the user is never stranded in demo.
       const none: Delegates = [];
       const attempts: Attempt[] =
-        perfMode === 'speed'
+        perfMode === 'speed' || forceCpu
           ? [
               { asset: MODEL_ASSETS.fast, label: `fast/${fast.label}`, delegates: fast.delegates },
               { asset: MODEL_ASSETS.fast, label: 'fast/cpu', delegates: none },
@@ -302,6 +312,19 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
           if (a.maxMs !== undefined && ms > a.maxMs) {
             throw new Error(`auto: ${ms}ms > ${a.maxMs}ms budget — stepping down`);
           }
+          // Correctness self-test: an accelerator that mis-compiled the graph
+          // returns a tensor that reads as garbage in BOTH layouts. Reject that
+          // delegate and fall to the next (CPU) rung — never ship a corrupt
+          // detector. Only gate the accelerator rungs (delegates.length > 0); the
+          // plain-CPU rung is the trusted fallback and is never corrupt-rejected.
+          if (
+            a.delegates.length > 0 &&
+            parseYoloOutput(new Float32Array(o0 as ArrayBuffer), 0, {
+              inputSize: detInputSize,
+            }).debug?.corrupt
+          ) {
+            throw new Error(`smoke test: ${a.label} corrupt output — stepping down`);
+          }
           if (!alive) return;
           // Persist the measured tier so Settings can show real device
           // numbers ("precise/core-ml · 42ms") without running the camera.
@@ -323,7 +346,7 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
     return () => {
       alive = false;
     };
-  }, [detectorModel, perfMode, detInputSize]);
+  }, [detectorModel, perfMode, detInputSize, forceCpu]);
 
   const isModelLoaded = modelState.model != null;
   // 'camera' as soon as a real device exists and we're not in EXPLICIT demo
@@ -559,6 +582,22 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
       // Publish this second as the camera media clock so recordingStartSec
       // (sampled in live.tsx via engine.nowCameraSec()) shares the exact clock.
       lastFrameSec.current = t;
+      // Self-heal watch: a corrupt output tensor (both layouts garbage) means the
+      // accelerator delegate mis-ran the graph. A sustained streak (~0.5s of
+      // detections) flips to the CPU delegate, which reloads the model — once per
+      // session, so it can never thrash. A single stray frame never trips it.
+      const dbg = payload.frame.debug;
+      if (dbg) {
+        if (dbg.corrupt) {
+          corruptStreak.current += 1;
+          if (corruptStreak.current >= 15 && !forceCpuRef.current) {
+            forceCpuRef.current = true;
+            setForceCpu(true);
+          }
+        } else {
+          corruptStreak.current = 0;
+        }
+      }
       pipeline.step({
         ...payload,
         frame: { ...payload.frame, t },

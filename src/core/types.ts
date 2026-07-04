@@ -55,6 +55,14 @@ export interface FrameDebug {
   rawCount: number;
   maxScore: number;
   coordMax: number;
+  /**
+   * True when BOTH tensor layouts read as transpose-garbage (>5% of anchors
+   * firing). A real frame never does this in both layouts — it only happens
+   * when the inference delegate returned a CORRUPTED output tensor (the iOS
+   * CoreML/Metal-on-YOLO failure mode). The engine watches this to auto-fall
+   * back from a corrupting accelerator to the CPU delegate.
+   */
+  corrupt: boolean;
 }
 
 /** One analysed camera frame's raw detector output. */
