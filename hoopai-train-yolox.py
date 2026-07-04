@@ -207,11 +207,16 @@ def setup_env():
               % e, flush=True)
         sh("pip install -q -r %s || true" % req_in, check=False)
 
-    # Install YOLOX itself (editable), --no-deps: every runtime dep was already
-    # installed above (core deps + filtered requirements), and --no-deps stops
-    # the editable install from re-resolving YOLOX's pinned onnx-simplifier==
-    # 0.4.10, which build-fails on Python 3.12 and aborted the whole run.
-    sh("pip install -q -v -e %s --no-deps" % YOLOX_DIR)
+    # Run YOLOX FROM SOURCE via PYTHONPATH — do NOT `pip install -e` it: YOLOX's
+    # `setup.py develop` path fails on Kaggle's Python 3.12 / new setuptools, and
+    # YOLOX is pure-Python (no compiled extensions) so an install is unnecessary.
+    # Put YOLOX_DIR on THIS process's sys.path (for the in-process import check in
+    # fail_fast_env_check) and on every subprocess env's PYTHONPATH (set where
+    # train/eval/export are launched). A non-editable wheel install is attempted
+    # as a bonus but is NEVER fatal.
+    if YOLOX_DIR not in sys.path:
+        sys.path.insert(0, YOLOX_DIR)
+    sh("pip install -q --no-deps --no-build-isolation %s" % YOLOX_DIR, check=False)
 
     # RE-ASSERT the numpy<2 + headless-opencv pins AFTER YOLOX's requirements,
     # in case anything above nudged them.
@@ -735,6 +740,7 @@ def train(ckpt):
     os.makedirs(OUT_ROOT, exist_ok=True)
 
     env = dict(os.environ)
+    env["PYTHONPATH"] = YOLOX_DIR + os.pathsep + env.get("PYTHONPATH", "")
     env["YOLOX_DATADIR"] = COCO_DIR          # belt-and-suspenders w/ data_dir
 
     import torch
@@ -806,6 +812,7 @@ def save_and_export():
     print("SAVED %s (from %s)" % (pth_out, ckpt), flush=True)
 
     env = dict(os.environ)
+    env["PYTHONPATH"] = YOLOX_DIR + os.pathsep + env.get("PYTHONPATH", "")
     env["YOLOX_DATADIR"] = COCO_DIR
 
     import torch
