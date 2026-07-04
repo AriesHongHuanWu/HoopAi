@@ -80,6 +80,30 @@ describe('parseYoloOutput — layout auto-detection', () => {
     expect(out.detections[0]!.box.y).toBeCloseTo(160 - 16);
   });
 
+  test('rejects the transpose-garbage layout even when it yields far more boxes', () => {
+    // Reproduces the on-device "pile of boxes" bug. A REAL channels-first output
+    // has coordinate predictions (rows 0..3, normalized ~0.3-0.5) on EVERY
+    // anchor but a real class score on only a few. Read in the WRONG layout,
+    // those coord values are interpreted as class scores, so a huge fraction of
+    // anchors spuriously pass the score floor (~200 junk boxes here) and the old
+    // "more boxes wins" rule picked the garbage layout.
+    const n = 400;
+    const data = new Float32Array(ROWS * n);
+    for (let i = 0; i < n; i++) {
+      data[0 * n + i] = 0.5; // cx (normalized)
+      data[1 * n + i] = 0.5; // cy
+      data[2 * n + i] = 0.3; // w
+      data[3 * n + i] = 0.3; // h
+    }
+    data[(4 + 0) * n + 10] = 0.9; // the ONE genuine ball detection
+    const out = parseYoloOutput(data, 0, { inputSize: 640 });
+    // Guard must reject channels-last (garbage) and keep the clean read.
+    expect(out.debug?.layout).toBe('channels-first');
+    expect(out.detections).toHaveLength(1);
+    expect(out.detections[0]!.cls).toBe('ball');
+    expect(out.detections[0]!.box.width).toBeCloseTo(0.3 * 640);
+  });
+
   test('picks the correct layout per frame (pure, no cross-frame state)', () => {
     const n = 100;
     const clData = buildChannelsLast(n, [

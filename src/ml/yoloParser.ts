@@ -192,8 +192,22 @@ export function parseYoloOutput(
   // the transposed (wrong) read frame-to-frame, scrambling class labels and
   // coordinates — so on a tie STICK to the previous frame's layout when given,
   // and only fall back to maxScore when there is no prior.
+  // Transpose-garbage guard (CRITICAL). Reading the tensor in the WRONG layout
+  // interprets box-coordinate values (normalized 0..1) as class scores, so a
+  // HUGE fraction of anchors (~27%) spuriously clear the score floor — e.g. 2256
+  // "boxes" from the wrong read vs a handful from the correct one. No real frame
+  // has anywhere near that many raw detections, so a layout whose raw count
+  // exceeds ~5% of the anchors is the garbage read; always prefer the OTHER
+  // layout. Without this, the naive "more boxes wins" rule below picked the
+  // garbage layout and the HUD filled with a pile of overlapping phantom boxes
+  // (verified on device + reproduced frame-for-frame off-line).
+  const garbageCeil = n * 0.05;
+  const cfGarbage = cf.raw.length > garbageCeil;
+  const clGarbage = cl.raw.length > garbageCeil;
   let useCf: boolean;
-  if (cf.raw.length !== cl.raw.length) {
+  if (cfGarbage !== clGarbage) {
+    useCf = clGarbage; // exactly one layout is garbage → take the clean one
+  } else if (cf.raw.length !== cl.raw.length) {
     useCf = cf.raw.length > cl.raw.length;
   } else if (prevLayout === 'channels-first') {
     useCf = true;
