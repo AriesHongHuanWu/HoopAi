@@ -1,0 +1,27 @@
+{
+  "arch": "yolox_nano",
+  "license": "Apache-2.0",
+  "classes": ["ball", "rim", "ball_in_basket", "person"],
+  "num_classes": 4,
+  "input": {
+    "shape": [1, 416, 416, 3],
+    "layout": "NHWC (interleaved RGB)",
+    "dtype": "float32",
+    "range": "0..1 (the *255 YOLOX rescale is baked into the graph)"
+  },
+  "output": {
+    "shape": [1, 3549, 9],
+    "layout": "channels-last",
+    "fields": "[cx, cy, w, h, obj, cls0..3] in 416-px space (decode folded in)",
+    "score": "obj * max(cls)"
+  },
+  "metrics_epoch20": {
+    "AP50": 0.873,
+    "AP50_95": 0.649,
+    "AP75": 0.718,
+    "AP_large": 0.787
+  },
+  "provenance": "Recovered from the cancelled honghuanwu/hoopai-train-yolox v4 Kaggle run via its live checkpoint-promoter (epoch 20 of 40).",
+  "app_asset": "assets/models/hoopai-yolox.tflite",
+  "wired": "Opt-in via Settings > Detector engine (beta) = YOLOX. Default off."
+}

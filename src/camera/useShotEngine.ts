@@ -45,6 +45,10 @@ const MODEL_ASSETS = {
   precise: require('../../assets/models/hoopai-det-precise.tflite'),
   // 320-input nano for 'speed' perf mode (~4× faster on older phones).
   fast: require('../../assets/models/hoopai-det-fast.tflite'),
+  // Apache-2.0 YOLOX-Nano (416px, obj-aware, NHWC 0..1 input, decode folded).
+  // Opt-in beta (Settings > detectorEngine) — standard-conv graph the Metal GPU
+  // runs correctly, so no corrupt-fallback needed. See docs/yolox README.
+  yolox: require('../../assets/models/hoopai-yolox.tflite'),
 } as const;
 // MoveNet SinglePose Lightning (Apache-2.0) for opt-in form analysis.
 const POSE_ASSET = require('../../assets/models/movenet-pose.tflite');
@@ -54,6 +58,8 @@ const POSE_ASSET = require('../../assets/models/movenet-pose.tflite');
 const POSE_INPUT = 192;
 /** Detector input side for the 'speed' perf mode (matches the fast model export). */
 const SPEED_INPUT = 320;
+/** YOLOX-Nano input side (matches the hoopai-yolox export; fixed, not perf-scaled). */
+const YOLOX_INPUT = 416;
 
 /**
  * 'auto' detector budget: keep the precise model only when a smoke-test
@@ -232,10 +238,19 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
 
   const detectorModel = useSettings((s) => s.detectorModel);
   const perfMode = useSettings((s) => s.perfMode);
-  // Detector input side: 'speed' uses a 320-exported nano (~4× faster); every
-  // consumer (resizer, parser, net-motion, pose scaling) reads this, so quality
-  // mode is byte-identical to the previous fixed-640 path.
-  const detInputSize = perfMode === 'speed' || forceCpu ? SPEED_INPUT : DETECTION.inputSize;
+  // Opt-in Apache-2.0 YOLOX detector (beta). When on, it overrides model + input
+  // size + pixel layout; when off (default) every path is byte-identical to the
+  // shipping YOLO11 pipeline, so there is zero regression risk.
+  const detectorEngine = useSettings((s) => s.detectorEngine);
+  const useYolox = detectorEngine === 'yolox';
+  // Detector input side: YOLOX is a fixed 416; otherwise 'speed' uses a
+  // 320-exported nano (~4× faster). Every consumer (resizer, parser, net-motion,
+  // pose scaling) reads this, so quality mode stays identical to the 640 path.
+  const detInputSize = useYolox
+    ? YOLOX_INPUT
+    : perfMode === 'speed' || forceCpu
+      ? SPEED_INPUT
+      : DETECTION.inputSize;
 
   useEffect(() => {
     let alive = true;
@@ -270,8 +285,14 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
       // the selected model with delegate→CPU fallback; the last rung is
       // always "the other model on CPU" so the user is never stranded in demo.
       const none: Delegates = [];
-      const attempts: Attempt[] =
-        perfMode === 'speed' || forceCpu
+      const attempts: Attempt[] = useYolox
+        ? [
+            // YOLOX is a standard-conv graph: the GPU delegate should run it
+            // correctly (no corrupt-fallback needed), CPU is the safety rung.
+            { asset: MODEL_ASSETS.yolox, label: `yolox/${fast.label}`, delegates: fast.delegates },
+            { asset: MODEL_ASSETS.yolox, label: 'yolox/cpu', delegates: none },
+          ]
+        : perfMode === 'speed' || forceCpu
           ? [
               { asset: MODEL_ASSETS.fast, label: `fast/${fast.label}`, delegates: fast.delegates },
               { asset: MODEL_ASSETS.fast, label: 'fast/cpu', delegates: none },
@@ -321,6 +342,7 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
             a.delegates.length > 0 &&
             parseYoloOutput(new Float32Array(o0 as ArrayBuffer), 0, {
               inputSize: detInputSize,
+              hasObjectness: useYolox,
             }).debug?.corrupt
           ) {
             throw new Error(`smoke test: ${a.label} corrupt output — stepping down`);
@@ -346,7 +368,7 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
     return () => {
       alive = false;
     };
-  }, [detectorModel, perfMode, detInputSize, forceCpu]);
+  }, [detectorModel, perfMode, detInputSize, forceCpu, useYolox]);
 
   const isModelLoaded = modelState.model != null;
   // 'camera' as soon as a real device exists and we're not in EXPLICIT demo
@@ -551,12 +573,12 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
     channelOrder: 'rgb',
     dataType: 'float32',
     scaleMode: 'cover',
-    // PLANAR (NCHW): the exported YOLO tflite input tensor is [1,3,640,640],
-    // channels-first. Verified empirically — interleaved (NHWC) feeds the model
-    // scrambled pixels and every score collapses to ~0 (no detections), planar
-    // produces real detections (scores up to 0.7). fast-tflite does NOT
-    // transpose; the buffer layout must match the tensor exactly.
-    pixelLayout: 'planar',
+    // Layout MUST match the model's input tensor exactly — fast-tflite does NOT
+    // transpose, and a mismatch silently collapses every score to ~0.
+    //  - YOLO11 export is [1,3,S,S] channels-first  → PLANAR (NCHW).
+    //  - YOLOX  export is [1,416,416,3]             → INTERLEAVED (NHWC).
+    // Both take float32 0..1 (YOLOX bakes the *255 rescale into the graph).
+    pixelLayout: useYolox ? 'interleaved' : 'planar',
   });
 
   // Pose resizer: MoveNet wants NHWC uint8 192×192 (INTERLEAVED — verified the
@@ -710,8 +732,12 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
         if (roi != null) {
           const S = detInputSize;
           const N = 12;
-          // PLANAR buffer: the green channel plane starts at offset S*S (after
-          // the full red plane), so green(px,py) = inArr[S*S + py*S + px].
+          // Green-channel index depends on the buffer layout (must match the
+          // resizer's pixelLayout above):
+          //  - PLANAR (YOLO11): green plane starts after the red plane at S*S,
+          //    so green(px,py) = inArr[S*S + py*S + px].
+          //  - INTERLEAVED (YOLOX): pixels are R,G,B,R,G,B…, so green(px,py) =
+          //    inArr[(py*S + px)*3 + 1].
           const gPlane = S * S;
           const samples: number[] = new Array(N * N);
           let si = 0;
@@ -723,7 +749,9 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
               let px = Math.round(roi.x + ((gx + 0.5) / N) * roi.width);
               if (px < 0) px = 0;
               if (px > S - 1) px = S - 1;
-              samples[si++] = inArr[gPlane + py * S + px]!;
+              samples[si++] = useYolox
+                ? inArr[(py * S + px) * 3 + 1]!
+                : inArr[gPlane + py * S + px]!;
             }
           }
           const prev = prevNetSamples.value;
@@ -751,6 +779,7 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
         parsed = parseYoloOutput(new Float32Array(outputs[0]!), frameTsSec, {
           inputSize: detInputSize,
           prevLayout: prevLayoutSv.value,
+          hasObjectness: useYolox,
         });
         // Persist the chosen layout so next frame's tie-break sticks instead of
         // flipping on noise (which scrambles labels). Only lock in a real layout.

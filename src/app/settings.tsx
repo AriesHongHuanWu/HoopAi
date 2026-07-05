@@ -356,6 +356,7 @@ export default function SettingsScreen() {
   const detectorModel = useSettings((s) => s.detectorModel);
   const detectionRate = useSettings((s) => s.detectionRate);
   const perfMode = useSettings((s) => s.perfMode);
+  const detectorEngine = useSettings((s) => s.detectorEngine);
   const lastBenchmark = useSettings((s) => s.lastBenchmark);
   const debugMode = useSettings((s) => s.debugMode);
   const formAnalysis = useSettings((s) => s.formAnalysis);
@@ -522,9 +523,37 @@ export default function SettingsScreen() {
             Standard: every iPhone since XR · Precise: iPhone 13 and newer recommended.
           </Text>
           <Text style={styles.tierCaption}>
-            Current models are Ultra-Max (Temp) — a temporary build. A
-            clean-license detector is in training and will replace them.
+            Standard/Precise are Ultra-Max (Temp) YOLO11 builds. The
+            clean-license YOLOX engine below is the planned replacement.
           </Text>
+          <View style={styles.divider} />
+          <View style={styles.settingText}>
+            <Text style={styles.settingLabel}>Detector engine (beta)</Text>
+            <Text style={styles.settingDesc}>
+              YOLOX is an Apache-licensed detector that the iPhone GPU can run
+              directly — aiming for faster, steadier boxes. It overrides the
+              model and performance settings above. Beta: try it and see if
+              tracking feels better; switch back anytime.
+            </Text>
+          </View>
+          <View style={styles.chipWrap}>
+            <SelectChip
+              label="YOLO11 · current"
+              selected={detectorEngine === 'yolo'}
+              onPress={() => {
+                tick();
+                set('detectorEngine', 'yolo');
+              }}
+            />
+            <SelectChip
+              label="YOLOX · beta"
+              selected={detectorEngine === 'yolox'}
+              onPress={() => {
+                tick();
+                set('detectorEngine', 'yolox');
+              }}
+            />
+          </View>
           <View style={styles.divider} />
           <View style={styles.settingText}>
             <Text style={styles.settingLabel}>Performance</Text>

@@ -3,7 +3,7 @@
  * NaN/bounds guards that keep a corrupted tensor read from ever producing
  * a garbage detection.
  */
-import { describe, expect, test, beforeEach } from '@jest/globals';
+import { describe, expect, test } from '@jest/globals';
 
 import { CLASS_ORDER, nmsPerClass, parseYoloOutput } from '../yoloParser';
 import type { Detection } from '../../core/types';
@@ -193,5 +193,59 @@ describe('nmsPerClass', () => {
     const b = det('ball', 0.8, 500, 500);
     const out = nmsPerClass([a, b], 0.45);
     expect(out).toHaveLength(2);
+  });
+});
+
+describe('parseYoloOutput — YOLOX (objectness) decode', () => {
+  const YROWS = 5 + NC; // 9: cx,cy,w,h,obj,cls0..3 — matches hoopai-yolox.tflite
+
+  /** Build a channels-last [1, n, 5+nc] YOLOX tensor (decode folded in). */
+  function buildYolox(
+    n: number,
+    boxes: { i: number; cx: number; cy: number; w: number; h: number; cls: number; obj: number; cls_p: number }[],
+  ): Float32Array {
+    const data = new Float32Array(n * YROWS);
+    for (const b of boxes) {
+      data[b.i * YROWS + 0] = b.cx;
+      data[b.i * YROWS + 1] = b.cy;
+      data[b.i * YROWS + 2] = b.w;
+      data[b.i * YROWS + 3] = b.h;
+      data[b.i * YROWS + 4] = b.obj;
+      data[b.i * YROWS + (5 + b.cls)] = b.cls_p;
+    }
+    return data;
+  }
+
+  test('decodes a rim box with score = obj * class prob', () => {
+    // Mirrors the offline-validated tensor: 3549 anchors, one strong rim box.
+    const data = buildYolox(3549, [
+      { i: 1000, cx: 208, cy: 260, w: 46, h: 43, cls: 1, obj: 0.9, cls_p: 0.75 },
+    ]);
+    const out = parseYoloOutput(data, 1.0, { inputSize: 416, hasObjectness: true });
+    expect(out.debug?.layout).toBe('channels-last');
+    expect(out.detections).toHaveLength(1);
+    const d = out.detections[0]!;
+    expect(d.cls).toBe('rim');
+    expect(d.score).toBeCloseTo(0.9 * 0.75); // 0.675
+    expect(d.box.x).toBeCloseTo(208 - 23);
+    expect(d.box.y).toBeCloseTo(260 - 21.5);
+    expect(d.box.width).toBeCloseTo(46);
+  });
+
+  test('objectness gates out a high-class-prob box with low objectness', () => {
+    // cls prob 0.9 but obj 0.05 -> conf 0.045 < scoreMin 0.15 -> dropped.
+    const data = buildYolox(3549, [
+      { i: 200, cx: 100, cy: 100, w: 20, h: 20, cls: 0, obj: 0.05, cls_p: 0.9 },
+    ]);
+    const out = parseYoloOutput(data, 1.0, { inputSize: 416, hasObjectness: true });
+    expect(out.detections).toHaveLength(0);
+  });
+
+  test('does not flag a valid YOLOX frame as corrupt', () => {
+    const data = buildYolox(3549, [
+      { i: 10, cx: 200, cy: 200, w: 30, h: 30, cls: 0, obj: 0.8, cls_p: 0.6 },
+    ]);
+    const out = parseYoloOutput(data, 1.0, { inputSize: 416, hasObjectness: true });
+    expect(out.debug?.corrupt).toBe(false);
   });
 });

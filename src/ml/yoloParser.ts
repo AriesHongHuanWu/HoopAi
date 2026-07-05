@@ -36,6 +36,15 @@ export interface YoloParseOptions {
    * back. The worklet stays pure — the caller owns this state (a SharedValue).
    */
   prevLayout?: 'channels-first' | 'channels-last';
+  /**
+   * YOLOX-family output: one extra OBJECTNESS channel between the 4 box coords
+   * and the class scores, so each anchor is `[cx,cy,w,h, obj, cls0..nc-1]`
+   * (rows = 5 + nc) and the true confidence is `obj * max(cls)`. YOLOX's decode
+   * is folded into the exported graph, so the tensor is ALWAYS channels-last
+   * `[1, N, 5+nc]` in input-pixel space — the layout auto-detect is skipped.
+   * Ultralytics YOLOv8/11 has no objectness (rows = 4 + nc); leave this false.
+   */
+  hasObjectness?: boolean;
 }
 
 interface Extracted {
@@ -53,11 +62,15 @@ function extract(
   inputSize: number,
   scoreMin: number,
   normalized: boolean | undefined,
+  hasObj: boolean,
 ): Extracted {
   'worklet';
   // value(row, i)
   const val = (row: number, i: number): number =>
     channelsFirst ? data[row * n + i]! : data[i * rows + row]!;
+
+  // Class scores start after the 4 box coords, plus a YOLOX objectness channel.
+  const clsBase = hasObj ? 5 : 4;
 
   let coordMax = 0;
   for (let i = 0; i < n; i++) {
@@ -77,19 +90,23 @@ function extract(
   let maxScore = 0;
   for (let i = 0; i < n; i++) {
     let best = -1;
-    let bestScore = 0;
+    let bestCls = 0;
     for (let c = 0; c < nc; c++) {
-      const s = val(4 + c, i);
+      const s = val(clsBase + c, i);
       // NaN guard: a corrupted/garbage tensor read (bad delegate output,
       // uninitialized memory) must never win best-class or poison maxScore —
-      // every comparison against NaN is false, so an unguarded `s > bestScore`
-      // silently skips NaN (safe), but `bestScore > maxScore` below runs on
-      // whatever bestScore settled on and needs the same protection.
-      if (Number.isFinite(s) && s > bestScore) {
-        bestScore = s;
+      // every comparison against NaN is false, so an unguarded `s > bestCls`
+      // silently skips NaN (safe), but the score comparison below runs on
+      // whatever bestCls settled on and needs the same protection.
+      if (Number.isFinite(s) && s > bestCls) {
+        bestCls = s;
         best = c;
       }
     }
+    // YOLOX confidence = objectness * class prob; Ultralytics has no objectness
+    // so obj defaults to 1 and score == class prob (unchanged behaviour).
+    const obj = hasObj ? val(4, i) : 1;
+    const bestScore = Number.isFinite(obj) ? obj * bestCls : 0;
     if (bestScore > maxScore) maxScore = bestScore;
     if (best < 0 || bestScore < scoreMin) continue;
     const cx = val(0, i) * scale;
@@ -178,15 +195,16 @@ export function parseYoloOutput(
     maxDetections = 16,
     normalized,
     prevLayout,
+    hasObjectness = false,
   } = opts;
   const nc = CLASS_ORDER.length;
-  const rows = 4 + nc;
+  const rows = (hasObjectness ? 5 : 4) + nc;
   const n = Math.floor(data.length / rows);
 
   // Parse under both layouts; keep whichever found more valid boxes (tie ->
   // the higher-confidence one; final tie -> channels-first default).
-  const cf = extract(data, nc, n, rows, true, inputSize, scoreMin, normalized);
-  const cl = extract(data, nc, n, rows, false, inputSize, scoreMin, normalized);
+  const cf = extract(data, nc, n, rows, true, inputSize, scoreMin, normalized, hasObjectness);
+  const cl = extract(data, nc, n, rows, false, inputSize, scoreMin, normalized, hasObjectness);
   // Layout pick. A strict valid-box-count winner always wins (self-healing). On
   // a TIE the maxScore tie-break is noise-dominated on degraded input and flips
   // the transposed (wrong) read frame-to-frame, scrambling class labels and
@@ -205,7 +223,12 @@ export function parseYoloOutput(
   const cfGarbage = cf.raw.length > garbageCeil;
   const clGarbage = cl.raw.length > garbageCeil;
   let useCf: boolean;
-  if (cfGarbage !== clGarbage) {
+  if (hasObjectness) {
+    // YOLOX folds its decode into the graph and always emits channels-last
+    // [1, N, 5+nc]. The layout is known, so skip the auto-detect (parsing it
+    // channels-first would read the transposed garbage).
+    useCf = false;
+  } else if (cfGarbage !== clGarbage) {
     useCf = clGarbage; // exactly one layout is garbage → take the clean one
   } else if (cf.raw.length !== cl.raw.length) {
     useCf = cf.raw.length > cl.raw.length;

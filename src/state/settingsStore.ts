@@ -40,6 +40,19 @@ export type DetectionRate = 'auto' | 'battery' | 'max';
  */
 export type PerfMode = 'quality' | 'speed';
 
+/**
+ * Which detector architecture to run.
+ * - 'yolo' (default): the shipping Ultralytics YOLO11 detector (AGPL). GPU
+ *   delegates corrupt its graph on some iPhones, so the self-healing delegate
+ *   falls back to CPU there (see useShotEngine).
+ * - 'yolox' (beta): the Apache-2.0 YOLOX-Nano detector (416px, obj-aware). A
+ *   standard-conv graph the Metal GPU runs correctly, so it should be fast AND
+ *   accurate on iPhone — and its licence is clean for a paid app. Offline-
+ *   validated (AP50 0.873); the live camera feed still needs an on-device
+ *   confirmation, which is why it's opt-in and default-off.
+ */
+export type DetectorEngine = 'yolo' | 'yolox';
+
 /** Clip window bounds (seconds), used by the Settings > Video steppers. */
 export const CLIP_PRE_ROLL_MIN = 2;
 export const CLIP_PRE_ROLL_MAX = 10;
@@ -82,6 +95,8 @@ export interface SettingsState {
   detectionRate: DetectionRate;
   /** Detector input resolution / speed tradeoff (see PerfMode). */
   perfMode: PerfMode;
+  /** Detector architecture (see DetectorEngine). Default 'yolo'. */
+  detectorEngine: DetectorEngine;
   /**
    * Last on-device model smoke-test result — delegate label (e.g.
    * "precise/core-ml") + measured latency in ms. Written by useShotEngine
@@ -134,6 +149,7 @@ export const useSettings = create<SettingsState>()(
       detectorModel: 'auto',
       detectionRate: 'auto',
       perfMode: 'quality',
+      detectorEngine: 'yolo',
       lastBenchmark: null,
       debugMode: false,
       formAnalysis: false,
