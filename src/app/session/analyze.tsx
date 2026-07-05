@@ -38,7 +38,9 @@ import { color, radius, space, touch, type } from '../../constants/tokens';
 import {
   loadDetector,
   detectImageToBoxes,
+  resolveDetectorConfig,
   type DetBox,
+  type DetectorConfig,
 } from '../../camera/detectImage';
 import type { TensorflowModel } from 'react-native-fast-tflite';
 
@@ -80,7 +82,7 @@ type Phase =
   | { kind: 'idle' }
   | { kind: 'sampling'; done: number; total: number }
   | { kind: 'detecting'; done: number; total: number }
-  | { kind: 'done'; frames: FrameResult[] }
+  | { kind: 'done'; frames: FrameResult[]; config: DetectorConfig }
   | { kind: 'error'; message: string };
 
 /**
@@ -107,6 +109,9 @@ function AnalyzeScreen() {
   // guard so overlapping picks don't spawn two loads.
   const modelRef = useRef<TensorflowModel | null>(null);
   const modelLoadRef = useRef<Promise<TensorflowModel | null> | null>(null);
+  // Which engine the cached model is for — reload if the user switched engines
+  // in Settings between runs so Test AI always mirrors the live detector.
+  const modelConfigRef = useRef<string | null>(null);
   // Bumped on every new pick so a slow previous run can detect it's stale and
   // stop writing progress/results over the newer one.
   const runIdRef = useRef(0);
@@ -118,20 +123,34 @@ function AnalyzeScreen() {
     };
   }, []);
 
-  const ensureModel = useCallback(async (): Promise<TensorflowModel | null> => {
-    if (modelRef.current != null) return modelRef.current;
-    if (modelLoadRef.current == null) {
-      modelLoadRef.current = loadDetector();
-    }
-    const m = await modelLoadRef.current;
-    modelRef.current = m;
-    return m;
-  }, []);
+  const ensureModel = useCallback(
+    async (config: DetectorConfig): Promise<TensorflowModel | null> => {
+      // Reuse the cached model only if it's for the same engine; otherwise reload.
+      if (modelRef.current != null && modelConfigRef.current === config.label) {
+        return modelRef.current;
+      }
+      if (modelConfigRef.current !== config.label) {
+        modelRef.current = null;
+        modelLoadRef.current = null;
+        modelConfigRef.current = config.label;
+      }
+      if (modelLoadRef.current == null) {
+        modelLoadRef.current = loadDetector(config);
+      }
+      const m = await modelLoadRef.current;
+      modelRef.current = m;
+      return m;
+    },
+    [],
+  );
 
   const runAnalysis = useCallback(
     async (videoUri: string, durationMs: number) => {
       const runId = ++runIdRef.current;
       const isStale = () => runId !== runIdRef.current || !mountedRef.current;
+      // Snapshot the live detector config now so this whole run (model + preproc +
+      // parse + preview geometry) mirrors exactly what the live camera would do.
+      const config = resolveDetectorConfig();
 
       // Guard: a 0/negative/NaN duration would collapse every sample to t=0.
       const clipMs =
@@ -176,7 +195,7 @@ function AnalyzeScreen() {
       setPhase({ kind: 'detecting', done: 0, total: frames.length });
       let model: TensorflowModel | null;
       try {
-        model = await ensureModel();
+        model = await ensureModel(config);
       } catch {
         model = null;
       }
@@ -193,7 +212,7 @@ function AnalyzeScreen() {
       for (let i = 0; i < frames.length; i++) {
         if (isStale()) return;
         try {
-          frames[i]!.boxes = await detectImageToBoxes(frames[i]!.uri, model);
+          frames[i]!.boxes = await detectImageToBoxes(frames[i]!.uri, model, config);
         } catch {
           // Leave this frame's boxes empty; a decode/inference hiccup on one
           // frame shouldn't abort verification of the rest.
@@ -205,7 +224,7 @@ function AnalyzeScreen() {
 
       if (isStale()) return;
       setIndex(0);
-      setPhase({ kind: 'done', frames });
+      setPhase({ kind: 'done', frames, config });
     },
     [ensureModel],
   );
@@ -251,6 +270,7 @@ function AnalyzeScreen() {
     return (
       <ResultsView
         frames={phase.frames}
+        config={phase.config}
         index={index}
         onIndexChange={setIndex}
         onPickAnother={() => void pick()}
@@ -328,11 +348,13 @@ function AnalyzeScreen() {
 
 function ResultsView({
   frames,
+  config,
   index,
   onIndexChange,
   onPickAnother,
 }: {
   frames: FrameResult[];
+  config: DetectorConfig;
   index: number;
   onIndexChange: (i: number) => void;
   onPickAnother: () => void;
@@ -345,6 +367,20 @@ function ResultsView({
   const n = frames.length;
   const safeIndex = Math.max(0, Math.min(index, n - 1));
   const current = frames[safeIndex]!;
+
+  // Auto-play: step through the sampled frames like scrubbing the video, so you
+  // can watch the boxes track across the clip instead of tapping each frame.
+  const [playing, setPlaying] = useState(false);
+  const idxRef = useRef(safeIndex);
+  idxRef.current = safeIndex;
+  useEffect(() => {
+    if (!playing || n <= 1) return;
+    const id = setInterval(() => {
+      const next = idxRef.current + 1;
+      onIndexChange(next >= n ? 0 : next); // loop back to the start
+    }, 110); // ~9 fps — fast enough to read as playback, slow enough to see
+    return () => clearInterval(id);
+  }, [playing, n, onIndexChange]);
 
   // Header stats: how many frames each key class appeared in.
   const stats = useMemo(() => {
@@ -362,8 +398,13 @@ function ResultsView({
       <Row style={styles.backRow}>
         <BackPill />
       </Row>
-      <Eyebrow>Detection results</Eyebrow>
+      <Eyebrow>{`Detection results · ${config.label}`}</Eyebrow>
       <Text style={styles.title}>What the model found</Text>
+      <Text style={styles.lede}>
+        Same model + preprocessing as the live camera ({config.label},{' '}
+        {config.input}px, {config.scaleMode}). If it finds the ball and rim here,
+        the live path sees the same thing.
+      </Text>
 
       {/* Header stats */}
       <Row style={styles.statRow} gap={space.sm}>
@@ -378,6 +419,7 @@ function ResultsView({
           uri={current.uri}
           boxes={current.boxes}
           size={squareSize}
+          scaleMode={config.scaleMode}
         />
       </View>
 
@@ -410,6 +452,13 @@ function ResultsView({
         </Row>
       )}
 
+      {/* Play through the sampled frames like a video (loops). */}
+      <PillButton
+        label={playing ? '❙❙  Pause' : '▶  Play through clip'}
+        onPress={() => setPlaying((p) => !p)}
+        style={styles.cta}
+      />
+
       {/* Scrubber — a horizontal filmstrip of frame thumbnails to jump between. */}
       <Eyebrow>Scrub frames</Eyebrow>
       <ScrollView
@@ -425,7 +474,10 @@ function ResultsView({
           return (
             <Pressable
               key={f.uri}
-              onPress={() => onIndexChange(i)}
+              onPress={() => {
+                setPlaying(false); // manual scrub pauses playback
+                onIndexChange(i);
+              }}
               accessibilityRole="button"
               accessibilityLabel={`Frame ${i + 1}, ${f.boxes.length} detections`}
               accessibilityState={{ selected }}
@@ -461,10 +513,22 @@ function ResultsView({
  * longer side is clipped equally on both ends — the same geometry the model
  * saw. So a normalized box maps to on-screen px by a straight multiply.
  */
-function FramePreview({ uri, boxes, size }: { uri: string; boxes: DetBox[]; size: number }) {
+function FramePreview({
+  uri,
+  boxes,
+  size,
+  scaleMode,
+}: {
+  uri: string;
+  boxes: DetBox[];
+  size: number;
+  /** Must match the detector's scaleMode so boxes (normalized to the model's
+   *  square input) map onto the shown frame by a plain multiply. */
+  scaleMode: 'cover' | 'contain';
+}) {
   return (
     <View style={styles.previewInner}>
-      <Image source={{ uri }} style={StyleSheet.absoluteFill} resizeMode="cover" />
+      <Image source={{ uri }} style={StyleSheet.absoluteFill} resizeMode={scaleMode} />
       {boxes.map((b, i) => {
         const left = b.x * size;
         const top = b.y * size;

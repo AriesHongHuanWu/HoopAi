@@ -2,28 +2,24 @@
  * detectImage — run the app's live detector on a STILL image (JS thread).
  *
  * This is the offline / on-demand counterpart to the live camera path in
- * `useShotEngine.ts`. It exists so features that operate on a captured frame
- * (thumbnail review, a shared photo, a paused video frame, tests) can get the
- * exact same detections the realtime worklet would produce for that frame.
+ * `useShotEngine.ts`, used by the "Test AI" verify screen. It reproduces the
+ * live input pipeline for WHICHEVER detector engine is selected in Settings, so
+ * what you see here is what the live camera would produce for the same frame:
  *
- * It reproduces the live input pipeline BYTE-FOR-BYTE so scores match:
- *   - The live path resizes each camera frame with `react-native-vision-camera-
- *     resizer` configured `pixelLayout:'planar'`, `channelOrder:'rgb'`,
- *     `dataType:'float32'`, `scaleMode:'cover'` (see useShotEngine.ts), and the
- *     model receives values in 0..1.
- *   - `scaleMode:'cover'` == center-crop the source to a square, then scale that
- *     square up/down to the model side (640). We do the same here with Skia:
- *     draw the center square of the decoded image into a full 640×640 offscreen
- *     surface via `drawImageRect(src, dst)`.
- *   - We then read back RGBA8888 (Unpremul) pixels and pack them into a PLANAR
- *     NCHW float32 buffer [1,3,640,640], RGB, /255 — identical to what the model
- *     consumes live (verified: interleaved/NHWC feeds the model scrambled pixels
- *     and every score collapses to ~0; planar produces real detections).
+ *   - YOLOX (default): 416px input, scaleMode 'contain' (letterbox the whole
+ *     frame — nothing cropped), INTERLEAVED (NHWC), channel order BGR, 0..1
+ *     (the *255 rescale is baked into the model), parsed with objectness.
+ *   - YOLO11 (fallback): 640px input, scaleMode 'cover' (center-crop square),
+ *     PLANAR (NCHW), channel order RGB, 0..1, parsed without objectness.
  *
- * Parsing reuses `parseYoloOutput` (a 'worklet' fn that is equally callable on
- * the JS thread), then applies the SAME per-class score gates from
- * `src/core/config` DETECTION. Boxes are converted from 640-px space to
- * normalized 0..1 (÷640) relative to the center-cropped square.
+ * These MUST match useShotEngine's resizer config + parser flags exactly, or the
+ * verify screen would lie about what the live path sees.
+ *
+ * Parsing reuses `parseYoloOutput` (a 'worklet' fn equally callable on the JS
+ * thread), then applies the SAME per-class score gates from `src/core/config`
+ * DETECTION. Boxes are returned NORMALIZED 0..1 against the model's square input
+ * (the same square the model saw), so the preview draws them by a plain multiply
+ * as long as it renders the frame with the matching resizeMode ({@link DetectorConfig.scaleMode}).
  */
 import {
   Skia,
@@ -43,21 +39,61 @@ import { Platform } from 'react-native';
 import { DETECTION } from '../core/config';
 import type { DetClass } from '../core/types';
 import { parseYoloOutput } from '../ml/yoloParser';
+import { useSettings } from '../state/settingsStore';
 
 /* eslint-disable @typescript-eslint/no-var-requires */
-// Same 'standard' detector asset the live engine loads by default.
-const MODEL_ASSET = require('../../assets/models/hoopai-det.tflite');
+const YOLO11_ASSET = require('../../assets/models/hoopai-det.tflite');
+const YOLOX_ASSET = require('../../assets/models/hoopai-yolox.tflite');
 /* eslint-enable @typescript-eslint/no-var-requires */
 
-/** Detector input side. Kept in lockstep with DETECTION.inputSize (640). */
-const INPUT = DETECTION.inputSize;
+/**
+ * Resolved detector input config for the selected engine. Mirrors the live
+ * resizer + parser settings in useShotEngine.ts exactly.
+ */
+export interface DetectorConfig {
+  asset: number;
+  /** Model input side (square). */
+  input: number;
+  /** Memory layout of the packed buffer. */
+  layout: 'planar' | 'interleaved';
+  channelOrder: 'rgb' | 'bgr';
+  /** How the source frame maps into the square input (must match the preview). */
+  scaleMode: 'cover' | 'contain';
+  /** YOLOX has an objectness channel (score = obj*cls); YOLO11 does not. */
+  hasObjectness: boolean;
+  label: string;
+}
+
+/** Build the config for whatever engine live detection is currently set to. */
+export function resolveDetectorConfig(): DetectorConfig {
+  const engine = useSettings.getState().detectorEngine;
+  if (engine === 'yolox') {
+    return {
+      asset: YOLOX_ASSET,
+      input: 416,
+      layout: 'interleaved',
+      channelOrder: 'bgr',
+      scaleMode: 'contain',
+      hasObjectness: true,
+      label: 'YOLOX',
+    };
+  }
+  return {
+    asset: YOLO11_ASSET,
+    input: DETECTION.inputSize, // 640
+    layout: 'planar',
+    channelOrder: 'rgb',
+    scaleMode: 'cover',
+    hasObjectness: false,
+    label: 'YOLO11',
+  };
+}
 
 /**
- * A single detection produced from a still image.
- *
- * x, y, w, h are NORMALIZED 0..1 relative to the CENTER-CROPPED SQUARE of the
- * source image (the same square the model actually saw). To draw over the
- * original photo, map back through the same center-crop the detector used.
+ * A single detection from a still image. x, y, w, h are NORMALIZED 0..1 against
+ * the model's SQUARE input (letterboxed for 'contain', center-cropped for
+ * 'cover'). Render the frame with the same {@link DetectorConfig.scaleMode} and
+ * a box maps to on-screen px by a straight multiply.
  */
 export interface DetBox {
   cls: 'ball' | 'rim' | 'ball_in_basket' | 'person';
@@ -68,46 +104,36 @@ export interface DetBox {
   h: number;
 }
 
-/**
- * Per-class score gate, mirroring the live pipeline's DETECTION thresholds.
- * A box below its class gate is dropped.
- */
+/** Per-class score gate, mirroring the live pipeline's DETECTION thresholds. */
 function passesGate(cls: DetClass, score: number): boolean {
   switch (cls) {
     case 'ball':
-      return score >= DETECTION.ballScoreMin; // 0.3
+      return score >= DETECTION.ballScoreMin;
     case 'rim':
-      return score >= DETECTION.rimScoreMin; // 0.35
+      return score >= DETECTION.rimScoreMin;
     case 'ball_in_basket':
-      return score >= DETECTION.ballInBasketScoreMin; // 0.35
+      return score >= DETECTION.ballInBasketScoreMin;
     case 'person':
-      return score >= DETECTION.personScoreMin; // 0.4
+      return score >= DETECTION.personScoreMin;
     default:
       return false;
   }
 }
 
 /**
- * Load the detector with the SAME delegate fallback chain the live engine uses:
- * Uses the plain CPU (XNNPACK) delegate — NOT CoreML/GPU — ON PURPOSE. This is
- * an OFFLINE verification screen (a few frames), so accelerator speed is
- * irrelevant, and the CoreML delegate can produce INCORRECT output for this YOLO
- * model (it partitions the graph and mishandles some ops), which shows up as a
- * pile of phantom boxes on device even though the model + parser are correct —
- * the CPU path here matches the off-line reference exactly. Correctness wins on
- * the screen whose entire job is to show the model's true output. The platform
- * accelerator is kept only as a last-resort fallback if plain CPU ever fails to
- * load. Returns null if every attempt fails.
+ * Load the detector for `config`. Plain CPU (XNNPACK) FIRST — this is an OFFLINE
+ * verification screen where accelerator speed is irrelevant and CPU is always
+ * numerically correct (an accelerator that mis-compiles the graph would show
+ * phantom boxes on the very screen meant to prove the model's true output). The
+ * platform accelerator is only a last-resort fallback. Returns null if all fail.
  */
-export async function loadDetector(): Promise<TensorflowModel | null> {
+export async function loadDetector(config: DetectorConfig): Promise<TensorflowModel | null> {
   const accel: ('core-ml' | 'android-gpu')[] =
     Platform.OS === 'ios' ? ['core-ml'] : ['android-gpu'];
-  // Plain CPU FIRST (correct + always compatible); accelerator only as fallback.
   const attempts: ('core-ml' | 'android-gpu')[][] = [[], accel];
   for (const delegates of attempts) {
     try {
-      const model = await loadTensorflowModel(MODEL_ASSET, delegates);
-      return model;
+      return await loadTensorflowModel(config.asset, delegates);
     } catch {
       // Try the next delegate list.
     }
@@ -116,96 +142,97 @@ export async function loadDetector(): Promise<TensorflowModel | null> {
 }
 
 /**
- * Decode the image at `uri`, center-crop to a square, scale to INPUT×INPUT, and
- * pack a PLANAR NCHW RGB float32 buffer normalized to 0..1 — the exact tensor
- * layout the model consumes live. All Skia objects created here are disposed
- * before returning (success or throw).
- *
- * @returns the packed [1,3,INPUT,INPUT] buffer as an ArrayBuffer.
+ * Decode the image at `uri`, map it into the model's square input per
+ * `config.scaleMode`, and pack a float32 buffer (0..1) in the model's layout +
+ * channel order. All Skia objects are disposed before returning.
  */
-async function packPlanarInput(uri: string): Promise<ArrayBuffer> {
+async function packInput(uri: string, config: DetectorConfig): Promise<ArrayBuffer> {
+  const S = config.input;
   const data = await Skia.Data.fromURI(uri);
   let image: SkImage | null = null;
   let surface: SkSurface | null = null;
   try {
     image = Skia.Image.MakeImageFromEncoded(data);
-    if (image == null) {
-      throw new Error(`could not decode image at ${uri}`);
-    }
+    if (image == null) throw new Error(`could not decode image at ${uri}`);
     const iw = image.width();
     const ih = image.height();
-    if (iw <= 0 || ih <= 0) {
-      throw new Error(`invalid image dimensions ${iw}x${ih}`);
+    if (iw <= 0 || ih <= 0) throw new Error(`invalid image dimensions ${iw}x${ih}`);
+
+    let srcRect;
+    let dstRect;
+    if (config.scaleMode === 'cover') {
+      // Center-crop the source to the largest centered SQUARE, scale to fill S×S.
+      const sideC = Math.min(iw, ih);
+      srcRect = Skia.XYWHRect((iw - sideC) / 2, (ih - sideC) / 2, sideC, sideC);
+      dstRect = Skia.XYWHRect(0, 0, S, S);
+    } else {
+      // 'contain': fit the WHOLE frame into S×S preserving aspect, centered, with
+      // black bars on the short axis (matches the GPU resizer's letterbox pad).
+      const scale = Math.min(S / iw, S / ih);
+      const rw = iw * scale;
+      const rh = ih * scale;
+      srcRect = Skia.XYWHRect(0, 0, iw, ih);
+      dstRect = Skia.XYWHRect((S - rw) / 2, (S - rh) / 2, rw, rh);
     }
 
-    // scaleMode:'cover' == center-crop the source to the largest centered
-    // SQUARE, then scale that square to fill INPUT×INPUT. Compute that square
-    // as the source rect; the dest rect is the full offscreen surface.
-    const side = Math.min(iw, ih);
-    const srcX = (iw - side) / 2;
-    const srcY = (ih - side) / 2;
-    const srcRect = Skia.XYWHRect(srcX, srcY, side, side);
-    const dstRect = Skia.XYWHRect(0, 0, INPUT, INPUT);
-
-    surface = Skia.Surface.MakeOffscreen(INPUT, INPUT);
-    if (surface == null) {
-      throw new Error('could not create offscreen surface');
-    }
+    surface = Skia.Surface.MakeOffscreen(S, S);
+    if (surface == null) throw new Error('could not create offscreen surface');
     const canvas = surface.getCanvas();
-    const paint = Skia.Paint();
-    // drawImageRect with a plain paint uses the default (nearest) sampling; use
-    // drawImageRectOptions with LINEAR to match a resizer's bilinear downscale
-    // quality. Either works for detection; linear is closer to the GPU resizer.
+    // Offscreen starts transparent-black; for 'contain' the un-drawn bars stay
+    // (0,0,0) after we drop alpha — the black pad the model expects.
     canvas.drawImageRectOptions(
       image,
       srcRect,
       dstRect,
       FilterMode.Linear,
       MipmapMode.None,
-      paint,
+      Skia.Paint(),
     );
     surface.flush();
 
     const snapshot = surface.makeImageSnapshot();
     try {
-      // Read back tightly-packed RGBA8888, UNPREMULTIPLIED, at INPUT×INPUT.
-      // Unpremul matters: premultiplied would scale RGB by alpha; the offscreen
-      // surface is opaque here, but Unpremul is the safe, layout-stable choice
-      // and matches the resizer (which never premultiplies).
       const pixels = snapshot.readPixels(0, 0, {
-        width: INPUT,
-        height: INPUT,
+        width: S,
+        height: S,
         colorType: ColorType.RGBA_8888,
         alphaType: AlphaType.Unpremul,
       });
-      if (pixels == null) {
-        throw new Error('readPixels returned null');
-      }
-      // pixels is RGBA8888 => a Uint8Array of length INPUT*INPUT*4.
+      if (pixels == null) throw new Error('readPixels returned null');
       const rgba =
         pixels instanceof Uint8Array
           ? pixels
           : new Uint8Array(pixels.buffer, pixels.byteOffset, pixels.byteLength);
 
-      const area = INPUT * INPUT;
-      // PLANAR NCHW: [ R-plane (area) | G-plane (area) | B-plane (area) ].
+      const area = S * S;
       const out = new Float32Array(3 * area);
-      const gPlane = area;
-      const bPlane = 2 * area;
+      const bgr = config.channelOrder === 'bgr';
+      const interleaved = config.layout === 'interleaved';
+      const g1 = area; // planar plane offsets
+      const b2 = 2 * area;
       for (let i = 0; i < area; i++) {
-        const p = i * 4; // RGBA stride
-        out[i] = rgba[p]! / 255; // R
-        out[gPlane + i] = rgba[p + 1]! / 255; // G
-        out[bPlane + i] = rgba[p + 2]! / 255; // B
-        // alpha (rgba[p + 3]) intentionally dropped — model input is 3-channel.
+        const p = i * 4;
+        const r = rgba[p]! / 255;
+        const g = rgba[p + 1]! / 255;
+        const b = rgba[p + 2]! / 255;
+        const c0 = bgr ? b : r;
+        const c2 = bgr ? r : b;
+        if (interleaved) {
+          const o = i * 3;
+          out[o] = c0;
+          out[o + 1] = g;
+          out[o + 2] = c2;
+        } else {
+          out[i] = c0;
+          out[g1 + i] = g;
+          out[b2 + i] = c2;
+        }
       }
       return out.buffer;
     } finally {
       snapshot.dispose();
     }
   } finally {
-    // Dispose in any case; SkData/SkImage/SkSurface are all JSI-owned native
-    // resources and leak the underlying memory if not released.
     if (surface != null) surface.dispose();
     if (image != null) image.dispose();
     data.dispose();
@@ -213,45 +240,41 @@ async function packPlanarInput(uri: string): Promise<ArrayBuffer> {
 }
 
 /**
- * Run the detector on the still image at `uri` and return the surviving boxes
- * (NORMALIZED 0..1 against the center-cropped square).
- *
- * Runs `model.run([buf])` ASYNC on the JS thread (this is NOT a worklet — the
- * async native call is fine off the frame processor). Parses with the shared
- * `parseYoloOutput`, applies the per-class DETECTION gates, and normalizes the
- * parser's 640-px boxes to 0..1 (÷640).
+ * Run the detector on the still image at `uri` and return surviving boxes
+ * (NORMALIZED 0..1 against the model's square input). Runs `model.run` ASYNC on
+ * the JS thread (not a worklet). Parses with the shared `parseYoloOutput` using
+ * the engine's objectness flag, applies the per-class gates, and normalizes the
+ * parser's input-px boxes to 0..1 (÷ input side).
  */
 export async function detectImageToBoxes(
   uri: string,
   model: TensorflowModel,
+  config: DetectorConfig,
 ): Promise<DetBox[]> {
-  const buf = await packPlanarInput(uri);
-  // Async inference on the JS thread (contract: model.run, not runSync).
+  const buf = await packInput(uri, config);
   const outputs = await model.run([buf]);
   const out0 = outputs[0];
   if (out0 == null) return [];
 
-  // t is unused for a still image; pass 0. parseYoloOutput auto-detects the
-  // channels-first/last layout and normalized-vs-pixel coords, applies NMS, and
-  // returns boxes in INPUT (640) pixel space with box.{x,y,width,height} as the
-  // TOP-LEFT corner + size.
-  const parsed = parseYoloOutput(new Float32Array(out0), 0, { inputSize: INPUT });
+  const S = config.input;
+  const parsed = parseYoloOutput(new Float32Array(out0), 0, {
+    inputSize: S,
+    hasObjectness: config.hasObjectness,
+  });
 
   const result: DetBox[] = [];
   for (const d of parsed.detections) {
     if (!passesGate(d.cls, d.score)) continue;
-    // Defensive size gate for the verification surface: drop any box covering
-    // ~the whole frame (a mis-scaled/degenerate detector box). Parser boxes are
-    // in INPUT (640) px; reject width or height >= 0.9 of the frame side so the
+    // Drop any box covering ~the whole frame (a mis-scaled/degenerate box) so the
     // screen meant to PROVE detection never renders a screen-covering phantom.
-    if (d.box.width >= 0.9 * INPUT || d.box.height >= 0.9 * INPUT) continue;
+    if (d.box.width >= 0.9 * S || d.box.height >= 0.9 * S) continue;
     result.push({
       cls: d.cls,
       score: d.score,
-      x: d.box.x / INPUT,
-      y: d.box.y / INPUT,
-      w: d.box.width / INPUT,
-      h: d.box.height / INPUT,
+      x: d.box.x / S,
+      y: d.box.y / S,
+      w: d.box.width / S,
+      h: d.box.height / S,
     });
   }
   return result;
