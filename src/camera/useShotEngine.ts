@@ -45,10 +45,12 @@ const MODEL_ASSETS = {
   precise: require('../../assets/models/hoopai-det-precise.tflite'),
   // 320-input nano for 'speed' perf mode (~4× faster on older phones).
   fast: require('../../assets/models/hoopai-det-fast.tflite'),
-  // Apache-2.0 YOLOX-Nano (416px, obj-aware, NHWC 0..1 input, decode folded).
-  // Opt-in beta (Settings > detectorEngine) — standard-conv graph the Metal GPU
-  // runs correctly, so no corrupt-fallback needed. See docs/yolox README.
+  // Apache-2.0 YOLOX-Nano (obj-aware, NHWC 0..1 input, decode folded). Two input
+  // sizes from the SAME weights: 416 (fast) and 640 (Quality — the ball is ~2.3x
+  // bigger in pixels, so it's detected in ~2x more frames + higher confidence,
+  // at ~1.8x the inference cost). Selected by Settings > Performance.
   yolox: require('../../assets/models/hoopai-yolox.tflite'),
+  yolox640: require('../../assets/models/hoopai-yolox-640.tflite'),
 } as const;
 // MoveNet SinglePose Lightning (Apache-2.0) for opt-in form analysis.
 const POSE_ASSET = require('../../assets/models/movenet-pose.tflite');
@@ -59,7 +61,8 @@ const POSE_INPUT = 192;
 /** Detector input side for the 'speed' perf mode (matches the fast model export). */
 const SPEED_INPUT = 320;
 /** YOLOX-Nano input side (matches the hoopai-yolox export; fixed, not perf-scaled). */
-const YOLOX_INPUT = 416;
+const YOLOX_INPUT = 416; // Speed
+const YOLOX_INPUT_HQ = 640; // Quality — bigger ball, better detection, slower
 
 /**
  * 'auto' detector budget: keep the precise model only when a smoke-test
@@ -263,11 +266,13 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
   // YOLOX delegate choice — CPU (accurate, default) vs GPU (faster, may degrade).
   // The user picks in Settings since only their device shows the real fps.
   const detectorAccel = useSettings((s) => s.detectorAccel);
-  // Detector input side: YOLOX is a fixed 416; otherwise 'speed' uses a
-  // 320-exported nano (~4× faster). Every consumer (resizer, parser, net-motion,
-  // pose scaling) reads this, so quality mode stays identical to the 640 path.
+  // Detector input side. For YOLOX, Performance = Quality uses 640 (bigger ball,
+  // better detection) and Speed uses 416. For YOLO11, 'speed' uses a 320 nano.
+  // Every consumer (resizer, parser, net-motion, pose) reads this single value.
   const detInputSize = useYolox
-    ? YOLOX_INPUT
+    ? perfMode === 'speed'
+      ? YOLOX_INPUT
+      : YOLOX_INPUT_HQ
     : perfMode === 'speed' || forceCpu
       ? SPEED_INPUT
       : DETECTION.inputSize;
@@ -312,8 +317,11 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
       // producing the fully-garbage tensor the self-heal corrupt-check catches, so
       // 'cpu' is the accurate default. 'gpu' is offered for speed on phones where
       // CPU can't keep up; the other delegate is always the fallback rung.
-      const yoloxGpu = { asset: MODEL_ASSETS.yolox, label: `yolox/${fast.label}`, delegates: fast.delegates };
-      const yoloxCpu = { asset: MODEL_ASSETS.yolox, label: 'yolox/cpu', delegates: none };
+      // Quality = 640 model (bigger ball), Speed = 416. Must match detInputSize.
+      const yoloxAsset = perfMode === 'speed' ? MODEL_ASSETS.yolox : MODEL_ASSETS.yolox640;
+      const yoloxTag = perfMode === 'speed' ? 'yolox416' : 'yolox640';
+      const yoloxGpu = { asset: yoloxAsset, label: `${yoloxTag}/${fast.label}`, delegates: fast.delegates };
+      const yoloxCpu = { asset: yoloxAsset, label: `${yoloxTag}/cpu`, delegates: none };
       const attempts: Attempt[] = useYolox
         ? detectorAccel === 'gpu'
           ? [yoloxGpu, yoloxCpu]

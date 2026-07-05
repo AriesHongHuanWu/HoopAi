@@ -44,6 +44,7 @@ import { useSettings } from '../state/settingsStore';
 /* eslint-disable @typescript-eslint/no-var-requires */
 const YOLO11_ASSET = require('../../assets/models/hoopai-det.tflite');
 const YOLOX_ASSET = require('../../assets/models/hoopai-yolox.tflite');
+const YOLOX640_ASSET = require('../../assets/models/hoopai-yolox-640.tflite');
 /* eslint-enable @typescript-eslint/no-var-requires */
 
 /**
@@ -68,14 +69,16 @@ export interface DetectorConfig {
 export function resolveDetectorConfig(): DetectorConfig {
   const engine = useSettings.getState().detectorEngine;
   if (engine === 'yolox') {
+    // Quality = 640 (bigger ball), Speed = 416 — must mirror useShotEngine.
+    const hq = useSettings.getState().perfMode !== 'speed';
     return {
-      asset: YOLOX_ASSET,
-      input: 416,
+      asset: hq ? YOLOX640_ASSET : YOLOX_ASSET,
+      input: hq ? 640 : 416,
       layout: 'interleaved',
       channelOrder: 'bgr',
       scaleMode: 'contain',
       hasObjectness: true,
-      label: 'YOLOX',
+      label: hq ? 'YOLOX 640' : 'YOLOX 416',
     };
   }
   return {

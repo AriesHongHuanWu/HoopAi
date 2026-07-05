@@ -591,14 +591,16 @@ export default function SettingsScreen() {
           <View style={styles.settingText}>
             <Text style={styles.settingLabel}>Performance</Text>
             <Text style={styles.settingDesc}>
-              Input resolution — the biggest speed lever. Speed runs a 320px
-              model (~4× faster, 30–60fps on iPhone XR) with a small hit on a
-              tiny or far ball. Quality keeps full 640px accuracy.
+              Input resolution — the biggest accuracy/speed lever. Quality feeds
+              the detector a larger image so the small, fast BALL is seen in ~2×
+              more frames (YOLOX 640) — best for tracking the ball, but slower.
+              Speed is lighter and faster (YOLOX 416) with a hit on a tiny/far
+              ball. If the ball keeps getting missed, use Quality.
             </Text>
           </View>
           <View style={styles.chipWrap}>
             <SelectChip
-              label="Quality · 640"
+              label="Quality · best ball"
               selected={perfMode === 'quality'}
               onPress={() => {
                 tick();
@@ -606,7 +608,7 @@ export default function SettingsScreen() {
               }}
             />
             <SelectChip
-              label="Speed · 320"
+              label="Speed · faster"
               selected={perfMode === 'speed'}
               onPress={() => {
                 tick();
