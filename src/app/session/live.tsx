@@ -364,6 +364,12 @@ function LiveSessionScreen() {
           // preview — critical in landscape, where the default 'cover' hid the
           // sides of the scene.
           resizeMode="contain"
+          // Orient the frame buffer to the LOCKED UI orientation (not the raw
+          // physical device angle), so it matches this screen's fixed
+          // portrait/landscape lock. Paired with enablePhysicalBufferRotation on
+          // the frame output (useShotEngine), the frames the model sees are the
+          // same upright image as the preview → overlay boxes map exactly.
+          orientationSource="interface"
         />
       ) : (
         <DemoCourt />

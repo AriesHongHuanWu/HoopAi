@@ -99,14 +99,13 @@ export interface OverlayState {
   frameW: number;
   frameH: number;
   /**
-   * Raw camera-frame dimensions in px (sensor-native — VisionCamera does not
-   * rotate the buffer). The detector input and the <Camera> preview both use
-   * scaleMode 'contain', letterboxing this frame into the analysis square and
-   * the view respectively; the overlay inverts the analysis letterbox and
-   * applies the preview one, so it needs the real source aspect (not a
-   * hardcoded 9:16 guess that broke landscape). In a landscape-locked session
-   * the sensor is already landscape, so these equal the display dims and the
-   * mapping is exact. 0 until the first frame.
+   * Camera-frame dimensions in px, from the physically-rotated buffer
+   * (enablePhysicalBufferRotation + orientationSource "interface"), so they are
+   * DISPLAY-oriented and match the preview. The detector input and the <Camera>
+   * preview both use scaleMode 'contain', letterboxing this frame into the
+   * analysis square and the view respectively; the overlay inverts the analysis
+   * letterbox and applies the preview one, so it needs the real source aspect
+   * (not a hardcoded 9:16 guess that broke landscape). 0 until the first frame.
    */
   srcW: number;
   srcH: number;
@@ -667,6 +666,16 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
     pixelFormat: 'yuv',
     // ML gets small buffers; the video output keeps recording at full res.
     enablePreviewSizedOutputBuffers: true,
+    // Physically rotate the frame buffer to the output orientation (the locked
+    // interface — see <Camera orientationSource="interface"> in live.tsx). Without
+    // this the buffer stays in the camera's SENSOR-NATIVE orientation, so the
+    // model sees the scene rotated/flipped relative to the preview: detections
+    // track but land in the wrong place, and an upside-down landscape (or portrait)
+    // scene detects poorly. With it, frame.orientation is 'up', frame.width/height
+    // are display-oriented, and the analysis frame is pixel-identical to what the
+    // preview shows — so the HUD overlay maps exactly. Small per-frame cost on the
+    // preview-sized buffer.
+    enablePhysicalBufferRotation: true,
     // Backpressure: drop frames while the detector is still running.
     dropFramesWhileBusy: true,
     // Diagnostic: count drops so the debug panel can tell "camera never
@@ -726,12 +735,11 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
         let resized: { getPixelBuffer(): ArrayBuffer; dispose(): void } | null = null;
         try {
         const tflite = boxed.unbox() as TensorflowModel;
-        // Raw camera-frame dims for the HUD's letterbox mapping. These are the
-        // buffer's SENSOR-NATIVE dimensions (VisionCamera does not rotate the
-        // buffer). When the session is locked LANDSCAPE the sensor is already
-        // landscape, so these match the display and the mapping is exact; the
-        // overlay reconciles against the view orientation for the portrait case.
-        // Constant within a locked-orientation session.
+        // Camera-frame dims for the HUD's letterbox mapping. With
+        // enablePhysicalBufferRotation (frame output) + orientationSource
+        // "interface" (Camera), the buffer is physically rotated to the locked UI
+        // orientation, so frame.width/height are DISPLAY-oriented and match the
+        // preview exactly. Constant within a locked-orientation session.
         srcDimsSv.value = { w: frame.width, h: frame.height };
         resized = resizer.resize(frame);
         const rawBuffer = resized.getPixelBuffer();

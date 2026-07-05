@@ -45,13 +45,11 @@ export function mapAnalysisToView(o: OverlayState, view: { w: number; h: number 
   if (w <= 0 || h <= 0 || S <= 0 || sw <= 0 || sh <= 0) {
     return { ok: false, scale: 0, ox: 0, oy: 0 };
   }
-  // srcW/srcH are the camera buffer's SENSOR-NATIVE dims. In a landscape-locked
-  // session the sensor is already landscape, so they match the display and the
-  // mapping below is exact. If the view orientation disagrees with the source
-  // (portrait-locked, where the buffer is still sensor-landscape) align the
-  // aspect to what's on screen so boxes at least land in the right-shaped
-  // region. (Fully-correct portrait needs the buffer physically rotated upright
-  // — a follow-up; the app's primary setup is landscape.)
+  // srcW/srcH come from the physically-rotated buffer (enablePhysicalBufferRotation
+  // + orientationSource "interface"), so they are display-oriented and normally
+  // match the view orientation exactly. This swap is a defensive fallback: if a
+  // device ever delivers sensor-oriented dims, align the aspect to what's on
+  // screen so boxes still land in the right-shaped region.
   if (w > h !== sw > sh) {
     const t = sw;
     sw = sh;
