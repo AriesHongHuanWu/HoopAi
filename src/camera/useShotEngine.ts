@@ -111,6 +111,9 @@ export interface OverlayState {
   srcH: number;
   /** Every raw detection this frame (for the debug box overlay). */
   dets: OverlayDet[];
+  /** Seconds left on the pre-lock "hold steady" countdown (HUD shows ceil() as a
+   *  3-2-1 reticle), or null when not counting / already locked. */
+  rimCountdown: number | null;
 }
 
 export const EMPTY_OVERLAY: OverlayState = {
@@ -123,6 +126,7 @@ export const EMPTY_OVERLAY: OverlayState = {
   srcW: 0,
   srcH: 0,
   dets: [],
+  rimCountdown: null,
 };
 
 /** Live diagnostics for the on-screen debug panel (helps fix on-device ML). */
@@ -496,6 +500,7 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
             h: d.box.height,
             score: d.score,
           })),
+          rimCountdown: state.rimCountdown,
         };
       },
     });

@@ -412,3 +412,56 @@ describe('RimLock oversized-box admission gate', () => {
     expect(g!.box.width).toBe(180);
   });
 });
+
+describe('RimLock — pre-lock hold countdown', () => {
+  const step = (lock: RimLock, box: Box, t: number) =>
+    lock.step(frame(t, [rimDet(box)]), t);
+
+  test('default (no hold) locks immediately, no countdown', () => {
+    const lock = new RimLock();
+    const g = feed(lock, rimBox, 3);
+    expect(g).not.toBeNull();
+    expect(lock.lockCountdown).toBeNull();
+  });
+
+  test('locks only after lockHoldSec of continuous stable rim, exposing 3-2-1', () => {
+    const hold = 2.5;
+    const lock = new RimLock({ lockHoldSec: hold });
+    let out = null;
+    let t = 0;
+    // Continuous stable rim up to just before the hold — cluster forms, no lock.
+    for (; t < hold - 0.1; t += 1 / FPS) out = step(lock, rimBox, t);
+    expect(out).toBeNull();
+    expect(lock.lockCountdown).not.toBeNull();
+    expect(lock.lockCountdown!).toBeGreaterThan(0);
+    expect(Math.ceil(lock.lockCountdown!)).toBe(1); // final "1" of 3-2-1
+    // A few more frames past the hold → locks, countdown clears.
+    for (; t < hold + 0.15; t += 1 / FPS) out = step(lock, rimBox, t);
+    expect(out).not.toBeNull();
+    expect(lock.lockCountdown).toBeNull();
+  });
+
+  test('a big move restarts the countdown (no lock on a jittering rim)', () => {
+    const hold = 2.0;
+    const lock = new RimLock({ lockHoldSec: hold });
+    let t = 0;
+    for (; t < 1.0; t += 1 / FPS) step(lock, rimBox, t);
+    const mid = lock.lockCountdown;
+    expect(mid).not.toBeNull();
+    // A large jump resets the cluster → countdown restarts near full.
+    const moved: Box = { x: rimBox.x + 300, y: rimBox.y + 200, width: rimBox.width, height: rimBox.height };
+    step(lock, moved, t);
+    expect(lock.lockCountdown!).toBeGreaterThan(mid!);
+    expect(lock.geometry).toBeNull();
+  });
+
+  test('a vanished rim clears the forming cluster', () => {
+    const lock = new RimLock({ lockHoldSec: 2.0 });
+    step(lock, rimBox, 0);
+    expect(lock.lockCountdown).not.toBeNull();
+    // No rim for > CLUSTER_STALE_SEC (1s) → cluster discarded.
+    const gone = lock.step(frame(1.5, []), 1.5);
+    expect(gone).toBeNull();
+    expect(lock.lockCountdown).toBeNull();
+  });
+});

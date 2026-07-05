@@ -244,6 +244,19 @@ function LiveSessionScreen() {
   useEffect(() => {
     engineRef.current = engine;
   }, [engine]);
+
+  // Pre-lock "hold steady" countdown (3-2-1). Poll the overlay SharedValue at
+  // 5 Hz — it changes ~once/second, so no need for a per-frame React update.
+  const [countdown, setCountdown] = useState<number | null>(null);
+  const overlaySv = engine.overlay;
+  useEffect(() => {
+    const id = setInterval(() => {
+      const c = overlaySv.value.rimCountdown;
+      const n = c != null ? Math.max(1, Math.ceil(c)) : null;
+      setCountdown((prev) => (prev !== n ? n : prev));
+    }, 200);
+    return () => clearInterval(id);
+  }, [overlaySv]);
   useEffect(() => () => {
     if (driftTimer.current) clearTimeout(driftTimer.current);
     if (pausedTimer.current) clearTimeout(pausedTimer.current);
@@ -380,7 +393,7 @@ function LiveSessionScreen() {
       {debugMode && <DetectionBoxes overlay={engine.overlay} />}
       {debugMode && <DebugPanel debug={engine.debug} />}
 
-      {!rimLocked && <AimingOverlay />}
+      {!rimLocked && <AimingOverlay countdown={countdown} />}
 
       {!rimLocked && liveCoach.visible && (
         <CoachMarks
@@ -519,7 +532,7 @@ function LiveSessionScreen() {
 // Aiming guidance — shown until the rim locks.
 // ---------------------------------------------------------------------------
 
-function AimingOverlay() {
+function AimingOverlay({ countdown }: { countdown: number | null }) {
   const pulse = useSharedValue(0);
   useEffect(() => {
     pulse.value = withRepeat(
@@ -533,16 +546,29 @@ function AimingOverlay() {
     transform: [{ scale: 1 + pulse.value * 0.04 }],
   }));
 
+  // Counting down: the rim is stable and locking in N seconds — show a big 3-2-1
+  // inside the reticle so the user knows to hold the camera still.
+  const counting = countdown != null;
   return (
     <View
       style={styles.aiming}
       pointerEvents="none"
       accessibilityLiveRegion="polite"
-      accessibilityLabel="Point the camera at the hoop. Hold steady, the rim locks in automatically."
+      accessibilityLabel={
+        counting
+          ? `Rim found. Locking in ${countdown}. Hold steady.`
+          : 'Point the camera at the hoop. Hold steady, the rim locks in automatically.'
+      }
     >
-      <Animated.View style={[styles.rimPlaceholder, boxStyle]} />
-      <Text style={styles.aimTitle}>Point the camera at the hoop</Text>
-      <Text style={styles.aimSub}>Hold steady — the rim locks in automatically</Text>
+      <Animated.View style={[styles.rimPlaceholder, boxStyle, counting && styles.rimPlaceholderCounting]}>
+        {counting && <Text style={styles.countdownNum}>{countdown}</Text>}
+      </Animated.View>
+      <Text style={styles.aimTitle}>
+        {counting ? 'Hold steady — locking on the rim' : 'Point the camera at the hoop'}
+      </Text>
+      <Text style={styles.aimSub}>
+        {counting ? `Locking in ${countdown}…` : 'Hold steady — the rim locks in automatically'}
+      </Text>
     </View>
   );
 }
@@ -682,6 +708,20 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     borderColor: color.accent,
     marginBottom: space.xl,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  rimPlaceholderCounting: {
+    borderWidth: 3,
+    borderColor: color.make,
+  },
+  countdownNum: {
+    ...type.title,
+    fontSize: 56,
+    lineHeight: 60,
+    fontWeight: '800',
+    color: color.make,
+    fontVariant: ['tabular-nums'],
   },
   aimTitle: {
     ...type.title,

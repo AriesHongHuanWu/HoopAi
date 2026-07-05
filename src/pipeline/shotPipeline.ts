@@ -9,7 +9,7 @@
  * v2 upgrade path: move this whole class into the worklet runtime and swap
  * the scheduleOnRN hop for direct SharedValue writes (docs/ARCHITECTURE.md §2).
  */
-import { DETECTION, SHOT_FSM } from '../core/config';
+import { DETECTION, RIM, SHOT_FSM } from '../core/config';
 import { BallTracker } from '../core/ballTracker';
 import { estimateShotValue } from '../core/court';
 import { FormAnalyzer, coachingTips } from '../core/formAnalysis';
@@ -60,11 +60,14 @@ export interface PipelineFrameState {
   frameHeight: number;
   /** Raw model detections this frame (analysis px) — for the debug box overlay. */
   detections: readonly Detection[];
+  /** Seconds left on the pre-lock "hold steady" countdown (rounds up to a 3-2-1
+   *  reticle in the HUD), or null when not counting / already locked. */
+  rimCountdown: number | null;
 }
 
 export class ShotPipeline {
   private readonly tracker = new BallTracker({});
-  private readonly rimLock = new RimLock();
+  private readonly rimLock = new RimLock({ lockHoldSec: RIM.lockHoldSec });
   private fsm: ShotFsm | null = null;
   private events: PipelineEvents;
   private lastRim: RimGeometry | null = null;
@@ -164,6 +167,8 @@ export class ShotPipeline {
       frameWidth: frame.frameWidth,
       frameHeight: frame.frameHeight,
       detections: frame.detections,
+      // Pre-lock countdown (null once locked) so the HUD can show 3-2-1.
+      rimCountdown: this.lastRim ? null : this.rimLock.lockCountdown,
     };
     this.events.onFrame?.(state);
     if (resolved) {

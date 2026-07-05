@@ -51,6 +51,13 @@ export interface FrameSize {
 /** Why a live shot left SHOT_LIVE (internal). */
 type ResolveReason = 'belowRim' | 'ballLost' | 'timeout';
 
+/**
+ * Max samples kept in the live trajectory trail. A release→rim arc at 15–30 fps
+ * is ~15–40 samples, so this doesn't clip a real shot; it just bounds a stuck /
+ * occluded shot (which can run to maxLiveSec) so the comet never drags too long.
+ */
+const MAX_TRAJ_SAMPLES = 48;
+
 /** Internal per-frame net-motion sample. */
 interface NetSample {
   t: number;
@@ -175,6 +182,11 @@ export class ShotFsm {
         score: ball.score,
         predicted: ball.predicted,
       });
+      // Cap the trail so it never drags too long — a normal release→rim arc is
+      // well under this, but a stuck/occluded shot that times out at maxLiveSec
+      // could otherwise draw a very long, messy comet. Keep only the most recent
+      // samples (the visible arc); the oldest drops off the tail.
+      if (this.trajectory.length > MAX_TRAJ_SAMPLES) this.trajectory.shift();
       this.lastBallT = t;
       if (!this.touchedRim && this.touchesRimRegion(ball)) {
         this.touchedRim = true;

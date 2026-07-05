@@ -184,6 +184,23 @@ export class RimLock {
   private preDriftW = 0;
   private preDriftH = 0;
 
+  /** Seconds the rim must stay stable before the lock commits (0 = immediate). */
+  private readonly holdSec: number;
+  /** Camera-clock time (s) the current forming cluster began. */
+  private clusterStartT = 0;
+  /** Camera-clock time (s) of the last rim observation. */
+  private lastObsT = 0;
+  /** Seconds left on the pre-lock hold, or null when not counting (UI reads this). */
+  private countdownSec: number | null = null;
+
+  /** After this many seconds with no rim observation, a forming (unlocked)
+   *  cluster is discarded — the rim left the frame, so the countdown restarts. */
+  private static readonly CLUSTER_STALE_SEC = 1.0;
+
+  constructor(opts: { lockHoldSec?: number } = {}) {
+    this.holdSec = Math.max(0, opts.lockHoldSec ?? 0);
+  }
+
   /**
    * Consumes one frame of detections and returns the current locked geometry,
    * or null while no lock is held.
@@ -198,7 +215,6 @@ export class RimLock {
    *   (RIM.reverifySec) is not wired in; re-locking is observation-driven.
    */
   step(frame: FrameDetections, t: number): RimGeometry | null {
-    void t;
     let best: Detection | null = null;
     const dets = frame.detections;
     // Frame side the boxes are authored in (square analysis frame, 640).
@@ -214,8 +230,33 @@ export class RimLock {
       if (d.box.width > maxRimSide || d.box.height > maxRimSide) continue;
       if (best === null || d.score > best.score) best = d;
     }
-    if (best !== null) this.observe(best.box, best.score);
+    if (best !== null) this.observe(best.box, best.score, t);
+
+    // Pre-lock hold countdown (UI shows 3-2-1) + stale-cluster cleanup. Only
+    // meaningful before the first lock; once locked or drifting, no countdown.
+    if (this.locked || this.drift || this.holdSec <= 0) {
+      this.countdownSec = null;
+    } else if (this.clusterCount > 0) {
+      if (t - this.lastObsT > RimLock.CLUSTER_STALE_SEC) {
+        // Rim vanished mid-countdown → discard the cluster and restart.
+        this.clearCluster();
+        this.countdownSec = null;
+      } else {
+        this.countdownSec = Math.max(0, this.holdSec - (t - this.clusterStartT));
+      }
+    } else {
+      this.countdownSec = null;
+    }
     return this.locked ? this.geom : null;
+  }
+
+  /**
+   * Seconds remaining on the pre-lock "hold steady" countdown, or null when not
+   * counting (already locked, drifting, no cluster, or hold disabled). The live
+   * HUD renders `ceil(this)` as a 3-2-1 reticle.
+   */
+  get lockCountdown(): number | null {
+    return this.countdownSec;
   }
 
   /** Current locked geometry, or null while no lock is held. */
@@ -263,6 +304,9 @@ export class RimLock {
     this.drift = false;
     this.preDriftW = 0;
     this.preDriftH = 0;
+    this.clusterStartT = 0;
+    this.lastObsT = 0;
+    this.countdownSec = null;
   }
 
   // -------------------------------------------------------------------------
@@ -270,10 +314,18 @@ export class RimLock {
   // -------------------------------------------------------------------------
 
   /** Routes one accepted-class rim observation through the lock state. */
-  private observe(box: Box, score: number): void {
+  private observe(box: Box, score: number, t: number): void {
+    this.lastObsT = t;
     if (!this.locked) {
-      this.feedCluster(box);
-      if (this.clusterCount >= LOCK_CLUSTER_SIZE) this.lockAtClusterMean();
+      this.feedCluster(box, t);
+      // Lock once the cluster is consistent AND (when a hold is configured) it
+      // has stayed stable for holdSec — the 3-2-1 countdown the user asked for.
+      if (
+        this.clusterCount >= LOCK_CLUSTER_SIZE &&
+        (this.holdSec <= 0 || t - this.clusterStartT >= this.holdSec)
+      ) {
+        this.lockAtClusterMean();
+      }
       return;
     }
 
@@ -298,7 +350,7 @@ export class RimLock {
       this.preDriftW = this.lockW;
       this.preDriftH = this.lockH;
       this.consecutiveRejects++;
-      this.feedCluster(box);
+      this.feedCluster(box, t);
       if (this.clusterCount >= LOCK_CLUSTER_SIZE) {
         if (this.clusterSizeMatchesPreDrift()) this.lockAtClusterMean();
         else this.clearCluster();
@@ -333,7 +385,7 @@ export class RimLock {
     }
     if (this.drift) {
       // Re-verify: accumulate a consistent cluster at the new location.
-      this.feedCluster(box);
+      this.feedCluster(box, t);
       if (this.clusterCount >= LOCK_CLUSTER_SIZE) {
         if (this.clusterSizeMatchesPreDrift()) {
           this.lockAtClusterMean();
@@ -371,7 +423,7 @@ export class RimLock {
    * strays more than maxDriftDiagFactor·diag from the cluster's running mean
    * restarts the cluster at that observation.
    */
-  private feedCluster(box: Box): void {
+  private feedCluster(box: Box, t: number): void {
     if (this.clusterCount > 0) {
       const n = this.clusterCount;
       const meanW = this.clusterSumW / n;
@@ -386,6 +438,9 @@ export class RimLock {
         this.clearCluster();
       }
     }
+    // A big move restarts the cluster (above) → this observation begins a fresh
+    // one, so (re)stamp its start time; the hold countdown measures from here.
+    if (this.clusterCount === 0) this.clusterStartT = t;
     this.clusterSumX += box.x;
     this.clusterSumY += box.y;
     this.clusterSumW += box.width;

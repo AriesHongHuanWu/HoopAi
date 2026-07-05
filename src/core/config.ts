@@ -77,6 +77,14 @@ export const RIM = {
   /** Damping factor for the rim lock (EMA weight of the NEW observation). */
   lockAlpha: 0.05,
   /**
+   * Seconds the rim must stay stably in view (a consistent cluster, no big
+   * movement) before the lock commits — surfaced as a 3-2-1 countdown in the
+   * live view so the user knows to hold the camera steady. 0 = lock the moment
+   * the cluster forms (the default RimLock uses, so unit tests are unchanged);
+   * the live pipeline passes this value.
+   */
+  lockHoldSec: 2.5,
+  /**
    * Reject a rim box larger than this fraction of the frame side before it can
    * feed the lock cluster. Mirrors DETECTION.ballMaxSizeFraction: the ball added
    * a 0.22 cap for exactly the "half-frame box blooms over the whole screen"
