@@ -12,6 +12,8 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { shareSessionCard } from '@/components/ShareCard';
+import { FramePickerModal } from '@/components/FramePickerModal';
+import { sessionMomentSec } from '@/core/shareFrame';
 import {
   BackPill,
   SessionRecap,
@@ -178,8 +180,19 @@ export default function SessionDetailScreen() {
   // (shareSessionCard never throws).
   const [sharing, setSharing] = useState(false);
   const [shareFailed, setShareFailed] = useState(false);
-  const onShareCard = () => {
-    if (sharing || session == null) return;
+  const [pickingFrame, setPickingFrame] = useState(false);
+
+  const recStartSec = session?.recordingStartSec ?? null;
+  const durationSec =
+    session?.endedAt != null && session?.startedAt != null
+      ? (session.endedAt - session.startedAt) / 1000
+      : 0;
+  const canPickFrame = session?.videoPath != null && recStartSec != null;
+  const initialMomentSec =
+    recStartSec != null ? (sessionMomentSec(record.shots, recStartSec, durationSec) ?? 0) : 0;
+
+  const doShare = (backgroundUri?: string) => {
+    if (session == null) return;
     setSharing(true);
     setShareFailed(false);
     void shareSessionCard({
@@ -187,10 +200,16 @@ export default function SessionDetailScreen() {
       shots: record.shots,
       label: tag.trim() !== '' ? tag : 'Shooting session',
       dateMs: session.startedAt,
+      backgroundUri,
     }).then((ok) => {
       setSharing(false);
       if (!ok) setShareFailed(true);
     });
+  };
+  const onShareCard = () => {
+    if (sharing || pickingFrame || session == null) return;
+    if (canPickFrame) setPickingFrame(true);
+    else doShare();
   };
 
   /**
@@ -242,6 +261,7 @@ export default function SessionDetailScreen() {
       : null;
 
   return (
+    <>
     <Screen scroll>
       <Row style={{ marginBottom: space.lg }}>
         <BackPill />
@@ -316,6 +336,22 @@ export default function SessionDetailScreen() {
         </View>
       )}
     </Screen>
+    {pickingFrame && session?.videoPath != null && (
+      <FramePickerModal
+        videoPath={session.videoPath}
+        durationSec={durationSec}
+        initialTimeSec={initialMomentSec}
+        onPick={(uri) => {
+          setPickingFrame(false);
+          doShare(uri);
+        }}
+        onCancel={() => {
+          setPickingFrame(false);
+          doShare();
+        }}
+      />
+    )}
+    </>
   );
 }
 

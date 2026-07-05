@@ -12,6 +12,8 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { StyleSheet, Text, View, type LayoutRectangle } from 'react-native';
 
 import { shareSessionCard } from '@/components/ShareCard';
+import { FramePickerModal } from '@/components/FramePickerModal';
+import { sessionMomentSec } from '@/core/shareFrame';
 import {
   persistSessionLabel,
   SessionRecap,
@@ -34,6 +36,7 @@ export default function SessionSummaryScreen() {
   const entries = useSession((s) => s.shots);
   const storeStats = useSession((s) => s.stats);
   const recordingPath = useSession((s) => s.recordingPath);
+  const recordingStartSecStore = useSession((s) => s.recordingStartSec);
   const correctShot = useSession((s) => s.correctShot);
   const correctShotValue = useSession((s) => s.correctShotValue);
   const resetToIdle = useSession((s) => s.resetToIdle);
@@ -97,8 +100,24 @@ export default function SessionSummaryScreen() {
   // a quiet chip (shareSessionCard itself never throws).
   const [sharing, setSharing] = useState(false);
   const [shareFailed, setShareFailed] = useState(false);
-  const onShareCard = () => {
-    if (sharing) return;
+  const [pickingFrame, setPickingFrame] = useState(false);
+
+  const recordingStartSec = storeMode
+    ? recordingStartSecStore
+    : (record.session?.recordingStartSec ?? null);
+  // Best-effort clip duration for the frame sampler (getThumbnailAsync clamps to
+  // the real video, so an approximate span is fine).
+  const durationSec = storeMode
+    ? startedAtMs != null
+      ? (Date.now() - startedAtMs) / 1000
+      : 0
+    : record.session?.endedAt != null && record.session?.startedAt != null
+      ? (record.session.endedAt - record.session.startedAt) / 1000
+      : 0;
+  const canPickFrame = videoPath != null && recordingStartSec != null;
+
+  // Actually render + share the card, optionally with a chosen shot-frame photo.
+  const doShare = (backgroundUri?: string) => {
     setSharing(true);
     setShareFailed(false);
     const dateMs = storeMode
@@ -109,11 +128,23 @@ export default function SessionSummaryScreen() {
       shots,
       label: label.trim() !== '' ? label : 'Shooting session',
       dateMs,
+      backgroundUri,
     }).then((ok) => {
       setSharing(false);
       if (!ok) setShareFailed(true);
     });
   };
+
+  const onShareCard = () => {
+    if (sharing || pickingFrame) return;
+    // If the session was recorded, let the user pick a shooting-moment frame to
+    // feature behind their stats; otherwise share the plain coal card.
+    if (canPickFrame) setPickingFrame(true);
+    else doShare();
+  };
+
+  const initialMomentSec =
+    recordingStartSec != null ? (sessionMomentSec(shots, recordingStartSec, durationSec) ?? 0) : 0;
 
   const loading = !storeMode && dbId != null && !record.loaded;
   const empty =
@@ -218,6 +249,21 @@ export default function SessionSummaryScreen() {
     </Screen>
     {!loading && !empty && coach.visible && (
       <CoachMarks steps={coach.steps} onFinish={coach.finish} onSkip={coach.finish} />
+    )}
+    {pickingFrame && videoPath != null && (
+      <FramePickerModal
+        videoPath={videoPath}
+        durationSec={durationSec}
+        initialTimeSec={initialMomentSec}
+        onPick={(uri) => {
+          setPickingFrame(false);
+          doShare(uri);
+        }}
+        onCancel={() => {
+          setPickingFrame(false);
+          doShare();
+        }}
+      />
     )}
     </View>
   );

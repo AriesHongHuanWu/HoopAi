@@ -32,7 +32,9 @@ import {
   Canvas,
   Circle,
   Group,
+  Image as SkiaImage,
   ImageFormat,
+  LinearGradient,
   Path,
   RadialGradient,
   Rect,
@@ -41,8 +43,10 @@ import {
   Text as SkText,
   drawAsImage,
   matchFont,
+  useImage,
   vec,
   type SkFont,
+  type SkImage,
 } from '@shopify/react-native-skia';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as MediaLibrary from 'expo-media-library/legacy';
@@ -63,6 +67,14 @@ const CONTENT_W = CARD_W - PAD * 2;
 
 /** Alpha-0 endpoint of palette.leather for the radial glow fade. */
 const GLOW_FADE = 'rgba(240, 90, 36, 0)';
+
+// Photo-background legibility scrim (coal #100F0E = rgb 16,15,14): dark top +
+// bottom where text sits, lighter middle so the shot frame shows through.
+const SCRIM_TOP = 'rgba(16, 15, 14, 0.78)';
+const SCRIM_MID = 'rgba(16, 15, 14, 0.40)';
+const SCRIM_BOT = 'rgba(16, 15, 14, 0.88)';
+/** Fainter accent wash over a photo (the full accentTint would muddy it). */
+const ACCENT_WASH = 'rgba(240, 90, 36, 0.16)';
 
 // ---------------------------------------------------------------------------
 // Fonts — condensed SYSTEM face via matchFont (see module doc)
@@ -176,6 +188,13 @@ export interface ShareCardData {
   pips: readonly ShotOutcome[];
   /** Rows of stat chips (makes / best run / 2PT / 3PT splits). */
   chips: readonly (readonly ChipSpec[])[];
+  /**
+   * Optional shot-frame background: a local image URI (a frame grabbed from the
+   * session video at the shooting moment). When set, the card composites this
+   * photo full-bleed behind a dark scrim so the stats stay legible; when absent
+   * it falls back to the original coal + radial-glow background.
+   */
+  backgroundUri?: string;
 }
 
 const MONTHS = [
@@ -365,7 +384,14 @@ function ChipRow({ chips, top }: { chips: readonly ChipSpec[]; top: number }) {
  * inside any `<Canvas>` or offscreen via `drawAsImage`. No hooks, so it is
  * safe under Skia's offscreen reconciler.
  */
-export function ShareCardGraphic({ data }: { data: ShareCardData }) {
+export function ShareCardGraphic({
+  data,
+  bgImage,
+}: {
+  data: ShareCardData;
+  /** Pre-decoded shot-frame background (loaded by the caller — offscreen-safe). */
+  bgImage?: SkImage | null;
+}) {
   const wordmarkFont = displayFont(60);
   const dateFont = displayFont(30);
   const eyebrowFont = displayFont(30);
@@ -392,11 +418,33 @@ export function ShareCardGraphic({ data }: { data: ShareCardData }) {
 
   return (
     <Group>
-      {/* Coal canvas + subtle leather radial glow behind the hero. */}
+      {/* Coal base (also the letterbox fill if the photo isn't a perfect 4:5). */}
       <Rect x={0} y={0} width={CARD_W} height={CARD_H} color={color.bg} />
-      <Rect x={0} y={0} width={CARD_W} height={CARD_H}>
-        <RadialGradient c={vec(CARD_W / 2, 840)} r={660} colors={[color.accentTint, GLOW_FADE]} />
-      </Rect>
+      {bgImage != null ? (
+        <>
+          {/* Shot-frame photo, full-bleed cover. */}
+          <SkiaImage image={bgImage} x={0} y={0} width={CARD_W} height={CARD_H} fit="cover" />
+          {/* Legibility scrim: darker at the top (wordmark/title) and bottom
+              (hero/pips/chips), letting the photo show through the middle band. */}
+          <Rect x={0} y={0} width={CARD_W} height={CARD_H}>
+            <LinearGradient
+              start={vec(0, 0)}
+              end={vec(0, CARD_H)}
+              colors={[SCRIM_TOP, SCRIM_MID, SCRIM_BOT]}
+              positions={[0, 0.45, 1]}
+            />
+          </Rect>
+          {/* Keep a touch of the leather glow so the brand read survives. */}
+          <Rect x={0} y={0} width={CARD_W} height={CARD_H}>
+            <RadialGradient c={vec(CARD_W / 2, 840)} r={660} colors={[ACCENT_WASH, GLOW_FADE]} />
+          </Rect>
+        </>
+      ) : (
+        /* No photo → the original coal + subtle leather radial glow. */
+        <Rect x={0} y={0} width={CARD_W} height={CARD_H}>
+          <RadialGradient c={vec(CARD_W / 2, 840)} r={660} colors={[color.accentTint, GLOW_FADE]} />
+        </Rect>
+      )}
       {/* Faint center-court circle grounding the hero numeral. */}
       <Circle
         cx={CARD_W / 2}
@@ -487,6 +535,9 @@ export function ShareCard({
   style?: StyleProp<ViewStyle>;
 }) {
   const scale = width / CARD_W;
+  // Load the optional shot-frame background for the inline preview (async, safe
+  // to call with null — returns null until/unless a uri decodes).
+  const bgImage = useImage(data.backgroundUri ?? null);
   return (
     <Canvas
       style={[{ width, height: Math.round(CARD_H * scale) }, style]}
@@ -494,7 +545,7 @@ export function ShareCard({
       accessibilityLabel={`Share card: ${data.title}, ${data.hero} ${data.heroLabel.toLowerCase()}`}
     >
       <Group transform={[{ scale }]}>
-        <ShareCardGraphic data={data} />
+        <ShareCardGraphic data={data} bgImage={bgImage} />
       </Group>
     </Canvas>
   );
@@ -537,8 +588,21 @@ export async function shareCardImage(
   data: ShareCardData,
   fallbackMessage: string,
 ): Promise<boolean> {
+  // Decode the optional shot-frame background off the file URI first (offscreen
+  // drawAsImage can't run the useImage hook). Best-effort — a bad frame just
+  // falls back to the coal background.
+  let bgImage: SkImage | null = null;
+  let bgData: ReturnType<typeof Skia.Data.fromBytes> | null = null;
+  if (data.backgroundUri != null && data.backgroundUri !== '') {
+    try {
+      bgData = await Skia.Data.fromURI(data.backgroundUri);
+      bgImage = Skia.Image.MakeImageFromEncoded(bgData);
+    } catch {
+      bgImage = null;
+    }
+  }
   try {
-    const image = await drawAsImage(<ShareCardGraphic data={data} />, {
+    const image = await drawAsImage(<ShareCardGraphic data={data} bgImage={bgImage} />, {
       width: CARD_W,
       height: CARD_H,
     });
@@ -558,6 +622,9 @@ export async function shareCardImage(
   } catch (err) {
     console.warn('[shareCard] Card share failed, falling back to text', err);
     return shareText(fallbackMessage);
+  } finally {
+    bgImage?.dispose?.();
+    bgData?.dispose?.();
   }
 }
 
@@ -571,10 +638,15 @@ export async function shareSessionCard(opts: {
   label: string;
   /** Session start (epoch ms); defaults to now. */
   dateMs?: number;
+  /** Optional shot-frame background (local image URI) grabbed from the video. */
+  backgroundUri?: string;
 }): Promise<boolean> {
   const { stats } = opts;
   const decided = stats.makes + stats.misses;
   const pct = decided > 0 ? Math.round(stats.fgPct * 100) : 0;
   const fallback = `🏀 ${stats.makes}/${stats.attempts} makes (${pct}% FG), best run ${stats.bestStreak} — tracked on Hoopilot.`;
-  return shareCardImage(sessionCardData(opts), fallback);
+  return shareCardImage(
+    { ...sessionCardData(opts), backgroundUri: opts.backgroundUri },
+    fallback,
+  );
 }
