@@ -11,6 +11,7 @@ import { router, useLocalSearchParams } from 'expo-router';
 import React, { useEffect, useMemo, useState } from 'react';
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
+import { shareSessionCard } from '@/components/ShareCard';
 import {
   BackPill,
   SessionRecap,
@@ -172,6 +173,26 @@ export default function SessionDetailScreen() {
     if (sessionId != null) void updateSessionLabel(sessionId, next);
   };
 
+  // Re-share a past session as a branded card. Mirrors the summary screen:
+  // disabled while the offscreen snapshot renders, a quiet chip on failure
+  // (shareSessionCard never throws).
+  const [sharing, setSharing] = useState(false);
+  const [shareFailed, setShareFailed] = useState(false);
+  const onShareCard = () => {
+    if (sharing || session == null) return;
+    setSharing(true);
+    setShareFailed(false);
+    void shareSessionCard({
+      stats: record.stats,
+      shots: record.shots,
+      label: tag.trim() !== '' ? tag : 'Shooting session',
+      dateMs: session.startedAt,
+    }).then((ok) => {
+      setSharing(false);
+      if (!ok) setShareFailed(true);
+    });
+  };
+
   /**
    * The next older session that actually has shots, for the comparison card.
    * undefined = still loading, null = none found (card skipped either way).
@@ -243,6 +264,18 @@ export default function SessionDetailScreen() {
           <View style={{ marginTop: space.sm }}>
             <TagField tag={tag} onChange={onTagChange} />
           </View>
+          {shareFailed && (
+            <View style={{ marginTop: space.md }}>
+              <Chip label="Couldn't share — try again" tone="unsure" />
+            </View>
+          )}
+          <PillButton
+            variant="ghost"
+            label={sharing ? 'Preparing…' : 'Share card'}
+            onPress={onShareCard}
+            disabled={sharing || record.shots.length === 0}
+            style={{ marginTop: space.lg }}
+          />
           {session.videoPath != null && (
             <PillButton
               label="Watch replay"
