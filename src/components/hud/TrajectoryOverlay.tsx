@@ -16,31 +16,11 @@
  *
  * COORDINATE MAPPING (orientation-correct)
  * ----------------------------------------
- * Two centered transforms compose between analysis space and view space:
- *
- *   camera frame --letterbox--> 640×640 analysis square   (fit, bars on the
- *                                                          camera's short axis)
- *   camera frame ----cover----> preview view              (fill, center-crop)
- *
- * The detector input is produced with scaleMode:'cover' (useShotEngine), so the
- * S×S analysis square is the CENTER-SQUARE CROP of the camera frame (full
- * short-axis, centered on the long axis) — it is NOT a letterbox of the whole
- * frame. The <Camera> preview (default resizeMode 'cover', oriented WITH the
- * view since VisionCamera rotates the stream with the interface) fills the view
- * with that same frame, so the analysis square appears as a CENTERED SQUARE in
- * the view. Its on-screen side is:
- *
- *   portrait :  sq = max(viewW, aspect · viewH)
- *   landscape:  sq = max(viewH, aspect · viewW)      (aspect = short/long)
- *   scale  = sq / S       (analysis-px → view-px, same on both axes)
- *   offset = (viewDim − sq) / 2   (center the square in the view)
- *
- * An earlier version modeled the square as a 'contain'/letterbox of the whole
- * frame (contentW = S·aspect), which over-scaled every box by 1/aspect ≈ 1.78×
- * and threw the ball/rim boxes far off the actual objects. Recomputed from
- * onLayout on every rotation; a w/h swap only swaps which term wins the max(),
- * so the scale stays uniform. All per-frame math lives inside useDerivedValue
- * worklets.
+ * The detector input and the <Camera> preview both use scaleMode 'contain', so
+ * every drawn point maps analysis-px → view-px with one uniform scale + offset.
+ * That composition (and the reason it must read the REAL source frame dims, not
+ * a hardcoded aspect) lives in ./overlayMapping so this and DetectionBoxes stay
+ * pixel-identical. All per-frame math runs inside useDerivedValue worklets.
  */
 import React from 'react';
 import { StyleSheet, type LayoutChangeEvent, type StyleProp, type ViewStyle } from 'react-native';
@@ -64,6 +44,7 @@ import {
 
 import type { OverlayState } from '../../camera/useShotEngine';
 import { color, glow } from '../../constants/tokens';
+import { mapAnalysisToView } from './overlayMapping';
 
 /** Widths of the three stacked trail passes (bloom → core → hot). */
 const TRAIL_BLOOM = 16;
@@ -79,23 +60,13 @@ const MAX_EXTRAPOLATION_SEC = 0.12;
 /** Corner-bracket arm length as a fraction of the rim box's shorter side. */
 const BRACKET_FRAC = 0.28;
 const BRACKET_STROKE = 3;
-/**
- * Camera content aspect ratio as short/long side (16:9 stream → 9/16). Used to
- * locate the camera content inside the letterboxed analysis square — see the
- * coordinate-mapping notes above. Overridable per-instance via `sourceAspect`
- * if a format with a different aspect is ever selected.
- */
-const DEFAULT_SOURCE_ASPECT = 9 / 16;
 
 export function TrajectoryOverlay({
   overlay,
   style,
-  sourceAspect = DEFAULT_SOURCE_ASPECT,
 }: {
   overlay: SharedValue<OverlayState>;
   style?: StyleProp<ViewStyle>;
-  /** Camera content aspect as short/long (0..1]. Defaults to a 16:9 stream. */
-  sourceAspect?: number;
 }) {
   const viewSize = useSharedValue({ w: 0, h: 0 });
 
@@ -116,40 +87,11 @@ export function TrajectoryOverlay({
   }, [pulse]);
 
   // --- analysis → view transform (worklet-local) ---------------------------
-  // Letterbox (camera → analysis square) composed with cover (camera → view);
-  // both are centered uniform scales, so the result is one uniform scale +
-  // centering. Orientation-aware: the camera content rect inside the analysis
-  // square follows the view's orientation. See the header notes for the math.
-  const mapping = useDerivedValue(() => {
-    const o = overlay.value;
-    const { w, h } = viewSize.value;
-    if (w <= 0 || h <= 0 || o.frameW <= 0 || o.frameH <= 0) {
-      return { ok: false, scale: 0, ox: 0, oy: 0 };
-    }
-    // Camera short/long ratio, clamped to a sane range (guards a bad prop).
-    const aspect = Math.min(1, Math.max(0.1, sourceAspect));
-    // Side of the (square) analysis frame.
-    const side = Math.max(o.frameW, o.frameH);
-    // The detector input uses scaleMode:'cover' (see useShotEngine), so the
-    // analysis square is the CENTER-SQUARE CROP of the camera frame — full
-    // short-axis, centered on the long axis — NOT a letterbox of the whole
-    // frame. The <Camera> preview (default resizeMode 'cover') fills the view
-    // with that same frame, so the analysis square lands as a CENTERED SQUARE
-    // in the view whose on-screen side `sq` equals the view's SHORT axis,
-    // widened by the frame's long/short ratio (aspect) along the view's LONG
-    // axis. (The previous 'contain'/letterbox model over-scaled every box by
-    // 1/aspect ≈ 1.78×, throwing boxes far off the ball and rim.)
-    const landscape = w > h;
-    const sq = landscape ? Math.max(h, aspect * w) : Math.max(w, aspect * h);
-    // analysis-px → view-px, plus centering of the square in the view.
-    const scale = sq / side;
-    return {
-      ok: true,
-      scale,
-      ox: (w - sq) / 2,
-      oy: (h - sq) / 2,
-    };
-  });
+  // 'contain' letterbox (camera → analysis square) composed with the preview's
+  // 'contain' letterbox (camera → view) → one uniform scale + centering. Shared
+  // with DetectionBoxes so every layer lands on the same pixels. See
+  // ./overlayMapping for the derivation.
+  const mapping = useDerivedValue(() => mapAnalysisToView(overlay.value, viewSize.value));
 
   // --- shot-arc trail ------------------------------------------------------
   const trajPath = useDerivedValue(() => {

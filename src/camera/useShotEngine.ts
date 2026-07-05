@@ -98,6 +98,18 @@ export interface OverlayState {
   phase: 'IDLE' | 'SHOT_LIVE' | 'COOLDOWN';
   frameW: number;
   frameH: number;
+  /**
+   * Raw camera-frame dimensions in px (sensor-native — VisionCamera does not
+   * rotate the buffer). The detector input and the <Camera> preview both use
+   * scaleMode 'contain', letterboxing this frame into the analysis square and
+   * the view respectively; the overlay inverts the analysis letterbox and
+   * applies the preview one, so it needs the real source aspect (not a
+   * hardcoded 9:16 guess that broke landscape). In a landscape-locked session
+   * the sensor is already landscape, so these equal the display dims and the
+   * mapping is exact. 0 until the first frame.
+   */
+  srcW: number;
+  srcH: number;
   /** Every raw detection this frame (for the debug box overlay). */
   dets: OverlayDet[];
 }
@@ -109,6 +121,8 @@ export const EMPTY_OVERLAY: OverlayState = {
   phase: 'IDLE',
   frameW: 640,
   frameH: 640,
+  srcW: 0,
+  srcH: 0,
   dets: [],
 };
 
@@ -383,6 +397,11 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
 
   const overlay = useSharedValue<OverlayState>(EMPTY_OVERLAY);
   const debug = useSharedValue<EngineDebug>({ ...EMPTY_DEBUG });
+  // Source camera-frame dims, written by the frame worklet (frame.width/height)
+  // and read on the JS thread when building the overlay. Constant within a
+  // session (orientation is locked), so a 1-frame lag is irrelevant. Feeds the
+  // orientation-correct 'contain' letterbox mapping in the HUD overlays.
+  const srcDimsSv = useSharedValue({ w: 0, h: 0 });
 
   // Mirror the load state into the debug panel as soon as it changes.
   useEffect(() => {
@@ -459,6 +478,8 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
           phase: state.phase,
           frameW: state.frameWidth,
           frameH: state.frameHeight,
+          srcW: srcDimsSv.value.w,
+          srcH: srcDimsSv.value.h,
           dets: state.detections.map((d) => ({
             cls: d.cls,
             x: d.box.x,
@@ -570,9 +591,22 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
   const { resizer } = useResizer({
     width: detInputSize,
     height: detInputSize,
-    channelOrder: 'rgb',
+    // Channel order MUST match how the model was trained/validated:
+    //  - YOLOX (Megvii) is trained on cv2 BGR frames (no RGB swap) — and the
+    //    offline validation that confirmed this model detects used BGR, so the
+    //    device MUST feed BGR too or the ball/rim colours invert and it detects
+    //    nothing.
+    //  - YOLO11 (Ultralytics) is trained on RGB.
+    channelOrder: useYolox ? 'bgr' : 'rgb',
     dataType: 'float32',
-    scaleMode: 'cover',
+    // 'contain' letterboxes the WHOLE frame into the square input (bars on the
+    // short axis) instead of 'cover' center-cropping it. 'cover' discarded the
+    // sides of a wide LANDSCAPE frame — taking the hoop out of the model input
+    // entirely, so nothing detected. 'contain' keeps the whole scene visible in
+    // any orientation, and matches the letterbox preprocessing both detectors
+    // were validated with. The <Camera> preview uses 'contain' too so the boxes
+    // line up (see live.tsx + the HUD overlay mapping).
+    scaleMode: 'contain',
     // Layout MUST match the model's input tensor exactly — fast-tflite does NOT
     // transpose, and a mismatch silently collapses every score to ~0.
     //  - YOLO11 export is [1,3,S,S] channels-first  → PLANAR (NCHW).
@@ -692,6 +726,13 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
         let resized: { getPixelBuffer(): ArrayBuffer; dispose(): void } | null = null;
         try {
         const tflite = boxed.unbox() as TensorflowModel;
+        // Raw camera-frame dims for the HUD's letterbox mapping. These are the
+        // buffer's SENSOR-NATIVE dimensions (VisionCamera does not rotate the
+        // buffer). When the session is locked LANDSCAPE the sensor is already
+        // landscape, so these match the display and the mapping is exact; the
+        // overlay reconciles against the view orientation for the portrait case.
+        // Constant within a locked-orientation session.
+        srcDimsSv.value = { w: frame.width, h: frame.height };
         resized = resizer.resize(frame);
         const rawBuffer = resized.getPixelBuffer();
         bufBytes = rawBuffer.byteLength;

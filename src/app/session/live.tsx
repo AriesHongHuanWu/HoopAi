@@ -358,6 +358,12 @@ function LiveSessionScreen() {
           isActive={!ending}
           device={cam.device}
           outputs={cam.outputs}
+          // 'contain' shows the WHOLE camera frame (letterboxed), matching the
+          // detector input (scaleMode:'contain' in useShotEngine) so the overlay
+          // boxes line up exactly and nothing the model sees is cropped off the
+          // preview — critical in landscape, where the default 'cover' hid the
+          // sides of the scene.
+          resizeMode="contain"
         />
       ) : (
         <DemoCourt />

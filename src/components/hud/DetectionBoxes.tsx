@@ -3,7 +3,8 @@
  * frame — ball (orange), rim (green), made (gold), person (blue) — so you can
  * SEE in real time whether the detector is firing, even with just a ball and no
  * hoop. Gated by Settings > Debug mode. Same analysis→view mapping as
- * TrajectoryOverlay (letterbox camera→square, composed with cover→view).
+ * TrajectoryOverlay ('contain' letterbox camera→square, composed with the
+ * preview's 'contain' letterbox camera→view).
  *
  * CRASH-SAFETY: every derived value is an explicit top-level hook (no hooks in a
  * helper), and each path builder guards `o.dets` (defensive against any overlay
@@ -21,8 +22,7 @@ import {
 import type { OverlayState } from '../../camera/useShotEngine';
 import { DETECTION } from '../../core/config';
 import { color } from '../../constants/tokens';
-
-const DEFAULT_SOURCE_ASPECT = 9 / 16;
+import { mapAnalysisToView, type Mapping } from './overlayMapping';
 
 // Per-class score gates — draw only detections the app ACTUALLY acts on, not
 // the raw 0.15 parser floor. On a degraded input (e.g. filming a screen) the
@@ -33,13 +33,6 @@ const BALL_MIN = DETECTION.ballScoreMin;
 const RIM_MIN = DETECTION.rimScoreMin;
 const MADE_MIN = DETECTION.ballInBasketScoreMin;
 const PERSON_MIN = DETECTION.personScoreMin;
-
-interface Mapping {
-  ok: boolean;
-  scale: number;
-  ox: number;
-  oy: number;
-}
 
 /** Build a Skia path of all detection boxes for one class. Pure worklet. */
 function classPath(o: OverlayState, m: Mapping, cls: string, minScore: number) {
@@ -66,10 +59,8 @@ function classPath(o: OverlayState, m: Mapping, cls: string, minScore: number) {
 
 export function DetectionBoxes({
   overlay,
-  sourceAspect = DEFAULT_SOURCE_ASPECT,
 }: {
   overlay: SharedValue<OverlayState>;
-  sourceAspect?: number;
 }) {
   const viewSize = useSharedValue({ w: 0, h: 0 });
   const onLayout = (e: LayoutChangeEvent) => {
@@ -77,24 +68,7 @@ export function DetectionBoxes({
     viewSize.value = { w: width, h: height };
   };
 
-  const mapping = useDerivedValue<Mapping>(() => {
-    const o = overlay.value;
-    const { w, h } = viewSize.value;
-    if (w <= 0 || h <= 0 || o.frameW <= 0 || o.frameH <= 0) {
-      return { ok: false, scale: 0, ox: 0, oy: 0 };
-    }
-    const aspect = Math.min(1, Math.max(0.1, sourceAspect));
-    const side = Math.max(o.frameW, o.frameH);
-    // scaleMode:'cover' → the analysis square is the CENTER-SQUARE crop of the
-    // frame, and the preview ('cover') shows it as a CENTERED SQUARE in the view
-    // whose side is the view's short axis widened by `aspect` on the long axis.
-    // (Must match TrajectoryOverlay exactly; the old letterbox math over-scaled
-    // every box by 1/aspect ≈ 1.78×.)
-    const landscape = w > h;
-    const sq = landscape ? Math.max(h, aspect * w) : Math.max(w, aspect * h);
-    const scale = sq / side;
-    return { ok: true, scale, ox: (w - sq) / 2, oy: (h - sq) / 2 };
-  });
+  const mapping = useDerivedValue<Mapping>(() => mapAnalysisToView(overlay.value, viewSize.value));
 
   // Explicit top-level derived values (no hooks-in-a-helper).
   const ballPath = useDerivedValue(() => classPath(overlay.value, mapping.value, 'ball', BALL_MIN));
