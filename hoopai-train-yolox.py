@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-hoopai-train-yolox.py  —  Kaggle GPU kernel (FINAL, launch-ready)
+hoopai-train-yolox.py  --  Kaggle GPU kernel (FINAL, launch-ready)
 
 Trains YOLOX-Nano (4 classes: ball, rim, ball_in_basket, person) on a merged
 26-dataset basketball corpus pulled from Roboflow in COCO format, then exports:
@@ -60,7 +60,7 @@ COCO_DIR      = os.path.join(TMP, "hoopcoco")        # merged YOLOX/COCO dataset
 YOLOX_DIR     = os.path.join(TMP, "YOLOX")           # cloned repo
 EXP_FILE      = os.path.join(TMP, "hoop_exp.py")     # generated custom Exp
 OUT_ROOT      = os.path.join(WORK, "YOLOX_outputs")  # YOLOX checkpoint root
-EXP_NAME      = "hoop_yolox_nano"
+EXP_NAME      = "hoop_yolox_tiny"
 
 TRAIN_IMG_DIR = os.path.join(COCO_DIR, "train2017")
 VAL_IMG_DIR   = os.path.join(COCO_DIR, "val2017")
@@ -70,7 +70,7 @@ VAL_ANN       = "instances_val2017.json"
 
 # The predictable checkpoint dir YOLOX writes to (output_dir/exp_name).
 CKPT_OUT_DIR  = os.path.join(OUT_ROOT, EXP_NAME)
-PROMOTED_PTH  = os.path.join(WORK, "yolox_nano_hoop.pth")
+PROMOTED_PTH  = os.path.join(WORK, "yolox_tiny_hoop.pth")
 
 ROBOFLOW_KEY  = "4wYE6hxRLYRBQWE7DEkz"
 
@@ -80,8 +80,8 @@ ROBOFLOW_KEY  = "4wYE6hxRLYRBQWE7DEkz"
 # 40 epochs of YOLOX-Nano at FIXED 416 on P100 over the merged corpus is a far
 # safer fit for a single 8-12h session than the original 80 (which, combined
 # with multiscale-to-640, plausibly needed 15-30h).
-MAX_EPOCH     = 40
-BATCH_SIZE    = 24            # fits P100 16GB / T4 15GB at 416x416 nano+fp16
+MAX_EPOCH     = 50
+BATCH_SIZE    = 16            # Tiny (non-depthwise) is heavier than nano; 16 fits P100/T4 15-16GB at 416+fp16
 INPUT_SIZE    = (416, 416)
 
 # Unified target classes.  index -> name.  COCO category ids are index+1 (1..4).
@@ -116,46 +116,25 @@ NAME2TGT = {
 }
 
 
-# (workspace, project, version) — 26 Roboflow datasets.
+# (workspace, project, version) -- CURATED high-quality subset for the YOLOX-Tiny
+# run (2026-07-06). Cut from 35 to 12 to (a) keep total images ~15-20k so a
+# heavier Tiny model actually finishes enough epochs under the Kaggle wall, and
+# (b) keep the 4 classes balanced (dropped the huge scoreboard set that would
+# have dominated with 24k ball boxes, and the noisier/redundant single-class
+# sets). Chosen for clean, all-class annotations + realistic game footage.
 DATASETS = [
-    ("basketball-detection-b977c", "basketball-detection-sskux", 7),
-    ("roboflow-jvuqo", "basketball-player-detection-3-ycjdo", 18),
-    ("sc-xqmxu", "basketball-and-net-detection", 7),
-    ("computer-vision-project-v2zmg", "basketball-video-analysis", 8),
-    ("finalprojectteam16", "automatic-basketball-scoring-system", 7),
-    ("yolo-bvles", "basketball-detection-1mtj3-4ad5o-c7dos-zmo1g-p9npw-bo5ez", 2),
-    ("computer-vision-d5fjh", "basketball-detection-dn6fg", 4),
-    ("basketball-hoop-tsdku", "basketball-hoop-images", 4),
-    ("ball101", "rim-detection", 1),
-    ("roboflow-jvuqo", "basketball-player-detection-2", 20),
-    ("rohit-krishnan-xr6xf", "basketball_and_hoops", 3),
-    ("basketballcv", "basketball-cv", 9),
-    ("ownprojects", "basketball-w2xcw", 2),
-    ("zaki-b86c6", "basketball-jagmz", 74),
-    ("mytem", "people_basketball_hoops", 6),
-    ("loganwork", "basketball-rdtyv", 6),
-    ("lokesh-podipireddy-eocdt", "basketball-player-detection-6y9yj", 14),
-    ("piebasket", "only_ball_handler", 5),
-    ("zeeshan-public-projects", "basket-ball-tracking-xkyu5", 5),
-    ("basketball-z8lzd", "basketball-6phla", 21),
-    ("basketballv1", "basketball-ikdxt", 22),
-    ("roboflow-universe-projects", "basketball-players-fy4c2", 25),
-    ("dataset-baketball", "baskball", 5),
-    ("public-0stx0", "made-baskets", 3),
-    ("tickstrike", "basketball-players-and-ball1", 4),
-    ("ntu-nw2om", "tracking-players-and-balls", 3),
-    # --- ADDED 2026-07-04: verified high-quality Roboflow sets (Roboflow API
-    # class counts confirmed) chosen to reinforce the WEAK rim + made classes.
-    # All are object-detection, CC-licensed, and NOT duplicates of the 26 above.
-    ("the-university-of-arizona-th1yv", "basketball-shooting-robot", 1),  # rim10140 made339 ball person
-    ("test-datset", "player_detect-0spfb", 1),                            # ball9377 rim6445 made507 person
-    ("devin-ross-g0rqc", "basketball-ls818", 71),                         # made-basket 3792 (rare class!)
-    ("queenmary", "basketball-poeple-rin", 1),                            # rim2828 made171 ball person
-    ("woo-lgxdg", "final-aops8", 3),                                      # rim2786 ball person
+    ("test-datset", "player_detect-0spfb", 1),                            # ball9377 rim6445 made507 person -- ALL classes
+    ("cv-8scak", "cv-cnfd4", 1),                                          # ball2913 rim2645 people3735 -- balanced
+    ("the-university-of-arizona-th1yv", "basketball-shooting-robot", 1),  # rim10140 made339 -- rim-rich
+    ("devin-ross-g0rqc", "basketball-ls818", 71),                         # made-basket 3792 -- the RARE made class
     ("hotshot", "basketball-detection-tqwcs", 7),                         # ball5658 hoop4994
-    ("abc-bvosr", "automated-basketball-scoreboard", 2),                  # ball24352 net6968
-    ("amrita-hlhw6", "basketball-and-hoop-detection", 1),                 # ball10103 net2885
-    ("cv-8scak", "cv-cnfd4", 1),                                          # ball2913 rim2645 people3735
+    ("amrita-hlhw6", "basketball-and-hoop-detection", 1),                 # ball10103 net2885 -- ball-rich
+    ("queenmary", "basketball-poeple-rin", 1),                            # rim2828 made171
+    ("woo-lgxdg", "final-aops8", 3),                                      # rim2786
+    ("roboflow-jvuqo", "basketball-player-detection-3-ycjdo", 18),        # person-rich (all-class original)
+    ("roboflow-universe-projects", "basketball-players-fy4c2", 25),       # players + ball variety
+    ("basketball-detection-b977c", "basketball-detection-sskux", 7),      # core ball + rim
+    ("computer-vision-project-v2zmg", "basketball-video-analysis", 8),    # real game-video frames
 ]
 
 
@@ -172,13 +151,13 @@ def sh(cmd, check=True, env=None):
 
 
 # --------------------------------------------------------------------------- #
-#  Step 1 — environment: P100-safe torch, YOLOX, deps
+#  Step 1 -- environment: P100-safe torch, YOLOX, deps
 # --------------------------------------------------------------------------- #
 def setup_env():
     print("=== STEP 1: environment setup ===", flush=True)
 
     # P100 (sm_60) + T4 safe torch. Kaggle default may drop sm_60.
-    # LOAD-BEARING PIN — see module docstring. Do NOT bump past 2.5.x.
+    # LOAD-BEARING PIN -- see module docstring. Do NOT bump past 2.5.x.
     sh("pip install -q torch==2.5.1 torchvision==0.20.1 "
        "--index-url https://download.pytorch.org/whl/cu121")
 
@@ -215,11 +194,11 @@ def setup_env():
             f.writelines(kept)
         sh("pip install -q -r %s || true" % req_out, check=False)
     except Exception as e:
-        print("  !! could not filter YOLOX requirements (%r) — installing raw"
+        print("  !! could not filter YOLOX requirements (%r) -- installing raw"
               % e, flush=True)
         sh("pip install -q -r %s || true" % req_in, check=False)
 
-    # Run YOLOX FROM SOURCE via PYTHONPATH — do NOT `pip install -e` it: YOLOX's
+    # Run YOLOX FROM SOURCE via PYTHONPATH -- do NOT `pip install -e` it: YOLOX's
     # `setup.py develop` path fails on Kaggle's Python 3.12 / new setuptools, and
     # YOLOX is pure-Python (no compiled extensions) so an install is unnecessary.
     # Put YOLOX_DIR on THIS process's sys.path (for the in-process import check in
@@ -237,7 +216,7 @@ def setup_env():
     # NOTE: onnx2tf / tensorflow are deliberately NOT installed here. They can
     # drag numpy>=2 and heavy TF wheels into the env that TRAINING depends on.
     # We install that toolchain LAZILY inside save_and_export(), only when an
-    # ONNX actually exists — so it can never destabilise training.
+    # ONNX actually exists -- so it can never destabilise training.
 
     fail_fast_env_check()
 
@@ -249,14 +228,14 @@ def fail_fast_env_check():
     print("--- fail-fast env check ---", flush=True)
     import numpy
     assert numpy.__version__.split(".")[0] == "1", \
-        "numpy must be <2 (got %s) — pycocotools/opencv ABI break" % numpy.__version__
+        "numpy must be <2 (got %s) -- pycocotools/opencv ABI break" % numpy.__version__
     import cv2  # noqa: F401  (must import cleanly against numpy 1.x)
     import torch
     print("torch:", torch.__version__, "| torch.version.cuda:",
           torch.version.cuda, "| cuda avail:", torch.cuda.is_available(),
           flush=True)
     assert torch.cuda.is_available(), \
-        "no CUDA GPU visible — refusing to burn the session on CPU training"
+        "no CUDA GPU visible -- refusing to burn the session on CPU training"
     cc = torch.cuda.get_device_capability(0)
     print("GPU:", torch.cuda.get_device_name(0), "| capability:", cc, flush=True)
     # P100 = sm_60, T4 = sm_75. Anything in (6, 7) is the expected Kaggle GPU.
@@ -274,7 +253,7 @@ def fail_fast_env_check():
 
 
 # --------------------------------------------------------------------------- #
-#  Step 2 — download 26 datasets (COCO), merge into one COCO dataset
+#  Step 2 -- download 26 datasets (COCO), merge into one COCO dataset
 # --------------------------------------------------------------------------- #
 def _has_coco_json(loc):
     """True if a COCO export exists under loc in EITHER the nested split layout
@@ -414,7 +393,7 @@ def merge_datasets(downloaded):
             # ---- build source cat id -> unified cat id (1..4) or None ----
             # CRITICAL: skip the Roboflow group/supercategory row. That row is
             # exported with id 0 (and/or supercategory 'none') and its NAME is
-            # the project label — mapping it can mislabel real boxes or nuke a
+            # the project label -- mapping it can mislabel real boxes or nuke a
             # whole dataset. We ignore id 0 and supercategory=='none' rows.
             src_cat_map = {}
             src_names = []
@@ -424,7 +403,7 @@ def merge_datasets(downloaded):
                 supercat = str(c.get("supercategory", "")).strip().lower()
                 src_names.append("%s:%s" % (cid, nm))
                 if cid == 0 or supercat == "none":
-                    # group/supercategory row — never a real object class
+                    # group/supercategory row -- never a real object class
                     src_cat_map[cid] = None
                     continue
                 tgt = NAME2TGT.get(nm)
@@ -466,7 +445,7 @@ def merge_datasets(downloaded):
                 src_img = os.path.join(sdir, fn)
                 if not os.path.isfile(src_img):
                     # Exact-name fallback. Use os.path.isfile with the literal
-                    # basename — NOT glob — because Roboflow filenames often
+                    # basename -- NOT glob -- because Roboflow filenames often
                     # contain glob metacharacters ('[', ']', '?') that glob would
                     # misinterpret, silently dropping a present file.
                     cand = os.path.join(sdir, os.path.basename(fn))
@@ -531,7 +510,7 @@ def merge_datasets(downloaded):
 
     # Guard: if no val images collected, carve a slice off train so eval works.
     if copied["val"] == 0 and copied["train"] > 0:
-        print("  !! no val images — carving ~5%% of train into val", flush=True)
+        print("  !! no val images -- carving ~5%% of train into val", flush=True)
         imgs = merged["train"]["images"]
         n_val = max(1, len(imgs) // 20)
         val_imgs = imgs[:n_val]
@@ -569,9 +548,9 @@ def merge_datasets(downloaded):
           flush=True)
 
     if copied["train"] == 0:
-        raise RuntimeError("merge produced 0 training images — aborting")
+        raise RuntimeError("merge produced 0 training images -- aborting")
     if kept_anns == 0:
-        raise RuntimeError("merge produced 0 kept annotations — aborting")
+        raise RuntimeError("merge produced 0 kept annotations -- aborting")
     return copied["train"], copied["val"]
 
 
@@ -583,8 +562,8 @@ NEG_CAP = 8000
 
 
 def add_negatives():
-    """Append non-basketball background images as NEGATIVES — image entries with
-    ZERO annotations — to the TRAIN COCO json. A basketball-only training set
+    """Append non-basketball background images as NEGATIVES -- image entries with
+    ZERO annotations -- to the TRAIN COCO json. A basketball-only training set
     never shows the model an empty/irrelevant scene, so it over-fires on court
     clutter (rim-on-trees, ball-on-fences). Negatives directly teach "predict
     nothing here", cutting those false positives. Best-effort: if the dataset
@@ -597,13 +576,13 @@ def add_negatives():
     from PIL import Image
     print("=== STEP 2c: adding non-basketball negatives ===", flush=True)
     if not os.path.isdir(NEG_DIR):
-        print("  !! negatives not mounted at %s — skipping (add it via "
+        print("  !! negatives not mounted at %s -- skipping (add it via "
               "kernel dataset_sources)" % NEG_DIR, flush=True)
         return
     imgs = sorted(_glob.glob(os.path.join(NEG_DIR, "**", "*.jpg"), recursive=True))
     imgs = imgs[:NEG_CAP]
     if not imgs:
-        print("  !! no .jpg negatives under %s — skipping" % NEG_DIR, flush=True)
+        print("  !! no .jpg negatives under %s -- skipping" % NEG_DIR, flush=True)
         return
     ann_path = os.path.join(ANN_DIR, TRAIN_ANN)
     with open(ann_path, "r", encoding="utf-8") as f:
@@ -623,15 +602,15 @@ def add_negatives():
             next_id += 1
             added += 1
         except Exception:
-            continue  # unreadable/odd image — skip, never fatal
+            continue  # unreadable/odd image -- skip, never fatal
     with open(ann_path, "w", encoding="utf-8") as f:
         json.dump(doc, f)
-    print("  added %d negative (empty-annotation) images — train images now %d"
+    print("  added %d negative (empty-annotation) images -- train images now %d"
           % (added, len(doc["images"])), flush=True)
 
 
 # --------------------------------------------------------------------------- #
-#  Step 3 — write custom YOLOX-Nano Exp
+#  Step 3 -- write custom YOLOX-Nano Exp
 # --------------------------------------------------------------------------- #
 def write_exp():
     """Emit a custom Exp file matching exps/default/yolox_nano.py but for our
@@ -655,9 +634,10 @@ from yolox.exp import Exp as MyExp
 class Exp(MyExp):
     def __init__(self):
         super(Exp, self).__init__()
-        # ---- nano geometry (matches exps/default/yolox_nano.py) ----
+        # ---- tiny geometry (matches exps/default/yolox_tiny.py) -- ~5x the
+        #      capacity of nano, the key upgrade for the small/fast BALL ----
         self.depth = 0.33
-        self.width = 0.25
+        self.width = 0.375
         self.input_size = (416, 416)
         # PIN resolution to 416 (13*32=416). Nano default is (10, 20) => random
         # 320-640px multiscale, which blows up per-iter cost/memory on P100 and
@@ -698,14 +678,15 @@ class Exp(MyExp):
         if "model" not in self.__dict__:
             from yolox.models import YOLOX, YOLOPAFPN, YOLOXHead
             in_channels = [256, 512, 1024]
-            # NANO uses depthwise=True (the key nano difference)
+            # TINY uses STANDARD (non-depthwise) convs -- the key difference from
+            # nano, and where the extra small-object capacity comes from.
             backbone = YOLOPAFPN(
                 self.depth, self.width, in_channels=in_channels,
-                act=self.act, depthwise=True,
+                act=self.act, depthwise=False,
             )
             head = YOLOXHead(
                 self.num_classes, self.width, in_channels=in_channels,
-                act=self.act, depthwise=True,
+                act=self.act, depthwise=False,
             )
             self.model = YOLOX(backbone, head)
         self.model.apply(init_yolo)
@@ -726,20 +707,20 @@ class Exp(MyExp):
 
 
 # --------------------------------------------------------------------------- #
-#  Step 4 — fetch pretrained nano weights + train (with live ckpt promotion)
+#  Step 4 -- fetch pretrained nano weights + train (with live ckpt promotion)
 # --------------------------------------------------------------------------- #
 def fetch_pretrained():
-    """Download official yolox_nano.pth to finetune from. Best-effort — if it
+    """Download official yolox_tiny.pth to finetune from. Best-effort -- if it
     fails we train from scratch (-c omitted)."""
-    dst = os.path.join(TMP, "yolox_nano.pth")
+    dst = os.path.join(TMP, "yolox_tiny.pth")
     if os.path.isfile(dst) and os.path.getsize(dst) > 1_000_000:
         return dst
     url = ("https://github.com/Megvii-BaseDetection/YOLOX/releases/download/"
-           "0.1.1rc0/yolox_nano.pth")
+           "0.1.1rc0/yolox_tiny.pth")
     try:
         sh("wget -q -O %s %s" % (dst, url), check=False)
         if os.path.isfile(dst) and os.path.getsize(dst) > 1_000_000:
-            print("  fetched pretrained yolox_nano.pth", flush=True)
+            print("  fetched pretrained yolox_tiny.pth", flush=True)
             return dst
     except Exception as e:
         print("  !! pretrained fetch failed: %r (train from scratch)" % e,
@@ -782,7 +763,7 @@ def _promote_once():
 class _Promoter(threading.Thread):
     """Background thread: while training runs, continuously copy the newest
     checkpoint to /kaggle/working/yolox_nano_hoop.pth. This is the key defense
-    against Kaggle's SIGKILL wall-clock cutoff — the documented deliverable
+    against Kaggle's SIGKILL wall-clock cutoff -- the documented deliverable
     exists even if train.py is killed mid-run and save_and_export() never runs.
     """
     def __init__(self, interval=90):
@@ -833,7 +814,7 @@ def train(ckpt):
     promoter = _Promoter(interval=90)
     promoter.start()
     try:
-        # Training must not abort the whole kernel — a cutoff/OOM should still
+        # Training must not abort the whole kernel -- a cutoff/OOM should still
         # leave the checkpoints we have on disk (already under /kaggle/working).
         rc = sh(cmd, check=False, env=env)
         print("  train.py exited rc=%d" % rc, flush=True)
@@ -844,7 +825,7 @@ def train(ckpt):
 
 
 # --------------------------------------------------------------------------- #
-#  Step 5 — save weights, eval, export ONNX, best-effort tflite
+#  Step 5 -- save weights, eval, export ONNX, best-effort tflite
 # --------------------------------------------------------------------------- #
 def _find_ckpt():
     """Locate best_ckpt.pth (fallback latest_ckpt.pth) under CKPT_OUT_DIR.
@@ -864,11 +845,11 @@ def save_and_export():
     if not ckpt:
         # The promoter may still have salvaged something to PROMOTED_PTH.
         if os.path.isfile(PROMOTED_PTH):
-            print("  no ckpt dir hit, but promoted %s exists — exporting from it"
+            print("  no ckpt dir hit, but promoted %s exists -- exporting from it"
                   % PROMOTED_PTH, flush=True)
             ckpt = PROMOTED_PTH
         else:
-            print("  !! no checkpoint found under %s — nothing to export"
+            print("  !! no checkpoint found under %s -- nothing to export"
                   % OUT_ROOT, flush=True)
             return
 
@@ -885,7 +866,7 @@ def save_and_export():
     import torch
     fp16 = "--fp16" if torch.cuda.is_available() else ""
 
-    # 5b. Eval (COCO mAP) — best-effort, never fatal. (eval.py has NO -o flag.)
+    # 5b. Eval (COCO mAP) -- best-effort, never fatal. (eval.py has NO -o flag.)
     try:
         eval_py = os.path.join(YOLOX_DIR, "tools", "eval.py")
         if os.path.isfile(eval_py):
@@ -895,7 +876,7 @@ def save_and_export():
     except Exception as e:
         print("  !! eval skipped: %r" % e, flush=True)
 
-    # 5c. Export ONNX — best-effort. export_onnx.py has NO -o flag.
+    # 5c. Export ONNX -- best-effort. export_onnx.py has NO -o flag.
     onnx_out = os.path.join(WORK, "hoopai-yolox.onnx")
     onnx_ok = False
     try:
@@ -909,7 +890,7 @@ def save_and_export():
     except Exception as e:
         print("  !! onnx export failed: %r" % e, flush=True)
 
-    # 5d. ONNX -> tflite via onnx2tf — strictly best-effort. Install the toolchain
+    # 5d. ONNX -> tflite via onnx2tf -- strictly best-effort. Install the toolchain
     # LAZILY here (never during setup_env) so its heavy deps can't destabilise
     # training's numpy/opencv/torch stack. A failure never loses .pth/.onnx.
     if onnx_ok:
@@ -931,13 +912,13 @@ def save_and_export():
                 shutil.copyfile(cands[0], tfl_out)
                 print("SAVED %s (from %s)" % (tfl_out, cands[0]), flush=True)
             else:
-                print("  !! onnx2tf produced no .tflite (rc=%d) — skipping" % rc,
+                print("  !! onnx2tf produced no .tflite (rc=%d) -- skipping" % rc,
                       flush=True)
         except Exception as e:
             print("  !! tflite conversion failed (kept .pth/.onnx): %r" % e,
                   flush=True)
     else:
-        print("  !! no valid ONNX — skipping tflite", flush=True)
+        print("  !! no valid ONNX -- skipping tflite", flush=True)
 
     # 5e. Emit a small metadata file for the app.
     try:
@@ -946,7 +927,7 @@ def save_and_export():
             "classes": TARGET_NAMES,
             "num_classes": len(TARGET_NAMES),
             "input_size": list(INPUT_SIZE),
-            "arch": "yolox_nano",
+            "arch": "yolox_tiny",
             "artifacts": {
                 "pth": os.path.basename(pth_out),
                 "onnx": os.path.basename(onnx_out) if onnx_ok else None,
@@ -969,15 +950,15 @@ def main():
     print("########## HOOPAI YOLOX-NANO TRAINING KERNEL ##########", flush=True)
     os.makedirs(WORK, exist_ok=True)
 
-    setup_env()   # includes fail_fast_env_check() — aborts in <1 min if broken
+    setup_env()   # includes fail_fast_env_check() -- aborts in <1 min if broken
 
     downloaded = download_datasets()
     if not downloaded:
-        raise RuntimeError("no datasets downloaded — cannot proceed")
+        raise RuntimeError("no datasets downloaded -- cannot proceed")
 
     merge_datasets(downloaded)
 
-    add_negatives()   # non-basketball backgrounds → fewer false positives
+    add_negatives()   # non-basketball backgrounds -> fewer false positives
 
     write_exp()
 
@@ -986,9 +967,9 @@ def main():
 
     save_and_export()
 
-    print("########## DONE — artifacts in %s ##########" % WORK, flush=True)
+    print("########## DONE -- artifacts in %s ##########" % WORK, flush=True)
     for f in sorted(os.listdir(WORK)):
-        if f.startswith("hoopai") or f.startswith("yolox_nano_hoop"):
+        if f.startswith("hoopai") or f.startswith("yolox_tiny_hoop"):
             p = os.path.join(WORK, f)
             if os.path.isfile(p):
                 print("   %s  (%.1f MB)" % (f, os.path.getsize(p) / 1e6),
