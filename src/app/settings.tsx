@@ -357,6 +357,7 @@ export default function SettingsScreen() {
   const detectionRate = useSettings((s) => s.detectionRate);
   const perfMode = useSettings((s) => s.perfMode);
   const detectorEngine = useSettings((s) => s.detectorEngine);
+  const detectorAccel = useSettings((s) => s.detectorAccel);
   const lastBenchmark = useSettings((s) => s.lastBenchmark);
   const debugMode = useSettings((s) => s.debugMode);
   const formAnalysis = useSettings((s) => s.formAnalysis);
@@ -553,6 +554,39 @@ export default function SettingsScreen() {
               }}
             />
           </View>
+          {detectorEngine === 'yolox' && (
+            <>
+              <View style={styles.divider} />
+              <View style={styles.settingText}>
+                <Text style={styles.settingLabel}>YOLOX accelerator</Text>
+                <Text style={styles.settingDesc}>
+                  CPU is the most accurate (it's what the Test AI screen uses) and
+                  runs YOLOX in real time on most phones. GPU is faster but can make
+                  the boxes less accurate on some devices. If live tracking looks
+                  worse than Test AI, use CPU; if it feels laggy, try GPU. Turn on
+                  Debug mode below to see the live fps.
+                </Text>
+              </View>
+              <View style={styles.chipWrap}>
+                <SelectChip
+                  label="CPU · accurate"
+                  selected={detectorAccel === 'cpu'}
+                  onPress={() => {
+                    tick();
+                    set('detectorAccel', 'cpu');
+                  }}
+                />
+                <SelectChip
+                  label="GPU · faster"
+                  selected={detectorAccel === 'gpu'}
+                  onPress={() => {
+                    tick();
+                    set('detectorAccel', 'gpu');
+                  }}
+                />
+              </View>
+            </>
+          )}
           <View style={styles.divider} />
           <View style={styles.settingText}>
             <Text style={styles.settingLabel}>Performance</Text>

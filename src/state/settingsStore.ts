@@ -51,6 +51,18 @@ export type PerfMode = 'quality' | 'speed';
  */
 export type DetectorEngine = 'yolo' | 'yolox';
 
+/**
+ * Which compute delegate runs the YOLOX detector.
+ * - 'cpu' (default): XNNPACK — always numerically correct (the Test AI verify
+ *   screen uses it and gets accurate boxes). YOLOX-Nano @416 is small, so it's
+ *   ~real-time, but on an older phone (iPhone XR/A11) it may not hit full fps.
+ * - 'gpu': Metal (iOS) / GPU (Android) — faster, but the GPU delegate can DEGRADE
+ *   YOLOX output on some devices (imprecise/missed boxes). Try it for speed; if
+ *   tracking looks worse than the CPU option, switch back.
+ * Only affects the YOLOX engine; YOLO11 keeps its own auto delegate + self-heal.
+ */
+export type DetectorAccel = 'cpu' | 'gpu';
+
 /** Clip window bounds (seconds), used by the Settings > Video steppers. */
 export const CLIP_PRE_ROLL_MIN = 2;
 export const CLIP_PRE_ROLL_MAX = 10;
@@ -95,6 +107,8 @@ export interface SettingsState {
   perfMode: PerfMode;
   /** Detector architecture (see DetectorEngine). Default 'yolox'. */
   detectorEngine: DetectorEngine;
+  /** Compute delegate for the YOLOX detector (see DetectorAccel). Default 'cpu'. */
+  detectorAccel: DetectorAccel;
   /**
    * Last on-device model smoke-test result — delegate label (e.g.
    * "precise/core-ml") + measured latency in ms. Written by useShotEngine
@@ -148,6 +162,7 @@ export const useSettings = create<SettingsState>()(
       detectionRate: 'auto',
       perfMode: 'quality',
       detectorEngine: 'yolox',
+      detectorAccel: 'cpu',
       lastBenchmark: null,
       debugMode: false,
       formAnalysis: false,

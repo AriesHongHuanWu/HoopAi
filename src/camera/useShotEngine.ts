@@ -256,6 +256,9 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
   // shipping YOLO11 pipeline, so there is zero regression risk.
   const detectorEngine = useSettings((s) => s.detectorEngine);
   const useYolox = detectorEngine === 'yolox';
+  // YOLOX delegate choice — CPU (accurate, default) vs GPU (faster, may degrade).
+  // The user picks in Settings since only their device shows the real fps.
+  const detectorAccel = useSettings((s) => s.detectorAccel);
   // Detector input side: YOLOX is a fixed 416; otherwise 'speed' uses a
   // 320-exported nano (~4× faster). Every consumer (resizer, parser, net-motion,
   // pose scaling) reads this, so quality mode stays identical to the 640 path.
@@ -298,13 +301,19 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
       // the selected model with delegate→CPU fallback; the last rung is
       // always "the other model on CPU" so the user is never stranded in demo.
       const none: Delegates = [];
+      // YOLOX: order the delegates by the user's Settings choice. CPU (XNNPACK)
+      // is always numerically correct — the Test AI verify screen runs YOLOX on
+      // CPU and gets accurate, stable boxes on the exact same model. On device the
+      // Metal GPU delegate DEGRADED YOLOX output (imprecise / missed boxes) without
+      // producing the fully-garbage tensor the self-heal corrupt-check catches, so
+      // 'cpu' is the accurate default. 'gpu' is offered for speed on phones where
+      // CPU can't keep up; the other delegate is always the fallback rung.
+      const yoloxGpu = { asset: MODEL_ASSETS.yolox, label: `yolox/${fast.label}`, delegates: fast.delegates };
+      const yoloxCpu = { asset: MODEL_ASSETS.yolox, label: 'yolox/cpu', delegates: none };
       const attempts: Attempt[] = useYolox
-        ? [
-            // YOLOX is a standard-conv graph: the GPU delegate should run it
-            // correctly (no corrupt-fallback needed), CPU is the safety rung.
-            { asset: MODEL_ASSETS.yolox, label: `yolox/${fast.label}`, delegates: fast.delegates },
-            { asset: MODEL_ASSETS.yolox, label: 'yolox/cpu', delegates: none },
-          ]
+        ? detectorAccel === 'gpu'
+          ? [yoloxGpu, yoloxCpu]
+          : [yoloxCpu, yoloxGpu]
         : perfMode === 'speed' || forceCpu
           ? [
               { asset: MODEL_ASSETS.fast, label: `fast/${fast.label}`, delegates: fast.delegates },
@@ -381,7 +390,7 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
     return () => {
       alive = false;
     };
-  }, [detectorModel, perfMode, detInputSize, forceCpu, useYolox]);
+  }, [detectorModel, perfMode, detInputSize, forceCpu, useYolox, detectorAccel]);
 
   const isModelLoaded = modelState.model != null;
   // 'camera' as soon as a real device exists and we're not in EXPLICIT demo
