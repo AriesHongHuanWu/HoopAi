@@ -10,10 +10,17 @@
 export const DETECTION = {
   /** Detector input side (letterboxed square). 640 is the floor for a 20–40px ball. */
   inputSize: 640,
-  /** Ball confidence gate in open court. */
-  ballScoreMin: 0.3,
+  /**
+   * Ball confidence gate in open court. Lowered from 0.3 → 0.2 for YOLOX: the
+   * ball is a small object and at the 416 letterboxed input the model scores it
+   * in the ~0.2–0.35 band (vs the old 640 YOLO11 which sat higher), so 0.3 was
+   * rejecting a real ball across most of its arc. 0.2 catches it; the Kalman
+   * tracker + shot FSM (up-zone entry, trajectory shape) reject stray boxes so a
+   * lower gate doesn't create phantom shots.
+   */
+  ballScoreMin: 0.2,
   /** Relaxed ball gate inside the hoop ROI (occlusion/blur near the rim). */
-  ballScoreMinHoopRoi: 0.15,
+  ballScoreMinHoopRoi: 0.1,
   /**
    * Rim confidence gate. The rim is a small, static, net-occluded object a nano
    * detector scores in the 0.3-0.5 band from a 15-30 ft side view — gating at

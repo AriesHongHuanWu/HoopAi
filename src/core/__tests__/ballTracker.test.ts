@@ -145,7 +145,10 @@ describe('BallTracker', () => {
 
   test('relaxed confidence gate applies only inside the hoop ROI', () => {
     const hoopRoi: Box = { x: 300, y: 100, width: 100, height: 100 };
-    const score = 0.2; // between ballScoreMinHoopRoi (0.15) and ballScoreMin (0.3)
+    // Midway between the relaxed hoop-ROI gate and the open-court gate, so it's
+    // accepted inside the ROI but rejected outside — derived from the constants
+    // so it survives threshold retuning.
+    const score = (DETECTION.ballScoreMinHoopRoi + DETECTION.ballScoreMin) / 2;
 
     // Same score OUTSIDE the ROI: rejected.
     const outside = new BallTracker({});

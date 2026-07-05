@@ -74,6 +74,9 @@ export class ShotPipeline {
   private form: FormAnalyzer | null = null;
   private formHand: ShootingHand = 'right';
   private sawPoseThisShot = false;
+  /** Latest pose ankle-midpoint (analysis px) — the pose-based shooter foot for
+   *  2/3 estimation. Null until a pose with a visible ankle arrives. */
+  private lastPoseFootPx: { x: number; y: number } | null = null;
 
   constructor(events: PipelineEvents = {}) {
     this.events = events;
@@ -126,6 +129,12 @@ export class ShotPipeline {
       if (!this.form) this.form = new FormAnalyzer({ hand: this.formHand, frameHeight: frame.frameHeight });
       this.form.push(pose, ball);
       this.sawPoseThisShot = true;
+      // Pose (MoveNet) gives a far more reliable shooter foot than the YOLO
+      // person box for the 2/3-point estimate — the ankle keypoints are exactly
+      // "where they're standing". Keep the latest ankle midpoint (analysis px);
+      // the shooter barely moves during a shot, so the latest is a good origin.
+      const foot = poseFootPx(pose);
+      if (foot) this.lastPoseFootPx = foot;
     }
 
     let phase: ShotPhase = 'IDLE';
@@ -162,10 +171,21 @@ export class ShotPipeline {
       // the shooter's foot (resolved.originX/Y). Attach the estimated value
       // BEFORE emitting so downstream stats/modes can score points.
       if (this.lastRim) {
+        // Prefer the pose-derived foot (ankle midpoint) when a pose was tracked
+        // this shot — it localizes the shooter far better than the person box.
+        // Fall back to the FSM's person-box origin when no pose is available.
+        let originX = resolved.originX;
+        let originY = resolved.originY;
+        if (this.sawPoseThisShot && this.lastPoseFootPx && frame.frameWidth > 0 && frame.frameHeight > 0) {
+          originX = this.lastPoseFootPx.x / frame.frameWidth;
+          originY = this.lastPoseFootPx.y / frame.frameHeight;
+          resolved.originX = originX;
+          resolved.originY = originY;
+        }
         const est = estimateShotValue(
           this.lastRim,
-          resolved.originX,
-          resolved.originY,
+          originX,
+          originY,
           { width: frame.frameWidth, height: frame.frameHeight },
         );
         resolved.shotValue = est.value;
@@ -185,6 +205,7 @@ export class ShotPipeline {
       }
       if (this.form) this.form.reset();
       this.sawPoseThisShot = false;
+      this.lastPoseFootPx = null; // freshen per shot
       this.events.onShot?.(resolved);
     }
     return state;
@@ -195,6 +216,7 @@ export class ShotPipeline {
     this.rimLock.reset();
     this.form = null;
     this.sawPoseThisShot = false;
+    this.lastPoseFootPx = null;
     this.fsm = null;
     this.lastRim = null;
     this.wasDrifted = false;
@@ -210,6 +232,21 @@ export class ShotPipeline {
     }
     if (first) this.events.onRimLocked?.(rim);
   }
+}
+
+/**
+ * Shooter foot from a pose frame: the midpoint of the two ankle keypoints
+ * (analysis-frame px, already de-normalized by the pose parser). Uses whichever
+ * ankle is visible; null when neither cleared the pose parser's score gate.
+ * A far better "where they're standing" cue than the YOLO person-box bottom.
+ */
+function poseFootPx(pose: PoseFrame): { x: number; y: number } | null {
+  const la = pose.keypoints.left_ankle;
+  const ra = pose.keypoints.right_ankle;
+  if (la && ra) return { x: (la.x + ra.x) / 2, y: (la.y + ra.y) / 2 };
+  if (la) return { x: la.x, y: la.y };
+  if (ra) return { x: ra.x, y: ra.y };
+  return null;
 }
 
 function bestPerson(frame: FrameDetections): Box | null {
