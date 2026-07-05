@@ -523,34 +523,33 @@ export default function SettingsScreen() {
             Standard: every iPhone since XR · Precise: iPhone 13 and newer recommended.
           </Text>
           <Text style={styles.tierCaption}>
-            Standard/Precise are Ultra-Max (Temp) YOLO11 builds. The
-            clean-license YOLOX engine below is the planned replacement.
+            These Standard/Precise tiers apply only to the YOLO11 fallback below.
           </Text>
           <View style={styles.divider} />
           <View style={styles.settingText}>
-            <Text style={styles.settingLabel}>Detector engine (beta)</Text>
+            <Text style={styles.settingLabel}>Detector engine</Text>
             <Text style={styles.settingDesc}>
-              YOLOX is an Apache-licensed detector that the iPhone GPU can run
-              directly — aiming for faster, steadier boxes. It overrides the
-              model and performance settings above. Beta: try it and see if
-              tracking feels better; switch back anytime.
+              YOLOX is the default — an Apache-licensed detector the iPhone GPU
+              runs directly for faster, steadier boxes and a clean licence. YOLO11
+              is the older fallback (and the Detector model / Performance settings
+              above apply to it). Switch anytime.
             </Text>
           </View>
           <View style={styles.chipWrap}>
             <SelectChip
-              label="YOLO11 · current"
-              selected={detectorEngine === 'yolo'}
-              onPress={() => {
-                tick();
-                set('detectorEngine', 'yolo');
-              }}
-            />
-            <SelectChip
-              label="YOLOX · beta"
+              label="YOLOX · default"
               selected={detectorEngine === 'yolox'}
               onPress={() => {
                 tick();
                 set('detectorEngine', 'yolox');
+              }}
+            />
+            <SelectChip
+              label="YOLO11 · fallback"
+              selected={detectorEngine === 'yolo'}
+              onPress={() => {
+                tick();
+                set('detectorEngine', 'yolo');
               }}
             />
           </View>

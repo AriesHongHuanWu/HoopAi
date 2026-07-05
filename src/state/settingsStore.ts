@@ -42,14 +42,12 @@ export type PerfMode = 'quality' | 'speed';
 
 /**
  * Which detector architecture to run.
- * - 'yolo' (default): the shipping Ultralytics YOLO11 detector (AGPL). GPU
+ * - 'yolox' (default): the Apache-2.0 YOLOX-Nano detector (416px, obj-aware). A
+ *   standard-conv graph the Metal GPU runs correctly, so it's fast AND accurate
+ *   on iPhone — and its licence is clean for a paid app (AP50 0.873).
+ * - 'yolo' (legacy fallback): the older Ultralytics YOLO11 detector (AGPL). GPU
  *   delegates corrupt its graph on some iPhones, so the self-healing delegate
- *   falls back to CPU there (see useShotEngine).
- * - 'yolox' (beta): the Apache-2.0 YOLOX-Nano detector (416px, obj-aware). A
- *   standard-conv graph the Metal GPU runs correctly, so it should be fast AND
- *   accurate on iPhone — and its licence is clean for a paid app. Offline-
- *   validated (AP50 0.873); the live camera feed still needs an on-device
- *   confirmation, which is why it's opt-in and default-off.
+ *   falls back to CPU there (see useShotEngine). Kept selectable as a fallback.
  */
 export type DetectorEngine = 'yolo' | 'yolox';
 
@@ -95,7 +93,7 @@ export interface SettingsState {
   detectionRate: DetectionRate;
   /** Detector input resolution / speed tradeoff (see PerfMode). */
   perfMode: PerfMode;
-  /** Detector architecture (see DetectorEngine). Default 'yolo'. */
+  /** Detector architecture (see DetectorEngine). Default 'yolox'. */
   detectorEngine: DetectorEngine;
   /**
    * Last on-device model smoke-test result — delegate label (e.g.
@@ -149,7 +147,7 @@ export const useSettings = create<SettingsState>()(
       detectorModel: 'auto',
       detectionRate: 'auto',
       perfMode: 'quality',
-      detectorEngine: 'yolo',
+      detectorEngine: 'yolox',
       lastBenchmark: null,
       debugMode: false,
       formAnalysis: false,
@@ -170,8 +168,16 @@ export const useSettings = create<SettingsState>()(
       // "from version N" to branch on instead of relying on zustand's default
       // shallow-merge rehydration, which silently keeps stale/renamed keys
       // around forever.
-      version: 1,
-      migrate: (persisted) => persisted as SettingsState,
+      version: 2,
+      migrate: (persisted, version) => {
+        const s = persisted as SettingsState;
+        // v2: YOLOX (Apache-2.0, GPU-correct) becomes the default detector. Move
+        // existing installs off the old YOLO11 default onto it — the opt-in beta
+        // shipped only hours earlier, so there are no meaningful explicit 'yolo'
+        // choices worth preserving. Anyone can re-select YOLO11 in Settings.
+        if (version < 2) s.detectorEngine = 'yolox';
+        return s;
+      },
     },
   ),
 );
