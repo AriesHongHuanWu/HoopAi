@@ -337,24 +337,38 @@ describe('BallTracker', () => {
     expect(out!.cy).toBeCloseTo(400);
   });
 
-  test('occlusion: predicts for maxPredictedFrames, then resets and returns null', () => {
+  test('occlusion: bridges through the time budget, then resets and returns null', () => {
     const tracker = new BallTracker({});
     warmUp(tracker, 3, 400, 300);
+    const lastAcceptT = 2 * DT; // 3rd (last) warm-up frame's timestamp
 
+    // Bridge a stationary ball through occlusion until the tracker gives up.
+    // Count every predicted frame — the cap is now TIME-based, so at 30fps the
+    // 0.5s budget binds before the 20-frame ceiling.
     let step = 3;
-    for (let k = 0; k < TRACKER.maxPredictedFrames; k++) {
+    let predicted = 0;
+    for (;;) {
       const out = tracker.step(frameAt(step * DT, []), null);
-      expect(out).not.toBeNull();
-      expect(out!.predicted).toBe(true);
-      expect(out!.score).toBe(0);
-      expect(out!.r).toBeCloseTo(15, 5);
+      if (out === null) break;
+      expect(out.predicted).toBe(true);
+      expect(out.score).toBe(0);
+      expect(out.r).toBeCloseTo(15, 5);
+      predicted++;
       step++;
+      // Safety: the frame ceiling must always eventually stop the loop.
+      expect(predicted).toBeLessThanOrEqual(TRACKER.maxPredictedFrames);
     }
-    expect(tracker.getHistory()).toHaveLength(3 + TRACKER.maxPredictedFrames);
+
+    // The TIME budget bound the bridge (fewer than the frame ceiling at 30fps):
+    // the last emitted prediction sits within maxPredictedSec of the last real
+    // detection, and one more frame would have exceeded it.
+    expect(predicted).toBeLessThan(TRACKER.maxPredictedFrames);
+    const history = tracker.getHistory();
+    const lastPredT = history[history.length - 1].t;
+    expect(lastPredT - lastAcceptT).toBeLessThanOrEqual(TRACKER.maxPredictedSec + 1e-9);
+    expect(lastPredT + DT - lastAcceptT).toBeGreaterThan(TRACKER.maxPredictedSec);
 
     // Past the budget: dead track.
-    expect(tracker.step(frameAt(step * DT, []), null)).toBeNull();
-    step++;
     expect(tracker.step(frameAt(step * DT, []), null)).toBeNull();
     step++;
 
@@ -366,6 +380,40 @@ describe('BallTracker', () => {
     expect(out!.cy).toBeCloseTo(50);
     expect(out!.vx).toBe(0);
     expect(out!.vy).toBe(0);
+  });
+
+  test('off-frame ghost cull: drops the track once a coasting prediction runs well off-frame', () => {
+    const tracker = new BallTracker({});
+    // Fast rightward motion near the right edge: two accepted detections 100px
+    // apart (within the 120px jump gate) → vx ≈ 3000 px/s in the CV fake.
+    tracker.step(frameAt(0, [ballDet(500, 300)]), null);
+    const moving = tracker.step(frameAt(DT, [ballDet(600, 300)]), null);
+    expect(moving).not.toBeNull();
+    expect(moving!.predicted).toBe(false);
+
+    // Occlude. The constant-velocity prediction marches right ~100px/frame.
+    // Cull fires once predicted x passes 640 + 640*predictOffFrameMarginFrac.
+    const cullX = 640 + 640 * TRACKER.predictOffFrameMarginFrac;
+    let step = 2;
+    let lastPredX = 600;
+    for (;;) {
+      const out = tracker.step(frameAt(step * DT, []), null);
+      if (out === null) break;
+      expect(out.predicted).toBe(true);
+      expect(out.cx).toBeGreaterThan(lastPredX); // still marching right
+      expect(out.cx).toBeLessThanOrEqual(cullX + 1); // never a wildly-off ghost
+      lastPredX = out.cx;
+      step++;
+      expect(step).toBeLessThan(30); // safety
+    }
+
+    // It coasted off the right edge, then the cull dropped the track (rather
+    // than the time/frame budget running out).
+    expect(lastPredX).toBeGreaterThan(640);
+    const reacq = tracker.step(frameAt(step * DT, [ballDet(320, 300)]), null);
+    expect(reacq).not.toBeNull();
+    expect(reacq!.predicted).toBe(false);
+    expect(reacq!.vx).toBe(0); // fresh init, not the old rightward velocity
   });
 
   test('history ring buffer caps at TRACKER.historyLen', () => {

@@ -63,6 +63,53 @@ export type DetectorEngine = 'yolo' | 'yolox';
  */
 export type DetectorAccel = 'cpu' | 'gpu';
 
+/**
+ * A one-tap tracking preset that bundles the four low-level detector knobs
+ * (engine / accelerator / input resolution / frame rate) into a single
+ * accuracy↔speed choice, so most users never open the advanced controls.
+ * - 'accuracy': the most precise setup — YOLOX on CPU at 640px (what the Test
+ *   AI screen uses). Best ball tracking; heaviest on the phone.
+ * - 'balanced': YOLOX on GPU at 640px — the big input keeps the ball visible,
+ *   the GPU keeps it fast. The recommended middle.
+ * - 'smooth': YOLOX on GPU at 416px — lightest and fastest for older phones,
+ *   at some cost to a tiny/far ball.
+ * - 'custom': the knobs were set individually and don't match a preset.
+ */
+export type TrackingPreset = 'accuracy' | 'balanced' | 'smooth' | 'custom';
+
+/** The four detector knobs a non-custom {@link TrackingPreset} sets together. */
+export type TrackingKnobs = Pick<
+  SettingsState,
+  'detectorEngine' | 'detectorAccel' | 'perfMode' | 'detectionRate'
+>;
+
+/** Concrete knob values each preset applies. */
+export const TRACKING_PRESETS: Record<Exclude<TrackingPreset, 'custom'>, TrackingKnobs> = {
+  accuracy: { detectorEngine: 'yolox', detectorAccel: 'cpu', perfMode: 'quality', detectionRate: 'auto' },
+  balanced: { detectorEngine: 'yolox', detectorAccel: 'gpu', perfMode: 'quality', detectionRate: 'auto' },
+  smooth: { detectorEngine: 'yolox', detectorAccel: 'gpu', perfMode: 'speed', detectionRate: 'auto' },
+};
+
+/**
+ * Which preset the current knob values correspond to, or 'custom' when they
+ * match none. Derived (not persisted) so the preset selector and the advanced
+ * knobs can never drift out of sync.
+ */
+export function presetFromKnobs(s: TrackingKnobs): TrackingPreset {
+  for (const key of ['accuracy', 'balanced', 'smooth'] as const) {
+    const p = TRACKING_PRESETS[key];
+    if (
+      p.detectorEngine === s.detectorEngine &&
+      p.detectorAccel === s.detectorAccel &&
+      p.perfMode === s.perfMode &&
+      p.detectionRate === s.detectionRate
+    ) {
+      return key;
+    }
+  }
+  return 'custom';
+}
+
 /** Clip window bounds (seconds), used by the Settings > Video steppers. */
 export const CLIP_PRE_ROLL_MIN = 2;
 export const CLIP_PRE_ROLL_MAX = 10;
@@ -133,6 +180,12 @@ export interface SettingsState {
   dailyGoalMakes: number;
 
   set: <K extends keyof SettingsState>(key: K, value: SettingsState[K]) => void;
+  /**
+   * Apply a tracking preset atomically — sets engine + accelerator + input
+   * resolution + frame rate in one update so the four never land in an
+   * inconsistent intermediate state. See {@link TRACKING_PRESETS}.
+   */
+  applyTrackingPreset: (preset: Exclude<TrackingPreset, 'custom'>) => void;
   /** Mark one screen's walkthrough as seen (called on finish/skip). */
   markTutorialSeen: (screen: TutorialScreen) => void;
   /**
@@ -169,6 +222,7 @@ export const useSettings = create<SettingsState>()(
       tutorialSeen: TUTORIAL_SEEN_DEFAULT,
       dailyGoalMakes: 0,
       set: (key, value) => set({ [key]: value } as Pick<SettingsState, typeof key>),
+      applyTrackingPreset: (preset) => set({ ...TRACKING_PRESETS[preset] }),
       markTutorialSeen: (screen) =>
         set((s) => ({ tutorialSeen: { ...s.tutorialSeen, [screen]: true } })),
       resetTutorial: () => set({ tutorialSeen: { ...TUTORIAL_SEEN_DEFAULT } }),

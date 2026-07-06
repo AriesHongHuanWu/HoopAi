@@ -140,8 +140,33 @@ export class BallTracker {
 
     // No usable detection this frame: bridge short occlusions by prediction.
     if (this.kalman.initialized) {
-      if (this.predictedStreak < TRACKER.maxPredictedFrames) {
+      // Bridge for at most `maxPredictedSec` of WALL-CLOCK time since the last
+      // real detection (device-independent), capped by `maxPredictedFrames` as
+      // a safety net on unusually fast pipelines.
+      const bridgedSec = this.lastAcceptT !== null ? t - this.lastAcceptT : 0;
+      if (
+        this.predictedStreak < TRACKER.maxPredictedFrames &&
+        bridgedSec <= TRACKER.maxPredictedSec
+      ) {
         const est = this.kalman.predict(t);
+        // Cull a runaway prediction that has coasted well off-frame rather than
+        // emitting a ghost ball there (precision guard — see config): during a
+        // long occlusion the constant-velocity term keeps marching in a straight
+        // line, and a ghost at an absurd position could feed the FSM a fake
+        // rim-plane crossing. A real ball is on-screen when a make/miss is at
+        // stake, so dropping a generously-off-frame prediction costs nothing.
+        const margin =
+          Math.max(frame.frameWidth, frame.frameHeight) *
+          TRACKER.predictOffFrameMarginFrac;
+        if (
+          est.x < -margin ||
+          est.x > frame.frameWidth + margin ||
+          est.y < -margin ||
+          est.y > frame.frameHeight + margin
+        ) {
+          this.resetTrack();
+          return null;
+        }
         this.predictedStreak++;
         const sample: BallSample = {
           cx: est.x,

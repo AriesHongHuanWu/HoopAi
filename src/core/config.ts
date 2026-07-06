@@ -65,8 +65,36 @@ export const TRACKER = {
    * part or netting — unless the sample is flagged as a motion-blur streak.
    */
   aspectWidthFactor: 1.4,
-  /** Keep predicting through occlusion for at most this many frames. */
-  maxPredictedFrames: 8,
+  /**
+   * Occlusion bridge: keep emitting Kalman predictions through a gap of at most
+   * this much WALL-CLOCK time. Time-based (not a fixed frame count) so the
+   * bridge is device-INDEPENDENT: a 30 fps phone gets ~15 predicted frames and
+   * a 15 fps phone ~7, i.e. the same ~0.5 s of real occlusion either way. 0.5 s
+   * comfortably covers the ball being hidden by a defender or by the net/rim at
+   * the basket (exactly when we most want the track alive to still call the
+   * make), while staying short enough that a ball which has truly left never
+   * coasts on as a ghost for long.
+   */
+  maxPredictedSec: 0.5,
+  /**
+   * Hard ceiling on predicted frames regardless of time: a safety net for an
+   * unexpectedly fast pipeline (e.g. 60 fps) so `maxPredictedSec` stays the real
+   * limiter on normal devices. Raised from the old fixed 8, which (being frame-
+   * counted) made the bridge device-DEPENDENT: only ~0.27 s at 30 fps, so a ball
+   * hidden behind a defender for a third of a second dropped the track.
+   */
+  maxPredictedFrames: 20,
+  /**
+   * Drop the track instead of emitting a predicted "ghost" ball once the Kalman
+   * extrapolation leaves the frame by more than this fraction of the frame's
+   * larger side. During occlusion the constant-velocity term marches the
+   * prediction in a straight line; without this cull a ball that actually left
+   * the frame coasts to an absurd off-screen position and can feed the shot FSM
+   * a fabricated rim-plane crossing. A real ball is on-screen when it matters
+   * for a make/miss call, so culling generously-off-frame predictions is pure
+   * precision with no cost to legitimate near-edge arcs.
+   */
+  predictOffFrameMarginFrac: 0.6,
   /** Drop samples older than this from the live buffer (seconds). */
   staleSampleSec: 2.0,
   /** Gravity prior for the constant-acceleration Kalman filter, px/s². Set at runtime from rim size (px-per-meter estimate); this is the fallback. */

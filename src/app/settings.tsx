@@ -26,9 +26,11 @@ import {
   CLIP_POST_ROLL_MIN,
   CLIP_PRE_ROLL_MAX,
   CLIP_PRE_ROLL_MIN,
+  presetFromKnobs,
   useSettings,
   type DetectionRate,
   type KeepMode,
+  type TrackingPreset,
   type VoiceMetric,
 } from '@/state/settingsStore';
 
@@ -79,6 +81,34 @@ const DETECTION_RATE_OPTIONS: { value: DetectionRate; label: string; blurb: stri
   { value: 'auto', label: 'Auto · recommended', blurb: 'Smooth tracking on every supported phone.' },
   { value: 'battery', label: 'Battery saver', blurb: 'Cooler phone, longer sessions.' },
   { value: 'max', label: 'Maximum', blurb: 'Newest phones only.' },
+];
+
+/**
+ * One-tap tracking presets — the primary Detection control. Each bundles the
+ * four advanced knobs (see TRACKING_PRESETS in settingsStore). Ordered most →
+ * least accurate; 'accuracy' is the default and the one we recommend because
+ * precise ball tracking is what this app lives or dies on.
+ */
+const PRESET_OPTIONS: {
+  value: Exclude<TrackingPreset, 'custom'>;
+  label: string;
+  blurb: string;
+}[] = [
+  {
+    value: 'accuracy',
+    label: 'Best accuracy · recommended',
+    blurb: 'YOLOX on CPU at 640px — the most precise ball tracking, the same path the Test AI screen uses. Runs in real time on most phones.',
+  },
+  {
+    value: 'balanced',
+    label: 'Balanced',
+    blurb: 'YOLOX on GPU at 640px — the large image still catches the small ball, and the GPU keeps it fast.',
+  },
+  {
+    value: 'smooth',
+    label: 'Smooth · older phones',
+    blurb: 'YOLOX on GPU at 416px — the lightest, fastest option, at some cost to a tiny or far ball.',
+  },
 ];
 
 /** Fires selection haptics when the user has them enabled. */
@@ -363,7 +393,22 @@ export default function SettingsScreen() {
   const formAnalysis = useSettings((s) => s.formAnalysis);
   const dailyGoalMakes = useSettings((s) => s.dailyGoalMakes);
   const set = useSettings((s) => s.set);
+  const applyTrackingPreset = useSettings((s) => s.applyTrackingPreset);
   const resetTutorial = useSettings((s) => s.resetTutorial);
+
+  // Derived tracking preset (never persisted — always reflects the live knobs).
+  const activePreset = presetFromKnobs({
+    detectorEngine,
+    detectorAccel,
+    perfMode,
+    detectionRate,
+  });
+  // Advanced detector knobs are collapsed by default; auto-expanded on mount
+  // only when the current knobs don't match any preset (so a returning "custom"
+  // user sees what they changed).
+  const [advancedOpen, setAdvancedOpen] = useState(
+    () => presetFromKnobs(useSettings.getState()) === 'custom',
+  );
 
   // Transient caption shown after "Restart tutorial" is tapped.
   const [tutorialNotice, setTutorialNotice] = useState(false);
@@ -481,6 +526,59 @@ export default function SettingsScreen() {
         {/* Detection */}
         <Card>
           <Eyebrow>Detection</Eyebrow>
+          <View style={styles.settingText}>
+            <Text style={styles.settingLabel}>Tracking mode</Text>
+            <Text style={styles.settingDesc}>
+              One choice that trades accuracy against speed for your phone. Most
+              people never need the advanced controls.
+            </Text>
+          </View>
+          {PRESET_OPTIONS.map((opt, i) => (
+            <View key={opt.value}>
+              {i > 0 && <View style={styles.divider} />}
+              <OptionRow
+                label={opt.label}
+                blurb={opt.blurb}
+                selected={activePreset === opt.value}
+                onPress={() => {
+                  tick();
+                  applyTrackingPreset(opt.value);
+                }}
+              />
+            </View>
+          ))}
+          {activePreset === 'custom' && (
+            <Text style={styles.tierCaption}>
+              Custom — your advanced controls below don&apos;t match a preset.
+              Pick one above to snap back to a bundle.
+            </Text>
+          )}
+          <View style={styles.divider} />
+          <Pressable
+            accessibilityRole="button"
+            accessibilityState={{ expanded: advancedOpen }}
+            accessibilityLabel="Advanced detection controls"
+            accessibilityHint="Engine, accelerator, resolution, frame rate and debug"
+            onPress={() => {
+              tick();
+              setAdvancedOpen((v) => !v);
+            }}
+            style={({ pressed }) => [
+              styles.optionRow,
+              pressed && { backgroundColor: color.surfaceRaised },
+            ]}
+          >
+            <View style={styles.settingText}>
+              <Text style={styles.settingLabel}>Advanced controls</Text>
+              <Text style={styles.settingDesc}>
+                Engine, accelerator, resolution, frame rate and debug.
+              </Text>
+            </View>
+            <Text style={styles.chevron}>{advancedOpen ? '▲' : '▼'}</Text>
+          </Pressable>
+          {advancedOpen && (
+          <>
+          <View style={styles.divider} />
           <View style={styles.settingText}>
             <Text style={styles.settingLabel}>Device benchmark</Text>
             <Text style={styles.settingDesc}>{benchmarkSummary(lastBenchmark)}</Text>
@@ -647,6 +745,8 @@ export default function SettingsScreen() {
               set('debugMode', v);
             }}
           />
+          </>
+          )}
         </Card>
 
         {/* Coaching */}
