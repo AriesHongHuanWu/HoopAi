@@ -124,6 +124,15 @@ export interface RimGeometry {
   hoopRoi: Box;
   /** Region of the net, monitored for motion bursts. */
   netRoi: Box;
+  /**
+   * Rim box aspect ratio (width / height) — a rough camera-angle proxy. A rim
+   * viewed from a normal side/elevated angle sits in a stable band; an EXTREME
+   * aspect (very flat = camera near rim level, or near-square/tall = steep
+   * top-down) means the horizontal rim-plane crossing test is geometrically
+   * unreliable. Exposed for on-device diagnostics + future angle-aware fusion;
+   * optional so callers/tests that build a geometry literal need not set it.
+   */
+  aspect?: number;
 }
 
 // ---------------------------------------------------------------------------

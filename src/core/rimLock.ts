@@ -43,6 +43,7 @@ function newRimGeometry(): RimGeometry {
     upZone: { x: 0, y: 0, width: 0, height: 0 },
     hoopRoi: { x: 0, y: 0, width: 0, height: 0 },
     netRoi: { x: 0, y: 0, width: 0, height: 0 },
+    aspect: 1,
   };
 }
 
@@ -64,6 +65,7 @@ function writeGeometry(
   out.box.y = y;
   out.box.width = w;
   out.box.height = h;
+  out.aspect = h > 0 ? w / h : 1;
   out.cx = cx;
   out.cy = cy;
 

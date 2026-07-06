@@ -16,7 +16,7 @@ import { StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import type { SharedValue } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import type { EngineDebug } from '../../camera/useShotEngine';
+import type { EngineDebug, OverlayState } from '../../camera/useShotEngine';
 import { color, radius, space, type } from '../../constants/tokens';
 
 /** Fields worth a re-render — a static frame between detections shouldn't
@@ -40,8 +40,17 @@ function debugChanged(a: EngineDebug, b: EngineDebug): boolean {
   );
 }
 
-export function DebugPanel({ debug }: { debug: SharedValue<EngineDebug> }) {
+export function DebugPanel({
+  debug,
+  overlay,
+}: {
+  debug: SharedValue<EngineDebug>;
+  /** Optional: read the locked rim box to show its aspect (camera-angle proxy). */
+  overlay?: SharedValue<OverlayState>;
+}) {
   const [d, setD] = useState<EngineDebug>(debug.value);
+  // Rim box aspect (width/height) — a rough camera-angle read. 0 = no rim yet.
+  const [rimAsp, setRimAsp] = useState(0);
   const insets = useSafeAreaInsets();
   const { width, height } = useWindowDimensions();
   const isLandscape = width > height;
@@ -49,9 +58,12 @@ export function DebugPanel({ debug }: { debug: SharedValue<EngineDebug> }) {
     const id = setInterval(() => {
       const next = debug.value;
       setD((prev) => (debugChanged(prev, next) ? { ...next } : prev));
+      const r = overlay?.value.rim;
+      const a = r != null && r.height > 0 ? r.width / r.height : 0;
+      setRimAsp((prev) => (Math.abs(prev - a) > 0.05 ? a : prev));
     }, 250);
     return () => clearInterval(id);
-  }, [debug]);
+  }, [debug, overlay]);
 
   // maxScore ~0 across frames => bad input/model. Good detections raise it.
   const scoreColor = d.maxScore > 0.3 ? color.make : d.maxScore > 0.05 ? color.unsure : color.miss;
@@ -82,6 +94,7 @@ export function DebugPanel({ debug }: { debug: SharedValue<EngineDebug> }) {
       <Row k="output" v={`${d.outputLen} · ${d.layout}`} />
       <Row k="maxScore" v={d.maxScore.toFixed(3)} vc={scoreColor} />
       <Row k="dets" v={String(d.detCount)} vc={d.detCount > 0 ? color.make : color.textDim} />
+      <Row k="rim asp" v={rimAsp > 0 ? rimAsp.toFixed(2) : '--'} vc={rimAsp > 0 ? color.text : color.textFaint} />
       <Row k="input" v={`${d.inputMin.toFixed(2)}..${d.inputMax.toFixed(2)}`} vc={inputOk ? color.text : color.miss} />
       <Row k="pixels" v={`${d.nonZeroPct}% nz`} vc={d.nonZeroPct > 5 ? color.make : color.miss} />
       <Row k="buf" v={`${Math.round(d.bufBytes / 1024)} KB`} vc={d.bufBytes > 0 ? color.text : color.miss} />

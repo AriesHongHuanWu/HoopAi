@@ -80,7 +80,10 @@ ROBOFLOW_KEY  = "4wYE6hxRLYRBQWE7DEkz"
 # 40 epochs of YOLOX-Nano at FIXED 416 on P100 over the merged corpus is a far
 # safer fit for a single 8-12h session than the original 80 (which, combined
 # with multiscale-to-640, plausibly needed 15-30h).
-MAX_EPOCH     = 50
+MAX_EPOCH     = 12            # 35 datasets x Tiny x 416 ~= 58min/epoch -> ~12 fits a
+                             # 12h session. CRITICAL: set to the ACHIEVABLE count so the
+                             # cosine LR fully decays (the 50-epoch run cut at 34 left LR
+                             # high = under-converged). Finetune-from-pretrained needs few.
 BATCH_SIZE    = 16            # Tiny (non-depthwise) is heavier than nano; 16 fits P100/T4 15-16GB at 416+fp16
 INPUT_SIZE    = (416, 416)
 
@@ -116,25 +119,48 @@ NAME2TGT = {
 }
 
 
-# (workspace, project, version) -- CURATED high-quality subset for the YOLOX-Tiny
-# run (2026-07-06). Cut from 35 to 12 to (a) keep total images ~15-20k so a
-# heavier Tiny model actually finishes enough epochs under the Kaggle wall, and
-# (b) keep the 4 classes balanced (dropped the huge scoreboard set that would
-# have dominated with 24k ball boxes, and the noisier/redundant single-class
-# sets). Chosen for clean, all-class annotations + realistic game footage.
+# (workspace, project, version) -- FULL 35-dataset corpus. The first Tiny run
+# (2026-07-06) curated this to 12 and, despite a great in-distribution val AP
+# (0.922), GENERALIZED WORSE than the 35-dataset nano on the user's real footage.
+# Lesson: for a heavier model, data VARIETY matters more than epochs-to-converge.
+# Back to all 35 (what made the nano generalize); Tiny gets ~12-15 epochs under
+# the wall, finetuned from pretrained + the live-promoter keeps the best.
 DATASETS = [
-    ("test-datset", "player_detect-0spfb", 1),                            # ball9377 rim6445 made507 person -- ALL classes
-    ("cv-8scak", "cv-cnfd4", 1),                                          # ball2913 rim2645 people3735 -- balanced
-    ("the-university-of-arizona-th1yv", "basketball-shooting-robot", 1),  # rim10140 made339 -- rim-rich
-    ("devin-ross-g0rqc", "basketball-ls818", 71),                         # made-basket 3792 -- the RARE made class
-    ("hotshot", "basketball-detection-tqwcs", 7),                         # ball5658 hoop4994
-    ("amrita-hlhw6", "basketball-and-hoop-detection", 1),                 # ball10103 net2885 -- ball-rich
-    ("queenmary", "basketball-poeple-rin", 1),                            # rim2828 made171
-    ("woo-lgxdg", "final-aops8", 3),                                      # rim2786
-    ("roboflow-jvuqo", "basketball-player-detection-3-ycjdo", 18),        # person-rich (all-class original)
-    ("roboflow-universe-projects", "basketball-players-fy4c2", 25),       # players + ball variety
-    ("basketball-detection-b977c", "basketball-detection-sskux", 7),      # core ball + rim
-    ("computer-vision-project-v2zmg", "basketball-video-analysis", 8),    # real game-video frames
+    ("basketball-detection-b977c", "basketball-detection-sskux", 7),
+    ("roboflow-jvuqo", "basketball-player-detection-3-ycjdo", 18),
+    ("sc-xqmxu", "basketball-and-net-detection", 7),
+    ("computer-vision-project-v2zmg", "basketball-video-analysis", 8),
+    ("finalprojectteam16", "automatic-basketball-scoring-system", 7),
+    ("yolo-bvles", "basketball-detection-1mtj3-4ad5o-c7dos-zmo1g-p9npw-bo5ez", 2),
+    ("computer-vision-d5fjh", "basketball-detection-dn6fg", 4),
+    ("basketball-hoop-tsdku", "basketball-hoop-images", 4),
+    ("ball101", "rim-detection", 1),
+    ("roboflow-jvuqo", "basketball-player-detection-2", 20),
+    ("rohit-krishnan-xr6xf", "basketball_and_hoops", 3),
+    ("basketballcv", "basketball-cv", 9),
+    ("ownprojects", "basketball-w2xcw", 2),
+    ("zaki-b86c6", "basketball-jagmz", 74),
+    ("mytem", "people_basketball_hoops", 6),
+    ("loganwork", "basketball-rdtyv", 6),
+    ("lokesh-podipireddy-eocdt", "basketball-player-detection-6y9yj", 14),
+    ("piebasket", "only_ball_handler", 5),
+    ("zeeshan-public-projects", "basket-ball-tracking-xkyu5", 5),
+    ("basketball-z8lzd", "basketball-6phla", 21),
+    ("basketballv1", "basketball-ikdxt", 22),
+    ("roboflow-universe-projects", "basketball-players-fy4c2", 25),
+    ("dataset-baketball", "baskball", 5),
+    ("public-0stx0", "made-baskets", 3),
+    ("tickstrike", "basketball-players-and-ball1", 4),
+    ("ntu-nw2om", "tracking-players-and-balls", 3),
+    ("the-university-of-arizona-th1yv", "basketball-shooting-robot", 1),
+    ("test-datset", "player_detect-0spfb", 1),
+    ("devin-ross-g0rqc", "basketball-ls818", 71),
+    ("queenmary", "basketball-poeple-rin", 1),
+    ("woo-lgxdg", "final-aops8", 3),
+    ("hotshot", "basketball-detection-tqwcs", 7),
+    ("abc-bvosr", "automated-basketball-scoreboard", 2),
+    ("amrita-hlhw6", "basketball-and-hoop-detection", 1),
+    ("cv-8scak", "cv-cnfd4", 1),
 ]
 
 
@@ -662,7 +688,7 @@ class Exp(MyExp):
         self.eval_interval = 1
         self.print_interval = 20
         self.warmup_epochs = 2
-        self.no_aug_epochs = 10
+        self.no_aug_epochs = 3  # short no-aug fine-tune tail (max_epoch is only 12)
         self.save_history_ckpt = False
 
         # persist checkpoints to /kaggle/working so a cutoff still yields them

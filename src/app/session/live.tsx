@@ -391,7 +391,7 @@ function LiveSessionScreen() {
       <TrajectoryOverlay overlay={engine.overlay} />
 
       {debugMode && <DetectionBoxes overlay={engine.overlay} />}
-      {debugMode && <DebugPanel debug={engine.debug} />}
+      {debugMode && <DebugPanel debug={engine.debug} overlay={engine.overlay} />}
 
       {!rimLocked && <AimingOverlay countdown={countdown} />}
 
