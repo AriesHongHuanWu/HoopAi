@@ -15,7 +15,7 @@
  * session store and renders store state. No per-frame React updates.
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Linking, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
+import { Linking, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import { router, useLocalSearchParams, useNavigation } from 'expo-router';
 import * as ScreenOrientation from 'expo-screen-orientation';
 import * as Haptics from 'expo-haptics';
@@ -34,6 +34,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAppStateGuard } from '../../camera/useAppStateGuard';
 import { ErrorBoundary } from '../../components/ErrorBoundary';
 import { useShotEngine, type ShotEngine } from '../../camera/useShotEngine';
+import { mapAnalysisToView } from '../../components/hud/overlayMapping';
 import { playSound, useShotSounds } from '../../camera/useShotSounds';
 import { useVoiceAnnouncements } from '../../camera/useVoiceAnnouncements';
 import { CoachMarks, useCoachMarks, type CoachStep } from '../../components/coach/CoachMarks';
@@ -257,6 +258,37 @@ function LiveSessionScreen() {
     }, 200);
     return () => clearInterval(id);
   }, [overlaySv]);
+
+  // Tap-to-set-rim — the single most important manual override. A wrong/failed
+  // auto-lock gates ALL shot detection, and until now the only recovery was
+  // ending the session. The user taps the real rim; we invert the HUD overlay
+  // mapping (view px -> analysis-frame px) and lock the rim there.
+  const onTapSetRim = useCallback(
+    (x: number, y: number) => {
+      const eng = engineRef.current;
+      if (eng == null) return;
+      const o = eng.overlay.value;
+      const m = mapAnalysisToView(o, { w: width, h: height });
+      if (!m.ok || m.scale <= 0) return;
+      const ax = (x - m.ox) / m.scale;
+      const ay = (y - m.oy) / m.scale;
+      const S = Math.max(o.frameW, o.frameH) || 416;
+      // Reuse the last-seen rim size when there is one (re-placing a same-size
+      // rim); otherwise a sensible default (~12% of the frame, 2:1).
+      const w = o.rim != null && o.rim.width > 0 ? o.rim.width : S * 0.12;
+      const h = o.rim != null && o.rim.height > 0 ? o.rim.height : Math.max(8, w * 0.5);
+      eng.setManualRim({ x: ax - w / 2, y: ay - h / 2, width: w, height: h });
+      void Haptics.selectionAsync();
+    },
+    [width, height],
+  );
+
+  // Re-aim — drop the lock and return to aiming (auto-lock or tap-to-set again).
+  const onReAim = useCallback(() => {
+    engineRef.current?.reAim();
+    useSession.getState().setRimLocked(false);
+    void Haptics.selectionAsync();
+  }, []);
   useEffect(() => () => {
     if (driftTimer.current) clearTimeout(driftTimer.current);
     if (pausedTimer.current) clearTimeout(pausedTimer.current);
@@ -393,7 +425,7 @@ function LiveSessionScreen() {
       {debugMode && <DetectionBoxes overlay={engine.overlay} />}
       {debugMode && <DebugPanel debug={engine.debug} overlay={engine.overlay} />}
 
-      {!rimLocked && <AimingOverlay countdown={countdown} />}
+      {!rimLocked && <AimingOverlay countdown={countdown} onTap={onTapSetRim} />}
 
       {!rimLocked && liveCoach.visible && (
         <CoachMarks
@@ -431,6 +463,7 @@ function LiveSessionScreen() {
         ]}
         pointerEvents="none"
       >
+        {engine.activeMode === 'camera' && <DetectionHeartbeat debug={engine.debug} />}
         {rimLocked && <StatStrip compact={isLandscape} />}
         {rimLocked && activeMode != null && (
           <View style={styles.modeBanner}>
@@ -482,7 +515,17 @@ function LiveSessionScreen() {
           },
         ]}
       >
-        {isRecording ? <RecIndicator /> : <View />}
+        <Row gap={space.md}>
+          {isRecording && <RecIndicator />}
+          {rimLocked && (
+            <PillButton
+              label="Re-aim"
+              variant="ghost"
+              onPress={onReAim}
+              style={styles.endButton}
+            />
+          )}
+        </Row>
         <PillButton
           label="End session"
           variant="ghost"
@@ -532,7 +575,47 @@ function LiveSessionScreen() {
 // Aiming guidance — shown until the rim locks.
 // ---------------------------------------------------------------------------
 
-function AimingOverlay({ countdown }: { countdown: number | null }) {
+/**
+ * Detection heartbeat — an always-on "is the AI seeing anything?" chip so the
+ * user knows tracking is alive WITHOUT enabling Debug mode. Polls the engine's
+ * debug SharedValue (maxScore is written every analysed frame regardless of the
+ * debug panel) at ~3 Hz. Green = detecting, amber = weak, red = blind.
+ */
+function DetectionHeartbeat({ debug }: { debug: ShotEngine['debug'] }) {
+  const [tone, setTone] = useState<'good' | 'weak' | 'blind'>('blind');
+  useEffect(() => {
+    const id = setInterval(() => {
+      const s = debug.value.maxScore;
+      const next = s > 0.3 ? 'good' : s > 0.05 ? 'weak' : 'blind';
+      setTone((prev) => (prev !== next ? next : prev));
+    }, 300);
+    return () => clearInterval(id);
+  }, [debug]);
+  const dot =
+    tone === 'good' ? color.make : tone === 'weak' ? color.unsure : color.miss;
+  const label = tone === 'good' ? 'Tracking' : tone === 'weak' ? 'Weak signal' : 'No detection';
+  return (
+    <View style={styles.heartbeatWrap}>
+      <HudChip>
+        <Row gap={space.sm}>
+          <View style={[styles.heartbeatDot, { backgroundColor: dot }]} />
+          <Text style={styles.heartbeatLabel} accessibilityLiveRegion="polite">
+            {label}
+          </Text>
+        </Row>
+      </HudChip>
+    </View>
+  );
+}
+
+function AimingOverlay({
+  countdown,
+  onTap,
+}: {
+  countdown: number | null;
+  /** Tap anywhere on the court to place the rim there (view px). */
+  onTap: (x: number, y: number) => void;
+}) {
   const pulse = useSharedValue(0);
   useEffect(() => {
     pulse.value = withRepeat(
@@ -550,14 +633,15 @@ function AimingOverlay({ countdown }: { countdown: number | null }) {
   // inside the reticle so the user knows to hold the camera still.
   const counting = countdown != null;
   return (
-    <View
+    <Pressable
       style={styles.aiming}
-      pointerEvents="none"
+      onPress={(e) => onTap(e.nativeEvent.locationX, e.nativeEvent.locationY)}
+      accessibilityRole="button"
       accessibilityLiveRegion="polite"
       accessibilityLabel={
         counting
-          ? `Rim found. Locking in ${countdown}. Hold steady.`
-          : 'Point the camera at the hoop. Hold steady, the rim locks in automatically.'
+          ? `Rim found. Locking in ${countdown}. Hold steady, or tap the rim to set it yourself.`
+          : 'Point the camera at the hoop. It locks automatically, or tap the rim to set it yourself.'
       }
     >
       <Animated.View style={[styles.rimPlaceholder, boxStyle, counting && styles.rimPlaceholderCounting]}>
@@ -567,9 +651,11 @@ function AimingOverlay({ countdown }: { countdown: number | null }) {
         {counting ? 'Hold steady — locking on the rim' : 'Point the camera at the hoop'}
       </Text>
       <Text style={styles.aimSub}>
-        {counting ? `Locking in ${countdown}…` : 'Hold steady — the rim locks in automatically'}
+        {counting
+          ? `Locking in ${countdown}… or tap the rim to set it now`
+          : 'It locks automatically — or tap the rim to place it yourself'}
       </Text>
-    </View>
+    </Pressable>
   );
 }
 
@@ -658,6 +744,19 @@ const styles = StyleSheet.create({
   topCenter: {
     alignItems: 'center',
     marginTop: space.sm,
+  },
+  heartbeatWrap: {
+    alignSelf: 'flex-start',
+    marginBottom: space.sm,
+  },
+  heartbeatDot: {
+    width: 9,
+    height: 9,
+    borderRadius: 5,
+  },
+  heartbeatLabel: {
+    ...type.caption,
+    color: color.text,
   },
   modeBanner: {
     marginTop: space.sm,

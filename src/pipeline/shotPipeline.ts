@@ -94,11 +94,22 @@ export class ShotPipeline {
     this.formHand = hand;
   }
 
-  /** Manual rim override from the setup screen's tap-to-adjust. */
+  /** Manual rim override from the live tap-to-set-rim. */
   setManualRim(box: Box, frame: { width: number; height: number }): void {
     this.rimLock.setManual(box);
     const rim = this.rimLock.geometry;
     if (rim) this.adoptRim(rim, frame);
+  }
+
+  /**
+   * Drop the current rim lock and return to acquiring (the "Re-aim" control).
+   * Only clears the rim + its derived geometry — the ball tracker/FSM stay put
+   * (a re-aim mid-session shouldn't wipe an in-flight shot's context).
+   */
+  reAim(): void {
+    this.rimLock.reset();
+    this.lastRim = null;
+    this.wasDrifted = false;
   }
 
   get rimGeometry(): RimGeometry | null {

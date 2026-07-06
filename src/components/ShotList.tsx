@@ -333,6 +333,9 @@ const ShotListItem = React.memo(function ShotListItem({
               }
             />
             {shot.corrected === true && <Chip label="Edited" tone="accent" />}
+            {shot.outcome === 'unsure' && shot.corrected !== true && (
+              <Chip label="Review" tone="unsure" />
+            )}
           </Row>
           {(shot.entryAngleDeg != null || shot.releaseAngleDeg != null || hasForm) && (
             <Row gap={space.xs} style={{ flexWrap: 'wrap' }}>

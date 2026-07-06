@@ -228,6 +228,8 @@ export interface ShotEngine {
    */
   inferenceMs: number;
   setManualRim: (box: Box) => void;
+  /** Drop the rim lock and return to acquiring (the "Re-aim" control). */
+  reAim: () => void;
 }
 
 export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotEngine {
@@ -997,6 +999,7 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
         width: detInputSize,
         height: detInputSize,
       }),
+    reAim: () => pipeline.reAim(),
   };
 }
 
