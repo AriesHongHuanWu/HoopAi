@@ -55,6 +55,21 @@ const SPEECH_OPTIONS: Speech.SpeechOptions = {
 };
 
 /**
+ * Streak hype line for a MAKE that extended the current run, or null below
+ * the callout floor. The phone-as-sensor experience (HomeCourt's audio-first
+ * lesson): the shooter never looks at the screen, so the voice carries the
+ * momentum. Escalates with the run — milestones get the big lines, the
+ * in-between makes a steady count so a long run never goes silent.
+ */
+export function streakCallout(streak: number): string | null {
+  if (streak < 3) return null;
+  if (streak >= 10) return `On fire! ${streak} in a row!`;
+  if (streak === 7) return 'On fire! 7 in a row!';
+  if (streak === 5) return 'Heating up — 5 straight!';
+  return `That's ${streak} straight!`;
+}
+
+/**
  * The spoken text for a resolved shot under the given metric, or null when
  * there is nothing to say (metric off, or entry angle unavailable).
  *
@@ -62,31 +77,52 @@ const SPEECH_OPTIONS: Speech.SpeechOptions = {
  * - 'entryAngle': "44 degrees" (rounded); makes say "Make, 44 degrees".
  *   Silent when the shot has no entry angle.
  * - 'fgPct': running "7 for 10" (makes for attempts) after every shot.
+ *
+ * Any make that has the current streak at 3+ gets the streak callout
+ * appended (all metrics) — momentum is the one thing worth interrupting a
+ * heads-down shooter for.
  */
 export function announcementFor(
   metric: VoiceMetric,
   shot: ResolvedShot,
   stats: SessionStats,
 ): string | null {
+  let base: string | null;
   switch (metric) {
     case 'result':
-      return shot.outcome === 'make'
-        ? 'Make!'
-        : shot.outcome === 'miss'
-          ? 'Miss'
-          : 'Unsure — tap to fix';
+      base =
+        shot.outcome === 'make'
+          ? 'Make!'
+          : shot.outcome === 'miss'
+            ? 'Miss'
+            : 'Unsure — tap to fix';
+      break;
     case 'entryAngle': {
-      if (shot.entryAngleDeg === null) return null;
+      if (shot.entryAngleDeg === null) {
+        base = null;
+        break;
+      }
       const deg = Math.round(shot.entryAngleDeg);
       const angle = `${deg} ${deg === 1 ? 'degree' : 'degrees'}`;
-      return shot.outcome === 'make' ? `Make, ${angle}` : angle;
+      base = shot.outcome === 'make' ? `Make, ${angle}` : angle;
+      break;
     }
     case 'fgPct':
-      return `${stats.makes} for ${stats.attempts}`;
+      base = `${stats.makes} for ${stats.attempts}`;
+      break;
     case 'none':
     default:
       return null;
   }
+  if (shot.outcome === 'make') {
+    const hype = streakCallout(stats.currentStreak);
+    if (hype !== null) {
+      // On the 'result' metric the callout REPLACES the plain "Make!" (the
+      // hype line already implies it); other metrics keep their number first.
+      return metric === 'result' ? hype : base === null ? hype : `${base}. ${hype}`;
+    }
+  }
+  return base;
 }
 
 /**
