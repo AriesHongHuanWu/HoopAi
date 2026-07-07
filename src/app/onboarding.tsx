@@ -29,11 +29,14 @@ import {
   type NativeSyntheticEvent,
 } from 'react-native';
 import Animated, {
+  FadeInDown,
   ReduceMotion,
   useAnimatedStyle,
+  useReducedMotion,
   withTiming,
 } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { Ionicons } from '@expo/vector-icons';
 
 import { MakeMissDot, PillButton, Row, Screen } from '@/components/ui';
 import { color, motion, radius, space, touch, type } from '@/constants/tokens';
@@ -144,8 +147,14 @@ function ClipsIllustration({ w }: { w: number }) {
     `M ${chartL} ${baseY} ` +
     ys.map((y, i) => `L ${chartL + stepX * i} ${y}`).join(' ') +
     ` L ${chartR} ${baseY} Z`;
+  // Ghost of the signature shot arc, landing on the trending-up make dot —
+  // carries the motif from panes 1 and 2 through to the payoff pane.
+  const ghostArc = `M ${clipX + 8} ${h - 24} Q ${w * 0.45} ${-h * 0.18} ${chartR} ${h * 0.3}`;
   return (
     <Canvas style={{ width: w, height: h, alignSelf: 'center' }}>
+      <Path path={ghostArc} style="stroke" strokeWidth={2} color={color.accent} opacity={0.16}>
+        <DashPathEffect intervals={[2, 8]} />
+      </Path>
       {/* Clip card with play button and a REC dot */}
       <RoundedRect x={clipX} y={28} width={clipW} height={h - 68} r={12} style="stroke" color={color.textDim} strokeWidth={2} />
       <Circle cx={clipX + 16} cy={44} r={4} color={color.miss} />
@@ -170,26 +179,31 @@ interface PageDef {
   Illustration: (props: { w: number }) => ReactElement;
 }
 
+/**
+ * Benefit-led pages: each title is the payoff, the body explains how it
+ * happens. Page 3 also primes the camera permission the player will grant on
+ * the setup screen — value first, OS dialog later.
+ */
 const PAGES: PageDef[] = [
   {
     key: 'aim',
     eyebrow: 'Step 1 · Setup',
-    title: 'Point it at the hoop',
-    body: 'Prop your phone 15–30 feet to the side of the basket with the whole rim in frame. A tripod, a bench or a water bottle all work.',
+    title: 'Track every shot',
+    body: 'Prop your phone 15–30 feet to the side with the whole rim in frame — a tripod, a bench or a water bottle all work. Then just play.',
     Illustration: AimIllustration,
   },
   {
     key: 'count',
     eyebrow: 'Step 2 · Tracking',
-    title: 'Every shot, counted',
-    body: "We follow the ball's arc and call every make and miss in real time, with courtside sounds you can hear from the free-throw line.",
+    title: "See your misses' pattern",
+    body: 'Every arc is followed to the rim and called make or miss in real time — so short, long or drifting wide shows up while you can still shoot your way out of it.',
     Illustration: CountIllustration,
   },
   {
     key: 'clips',
     eyebrow: 'Step 3 · Highlights',
-    title: 'Your clips, your stats',
-    body: "Record your session and keep the clips you want — makes only by default. FG%, streaks and entry angle land on your dashboard. Each screen will show you around the first time — look for the Skip if you'd rather dive in.",
+    title: 'Share your heat',
+    body: 'Makes become replay clips, and FG%, streaks and entry angle land on your dashboard — ready for the group chat when you catch fire.',
     Illustration: ClipsIllustration,
   },
 ];
@@ -222,6 +236,12 @@ export default function OnboardingScreen() {
   const setSetting = useSettings((s) => s.set);
 
   const lastIndex = PAGES.length - 1;
+
+  // Entrance stagger: illustration → legend → copy → footer. Pages mount up
+  // front, so the cascade plays once on first paint; off under reduced motion.
+  const reducedMotion = useReducedMotion();
+  const enter = (i: number) =>
+    reducedMotion ? undefined : FadeInDown.duration(motion.standard).delay(80 + i * 90);
 
   const finish = () => {
     if (hapticsEnabled) {
@@ -273,36 +293,54 @@ export default function OnboardingScreen() {
         getItemLayout={(_, index) => ({ length: width, offset: width * index, index })}
         renderItem={({ item }) => (
           <View style={[styles.page, { width }]}>
-            <View importantForAccessibility="no-hide-descendants">
+            <Animated.View entering={enter(0)} importantForAccessibility="no-hide-descendants">
               <item.Illustration w={width - space.xl * 2} />
-            </View>
+            </Animated.View>
             {item.key === 'count' && (
-              <Row gap={space.lg} style={styles.legend}>
-                <Row gap={space.xs}>
-                  <MakeMissDot outcome="make" />
-                  <Text style={styles.legendLabel}>Make</Text>
+              <Animated.View entering={enter(1)}>
+                <Row gap={space.lg} style={styles.legend}>
+                  <Row gap={space.xs}>
+                    <MakeMissDot outcome="make" />
+                    <Text style={styles.legendLabel}>Make</Text>
+                  </Row>
+                  <Row gap={space.xs}>
+                    <MakeMissDot outcome="miss" />
+                    <Text style={styles.legendLabel}>Miss</Text>
+                  </Row>
+                  <Row gap={space.xs}>
+                    <MakeMissDot outcome="unsure" />
+                    <Text style={styles.legendLabel}>Unsure — tap to fix</Text>
+                  </Row>
                 </Row>
-                <Row gap={space.xs}>
-                  <MakeMissDot outcome="miss" />
-                  <Text style={styles.legendLabel}>Miss</Text>
-                </Row>
-                <Row gap={space.xs}>
-                  <MakeMissDot outcome="unsure" />
-                  <Text style={styles.legendLabel}>Unsure — tap to fix</Text>
-                </Row>
-              </Row>
+              </Animated.View>
             )}
-            <Text style={styles.pageEyebrow}>{item.eyebrow.toUpperCase()}</Text>
-            <Text style={styles.pageTitle} accessibilityRole="header">
-              {item.title}
-            </Text>
-            <Text style={styles.pageBody}>{item.body}</Text>
+            <Animated.View entering={enter(2)} style={styles.copyBlock}>
+              <Text style={styles.pageEyebrow}>{item.eyebrow.toUpperCase()}</Text>
+              <Text style={styles.pageTitle} accessibilityRole="header">
+                {item.title}
+              </Text>
+              <Text style={styles.pageBody}>{item.body}</Text>
+              {item.key === 'clips' && (
+                // Permission primer — sets up the camera ask on the setup
+                // screen before any OS dialog appears. Copy only.
+                <Row gap={space.sm} style={styles.primer}>
+                  <Ionicons name="shield-checkmark-outline" size={16} color={color.make} />
+                  <Text style={styles.primerText}>
+                    Camera access comes next — everything is analyzed on your phone, and
+                    nothing is uploaded.
+                  </Text>
+                </Row>
+              )}
+            </Animated.View>
           </View>
         )}
       />
 
       {/* Dots + CTA */}
-      <View style={[styles.footer, { paddingBottom: insets.bottom + space.xl }]}>
+      <Animated.View
+        entering={enter(3)}
+        style={[styles.footer, { paddingBottom: insets.bottom + space.xl }]}
+      >
         {/* Decorative page dots — no text, invisible to screen readers. */}
         <View importantForAccessibility="no-hide-descendants">
           <Row gap={space.sm} style={styles.dots}>
@@ -311,8 +349,12 @@ export default function OnboardingScreen() {
             ))}
           </Row>
         </View>
-        <PillButton label={page === lastIndex ? "Let's hoop" : 'Next'} onPress={next} />
-      </View>
+        <PillButton
+          label={page === lastIndex ? "Let's hoop" : 'Next'}
+          icon={page === lastIndex ? 'basketball' : undefined}
+          onPress={next}
+        />
+      </Animated.View>
     </Screen>
   );
 }
@@ -349,6 +391,9 @@ const styles = StyleSheet.create({
     ...type.caption,
     color: color.textDim,
   },
+  copyBlock: {
+    gap: space.md,
+  },
   pageEyebrow: {
     ...type.caption,
     color: color.accent,
@@ -361,6 +406,20 @@ const styles = StyleSheet.create({
   pageBody: {
     ...type.body,
     color: color.textDim,
+  },
+  primer: {
+    alignItems: 'flex-start',
+    backgroundColor: color.surface,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: color.border,
+    borderRadius: radius.md,
+    padding: space.md,
+    marginTop: space.xs,
+  },
+  primerText: {
+    ...type.caption,
+    color: color.textDim,
+    flex: 1,
   },
   footer: {
     paddingHorizontal: space.xl,
