@@ -11,6 +11,7 @@ import { router, useLocalSearchParams } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { StyleSheet, Text, View, type LayoutRectangle } from 'react-native';
 
+import { ReelEntryButton } from '@/components/ReelEntryButton';
 import { shareSessionCard } from '@/components/ShareCard';
 import { FramePickerModal } from '@/components/FramePickerModal';
 import { sessionMomentSec } from '@/core/shareFrame';
@@ -219,12 +220,15 @@ export default function SessionSummaryScreen() {
                 setReplayRect({ x, y, width: w, height: h }),
               );
             }}>
-              <PillButton
-                label="Watch replay"
-                icon="play"
-                onPress={() => router.push(`/video/${sessionId}`)}
-                style={styles.replayButton}
-              />
+              <Row gap={space.md} style={styles.replayButton}>
+                <PillButton
+                  label="Watch replay"
+                  icon="play"
+                  onPress={() => router.push(`/video/${sessionId}`)}
+                  style={{ flex: 1 }}
+                />
+                <ReelEntryButton sessionId={sessionId} variant="ghost" style={{ flex: 1 }} />
+              </Row>
             </View>
           )}
           <SessionRecap

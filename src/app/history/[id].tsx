@@ -28,6 +28,7 @@ import {
   decidedEntryAngles,
 } from '@/components/charts/AngleHistogram';
 import { CompareBars } from '@/components/charts/CompareBars';
+import { ReelEntryButton } from '@/components/ReelEntryButton';
 import { Card, Chip, ErrorCard, Eyebrow, PillButton, Row, Screen } from '@/components/ui';
 import { color, radius, space, touch, type } from '@/constants/tokens';
 import { getModeDef, type ModeState } from '@/core/gameModes';
@@ -312,12 +313,15 @@ export default function SessionDetailScreen() {
             style={{ marginTop: space.md }}
           />
           {session.videoPath != null && (
-            <PillButton
-              label="Watch replay"
-              icon="play"
-              onPress={() => router.push(`/video/${session.id}`)}
-              style={{ marginTop: space.lg }}
-            />
+            <Row gap={space.md} style={{ marginTop: space.lg }}>
+              <PillButton
+                label="Watch replay"
+                icon="play"
+                onPress={() => router.push(`/video/${session.id}`)}
+                style={{ flex: 1 }}
+              />
+              <ReelEntryButton sessionId={session.id} variant="ghost" style={{ flex: 1 }} />
+            </Row>
           )}
           {session.modeId != null && (
             <View style={{ marginTop: space.lg }}>
