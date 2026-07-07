@@ -57,6 +57,10 @@ interface HistogramModel {
   maxCount: number;
   mean: number;
   count: number;
+  /** Bin holding the most recent shot's angle — emphasized in the render. */
+  lastIdx: number;
+  /** The most recent shot's angle, degrees. */
+  last: number;
 }
 
 export function AngleHistogram({ angles, height = 120 }: AngleHistogramProps) {
@@ -67,6 +71,7 @@ export function AngleHistogram({ angles, height = 120 }: AngleHistogramProps) {
     if (valid.length < MIN_SAMPLES) return null;
     const bins = new Array<number>(BIN_COUNT).fill(0);
     let sum = 0;
+    let lastIdx = 0;
     for (const a of valid) {
       // Out-of-domain angles clamp into the edge bins so no shot vanishes.
       const idx = Math.min(
@@ -75,12 +80,15 @@ export function AngleHistogram({ angles, height = 120 }: AngleHistogramProps) {
       );
       bins[idx] += 1;
       sum += a;
+      lastIdx = idx;
     }
     return {
       bins,
       maxCount: Math.max(...bins),
       mean: sum / valid.length,
       count: valid.length,
+      lastIdx,
+      last: valid[valid.length - 1]!,
     };
   }, [angles]);
 
@@ -109,6 +117,7 @@ export function AngleHistogram({ angles, height = 120 }: AngleHistogramProps) {
   const a11yLabel =
     `Entry angle histogram across ${model.count} shots. ` +
     `Mean ${Math.round(model.mean)} degrees. ` +
+    `Latest ${Math.round(model.last)} degrees. ` +
     `Optimal band ${FORM.entryAngle.min} to ${FORM.entryAngle.max} degrees.`;
 
   return (
@@ -121,21 +130,55 @@ export function AngleHistogram({ angles, height = 120 }: AngleHistogramProps) {
           <Canvas style={{ width, height }}>
             {/* optimal-arc band behind everything */}
             <Rect x={bandX} y={0} width={bandW} height={height} color={color.makeTint} />
+            {/* count gridlines at 50% and 100% of the tallest bar */}
+            <Rect
+              x={0}
+              y={height - 1 - usableH}
+              width={width}
+              height={1}
+              color={color.border}
+              opacity={0.35}
+            />
+            <Rect
+              x={0}
+              y={height - 1 - usableH / 2}
+              width={width}
+              height={1}
+              color={color.border}
+              opacity={0.55}
+            />
             {/* baseline */}
             <Rect x={0} y={height - 1} width={width} height={1} color={color.border} />
             {model.bins.map((count, i) => {
               if (count === 0) return null;
               const h = Math.max(3, (count / model.maxCount) * usableH);
+              const isLatest = i === model.lastIdx;
+              const x = slot * i + (slot - barW) / 2;
+              const y = height - 1 - h;
               return (
-                <RoundedRect
-                  key={i}
-                  x={slot * i + (slot - barW) / 2}
-                  y={height - 1 - h}
-                  width={barW}
-                  height={h}
-                  r={capR}
-                  color={color.accent}
-                />
+                <React.Fragment key={i}>
+                  <RoundedRect
+                    x={x}
+                    y={y}
+                    width={barW}
+                    height={h}
+                    r={capR}
+                    color={color.accent}
+                    opacity={isLatest ? 1 : 0.72}
+                  />
+                  {/* chalk cap on the bin holding the latest shot */}
+                  {isLatest && (
+                    <RoundedRect
+                      x={x}
+                      y={y}
+                      width={barW}
+                      height={2.5}
+                      r={capR}
+                      color={color.text}
+                      opacity={0.9}
+                    />
+                  )}
+                </React.Fragment>
               );
             })}
             {/* mean marker */}
@@ -156,7 +199,9 @@ export function AngleHistogram({ angles, height = 120 }: AngleHistogramProps) {
         <Text style={styles.axis}>{DOMAIN_MAX}°</Text>
       </Row>
       <Row style={{ justifyContent: 'space-between', marginTop: space.sm }}>
-        <Text style={styles.meta}>Mean {Math.round(model.mean)}°</Text>
+        <Text style={styles.meta}>
+          Mean {Math.round(model.mean)}° · Latest {Math.round(model.last)}°
+        </Text>
         <Text style={[styles.meta, { color: color.make }]}>
           Optimal {FORM.entryAngle.min}–{FORM.entryAngle.max}°
         </Text>

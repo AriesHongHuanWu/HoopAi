@@ -7,6 +7,7 @@
  * center (FORM.entryAngle). Null-safe: a metric without data shows an em dash
  * and an empty track, and never earns a marker.
  */
+import { Ionicons } from '@expo/vector-icons';
 import React from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
@@ -102,7 +103,14 @@ function BarLine({
         )}
       </View>
       <Row gap={3} style={styles.valueCell}>
-        {win && <Text style={styles.win}>▲</Text>}
+        {win && (
+          <Ionicons
+            name="caret-up"
+            size={11}
+            color={color.make}
+            importantForAccessibility="no"
+          />
+        )}
         <Text style={[styles.value, dim && { color: color.textDim }]}>
           {value != null ? format(value) : '—'}
         </Text>
@@ -139,7 +147,7 @@ export function CompareBars({
         </Row>
       </Row>
 
-      {METRICS.map((m) => {
+      {METRICS.map((m, i) => {
         const cur = m.value(current);
         const prv = m.value(previous);
         const cmp = cur != null && prv != null ? m.compare(cur, prv) : 0;
@@ -151,7 +159,12 @@ export function CompareBars({
           `previous ${prv != null ? m.format(prv) : 'no data'}` +
           (cmp > 0 ? '. Better this session.' : cmp < 0 ? '. Better previously.' : '.');
         return (
-          <View key={m.key} accessible accessibilityLabel={a11yLabel} style={{ gap: space.xs }}>
+          <View
+            key={m.key}
+            accessible
+            accessibilityLabel={a11yLabel}
+            style={[styles.metricRow, i > 0 && styles.metricDivider]}
+          >
             <Text style={styles.label}>{m.label}</Text>
             <BarLine
               value={cur}
@@ -166,7 +179,8 @@ export function CompareBars({
               fill={color.textFaint}
               win={cmp < 0}
               format={m.format}
-              dim
+              // The previous session stays quiet unless it actually won the row.
+              dim={cmp >= 0}
             />
           </View>
         );
@@ -176,10 +190,11 @@ export function CompareBars({
 }
 
 const styles = StyleSheet.create({
+  // Mini bar-shaped swatches so the legend echoes the chart's own geometry.
   swatch: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
+    width: 14,
+    height: 5,
+    borderRadius: radius.pill,
   },
   legend: {
     ...type.caption,
@@ -188,6 +203,14 @@ const styles = StyleSheet.create({
   label: {
     ...type.caption,
     color: color.textDim,
+  },
+  metricRow: {
+    gap: space.xs,
+  },
+  metricDivider: {
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: color.border,
+    paddingTop: space.md,
   },
   track: {
     flex: 1,

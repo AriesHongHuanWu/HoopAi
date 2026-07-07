@@ -6,6 +6,7 @@
  * comparison (against the next older session with shots) and the entry-angle
  * histogram.
  */
+import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { router, useLocalSearchParams } from 'expo-router';
 import React, { useEffect, useMemo, useState } from 'react';
@@ -286,7 +287,17 @@ export default function SessionDetailScreen() {
           <Text style={styles.title}>
             {formatSessionDate(session.startedAt)}
           </Text>
-          {meta != null && <Text style={styles.meta}>{meta}</Text>}
+          {meta != null && (
+            <Row gap={space.xs} style={styles.metaRow}>
+              <Ionicons
+                name="time-outline"
+                size={12}
+                color={color.textFaint}
+                importantForAccessibility="no"
+              />
+              <Text style={styles.meta}>{meta}</Text>
+            </Row>
+          )}
           <View style={{ marginTop: space.sm }}>
             <TagField tag={tag} onChange={onTagChange} />
           </View>
@@ -328,7 +339,7 @@ export default function SessionDetailScreen() {
               <ModeBreakdownCard modeId={session.modeId} resultJson={session.modeResultJson} />
             </View>
           )}
-          <View style={{ marginTop: space.lg }}>
+          <View style={styles.recapSection}>
             <SessionRecap
               shots={record.shots}
               stats={record.stats}
@@ -338,7 +349,7 @@ export default function SessionDetailScreen() {
               keepMode={session.keepMode}
             />
           </View>
-          <View style={{ marginTop: space.lg, gap: space.lg }}>
+          <View style={styles.analysisSection}>
             {prev != null && (
               <Card>
                 <Eyebrow>Vs previous session</Eyebrow>
@@ -381,11 +392,29 @@ const styles = StyleSheet.create({
     ...type.title,
     color: color.text,
   },
+  metaRow: {
+    marginTop: space.xs,
+  },
   meta: {
     ...type.caption,
     color: color.textFaint,
     fontVariant: ['tabular-nums'],
-    marginTop: space.xs,
+  },
+  // Section rhythm: the recap and analysis blocks each open with a hairline
+  // rule + generous top padding so the detail reads in broadcast "segments"
+  // (header / recap / deeper analysis), matching the summary screen's beat.
+  recapSection: {
+    marginTop: space.xl,
+    paddingTop: space.xl,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: color.border,
+  },
+  analysisSection: {
+    marginTop: space.xl,
+    paddingTop: space.xl,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: color.border,
+    gap: space.lg,
   },
   heading: {
     ...type.heading,
