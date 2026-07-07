@@ -3,10 +3,12 @@
  *
  * One instance lives per session. Feed it one {@link FsmFrameInput} per
  * analysed camera frame via {@link ShotFsm.step}. The machine arms when a
- * ball climbs into the rim's up-zone (or a player carries the ball above the
- * rim plane near the hoop — the layup path), buffers the live trajectory,
- * and resolves each attempt to make / miss / unsure by fusing three
- * independent signals:
+ * ball climbs into the rim's up-zone, a player carries the ball above the
+ * rim plane near the hoop (the layup path), or a confident ball falls into
+ * the hoop ROI off a ballistic arc from outside the zone (the
+ * descending-entry / floater path — seeded retroactively from a rolling
+ * pre-arm buffer), buffers the live trajectory, and resolves each attempt
+ * to make / miss / unsure by fusing three independent signals:
  *
  *  - geo — interpolated x at the rim plane on the FINAL descending crossing
  *    lies within the central rim span. `null` when the ball never crossed
@@ -55,12 +57,22 @@ export interface FrameSize {
 /** Why a live shot left SHOT_LIVE (internal). */
 type ResolveReason = 'belowRim' | 'ballLost' | 'timeout';
 
+/** Which arming branch started the live attempt (internal). */
+type ArmVia = 'jump' | 'layup' | 'descend';
+
 /**
  * Max samples kept in the live trajectory trail. A release→rim arc at 15–30 fps
  * is ~15–40 samples, so this doesn't clip a real shot; it just bounds a stuck /
  * occluded shot (which can run to maxLiveSec) so the comet never drags too long.
  */
 const MAX_TRAJ_SAMPLES = 48;
+
+/**
+ * Cap on the rolling pre-arm buffer (descending-entry seeding). 32 covers a
+ * full descendingArm.seedWindowSec at 30 fps; the time-based prune is the
+ * real limiter on slower devices.
+ */
+const PRE_ARM_MAX = 32;
 
 /** Internal per-frame net-motion sample. */
 interface NetSample {
@@ -118,10 +130,27 @@ export class ShotFsm {
    */
   private layupLowStreak = 0;
 
+  // --- stationary-ball suppressor (wedged/resting ball) --------------------
+  /** Arming suppressed until the resting ball leaves the layup zone. */
+  private restingBallSuppressed = false;
+  /** Start of the current still, in-zone run (null = no run in progress). */
+  private stationaryStartT: number | null = null;
+  /** Last time a REAL ball was seen inside the layup zone (gap lapse). */
+  private stationaryLastSeenT = -Infinity;
+
+  /**
+   * Rolling buffer of REAL ball samples observed while NOT live (IDLE /
+   * COOLDOWN), time-pruned to descendingArm.seedWindowSec. The
+   * descending-entry branch fits its approach arc over this and seeds the
+   * live trajectory from it on arm, so a retroactive arm still scores the
+   * plane crossing with full approach geometry.
+   */
+  private preArm: BallSample[] = [];
+
   // --- live-shot state (valid only while phase === 'SHOT_LIVE') ------------
   private tStart = 0;
-  /** Whether the live attempt armed via the layup branch (vs up-zone rise). */
-  private armedViaLayup = false;
+  /** Which branch armed the live attempt (null outside SHOT_LIVE). */
+  private armedVia: ArmVia | null = null;
   private originX: number | null = null;
   private originY: number | null = null;
   private trajectory: BallSample[] = [];
@@ -206,6 +235,11 @@ export class ShotFsm {
   step(input: FsmFrameInput): FsmStepResult {
     const t = input.t;
 
+    // Wedged/resting-ball tracker — runs in EVERY phase so the stillness
+    // observed during a doomed live attempt already suppresses the re-arm
+    // after its timeout resolve (see trackStationaryBall).
+    this.trackStationaryBall(input);
+
     if (this.phase === 'COOLDOWN' && t >= this.lastResolveT + SHOT_FSM.shotCooldownSec) {
       this.phase = 'IDLE';
     }
@@ -226,6 +260,7 @@ export class ShotFsm {
       } else {
         this.layupLowStreak = 0;
       }
+      if (ball !== null && !ball.predicted) this.pushPreArm(ball, t);
       if (ball !== null) {
         const via = this.canArm(input, ball);
         if (via !== null) this.arm(input, ball, via);
@@ -234,6 +269,11 @@ export class ShotFsm {
     }
 
     if (this.phase === 'COOLDOWN') {
+      // Keep the pre-arm buffer warm: a floater's approach frequently spans
+      // the COOLDOWN → IDLE boundary, and the descending-entry branch needs
+      // those samples the moment IDLE resumes.
+      const ball = input.ball;
+      if (ball !== null && !ball.predicted) this.pushPreArm(ball, t);
       return { phase: 'COOLDOWN', liveTrajectory: this.trajectory, resolved: null };
     }
 
@@ -315,7 +355,7 @@ export class ShotFsm {
   // Arming
   // -------------------------------------------------------------------------
 
-  private canArm(input: FsmFrameInput, ball: TrackedBall): 'jump' | 'layup' | null {
+  private canArm(input: FsmFrameInput, ball: TrackedBall): ArmVia | null {
     // Shot cooldown (redundant with COOLDOWN phase gating, kept as a guard).
     if (input.t < this.lastResolveT + SHOT_FSM.shotCooldownSec) return null;
     // Putback guard: after a rim-bounce resolve, hold arming a little longer
@@ -323,6 +363,14 @@ export class ShotFsm {
     if (input.t < this.lastBounceResolveT + SHOT_FSM.putbackWindowSec) {
       return null;
     }
+    // Wedged/resting ball: a ball that has sat still inside the layup zone
+    // re-satisfies the arming conditions every IDLE frame — without this it
+    // loops arm → maxLiveSec timeout → cooldown → re-arm, emitting a junk
+    // review shot every ~5.5 s. ALL branches are refused until the ball
+    // actually leaves the zone: the dislodging poke nudges it upward (a
+    // "rising ball" the jump branch would happily arm) before dropping it
+    // through the net, and that must not read as a fresh attempt either.
+    if (this.restingBallSuppressed) return null;
     const rim = this.rim;
     // Jump shot: ball rising through the up-zone.
     if (ball.vy < 0 && pointInBox(rim.upZone, ball.cx, ball.cy)) return 'jump';
@@ -356,14 +404,54 @@ export class ShotFsm {
     ) {
       return 'layup';
     }
+    // Descending entry (floater/runner): falls into the hoop too fast for
+    // the layup branch, never rose through the up-zone.
+    if (this.canArmDescending(ball)) return 'descend';
     return null;
   }
 
-  private arm(input: FsmFrameInput, ball: TrackedBall, via: 'jump' | 'layup'): void {
+  /**
+   * Descending-entry arm test (floater/runner — see SHOT_FSM.descendingArm).
+   * A real, confident ball inside the hoop ROI, descending within the sanity
+   * cap, whose pre-arm samples fit a clean gravity parabola that ORIGINATED
+   * outside the layup zone. The origin requirement is the discriminator
+   * against at-rim junk: a floater arrives from out past the zone, while a
+   * ball popping up off the rim (rebound residue) starts inside it.
+   */
+  private canArmDescending(ball: TrackedBall): boolean {
+    const cfg = SHOT_FSM.descendingArm;
+    const rim = this.rim;
+    if (ball.predicted || ball.score < cfg.minBallScore) return false;
+    if (ball.vy <= 0) return false;
+    if (ball.vy > cfg.maxFallVyRimWidthsPerSec * rim.box.width) return false;
+    if (!pointInBox(rim.hoopRoi, ball.cx, ball.cy)) return false;
+    const buf = this.preArm;
+    if (buf.length < cfg.minRealSamples) return false;
+    const first = buf[0];
+    if (pointInBox(this.layupZone, first.cx, first.cy)) return false;
+    const fit = fitArc(buf);
+    if (fit === null || fit.r2y < cfg.minR2y) return false;
+    // Gravity floor on ya (≈ g/2): rejects linear drift, whose fit is
+    // near-degenerate in the quadratic term.
+    if (fit.ya < cfg.minYaRimWidthsPerSec2 * rim.box.width) return false;
+    return true;
+  }
+
+  private arm(input: FsmFrameInput, ball: TrackedBall, via: ArmVia): void {
     this.phase = 'SHOT_LIVE';
-    this.armedViaLayup = via === 'layup';
+    this.armedVia = via;
     this.layupLowStreak = 0;
     this.tStart = input.t;
+    if (via === 'descend') {
+      // Retroactive seed: the approach observed while IDLE/COOLDOWN becomes
+      // the head of the live trajectory, so the imminent plane crossing is
+      // scored with real approach geometry and the release metrics come from
+      // the true flight, not from the at-rim arm frame.
+      for (const s of this.preArm) {
+        if (s.t < ball.t) this.trajectory.push(s);
+      }
+    }
+    this.preArm = [];
     const p = input.personBox;
     if (p !== null) {
       // Shooter origin = person-box foot midpoint, normalized 0..1.
@@ -387,6 +475,63 @@ export class ShotFsm {
     this.anyNetPositive = input.netMotionScore > 0;
     this.touchedRim = false;
     this.rimBounce = false;
+  }
+
+  /** Append a REAL sample to the rolling pre-arm buffer and prune it. */
+  private pushPreArm(ball: TrackedBall, t: number): void {
+    this.preArm.push({
+      cx: ball.cx,
+      cy: ball.cy,
+      r: ball.r,
+      t: ball.t,
+      score: ball.score,
+      predicted: false,
+    });
+    const horizon = t - SHOT_FSM.descendingArm.seedWindowSec;
+    while (this.preArm.length > 0 && this.preArm[0].t < horizon) {
+      this.preArm.shift();
+    }
+    if (this.preArm.length > PRE_ARM_MAX) this.preArm.shift();
+  }
+
+  /**
+   * Wedged/resting-ball tracker (every frame, ALL phases — see
+   * SHOT_FSM.stationaryBall). Accumulates how long a REAL ball has sat
+   * essentially still inside the layup zone; past minStillSec, arming is
+   * suppressed (canArm) until a real sample OUTSIDE the zone shows the ball
+   * actually left. Movement inside the zone breaks the stillness run but
+   * deliberately KEEPS the suppression: the dislodging poke that finally
+   * drops the ball through the net must not become a fresh attempt. A long
+   * gap with no real ball at all lets everything lapse, so a stale flag
+   * cannot outlive the wedged ball and block a later real attempt.
+   */
+  private trackStationaryBall(input: FsmFrameInput): void {
+    const cfg = SHOT_FSM.stationaryBall;
+    const ball = input.ball;
+    if (ball === null || ball.predicted) {
+      if (input.t - this.stationaryLastSeenT > cfg.clearAfterGapSec) {
+        this.stationaryStartT = null;
+        this.restingBallSuppressed = false;
+      }
+      return;
+    }
+    if (!pointInBox(this.layupZone, ball.cx, ball.cy)) {
+      // Real ball seen outside the zone: the resting ball left (or a new
+      // ball is in play) — arming may resume.
+      this.stationaryStartT = null;
+      this.restingBallSuppressed = false;
+      return;
+    }
+    this.stationaryLastSeenT = input.t;
+    const eps = cfg.maxSpeedRimWidthsPerSec * this.rim.box.width;
+    if (Math.hypot(ball.vx, ball.vy) > eps) {
+      this.stationaryStartT = null; // moving within the zone: run broken, suppression kept
+      return;
+    }
+    if (this.stationaryStartT === null) this.stationaryStartT = input.t;
+    if (input.t - this.stationaryStartT >= cfg.minStillSec) {
+      this.restingBallSuppressed = true;
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -605,17 +750,18 @@ export class ShotFsm {
     ) {
       outcome = 'unsure';
     }
-    // Pass-through guard: the ball-first layup branch can be armed by a pass
-    // or lob whose 2D path merely CROSSES the rim's projection (in front of
-    // or behind the hoop in depth) — and an in-span descending crossing then
-    // reads geo=true. A real layup make virtually always corroborates via a
-    // net burst or the ball_in_basket class; a geo-ONLY "make" on a
-    // layup-armed attempt is exactly the pass-through signature, so demote
-    // it to unsure rather than minting a phantom make. (touchedRim can't
-    // discriminate here: any in-span crossing overlaps the inflated rim box
-    // by construction.) Jump-shot-armed attempts are untouched — a rising
-    // ball through the up-zone is already strong attempt evidence.
-    if (outcome === 'make' && this.armedViaLayup && net !== true && !cls) {
+    // Pass-through guard: the ball-at-hoop branches (layup AND descending
+    // entry) can be armed by a pass or lob whose 2D path merely CROSSES the
+    // rim's projection (in front of or behind the hoop in depth) — and an
+    // in-span descending crossing then reads geo=true. A real make on those
+    // branches virtually always corroborates via a net burst or the
+    // ball_in_basket class; a geo-ONLY "make" is exactly the pass-through
+    // signature, so demote it to unsure rather than minting a phantom make.
+    // (touchedRim can't discriminate here: any in-span crossing overlaps the
+    // inflated rim box by construction.) Jump-shot-armed attempts are
+    // untouched — a rising ball through the up-zone is already strong
+    // attempt evidence.
+    if (outcome === 'make' && this.armedVia !== 'jump' && net !== true && !cls) {
       outcome = 'unsure';
     }
     if (outcome === 'make') this.lastMakeT = t;
@@ -668,7 +814,7 @@ export class ShotFsm {
     this.maxClsScore = 0;
     this.touchedRim = false;
     this.rimBounce = false;
-    this.armedViaLayup = false;
+    this.armedVia = null;
     this.originX = null;
     this.originY = null;
 

@@ -15,7 +15,7 @@ import type {
 
 const FRAME = { width: 640, height: 640 };
 
-/** Rim box: planeY=200, cx=320, span 304..336, belowY=230, upZone 240..400 × 160..200, hoopRoi 270..370 × 185..235. */
+/** Rim box: planeY=200, cx=320, span 304..336, belowY=230, upZone 240..400 × 160..200, hoopRoi 270..370 × 185..235, layupZone 245..395 × 172.5..247.5. */
 const RIM_BOX: Box = { x: 300, y: 200, width: 40, height: 20 };
 
 function rimFromBox(box: Box): RimGeometry {
@@ -648,5 +648,154 @@ describe('ShotFsm', () => {
     const { resolved: r2 } = run(fsm2, arcFrames({ x0: X0_CENTER }));
     expect(r2[0].originX).toBeNull();
     expect(r2[0].originY).toBeNull();
+  });
+
+  test('(14) wedged ball resting on the rim: ONE timeout resolve, then re-arming is suppressed', () => {
+    // A ball stuck rim/backboard: center just above the plane, inside the
+    // layup zone, motionless, high score. It satisfies the layup arm every
+    // IDLE frame, so without the stationary suppressor the machine loops
+    // arm → 4s maxLiveSec timeout → 'unsure' → 1.5s cooldown → re-arm,
+    // emitting a junk review shot every ~5.5s. 10 seconds covers two loop
+    // periods: exactly one resolve (the original event) may come out.
+    const fsm = newFsm();
+    const frames: FsmFrameInput[] = [];
+    for (let i = 0; i < 300; i++) {
+      const t = i / FPS;
+      frames.push(fin(t, tb(320, 195, t, 0)));
+    }
+    const { resolved, results } = run(fsm, frames);
+
+    expect(resolved).toHaveLength(1);
+    expect(resolved[0].outcome).toBe('unsure');
+    // After the first resolve the machine never goes live again.
+    const resolveIdx = results.findIndex((r) => r.resolved !== null);
+    for (let i = resolveIdx + 1; i < results.length; i++) {
+      expect(results[i].phase).not.toBe('SHOT_LIVE');
+    }
+  });
+
+  test('(14b) dislodging the wedged ball is not an attempt; arming resumes after it leaves the zone', () => {
+    const fsm = newFsm();
+    const frames: FsmFrameInput[] = [];
+    // 6s wedged: arms once at t=0, times out at ~4.03s, suppression latched
+    // (1s of stillness observed DURING the live attempt), re-arm refused.
+    for (let i = 0; i < 180; i++) {
+      const t = i / FPS;
+      frames.push(fin(t, tb(320, 195, t, 0)));
+    }
+    // The dislodging poke: ball nudged UP (a rising in-up-zone sample the
+    // jump branch would normally arm!) then dropping straight through the
+    // hoop in-span with a net burst — the classic phantom-make signature.
+    frames.push(fin(6.0, tb(320, 193, 6.0, -40)));
+    frames.push(fin(6.0 + 1 / 30, tb(320, 205, 6.0 + 1 / 30, 250), { netMotionScore: 0.7 }));
+    frames.push(fin(6.0 + 2 / 30, tb(320, 215, 6.0 + 2 / 30, 350), { netMotionScore: 0.7 }));
+    frames.push(fin(6.0 + 3 / 30, tb(320, 228, 6.0 + 3 / 30, 400), { netMotionScore: 0.7 }));
+    frames.push(fin(6.0 + 4 / 30, tb(320, 242, 6.0 + 4 / 30, 450)));
+    const { resolved } = run(fsm, frames);
+    // Only the original timeout resolve — the poke armed nothing.
+    expect(resolved).toHaveLength(1);
+    expect(resolved[0].outcome).toBe('unsure');
+
+    // Ball lands below the zone: a REAL out-of-zone sample lifts suppression.
+    fsm.step(fin(6.2, tb(320, 300, 6.2, 200)));
+    // A fresh soft layup at the hoop later must arm again.
+    const rearmed = fsm.step(fin(7.0, tb(310, 190, 7.0, 80)));
+    expect(rearmed.phase).toBe('SHOT_LIVE');
+  });
+
+  test('(15) floater falling into the hoop at ~400 px/s arms via descending entry and scores the make', () => {
+    // A 2–4m floater: released far LEFT of the up-zone (x < 240 throughout
+    // its rise), peaking well above the layup band, re-entering the hoop
+    // ROI descending at ~390–420 px/s — over the layup branch's fall gate
+    // (5 × 40 = 200 px/s). Before the descending-entry branch this armed via
+    // NEITHER path and a made floater left net motion with no attempt.
+    const VYF = -734.8; // apex at y ≈ 100
+    const XF0 = 178.3;
+    const VXF = 110; // descending crossing lands at x ≈ 320 (rim center)
+    const netF = (t: number): number => (t >= 1.28 && t <= 1.36 ? 0.6 : 0);
+    const frames: FsmFrameInput[] = [];
+    for (let i = 0; i <= 42; i++) {
+      const t = i / FPS;
+      const cy = Y0 + VYF * t + 0.5 * G * t * t;
+      frames.push(
+        fin(t, tb(XF0 + VXF * t, cy, t, VYF + G * t, { vx: VXF }), {
+          netMotionScore: netF(t),
+        }),
+      );
+    }
+    const { resolved } = run(newFsm(), frames);
+
+    expect(resolved).toHaveLength(1);
+    const s = resolved[0];
+    expect(s.outcome).toBe('make');
+    expect(s.signals).toEqual({ geo: true, net: true, cls: false });
+    expect(Math.abs((s.xCross as number) - 320)).toBeLessThan(2);
+    // Armed retroactively on hoop entry (~t=1.27), not at release…
+    expect(s.tStart).toBeGreaterThan(1.2);
+    // …but the trajectory was seeded from the pre-arm buffer, so the release
+    // metrics come from the true approach, well before the arm frame.
+    expect(s.trajectory[0].t).toBeLessThan(s.tStart - 0.5);
+    expect(s.releasePoint).toEqual({ x: s.trajectory[0].cx, y: s.trajectory[0].cy });
+  });
+
+  test('(15b) descend-armed geo-only "make" (netless, no cls) demotes to unsure like a layup', () => {
+    // Same floater on a silent net: the pass-through guard must apply to the
+    // descending-entry branch too — a lob sailing through the rim's 2D
+    // projection would produce exactly this signature.
+    const VYF = -734.8;
+    const XF0 = 178.3;
+    const VXF = 110;
+    const frames: FsmFrameInput[] = [];
+    for (let i = 0; i <= 42; i++) {
+      const t = i / FPS;
+      const cy = Y0 + VYF * t + 0.5 * G * t * t;
+      frames.push(fin(t, tb(XF0 + VXF * t, cy, t, VYF + G * t, { vx: VXF })));
+    }
+    const { resolved } = run(newFsm(), frames);
+
+    expect(resolved).toHaveLength(1);
+    expect(resolved[0].signals.geo).toBe(true); // attempt + crossing recorded
+    expect(resolved[0].outcome).toBe('unsure'); // but never a geo-only make
+  });
+
+  test('(15c) descending entry demands a confident ball: the same floater at score 0.15 never arms', () => {
+    // This branch arms on a FALLING ball, so relaxed-gate tracking crumbs
+    // (0.12–0.19) may continue flights but must not START attempts here.
+    const VYF = -734.8;
+    const XF0 = 178.3;
+    const VXF = 110;
+    const frames: FsmFrameInput[] = [];
+    for (let i = 0; i <= 42; i++) {
+      const t = i / FPS;
+      const cy = Y0 + VYF * t + 0.5 * G * t * t;
+      frames.push(
+        fin(t, tb(XF0 + VXF * t, cy, t, VYF + G * t, { vx: VXF, score: 0.15 })),
+      );
+    }
+    const { resolved, results } = run(newFsm(), frames);
+    expect(resolved).toHaveLength(0);
+    for (const r of results) expect(r.phase).toBe('IDLE');
+  });
+
+  test('(15d) descending entry refuses an arc that originated INSIDE the layup zone (at-rim junk)', () => {
+    // A loose ball popping up off the rim and dropping back into the hoop
+    // ROI: fast-falling (past the layup gate), real, confident, ballistic —
+    // but its pre-arm arc STARTS inside the layup zone, which is the
+    // discriminator against rebound residue. Kept below the plane and below
+    // the up-zone band the whole time so no other branch can arm either.
+    const seq: Array<[number, number]> = [
+      // [cy, vy] at x=320 — bounce from y=240 up to y=205 and back down.
+      [240, -450],
+      [225, -390],
+      [212, -210],
+      [205, 90],
+      [208, 300],
+      [218, 350],
+      [232, 420],
+    ];
+    const frames = seq.map(([cy, vy], i) => fin(i / FPS, tb(320, cy, i / FPS, vy)));
+    const { resolved, results } = run(newFsm(), frames);
+    expect(resolved).toHaveLength(0);
+    for (const r of results) expect(r.phase).toBe('IDLE');
   });
 });

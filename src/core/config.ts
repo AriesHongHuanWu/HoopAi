@@ -280,6 +280,64 @@ export const SHOT_FSM = {
    */
   putbackWindowSec: 2.0,
   /**
+   * Stationary-ball suppressor (wedged/resting ball). A ball stuck ON the
+   * rim — center just above the plane, inside the layup zone, |v| ≈ 0,
+   * often high score — re-satisfies the ball-at-hoop arm every IDLE frame,
+   * producing an arm → maxLiveSec timeout → 'unsure' → cooldown → re-arm
+   * loop that emits a junk review shot every ~5.5 s until dislodged. Once a
+   * REAL ball has sat inside the layup zone below the speed floor for
+   * minStillSec (tracked across ALL phases, so the stillness observed
+   * during the doomed first attempt already covers the post-timeout
+   * re-arm), arming is refused until a real sample OUTSIDE the zone shows
+   * the ball actually left — so the dislodging poke that finally drops it
+   * through the net cannot read as a fresh make either. Movement alone does
+   * NOT lift the suppression; leaving the zone does, and a long detection
+   * gap (clearAfterGapSec) does, so a stale flag cannot outlive the wedged
+   * ball and block a later real attempt.
+   */
+  stationaryBall: {
+    /** Speed (rim WIDTHS/sec) below which an in-zone ball counts as resting. */
+    maxSpeedRimWidthsPerSec: 0.75,
+    /** In-zone rest time (sec) before arming is suppressed. */
+    minStillSec: 1.0,
+    /** Suppression lapses after this long without any real ball sample. */
+    clearAfterGapSec: 2.0,
+  },
+  /**
+   * Descending-entry arming (floater/runner rescue). A 2–4 m floater rises
+   * OUTSIDE the up-zone's x-range, peaks above the layup band, and re-enters
+   * the hoop region descending at 3–5 m/s — over the layup branch's
+   * fall-speed gate — so it armed via NEITHER branch and a made floater
+   * produced net+cls with no attempt recorded. This branch arms
+   * RETROACTIVELY: a real, confident ball inside the hoop ROI, descending,
+   * whose recent samples fit a clean gravity parabola that ORIGINATED
+   * outside the layup zone (a ball popping up off the rim originates inside
+   * it) arms and seeds the live trajectory from the FSM's rolling pre-arm
+   * buffer, so the plane crossing a few frames later is scored with full
+   * approach geometry. Resolve-side, a descend-armed geo-only "make" is
+   * demoted to unsure exactly like the layup branch (pass-through guard) —
+   * a lob sailing through the rim's 2D projection still cannot mint a make.
+   */
+  descendingArm: {
+    /** Min detector score — arming on a FALLING ball demands real confidence. */
+    minBallScore: 0.3,
+    /** Min REAL pre-arm samples required for the approach fit. */
+    minRealSamples: 5,
+    /** Vertical-fit R² floor — the approach must be cleanly ballistic. */
+    minR2y: 0.85,
+    /**
+     * Floor on the fitted quadratic ya (≈ g/2 in px/s²), in rim WIDTHS/s².
+     * Physical is ~11 (g/2 · rimWidthPx / 0.45 m); 2 tolerates heavy camera
+     * foreshortening while still rejecting linear (non-ballistic) drift,
+     * whose fitted ya sits near 0.
+     */
+    minYaRimWidthsPerSec2: 2,
+    /** Sanity cap on downward speed at arming, rim WIDTHS/sec. */
+    maxFallVyRimWidthsPerSec: 12,
+    /** Rolling pre-arm sample window seeding the trajectory, seconds. */
+    seedWindowSec: 1.0,
+  },
+  /**
    * Virtual-crossing corroborator (occlusion inference). The net/rim hides
    * the ball at exactly the decisive moment, so an armed shot often dies
    * ABOVE the plane with no observed crossing → geo null → 'unsure'. When
