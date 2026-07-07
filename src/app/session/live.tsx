@@ -24,6 +24,7 @@ import { Canvas, Path, Skia } from '@shopify/react-native-skia';
 import Animated, {
   Easing,
   useAnimatedStyle,
+  useReducedMotion,
   useSharedValue,
   withRepeat,
   withTiming,
@@ -39,6 +40,14 @@ import { playSound, useShotSounds } from '../../camera/useShotSounds';
 import { useVoiceAnnouncements } from '../../camera/useVoiceAnnouncements';
 import { CoachMarks, useCoachMarks, type CoachStep } from '../../components/coach/CoachMarks';
 import { HudChip } from '../../components/hud/HudChip';
+import {
+  GHOST_RIM_ASPECT,
+  GHOST_RIM_CENTER_Y_FRAC,
+  GHOST_RIM_WIDTH_FRAC,
+  GhostRim,
+  PlacementGradeChip,
+  usePlacementGrade,
+} from '../../components/hud/PlacementGrade';
 import { ShotFlash } from '../../components/hud/ShotFlash';
 import { DebugPanel } from '../../components/hud/DebugPanel';
 import { DetectionBoxes } from '../../components/hud/DetectionBoxes';
@@ -47,7 +56,7 @@ import { TrajectoryOverlay } from '../../components/hud/TrajectoryOverlay';
 import { ModeBanner } from '../../components/modes/ModeBanner';
 import { ModeComplete } from '../../components/modes/ModeComplete';
 import { Card, Chip, PillButton, Row, Screen } from '../../components/ui';
-import { color, radius, space, type } from '../../constants/tokens';
+import { color, motion, radius, space, type } from '../../constants/tokens';
 import type { ResolvedShot } from '../../core/types';
 import { useMode } from '../../state/modeStore';
 import { useSession } from '../../state/sessionStore';
@@ -235,6 +244,11 @@ function LiveSessionScreen() {
     store.setRimLocked(true);
     if (useSettings.getState().soundsEnabled) {
       playSound('rim_locked', useSettings.getState().soundPack);
+    }
+    // Success haptic at the lock moment — the tactile half of the green-lock
+    // beat (the aiming overlay's ghost/countdown have just read fully green).
+    if (useSettings.getState().hapticsEnabled) {
+      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     }
 
     const { recordVideo, keepMode } = useSettings.getState();
@@ -468,6 +482,8 @@ function LiveSessionScreen() {
         <AimingOverlay
           countdown={countdown}
           warming={engine.activeMode === 'camera' && !engine.isModelLoaded}
+          overlay={engine.overlay}
+          debug={engine.debug}
           onTap={onTapSetRim}
         />
       )}
@@ -658,31 +674,58 @@ function DetectionHeartbeat({ debug }: { debug: ShotEngine['debug'] }) {
 function AimingOverlay({
   countdown,
   warming,
+  overlay,
+  debug,
   onTap,
 }: {
   countdown: number | null;
   /** Detector still loading — first seconds after the camera opens. */
   warming: boolean;
+  /** Engine overlay SharedValue — polled at 5 Hz for the placement grade. */
+  overlay: ShotEngine['overlay'];
+  /** Engine diagnostics SharedValue — effective fps feeds the grade. */
+  debug: ShotEngine['debug'];
   /** Tap anywhere on the court to place the rim there (view px). */
   onTap: (x: number, y: number) => void;
 }) {
+  const { width, height } = useWindowDimensions();
+  const reducedMotion = useReducedMotion();
+
+  // Three stages, one overlay: warming (model loading — the previously-blank
+  // dead seconds now say what's happening), aiming (frame the hoop over the
+  // ghost rim), and counting down (rim stable, locking in N — everything
+  // reads make-green so the lock moment lands unmistakably).
+  const counting = countdown != null;
+
+  // Live placement grade — Good/OK/Poor + ONE actionable reason, polled at
+  // 5 Hz exactly like the rimCountdown poll above (no per-frame React
+  // updates). Hidden while the model warms — nothing to grade yet.
+  const placement = usePlacementGrade(overlay, debug, !warming);
+
+  // Ghost pulse. Respect reduced motion (hold steady); while counting the
+  // ghost also goes solid — the sudden stillness itself signals "locking".
   const pulse = useSharedValue(0);
   useEffect(() => {
+    if (reducedMotion || counting) {
+      pulse.value = withTiming(1, { duration: motion.quick });
+      return;
+    }
     pulse.value = withRepeat(
       withTiming(1, { duration: 1200, easing: Easing.inOut(Easing.ease) }),
       -1,
       true,
     );
-  }, [pulse]);
-  const boxStyle = useAnimatedStyle(() => ({
+  }, [pulse, reducedMotion, counting]);
+  const ghostAnimStyle = useAnimatedStyle(() => ({
     opacity: 0.45 + pulse.value * 0.55,
-    transform: [{ scale: 1 + pulse.value * 0.04 }],
   }));
 
-  // Three stages, one overlay: warming (model loading — the previously-blank
-  // dead seconds now say what's happening), aiming, and counting down (rim
-  // stable, locking in N — big 3-2-1 inside the reticle).
-  const counting = countdown != null;
+  // Ghost rim geometry: the IDEAL apparent rim — GHOST_RIM_WIDTH_FRAC of the
+  // shorter view side, centered horizontally in the upper third of the frame.
+  // Frame the real hoop over it and the grade lands in the good band.
+  const ghostW = Math.round(Math.min(width, height) * GHOST_RIM_WIDTH_FRAC);
+  const ghostH = Math.round(ghostW * GHOST_RIM_ASPECT);
+
   return (
     <Pressable
       style={styles.aiming}
@@ -694,26 +737,51 @@ function AimingOverlay({
           ? 'Starting the shot tracker.'
           : counting
             ? `Rim found. Locking in ${countdown}. Hold steady, or tap the rim to set it yourself.`
-            : 'Point the camera at the hoop. It locks automatically, or tap the rim to set it yourself.'
+            : `Frame the hoop over the ghost rim outline near the top of the screen. ${
+                placement != null ? `${placement.reason}. ` : ''
+              }It locks automatically, or tap the rim to set it yourself.`
       }
     >
-      <Animated.View style={[styles.rimPlaceholder, boxStyle, counting && styles.rimPlaceholderCounting]}>
-        {counting && <Text style={styles.countdownNum}>{countdown}</Text>}
+      {/* Ghost rim — dashed silhouette at the ideal apparent size/position;
+          solid make-green while the 3-2-1 countdown runs (the lock reticle). */}
+      <Animated.View
+        pointerEvents="none"
+        style={[
+          styles.ghostWrap,
+          {
+            left: Math.round((width - ghostW) / 2),
+            top: Math.round(height * GHOST_RIM_CENTER_Y_FRAC - ghostH / 2),
+            width: ghostW,
+            height: ghostH,
+          },
+          ghostAnimStyle,
+        ]}
+      >
+        <GhostRim width={ghostW} height={ghostH} active={counting} />
       </Animated.View>
-      <Text style={styles.aimTitle}>
-        {warming
-          ? 'Waking up the AI…'
-          : counting
-            ? 'Hold steady — locking on the rim'
-            : 'Point the camera at the hoop'}
-      </Text>
-      <Text style={styles.aimSub}>
-        {warming
-          ? 'A second or two — then point at the hoop'
-          : counting
-            ? `Locking in ${countdown}… or tap the rim to set it now`
-            : 'It locks automatically — or tap the rim to place it yourself'}
-      </Text>
+
+      <View pointerEvents="none" style={styles.aimContent}>
+        {counting && <Text style={styles.countdownNum}>{countdown}</Text>}
+        <Text style={styles.aimTitle}>
+          {warming
+            ? 'Waking up the AI…'
+            : counting
+              ? 'Hold steady — locking on the rim'
+              : 'Frame the hoop over the ghost rim'}
+        </Text>
+        <Text style={styles.aimSub}>
+          {warming
+            ? 'A second or two — then frame the hoop over the ghost rim'
+            : counting
+              ? `Locking in ${countdown}… or tap the rim to set it now`
+              : 'It locks automatically — or tap the rim to place it yourself'}
+        </Text>
+        {!warming && placement != null && (
+          <View style={styles.gradeChip}>
+            <PlacementGradeChip result={placement} />
+          </View>
+        )}
+      </View>
     </Pressable>
   );
 }
@@ -859,19 +927,12 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingHorizontal: space.xl,
   },
-  rimPlaceholder: {
-    width: 168,
-    height: 96,
-    borderRadius: radius.md,
-    borderWidth: 2,
-    borderColor: color.accent,
-    marginBottom: space.xl,
-    alignItems: 'center',
-    justifyContent: 'center',
+  /** Positioned per-render at the ideal rim band (upper third, centered). */
+  ghostWrap: {
+    position: 'absolute',
   },
-  rimPlaceholderCounting: {
-    borderWidth: 3,
-    borderColor: color.make,
+  aimContent: {
+    alignItems: 'center',
   },
   countdownNum: {
     ...type.title,
@@ -880,6 +941,11 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     color: color.make,
     fontVariant: ['tabular-nums'],
+    marginBottom: space.md,
+  },
+  gradeChip: {
+    marginTop: space.lg,
+    maxWidth: '100%',
   },
   aimTitle: {
     ...type.title,
