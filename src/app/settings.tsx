@@ -23,7 +23,11 @@ import { BackPill } from '@/components/ShotList';
 import { Card, Eyebrow, Row, Screen } from '@/components/ui';
 import { color, radius, space, touch, type } from '@/constants/tokens';
 import type { ShootingHand } from '@/core/types';
-import { countHardExamples, exportHardExamples } from '@/data/hardExamples';
+import {
+  HARD_EXAMPLE_EXPORT_LIMIT,
+  countHardExamples,
+  exportHardExamples,
+} from '@/data/hardExamples';
 
 /** Staggered card entrance (i = card index top-to-bottom). */
 const cardEnter = (i: number) => FadeInDown.delay(i * 70).duration(380);
@@ -859,7 +863,7 @@ export default function SettingsScreen() {
           <ToggleRow
             label="Metric 2/3 distance"
             experimental
-            description="Uses the rim's real size (0.45m) and height (3.05m) as a ruler to compute your TRUE shooting distance in meters for the 2/3-point call, instead of the rough on-screen estimate. Falls back automatically when the camera angle can't support it."
+            description="Uses the rim's real size (0.45m) and height (3.05m) as a ruler to compute your TRUE shooting distance in meters for the 2/3-point call, instead of the rough on-screen estimate. Falls back automatically when the camera angle can't support it. A successful FT-line calibration on the live screen switches this path on for that session even with this toggle off."
             value={metric23}
             onValueChange={(v) => {
               tick();
@@ -921,7 +925,13 @@ export default function SettingsScreen() {
             </Text>
           </View>
           <ActionRow
-            label={`Export hard examples (${hardExampleCount ?? 0} available)`}
+            // Displayed count is capped at the export limit — advertising an
+            // uncapped total the export would then silently truncate reads
+            // as a bug to the user doing us the favor.
+            label={`Export hard examples (${Math.min(
+              hardExampleCount ?? 0,
+              HARD_EXAMPLE_EXPORT_LIMIT,
+            )} available)`}
             description="Opens the share sheet with a JSON manifest of shot timings. No video is attached or uploaded."
             disabled={hardExampleCount == null || hardExampleCount === 0}
             onPress={() => void runHardExampleExport()}

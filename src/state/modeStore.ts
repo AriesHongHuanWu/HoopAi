@@ -16,6 +16,7 @@ import { create } from 'zustand';
 
 import {
   initMode,
+  shiftModeClock,
   stepMode,
   tickMode,
   type InitModeOpts,
@@ -38,6 +39,13 @@ export interface ModeStoreState {
   applyShot: (shot: ResolvedShot, nowSec?: number) => void;
   /** Advance the clock for timed modes. No-op otherwise. */
   tick: (nowSec: number) => void;
+  /**
+   * Shift an armed Timed/Ghost clock forward by `deltaSec` — a REAL pause.
+   * Called on foreground with the backgrounded duration so the wall-clock
+   * `started` doesn't silently drain the game while the app was away (see
+   * shiftModeClock in src/core/gameModes.ts). No-op for every other state.
+   */
+  shiftClock: (deltaSec: number) => void;
   /** Clear the active mode (back to free-form / no game). */
   reset: () => void;
 }
@@ -65,6 +73,13 @@ export const useMode = create<ModeStoreState>((set, get) => ({
     const active = get().activeMode;
     if (active === null || active.done) return;
     const next = tickMode(active, nowSec);
+    if (next !== active) set({ activeMode: next });
+  },
+
+  shiftClock: (deltaSec) => {
+    const active = get().activeMode;
+    if (active === null) return;
+    const next = shiftModeClock(active, deltaSec);
     if (next !== active) set({ activeMode: next });
   },
 

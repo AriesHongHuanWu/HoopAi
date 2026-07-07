@@ -30,6 +30,7 @@ import {
 } from '@/components/charts/AngleHistogram';
 import { CompareBars } from '@/components/charts/CompareBars';
 import { ReelEntryButton } from '@/components/ReelEntryButton';
+import { ModeMark } from '@/components/modes/modeIdentity';
 import { Card, Chip, ErrorCard, Eyebrow, PillButton, Row, Screen } from '@/components/ui';
 import { color, radius, space, touch, type } from '@/constants/tokens';
 import { getModeDef, type ModeState } from '@/core/gameModes';
@@ -130,7 +131,9 @@ function ModeBreakdownCard({ modeId, resultJson }: { modeId: string; resultJson:
     <Card>
       <Eyebrow>Game mode</Eyebrow>
       <Row gap={space.sm}>
-        <Text style={styles.modeEmoji}>{def.emoji}</Text>
+        {/* Shared Ionicons identity mark — same glyph/tint as the picker and
+            live banner, replacing the legacy catalog emoji. */}
+        <ModeMark modeId={def.id} size={26} />
         <Text style={styles.heading}>{def.name}</Text>
       </Row>
       {mode != null && (
@@ -448,9 +451,6 @@ const styles = StyleSheet.create({
     color: color.textFaint,
     marginTop: -space.xs,
     marginBottom: space.md,
-  },
-  modeEmoji: {
-    fontSize: 20,
   },
   tagPill: {
     alignSelf: 'flex-start',

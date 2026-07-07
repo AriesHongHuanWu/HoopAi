@@ -594,6 +594,20 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
     };
   }, [activeMode, pipeline, nowSec, isModelLoaded, modelState.delegate, modelState.error, debug]);
 
+  // Camera-mode teardown, mirroring the demo effect's cleanup above: leaving
+  // the live screen (or flipping camera → demo) must reset the pipeline so an
+  // in-flight FT anchor capture RESOLVES (reason 'reset') instead of leaving
+  // the calibration chip's promise dangling forever. reset() also clears the
+  // tracker/rim/FSM/calibration — the right scope here, since this pipeline
+  // instance only lives as long as the hook and every mode restart begins
+  // from a fresh rim lock anyway.
+  useEffect(() => {
+    if (activeMode !== 'camera') return;
+    return () => {
+      pipeline.reset();
+    };
+  }, [activeMode, pipeline]);
+
   // -------------------------------------------------------------------------
   // Camera mode: worklet → detections → JS pipeline.
   //

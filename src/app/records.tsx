@@ -9,7 +9,7 @@
  */
 import { Ionicons } from '@expo/vector-icons';
 import { router, useFocusEffect } from 'expo-router';
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import Animated, { FadeInDown, useReducedMotion } from 'react-native-reanimated';
 
@@ -25,6 +25,26 @@ import { useAchievementsSeen } from '@/state/achievementsSeenStore';
 /** Cascade step between badge rows (ms), capped so long boards stay snappy. */
 const STAGGER_MS = 40;
 const STAGGER_CAP = 8;
+
+/**
+ * True once the persisted seen-badges store has rehydrated (same
+ * zustand-persist gate as _layout.tsx's settings hydration). The NEW-pip
+ * pass both reads AND writes it: run before hydration, markSeen would stamp
+ * hasVisited/seenBadgeIds over the pre-hydration defaults — clobbering the
+ * real persisted seen-set (every old badge floods back as NEW next visit)
+ * or, on the hasVisited=false default, silently swallowing genuinely new pips.
+ */
+function useAchievementsSeenHydrated(): boolean {
+  const [hydrated, setHydrated] = useState(() => useAchievementsSeen.persist.hasHydrated());
+  useEffect(() => {
+    if (useAchievementsSeen.persist.hasHydrated()) {
+      setHydrated(true);
+      return;
+    }
+    return useAchievementsSeen.persist.onFinishHydration(() => setHydrated(true));
+  }, []);
+  return hydrated;
+}
 
 /** Icon circle diameter on a personal-best tile, px. */
 const PB_ICON_SIZE = 28;
@@ -108,6 +128,7 @@ export default function RecordsScreen() {
   // Snapshot of "unlocked since last visit" ids, fixed for this visit so the
   // NEW pips don't vanish mid-view when the seen-store updates underneath.
   const [newIds, setNewIds] = useState<readonly string[]>([]);
+  const seenHydrated = useAchievementsSeenHydrated();
 
   useFocusEffect(
     useCallback(() => {
@@ -115,6 +136,11 @@ export default function RecordsScreen() {
       void lifetimeTotals().then((t) => {
         if (!alive) return;
         setTotals(t);
+        // The pip pass must wait for the persisted seen-set (see
+        // useAchievementsSeenHydrated) — the hydration flip re-creates this
+        // callback and re-fires the effect while focused, so pips still land,
+        // just never computed against (or written over) default store state.
+        if (!seenHydrated) return;
         const unlockedIds = evaluate(t).unlocked.map((d) => d.id);
         const { hasVisited, seenBadgeIds, markSeen } = useAchievementsSeen.getState();
         // First visit ever: record everything silently, no pip shower.
@@ -126,7 +152,7 @@ export default function RecordsScreen() {
       return () => {
         alive = false;
       };
-    }, []),
+    }, [seenHydrated]),
   );
 
   if (totals === null) {

@@ -4,6 +4,7 @@ import {
   getModeDef,
   ghostMakesAt,
   initMode,
+  shiftModeClock,
   stepMode,
   tickMode,
   type GhostConfig,
@@ -258,6 +259,26 @@ describe('gameModes / timed', () => {
     const s = initMode('free');
     expect(tickMode(s, 999)).toBe(s);
   });
+
+  // The live screen ticks at 4 Hz; the HUD displays whole seconds only
+  // (message + TimerRing numeral both Math.ceil). Ticks inside one displayed
+  // second must return the SAME object so the store skips the setState and
+  // nothing re-renders.
+  test('tickMode is identity-stable between displayed-second changes', () => {
+    let s = initMode('timed', { durationSec: 30 });
+    s = tickMode(s, 100); // arm at t=100 (timeLeft stays a full 30)
+    // 0.25s later: ceil(29.75) = 30 = ceil(30) ⇒ nothing displayed changed.
+    expect(tickMode(s, 100.25)).toBe(s);
+    expect(tickMode(s, 100.9)).toBe(s);
+    // Crossing into the next displayed second produces a fresh state…
+    const next = tickMode(s, 101.2); // ceil(28.8) = 29
+    expect(next).not.toBe(s);
+    expect(next.timeLeftSec).toBeCloseTo(28.8, 6);
+    expect(next.message).toContain('29s');
+    // …and stays stable again until the following second boundary.
+    expect(tickMode(next, 101.6)).toBe(next);
+    expect(tickMode(next, 102.1)).not.toBe(next);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -499,5 +520,74 @@ describe('gameModes / ghost', () => {
   test('config carries the timeline so replay re-inits an identical race', () => {
     const s = ghostInit();
     expect(initMode('ghost', s.config)).toEqual(ghostInit());
+  });
+
+  // Ghost races can run 30-60 minutes at a 4 Hz tick — a fresh state per tick
+  // re-renders the whole live screen for the entire race. Ticks must return
+  // the SAME object unless a DISPLAYED value moved: the race score
+  // (ghostMakesNow / lead) or the whole-second clock (progress bar shows
+  // whole percents, which whole-second quantization covers).
+  test('tickGhost is identity-stable between display changes', () => {
+    let s = ghostInit();
+    s = stepMode(s, make(), 100); // arm; you 1, ghost 0, timeLeft 10
+    s = tickMode(s, 100.3); // floor(9.7)=9 ≠ floor(10) ⇒ one fresh state
+    // Sub-second ticks with the same score + same whole second: SAME object.
+    expect(tickMode(s, 100.5)).toBe(s);
+    expect(tickMode(s, 100.75)).toBe(s);
+    // Crossing a whole second ⇒ new state.
+    const nextSec = tickMode(s, 101.05); // floor(8.95) = 8
+    expect(nextSec).not.toBe(s);
+    // A ghost make forces an update even without waiting on the clock check —
+    // the displayed race score changed (ghost's first make lands at +2s).
+    const ghostScored = tickMode(nextSec, 102.0);
+    expect(ghostScored).not.toBe(nextSec);
+    expect(ghostScored.ghost?.ghostMakesNow).toBe(1);
+    expect(ghostScored.ghost?.lead).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// shiftModeClock — the real "pause" for tick-driven modes
+// ---------------------------------------------------------------------------
+
+describe('gameModes / shiftModeClock', () => {
+  test('moves an armed timed clock forward by the gap (a real pause)', () => {
+    let s = initMode('timed', { durationSec: 60 });
+    s = tickMode(s, 100); // arm at t=100
+    const shifted = shiftModeClock(s, 30); // e.g. 30s backgrounded
+    expect(shifted.started).toBe(130);
+    // The clock resumes where it left off instead of draining the gap:
+    // 10s of real play after the shift reads 50s left, not 20s.
+    expect(tickMode(shifted, 140).timeLeftSec).toBeCloseTo(50, 6);
+  });
+
+  test('pauses the ghost pace along with the clock', () => {
+    let s = initMode('ghost', { ghost: GHOST_CFG });
+    s = stepMode(s, make(), 100); // arm; ghost's first make lands at +2s
+    const shifted = shiftModeClock(s, 60);
+    expect(shifted.started).toBe(160);
+    // 161 is only 1s of RACE time — the ghost has not scored yet.
+    const ticked = tickMode(shifted, 161);
+    expect(ticked.ghost?.ghostMakesNow).toBe(0);
+    expect(ticked.done).toBe(false);
+  });
+
+  test('no-ops on unarmed, done, non-clock modes and non-positive deltas', () => {
+    const unarmed = initMode('timed');
+    expect(shiftModeClock(unarmed, 10)).toBe(unarmed);
+
+    const freePlay: ModeState = { ...initMode('free'), started: 5 };
+    expect(shiftModeClock(freePlay, 10)).toBe(freePlay);
+
+    const finished: ModeState = { ...initMode('timed'), started: 5, done: true };
+    expect(shiftModeClock(finished, 10)).toBe(finished);
+
+    const ghostWaiting = initMode('ghost', { ghost: GHOST_CFG });
+    expect(shiftModeClock(ghostWaiting, 10)).toBe(ghostWaiting); // pre-first-shot
+
+    let armed = initMode('timed', { durationSec: 60 });
+    armed = tickMode(armed, 100);
+    expect(shiftModeClock(armed, 0)).toBe(armed);
+    expect(shiftModeClock(armed, -5)).toBe(armed);
   });
 });

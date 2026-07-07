@@ -23,21 +23,31 @@ jest.mock('expo-sqlite/kv-store', () => {
 
 jest.mock('../../data/db', () => ({
   listSessions: jest.fn(),
-  sessionShots: jest.fn(),
+  sessionShotOutcomes: jest.fn(),
 }));
 
-import { listSessions, sessionShots, type SessionSummaryRow, type ShotRow } from '../../data/db';
+import {
+  listSessions,
+  sessionShotOutcomes,
+  type SessionSummaryRow,
+  type ShotOutcomeRow,
+} from '../../data/db';
 import { loadTodayAggregate, useChallenges } from '../challengeStore';
 
 const listSessionsMock = listSessions as jest.MockedFunction<typeof listSessions>;
-const sessionShotsMock = sessionShots as jest.MockedFunction<typeof sessionShots>;
+// The loader deliberately uses the NARROW outcome reader (no trajectory/form
+// blobs) — mocking it here also pins that choice: reverting to sessionShots
+// would fail these tests.
+const sessionShotOutcomesMock = sessionShotOutcomes as jest.MockedFunction<
+  typeof sessionShotOutcomes
+>;
 
 const initial = useChallenges.getState();
 
 beforeEach(() => {
   useChallenges.setState({ dateKey: '', completedIds: [], totalPoints: 0 }, false);
   listSessionsMock.mockReset();
-  sessionShotsMock.mockReset();
+  sessionShotOutcomesMock.mockReset();
 });
 
 afterAll(() => {
@@ -114,9 +124,9 @@ describe('loadTodayAggregate', () => {
     return { id, startedAt, modeId } as SessionSummaryRow;
   }
 
-  /** Minimal ShotRow — only the fields the loader touches. */
-  function shotRow(outcome: ShotRow['outcome'], shotValue?: number | null): ShotRow {
-    return { outcome, shotValue } as ShotRow;
+  /** Minimal narrow outcome row — exactly what the loader now reads. */
+  function shotRow(outcome: ShotOutcomeRow['outcome'], shotValue: number | null = null): ShotOutcomeRow {
+    return { outcome, shotValue };
   }
 
   it('aggregates only sessions started on the local day of nowMs', async () => {
@@ -126,7 +136,7 @@ describe('loadTodayAggregate', () => {
       sessionRow(2, localMs(2026, 6, 7, 11, 0), null),
       sessionRow(3, localMs(2026, 6, 6, 20, 0), 'horse'), // yesterday
     ]);
-    sessionShotsMock.mockImplementation(async (sessionId: number) => {
+    sessionShotOutcomesMock.mockImplementation(async (sessionId: number) => {
       if (sessionId === 1) {
         return [shotRow('make', 3), shotRow('make', 2), shotRow('miss')];
       }
@@ -144,7 +154,7 @@ describe('loadTodayAggregate', () => {
     expect(day.fgPct).toBeCloseTo(4 / 5); // 4 makes over 5 decided
     expect(day.modesPlayed).toBe(1); // 'timed' only — yesterday's horse is out
     // Yesterday's session is never fetched.
-    expect(sessionShotsMock).toHaveBeenCalledTimes(2);
+    expect(sessionShotOutcomesMock).toHaveBeenCalledTimes(2);
   });
 
   it('returns an empty aggregate when nothing was played today', async () => {
@@ -160,6 +170,6 @@ describe('loadTodayAggregate', () => {
       fgPct: 0,
       modesPlayed: 0,
     });
-    expect(sessionShotsMock).not.toHaveBeenCalled();
+    expect(sessionShotOutcomesMock).not.toHaveBeenCalled();
   });
 });

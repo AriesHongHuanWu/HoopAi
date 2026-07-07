@@ -122,6 +122,25 @@ function HeroArc({ width }: { width: number }) {
   );
 }
 
+/**
+ * True once the persisted challenge ledger has rehydrated from SQLite —
+ * same zustand-persist gate pattern as _layout.tsx's settings hydration.
+ * The award pass below MUST wait for it: award() rewrites { dateKey,
+ * completedIds, totalPoints } wholesale, so running against the pre-hydration
+ * defaults clobbers the persisted career points ledger with a zero-point day.
+ */
+function useChallengesHydrated(): boolean {
+  const [hydrated, setHydrated] = useState(() => useChallenges.persist.hasHydrated());
+  useEffect(() => {
+    if (useChallenges.persist.hasHydrated()) {
+      setHydrated(true);
+      return;
+    }
+    return useChallenges.persist.onFinishHydration(() => setHydrated(true));
+  }, []);
+  return hydrated;
+}
+
 /** Quiet icon link tile — History / Trends / Records / Scoreboard / Test AI. */
 function QuickLink({
   icon,
@@ -177,6 +196,7 @@ export default function HomeScreen() {
   /** Today's aggregate for challenge progress (src/state/challengeStore.ts). */
   const [dayAgg, setDayAgg] = useState<DayAggregate>(emptyDayAggregate);
   const totalPoints = useChallenges((s) => s.totalPoints);
+  const challengesHydrated = useChallengesHydrated();
 
   // Coach marks: measured target rects for the hero CTA, mode row and quick
   // links, filled in as each view lays out. Steps render centered until a
@@ -264,6 +284,11 @@ export default function HomeScreen() {
   // awards are idempotent per day, so refocusing never double-counts.
   useFocusEffect(
     useCallback(() => {
+      // Wait for the persisted ledger before touching the store (see
+      // useChallengesHydrated). The hydration flip re-creates this callback,
+      // which re-fires the focus effect while the screen is focused — so the
+      // pass still runs, just never against pre-hydration defaults.
+      if (!challengesHydrated) return;
       let alive = true;
       const key = dateKeyFor(Date.now());
       setChallengeDay(key);
@@ -288,7 +313,7 @@ export default function HomeScreen() {
       return () => {
         alive = false;
       };
-    }, []),
+    }, [challengesHydrated]),
   );
 
   /** Today's three challenges — deterministic for the day key, so stable
@@ -445,11 +470,14 @@ export default function HomeScreen() {
         <Card entering={enter(4)}>
           <Row style={styles.challengeHeader}>
             <Eyebrow>Daily challenges</Eyebrow>
+            {/* '★ N', not 'N PTS' — PTS is reserved app-wide for scored
+                basketball points (SummaryHero, StatStrip); reusing it here
+                made challenge points read as game score. */}
             <Text
               style={styles.challengeTotal}
               accessibilityLabel={`${totalPoints} total challenge points`}
             >
-              {`${totalPoints} PTS`}
+              {`★ ${totalPoints}`}
             </Text>
           </Row>
           <View style={styles.challengeList}>

@@ -6,11 +6,13 @@
  * the ModeComplete sheet so a mode is recognizable at a glance anywhere in the
  * app. `glance` is the rules-at-a-glance chip copy for the picker.
  *
- * Pure presentation constants — accents are tokens (or 14% washes of token
- * hues, matching the tint convention in tokens.ts); no game logic lives here.
+ * Presentation constants plus one tiny renderer ({@link ModeMark}) — accents
+ * are tokens (or 14% washes of token hues, matching the tint convention in
+ * tokens.ts); no game logic lives here.
  */
-import type { ComponentProps } from 'react';
-import type { Ionicons } from '@expo/vector-icons';
+import React, { type ComponentProps } from 'react';
+import { View } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 
 import { color } from '../../constants/tokens';
 import type { GameModeId } from '../../core/types';
@@ -76,3 +78,35 @@ export const MODE_IDENTITY: Record<GameModeId, ModeIdentity> = {
     glance: ['Your past run', 'Same clock'],
   },
 } as const;
+
+/**
+ * ModeMark — a mode's Ionicons glyph on its identity-tint circle: the same
+ * mark the picker, ModeBanner and ModeComplete compose by hand. Exists so
+ * secondary surfaces (setup card, History chips/cards) render the SAME
+ * Ionicons identity instead of the legacy catalog emoji — one recognizable
+ * mark per mode, everywhere in the app.
+ */
+export function ModeMark({
+  modeId,
+  size = 24,
+}: {
+  modeId: GameModeId;
+  /** Circle diameter, px (glyph scales with it). */
+  size?: number;
+}) {
+  const id = MODE_IDENTITY[modeId];
+  return (
+    <View
+      style={{
+        width: size,
+        height: size,
+        borderRadius: size / 2,
+        backgroundColor: id.tint,
+        alignItems: 'center',
+        justifyContent: 'center',
+      }}
+    >
+      <Ionicons name={id.icon} size={Math.round(size * 0.55)} color={id.accent} />
+    </View>
+  );
+}

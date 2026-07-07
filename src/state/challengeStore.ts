@@ -24,7 +24,7 @@ import {
   type DayAggregate,
   type DaySessionFacts,
 } from '../core/dailyChallenges';
-import { listSessions, sessionShots } from '../data/db';
+import { listSessions, sessionShotOutcomes } from '../data/db';
 
 /**
  * Sessions scanned when rebuilding today's aggregate — generous for the same
@@ -96,9 +96,13 @@ export const useChallenges = create<ChallengeState>()(
  * Rebuild today's {@link DayAggregate} from the persisted sessions: pull
  * recent session summaries (src/data/db.ts listSessions), keep the ones whose
  * startedAt falls on the same local day as `nowMs` (the todayMakes windowing
- * from src/core/goals.ts), fetch each one's shots and fold them with the pure
- * aggregator. Never throws — db reads already return safe fallbacks, so the
- * worst case is an empty aggregate.
+ * from src/core/goals.ts), fetch each one's outcome stream and fold it with
+ * the pure aggregator. Uses the NARROW sessionShotOutcomes reader on purpose:
+ * this runs on EVERY Home focus across every today-session, and the full
+ * sessionShots SELECT * would drag each shot's multi-KB trajectoryJson /
+ * formJson blobs along for numbers that only need outcome + shotValue.
+ * Never throws — db reads already return safe fallbacks, so the worst case
+ * is an empty aggregate.
  */
 export async function loadTodayAggregate(nowMs = Date.now()): Promise<DayAggregate> {
   const sessions = await listSessions(DAY_SCAN_LIMIT);
@@ -106,10 +110,7 @@ export async function loadTodayAggregate(nowMs = Date.now()): Promise<DayAggrega
   const facts: DaySessionFacts[] = await Promise.all(
     today.map(async (row) => ({
       modeId: row.modeId,
-      shots: (await sessionShots(row.id)).map((shot) => ({
-        outcome: shot.outcome,
-        shotValue: shot.shotValue,
-      })),
+      shots: await sessionShotOutcomes(row.id),
     })),
   );
   return dayAggregate(facts);

@@ -1,7 +1,9 @@
 /**
- * Correction data flywheel — opt-in export of HARD EXAMPLES: the shots the
- * detector got wrong (user-corrected) or couldn't decide ('unsure'), across
- * every session that still has its master recording.
+ * Correction data flywheel — opt-in export of HARD EXAMPLES: the shots whose
+ * MAKE/MISS call the detector got wrong (user outcome-corrected, the
+ * outcomeCorrected column — a one-tap 2↔3 value fix is NOT a hard example)
+ * or couldn't decide ('unsure'), across every session that still has its
+ * master recording.
  *
  * The export is a JSON MANIFEST ONLY — no video ever leaves the phone. Each
  * example carries the session's videoPath plus a [windowStartSec,
@@ -54,7 +56,7 @@ export interface HardExample {
   originalOutcome: ShotOutcome | null;
   /** The user's hand-verified outcome — ground truth. Null when not corrected. */
   correctedOutcome: ShotOutcome | null;
-  /** True when the user flipped this shot by hand. */
+  /** True when the user flipped this shot's OUTCOME (make/miss) by hand. */
   corrected: boolean;
   /** The three fused make/miss signals the detector saw (null = unavailable). */
   signals: ShotSignals;
@@ -90,18 +92,32 @@ interface HardExampleRow {
   shotIndex: number;
   tResolved: number;
   outcome: ShotOutcome;
-  corrected: number;
+  /** 1 = the user hand-corrected the OUTCOME (make/miss), see db.ts v6. */
+  outcomeCorrected: number;
   rimBounce: number;
   signalsJson: string;
   videoPath: string;
   recordingStartSec: number;
 }
 
-/** Rows that are hard examples AND belong to a session with a recording. */
+/**
+ * Rows that are hard examples AND belong to a session with a recording.
+ * Filters on outcomeCorrected (NOT the general `corrected` flag): a value-only
+ * 2↔3 fix also stamps corrected=1 but the detector's make/miss call was
+ * right, so exporting it would pollute training with fake outcome labels.
+ */
 const HARD_EXAMPLE_WHERE = `
-  (sh.corrected = 1 OR sh.outcome = 'unsure')
+  (sh.outcomeCorrected = 1 OR sh.outcome = 'unsure')
   AND s.videoPath IS NOT NULL
   AND s.recordingStartSec IS NOT NULL`;
+
+/**
+ * Default collect/export cap. Generous on purpose: an engaged corrector can
+ * bank hundreds of examples between exports, and the old 50 silently dropped
+ * everything past the first page while the Settings row advertised the full
+ * uncapped count. Settings caps its displayed count at this same value.
+ */
+export const HARD_EXAMPLE_EXPORT_LIMIT = 500;
 
 const FALLBACK_SIGNALS: ShotSignals = { geo: null, net: null, cls: null };
 
@@ -139,7 +155,7 @@ export function exampleFromRow(
   const videoTimeSec = row.tResolved - row.recordingStartSec;
   const windowEndSec = videoTimeSec + CLIPS.postRollSec;
   if (windowEndSec <= 0) return null; // Resolved before the recording began.
-  const corrected = row.corrected === 1;
+  const corrected = row.outcomeCorrected === 1;
   return {
     sessionId: row.sessionId,
     shotId: row.shotIndex,
@@ -161,12 +177,14 @@ export function exampleFromRow(
  * all sessions that still have a recording, newest session first. Never
  * throws — any persistence failure returns an empty list.
  */
-export async function collectHardExamples(limit = 50): Promise<HardExample[]> {
+export async function collectHardExamples(
+  limit = HARD_EXAMPLE_EXPORT_LIMIT,
+): Promise<HardExample[]> {
   try {
     const db = await getDb();
     const rows = await db.getAllAsync<HardExampleRow>(
       `SELECT sh.sessionId, sh.shotIndex, sh.tResolved, sh.outcome,
-              sh.corrected, sh.rimBounce, sh.signalsJson,
+              sh.outcomeCorrected, sh.rimBounce, sh.signalsJson,
               s.videoPath, s.recordingStartSec
        FROM shots sh
        JOIN sessions s ON s.id = sh.sessionId
@@ -257,7 +275,9 @@ export interface HardExampleExportResult {
  * makes. Resolves { ok: false } when there is nothing to export or when
  * even the text share failed. NEVER throws.
  */
-export async function exportHardExamples(limit = 50): Promise<HardExampleExportResult> {
+export async function exportHardExamples(
+  limit = HARD_EXAMPLE_EXPORT_LIMIT,
+): Promise<HardExampleExportResult> {
   const examples = await collectHardExamples(limit);
   if (examples.length === 0) return { ok: false, count: 0 };
   const json = JSON.stringify(buildManifest(examples), null, 2);

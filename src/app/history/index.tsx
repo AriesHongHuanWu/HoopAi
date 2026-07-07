@@ -18,6 +18,7 @@ import {
   formatSessionDate,
   formatSessionTime,
 } from '@/components/ShotList';
+import { ModeMark } from '@/components/modes/modeIdentity';
 import {
   Card,
   Chip,
@@ -41,9 +42,11 @@ interface HistoryItem {
 }
 
 /**
- * Small emoji + name chip for a session played under a game mode. `null`
- * modeId (Free Play / pre-v4 rows) renders nothing so plain sessions keep
- * their existing card shape.
+ * Small mark + name chip for a session played under a game mode. Uses the
+ * shared Ionicons ModeMark so History speaks the same visual identity as the
+ * picker/banner/complete sheet (not the legacy catalog emoji). `null` modeId
+ * (Free Play / pre-v4 rows) renders nothing so plain sessions keep their
+ * existing card shape.
  */
 function ModeChip({ modeId }: { modeId: string | null }) {
   if (modeId == null || modeId === 'free') return null;
@@ -55,7 +58,7 @@ function ModeChip({ modeId }: { modeId: string | null }) {
   }
   return (
     <View style={styles.modeChip}>
-      <Text style={styles.modeChipEmoji}>{def.emoji}</Text>
+      <ModeMark modeId={def.id} size={14} />
       <Text style={styles.modeChipLabel}>{def.name}</Text>
     </View>
   );
@@ -463,9 +466,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: space.xs,
     borderRadius: radius.sm,
     backgroundColor: color.accentTint,
-  },
-  modeChipEmoji: {
-    fontSize: 11,
   },
   modeChipLabel: {
     ...type.micro,

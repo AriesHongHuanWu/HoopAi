@@ -40,6 +40,20 @@ const CELEBRATION_DELAY_MS = 420;
 /** Perfect-session celebration needs a non-trivial sample. */
 const PERFECT_MIN_ATTEMPTS = 3;
 
+/**
+ * Perfect session — every shot decided AND made, over a non-trivial sample.
+ * Exported (rather than re-derived by callers) so the summary screen can
+ * suppress the redundant bestFgPct personal-best line when this predicate
+ * already earned the PERFECT chip: a perfect night is definitionally the
+ * career-best FG%, and two adjacent banners celebrating the same fact reads
+ * as a duplicate, not a double win.
+ */
+export function isPerfectSession(stats: SessionStats): boolean {
+  return (
+    stats.attempts >= PERFECT_MIN_ATTEMPTS && stats.misses === 0 && stats.unsure === 0
+  );
+}
+
 // ---------------------------------------------------------------------------
 // CelebrationChip — one-shot pop + shimmer sweep, reduced-motion aware
 // ---------------------------------------------------------------------------
@@ -137,10 +151,7 @@ export function SummaryHero({
   // Celebration — derived purely from stats already on screen. A perfect
   // session (every shot decided AND made) outranks the heater; tiny perfect
   // sessions (1/1) stay quiet.
-  const perfect =
-    stats.attempts >= PERFECT_MIN_ATTEMPTS &&
-    stats.misses === 0 &&
-    stats.unsure === 0;
+  const perfect = isPerfectSession(stats);
   const heater = !perfect && stats.bestStreak >= 5;
 
   const enter = (delayMs: number) =>

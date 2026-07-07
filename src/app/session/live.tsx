@@ -164,6 +164,9 @@ function LiveSessionScreen() {
   const cameraRef = useRef<React.ComponentRef<typeof Camera>>(null);
   const driftTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pausedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Wall-clock ms when the app went to background — drives the REAL mode-
+   *  clock pause on foreground (see onForeground / shiftClock). */
+  const backgroundedAtMs = useRef<number | null>(null);
 
   // Entering this screen directly (deep link, dev reload) still gets a
   // coherent session.
@@ -372,6 +375,7 @@ function LiveSessionScreen() {
   // tracking is explained. Everything else (rim lock, stats) survives as-is.
   const onBackground = useCallback(() => {
     setBackgrounded(true);
+    backgroundedAtMs.current = Date.now();
     if (useSession.getState().isRecording) {
       void engineRef.current
         ?.stopRecording()
@@ -381,6 +385,17 @@ function LiveSessionScreen() {
   }, []);
   const onForeground = useCallback(() => {
     setBackgrounded(false);
+    // Make the mode-clock pause REAL. Freezing the tick loop below stops UI
+    // updates, but Timed/Ghost clocks are wall-clock (elapsed = now − started)
+    // — without this shift the whole background gap would drain the clock the
+    // instant the app returns, and a phone call could silently end the game.
+    // Shifting `started` forward by the gap resumes exactly where it left off
+    // (the ghost's recorded pace pauses with it, so its result stays fair).
+    const wentBackgroundAt = backgroundedAtMs.current;
+    backgroundedAtMs.current = null;
+    if (wentBackgroundAt != null) {
+      useMode.getState().shiftClock((Date.now() - wentBackgroundAt) / 1000);
+    }
     if (useSession.getState().phase === 'live') {
       setPausedChip(true);
       if (pausedTimer.current) clearTimeout(pausedTimer.current);
@@ -393,8 +408,9 @@ function LiveSessionScreen() {
   // clock on the same wall-clock source as applyShot (see onShot). Only runs
   // while a tick-driven game is live and not yet finished; tickMode is a no-op
   // for every other mode (and the ghost clock additionally waits for the first
-  // shot). Paused while the app is backgrounded so the clock can't expire
-  // mid-phone-call unseen.
+  // shot). While the app is backgrounded the interval stops AND onForeground
+  // shifts `started` forward by the gap (shiftClock), so the pause is real —
+  // stopping the ticks alone would only hide a wall-clock that keeps draining.
   useEffect(() => {
     if (!isTickDrivenMode || !rimLocked || modeDone || ending || backgrounded) return;
     const id = setInterval(() => {
@@ -418,11 +434,28 @@ function LiveSessionScreen() {
     // History can reconstruct its breakdown later. Omit entirely for Free
     // Play / no mode so endSession leaves any previously persisted result
     // untouched rather than clearing it.
+    //
+    // Strip the ghost race TIMELINE before persisting: it carries one point
+    // per ghost make (a multi-KB blob for a long session) and every
+    // listSessions consumer (History cards, lifetimeTotals' mode scan…)
+    // re-parses modeResultJson. History only reads the final scoreboard —
+    // ghost.finalGhostMakes / result / finalMargin plus durationSec — all of
+    // which survive; an empty timeline is a valid GhostConfig shape.
     const finishedMode = useMode.getState().activeMode;
+    const persistedMode =
+      finishedMode?.config?.ghost == null
+        ? finishedMode
+        : {
+            ...finishedMode,
+            config: {
+              ...finishedMode.config,
+              ghost: { ...finishedMode.config.ghost, timeline: [] },
+            },
+          };
     await useSession.getState().finish({
       nowMs: Date.now(),
       videoPath: path,
-      ...(finishedMode != null ? { modeResultJson: JSON.stringify(finishedMode) } : {}),
+      ...(persistedMode != null ? { modeResultJson: JSON.stringify(persistedMode) } : {}),
     });
     // The game ends with the session — clear it so it never leaks into the next
     // run (the hero quick-start also resets, but this covers the mode paths).
@@ -559,8 +592,12 @@ function LiveSessionScreen() {
         <ShotToast shot={toastShot} streak={streak} />
         {/* One-time FT-line calibration offer (optional 2/3 refinement).
             Mounts fresh at each rim lock (rimLocked flips false on re-aim),
-            self-hides after FT_OFFER_MS, and renders nothing once done. */}
-        {rimLocked && <FtCalibrationChip capture={captureFt} />}
+            self-hides after FT_OFFER_MS, and renders nothing once done.
+            NEVER mounts during a clock mode (Timed countdown / Ghost race):
+            the ritual asks the player to stand still at the FT line, which
+            would burn live game clock — offer it only when no mode is active
+            or the active mode has no running clock. */}
+        {rimLocked && !isTickDrivenMode && <FtCalibrationChip capture={captureFt} />}
         {engine.activeMode === 'demo' && (
           <View style={styles.topCenter}>
             <Chip label="DEMO MODE — scripted scene" tone="accent" />
@@ -759,8 +796,15 @@ function FtCalibrationChip({ capture }: { capture: () => Promise<FtCaptureOutcom
   if (stage === 'offer') {
     return (
       <View style={styles.topCenter}>
-        <HudChip>
-          <Row gap={space.sm}>
+        {/* The chip + row stretch to the HUD column and the copy Pressable is
+            the ONLY shrinking region (flex:1 + minWidth:0, Text flexShrink +
+            2 lines). RN Text in a row defaults to flexShrink 0, so the long
+            copy used to push the ✕ dismiss outside the chip where HudChip's
+            overflow:hidden clipped it away — worst in the landscape docked
+            column (300px, floor 220px). The ✕ sits after the shrink region
+            at its intrinsic width, so it can never be squeezed out. */}
+        <HudChip style={styles.ftChip}>
+          <Row gap={space.sm} style={styles.ftRow}>
             <Pressable
               onPress={() => {
                 setCount(3);
@@ -770,8 +814,11 @@ function FtCalibrationChip({ capture }: { capture: () => Promise<FtCaptureOutcom
               accessibilityRole="button"
               accessibilityLabel="Boost 2 and 3 point accuracy. Stand at the free-throw line, then tap to calibrate."
               hitSlop={8}
+              style={styles.ftTextPress}
             >
-              <Text style={styles.ftText}>Boost 2/3 accuracy — stand at the FT line, tap here</Text>
+              <Text style={styles.ftText} numberOfLines={2}>
+                Boost 2/3 accuracy — tap to calibrate at the FT line
+              </Text>
             </Pressable>
             <Pressable
               onPress={() => setStage('hidden')}
@@ -1040,9 +1087,24 @@ const styles = StyleSheet.create({
     ...type.bodyMedium,
     color: color.text,
   },
+  /** Offer chip spans the HUD column so the flex:1 copy region has real
+   *  width to fill (an auto-width chip would collapse a flex-basis-0 child). */
+  ftChip: {
+    alignSelf: 'stretch',
+  },
+  /** HudChip centers children; stretch the row so it owns the full width. */
+  ftRow: {
+    alignSelf: 'stretch',
+  },
+  /** The one shrinking region — minWidth:0 lets the Text actually wrap. */
+  ftTextPress: {
+    flex: 1,
+    minWidth: 0,
+  },
   ftText: {
     ...type.bodyMedium,
     color: color.text,
+    flexShrink: 1,
   },
   ftDoneText: {
     ...type.bodyMedium,

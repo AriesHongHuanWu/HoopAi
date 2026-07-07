@@ -47,8 +47,8 @@ interface FakeDatabase {
 function fakeDatabase(): FakeDatabase {
   return {
     execAsync: jest.fn().mockResolvedValue(undefined),
-    // migrate() reads PRAGMA user_version; report 5 = already migrated.
-    getFirstAsync: jest.fn().mockResolvedValue({ user_version: 5 }),
+    // migrate() reads PRAGMA user_version; report 6 = already migrated.
+    getFirstAsync: jest.fn().mockResolvedValue({ user_version: 6 }),
     getAllAsync: jest.fn().mockResolvedValue([]),
     runAsync: jest.fn().mockResolvedValue({ lastInsertRowId: 5, changes: 1 }),
     withTransactionAsync: jest.fn(async (fn: () => Promise<void>) => fn()),
@@ -63,7 +63,9 @@ function row(overrides: Partial<Record<string, unknown>> = {}) {
     shotIndex: 3,
     tResolved: 100,
     outcome: 'miss',
-    corrected: 1,
+    // The user hand-flipped this shot's OUTCOME (see db.ts v6) — the flag
+    // the hard-example filter keys on, not the general `corrected`.
+    outcomeCorrected: 1,
     rimBounce: 0,
     signalsJson: '{"geo":true,"net":false,"cls":null}',
     videoPath: '/videos/session-7.mp4',
@@ -114,12 +116,12 @@ function seed(rows: unknown[]): FakeDatabase {
 describe('collectHardExamples', () => {
   it('assembles one example per row with clipPlanner windows in video time', async () => {
     seed([
-      row(), // corrected miss, tResolved 100, recording starts at 90
+      row(), // outcome-corrected miss, tResolved 100, recording starts at 90
       row({
         shotIndex: 5,
         tResolved: 120,
         outcome: 'unsure',
-        corrected: 0,
+        outcomeCorrected: 0,
         rimBounce: 1,
         signalsJson: '{"geo":null,"net":true,"cls":null}',
       }),
@@ -171,15 +173,27 @@ describe('collectHardExamples', () => {
     expect(example.signals).toEqual({ geo: null, net: null, cls: null });
   });
 
-  it('queries only corrected/unsure shots of recorded sessions, newest first, with the limit', async () => {
+  it('queries only OUTCOME-corrected/unsure shots of recorded sessions, newest first, with the limit', async () => {
     const db = seed([]);
     await hardExamples.collectHardExamples(25);
     const [sql, limit] = db.getAllAsync.mock.calls[0];
-    expect(sql).toContain("(sh.corrected = 1 OR sh.outcome = 'unsure')");
+    // Filters on outcomeCorrected — the general `corrected` flag is also set
+    // by value-only 2↔3 fixes, which are NOT detector outcome mistakes and
+    // must never pollute the training export.
+    expect(sql).toContain("(sh.outcomeCorrected = 1 OR sh.outcome = 'unsure')");
+    expect(sql).not.toContain('sh.corrected');
     expect(sql).toContain('s.videoPath IS NOT NULL');
     expect(sql).toContain('s.recordingStartSec IS NOT NULL');
     expect(sql).toContain('ORDER BY s.startedAt DESC');
     expect(limit).toBe(25);
+  });
+
+  it('defaults the collect limit to the 500-example export cap', async () => {
+    const db = seed([]);
+    await hardExamples.collectHardExamples();
+    const [, limit] = db.getAllAsync.mock.calls[0];
+    expect(limit).toBe(hardExamples.HARD_EXAMPLE_EXPORT_LIMIT);
+    expect(hardExamples.HARD_EXAMPLE_EXPORT_LIMIT).toBe(500);
   });
 
   it('returns an empty list when the database is unavailable, without throwing', async () => {
@@ -192,7 +206,7 @@ describe('countHardExamples', () => {
   it('reports the COUNT(*) over the same hard-example filter', async () => {
     const db = fakeDatabase();
     db.getFirstAsync.mockImplementation(async (sql: string) =>
-      sql.includes('user_version') ? { user_version: 5 } : { n: 4 },
+      sql.includes('user_version') ? { user_version: 6 } : { n: 4 },
     );
     sqlite.openDatabaseAsync.mockResolvedValue(db);
 
@@ -200,7 +214,7 @@ describe('countHardExamples', () => {
     const countSql = db.getFirstAsync.mock.calls
       .map((c: unknown[]) => c[0] as string)
       .find((s: string) => s.includes('COUNT(*)'));
-    expect(countSql).toContain("(sh.corrected = 1 OR sh.outcome = 'unsure')");
+    expect(countSql).toContain("(sh.outcomeCorrected = 1 OR sh.outcome = 'unsure')");
     expect(countSql).toContain('s.videoPath IS NOT NULL');
   });
 
