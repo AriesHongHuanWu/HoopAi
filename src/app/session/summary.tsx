@@ -26,6 +26,7 @@ import {
 } from '@/components/ShotList';
 import { CoachMarks, useCoachMarks, type CoachStep } from '@/components/coach/CoachMarks';
 import { PersonalBestBanner } from '@/components/PersonalBestBanner';
+import { RecheckPanel } from '@/components/RecheckPanel';
 import { SummaryHero } from '@/components/SummaryHero';
 import { Card, Chip, Eyebrow, PillButton, Row, Screen } from '@/components/ui';
 import { color, space, type } from '@/constants/tokens';
@@ -122,6 +123,21 @@ export default function SessionSummaryScreen() {
   );
   const undoable = useUndoableCorrection(applyCorrection);
   const onCorrect = undoable.correct;
+
+  // Offline re-check (RecheckPanel): unsure, uncorrected shots the second
+  // pass could still decide; verdicts come back through the same correction
+  // pathway with corrected=false (machine re-read, not a user edit).
+  const unsureCount = useMemo(
+    () => shots.filter((s) => s.outcome === 'unsure' && s.corrected !== true).length,
+    [shots],
+  );
+  const onRecheckVerdict = useCallback(
+    (shotIndex: number, outcome: 'make' | 'miss') => {
+      const shot = shots.find((s) => s.id === shotIndex);
+      if (shot) applyCorrection(shot, outcome, false);
+    },
+    [shots, applyCorrection],
+  );
 
   const onCorrectValue = (shot: ResolvedShot, value: ShotValue) => {
     if (storeMode) correctShotValue(shot.id, value);
@@ -261,6 +277,14 @@ export default function SessionSummaryScreen() {
                   <ReelEntryButton sessionId={sessionId} variant="ghost" style={{ flex: 1 }} />
                 </Row>
               </View>
+              {recordingStartSec != null && (
+                <RecheckPanel
+                  sessionId={sessionId}
+                  unsureCount={unsureCount}
+                  onVerdict={onRecheckVerdict}
+                  style={{ marginTop: space.md }}
+                />
+              )}
             </View>
           )}
           <Eyebrow>Box score</Eyebrow>
