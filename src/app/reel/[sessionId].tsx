@@ -52,6 +52,7 @@ import Animated, {
 } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { BrandMark } from '@/components/BrandMark';
 import {
   sessionCardData,
   ShareCard,
@@ -611,6 +612,14 @@ function ReelPlayer({
                 reducedMotion={reducedMotion}
               />
             )}
+            {/* Persistent corner watermark — screen-recorded reels are the
+                marketing channel. Top-right so it never nears the progress
+                rail or counter below the video. Decorative; safe-area aware. */}
+            {status !== 'error' && windows.length > 0 && (
+              <BrandMark
+                style={[styles.watermark, { right: space.sm + insets.right }]}
+              />
+            )}
           </Pressable>
 
           <View style={styles.chrome}>
@@ -687,6 +696,11 @@ const styles = StyleSheet.create({
     width: '100%',
     aspectRatio: 16 / 9,
     backgroundColor: color.bg,
+  },
+  /** Corner brand watermark inside the video box (right inset per device). */
+  watermark: {
+    position: 'absolute',
+    top: space.sm,
   },
   videoOverlay: {
     position: 'absolute',

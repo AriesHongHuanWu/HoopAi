@@ -75,6 +75,12 @@ const CONTENT_W = CARD_W - PAD * 2;
 /** Alpha-0 endpoint of palette.leather for the radial glow fade. */
 const GLOW_FADE = 'rgba(240, 90, 36, 0)';
 
+/** Bottom brand hook — the line every viewer of a shared card reads.
+ *  Drawn on EVERY format so no card leaves the app unbranded. */
+const HOOK_TEXT = 'TRACK YOUR GAME · HOOPILOT';
+/** "ILOT" picks up the accent, echoing the HOOP|ILOT header lockup. */
+const HOOK_ACCENT_INDEX = HOOK_TEXT.indexOf('ILOT');
+
 // Photo-background legibility scrim (coal #100F0E = rgb 16,15,14): dark top +
 // bottom where text sits, lighter middle so the shot frame shows through.
 const SCRIM_TOP = 'rgba(16, 15, 14, 0.78)';
@@ -411,6 +417,10 @@ export function ShareCardGraphic({
   const titleFont = fitFont(data.title, 76, CONTENT_W);
   const heroFont = fitFont(data.hero, 330, 900);
   const labelFont = displayFont(30);
+  // Brand hook type: story has room to breathe; the denser 4:5 feed card
+  // runs it a touch smaller so it clears the chip rows.
+  const hookFont = displayFont(format === 'story' ? 30 : 26);
+  const hookTracking = format === 'story' ? 6 : 5;
 
   // Signature arc sweep landing at a glowing ball, sparks fanning out.
   const landX = 846;
@@ -526,23 +536,29 @@ export function ShareCardGraphic({
       {/* Make/miss pip rows. */}
       <Pips pips={data.pips} />
 
-      {/* Stat chips. */}
+      {/* Stat chips. Feed tightens the rows slightly so the brand hook
+          clears them inside the fixed 1350 height; story keeps the classic
+          spacing (its hook sits far below in the 9:16 canvas). */}
       {data.chips.map((row, i) => (
-        <ChipRow key={i} chips={row} top={1180 + i * 82} />
+        <ChipRow
+          key={i}
+          chips={row}
+          top={format === 'story' ? 1180 + i * 82 : 1164 + i * 76}
+        />
       ))}
       </Group>
 
-      {/* Story-only bottom brand hook — the line every viewer reads. */}
-      {format === 'story' && (
-        <TrackedText
-          text="TRACK YOUR GAME · HOOPILOT"
-          x={(CARD_W - trackedWidth(displayFont(30), 'TRACK YOUR GAME · HOOPILOT', 6)) / 2}
-          y={H - 84}
-          font={displayFont(30)}
-          tracking={6}
-          fg={color.textDim}
-        />
-      )}
+      {/* Bottom brand hook — every format carries the same line, with
+          "ILOT" in the accent to echo the header lockup. */}
+      <TrackedText
+        text={HOOK_TEXT}
+        x={(CARD_W - trackedWidth(hookFont, HOOK_TEXT, hookTracking)) / 2}
+        y={format === 'story' ? H - 84 : H - 18}
+        font={hookFont}
+        tracking={hookTracking}
+        fg={color.textDim}
+        accentFromIndex={HOOK_ACCENT_INDEX}
+      />
     </Group>
   );
 }

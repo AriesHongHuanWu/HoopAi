@@ -41,6 +41,7 @@ import Animated, {
 } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { BrandMark } from '@/components/BrandMark';
 import {
   BackPill,
   formatClock,
@@ -566,6 +567,12 @@ function ReplayPlayer({
     </>
   );
 
+  // Brand watermark — replays get screen-recorded and shared, so playback
+  // quietly carries the mark. Only while PLAYING: paused or scrubbing
+  // (scrubbing pauses the player) hides it so it never blocks inspecting a
+  // frame. Decorative only.
+  const showWatermark = isPlaying && status !== 'error';
+
   // ---- Landscape: full-bleed video, glass chrome overlay ---------------------
 
   if (isLandscape) {
@@ -578,6 +585,16 @@ function ReplayPlayer({
           style={StyleSheet.absoluteFill}
         />
         {videoOverlays}
+        {/* Top-right, safe-area aware — clear of the back pill (top-left)
+            and the glass transport panel (bottom). */}
+        {showWatermark && (
+          <BrandMark
+            style={[
+              styles.watermark,
+              { top: insets.top + space.sm, right: insets.right + space.lg },
+            ]}
+          />
+        )}
         <View
           style={{
             position: 'absolute',
@@ -636,6 +653,11 @@ function ReplayPlayer({
           style={StyleSheet.absoluteFill}
         />
         {videoOverlays}
+        {showWatermark && (
+          <BrandMark
+            style={[styles.watermark, { top: space.sm, right: space.sm + insets.right }]}
+          />
+        )}
       </View>
 
       <View style={styles.chrome}>
@@ -686,6 +708,10 @@ const styles = StyleSheet.create({
     width: '100%',
     aspectRatio: 16 / 9,
     backgroundColor: color.bg,
+  },
+  /** Corner brand watermark; each layout supplies its own top/right offsets. */
+  watermark: {
+    position: 'absolute',
   },
   videoOverlay: {
     position: 'absolute',
