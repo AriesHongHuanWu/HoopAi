@@ -44,7 +44,8 @@ export type LabMetricKey =
   | 'kneeFlexionDeg'
   | 'followThroughHeldMs'
   | 'releaseHeightNorm'
-  | 'arcHeightRatio';
+  | 'arcHeightRatio'
+  | 'releaseToRimSec';
 
 export interface LabMetricDef {
   key: LabMetricKey;
@@ -66,7 +67,13 @@ export const LAB_METRICS: readonly LabMetricDef[] = [
   { key: 'setPointElbowDeg', label: 'Set-point elbow', unit: '°', ideal: [FORM.elbowSetPoint.min, FORM.elbowSetPoint.max], digits: 0, needsPose: true },
   { key: 'kneeFlexionDeg', label: 'Knee flexion', unit: '°', ideal: [FORM.kneeFlexion.min, FORM.kneeFlexion.max], digits: 0, needsPose: true },
   { key: 'followThroughHeldMs', label: 'Follow-through hold', unit: 'ms', ideal: [FORM.followThrough.holdSec * 1000, 10000], digits: 0, needsPose: true },
-  { key: 'releaseHeightNorm', label: 'Release height', unit: '', digits: 2, needsPose: true },
+  // Release-to-rim: no ideal band on purpose — flight time scales with shot
+  // distance, so a universal target would mislead (a 2 m floater and a deep
+  // three differ by ~0.5 s while both being perfect). It still earns its
+  // make-vs-miss split: at a fixed spot, longer flight = higher arc. NOT in
+  // BENCHMARK_AXES either — the radar needs NBA/elite reference values the
+  // published literature doesn't give for this camera-derived quantity.
+  { key: 'releaseToRimSec', label: 'Release-to-rim time', unit: 's', digits: 2, needsPose: true },
 ] as const;
 
 /**
@@ -114,6 +121,8 @@ export function metricOf(shot: ResolvedShot, key: LabMetricKey): number | null {
       return shot.form?.metrics.followThroughHeldMs ?? null;
     case 'releaseHeightNorm':
       return shot.form?.metrics.releaseHeightNorm ?? null;
+    case 'releaseToRimSec':
+      return shot.releaseToRimSec ?? null;
   }
 }
 
@@ -424,6 +433,12 @@ const DRILLS: Record<LabMetricKey, { fixTitle: string; drill: string }> = {
   releaseHeightNorm: {
     fixTitle: 'Raise the release',
     drill: 'Wall-reach reps: mark your one-hand reach on a wall, release the ball above that mark 20 times in a row.',
+  },
+  // Unreachable today (no ideal band ⇒ coachPlan never selects it); the
+  // Record type keeps this exhaustive so a future band gets a drill for free.
+  releaseToRimSec: {
+    fixTitle: 'Shape the flight',
+    drill: 'Same-spot arc ladder: from one spot, alternate a flat make and a high-arc make — feel how flight time changes while the ball still drops in.',
   },
 };
 

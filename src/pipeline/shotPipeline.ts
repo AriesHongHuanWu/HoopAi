@@ -13,6 +13,7 @@ import { DETECTION, RIM, SHOT_FSM } from '../core/config';
 import { BallTracker } from '../core/ballTracker';
 import { estimateShotValue } from '../core/court';
 import { FormAnalyzer, coachingTips } from '../core/formAnalysis';
+import { ReleaseDetector } from '../core/releaseDetector';
 import { RimLock } from '../core/rimLock';
 import { estimateShotValueMetric } from '../core/courtGeometric';
 import { evalArc, fitArc, predictLanding } from '../core/trajectory';
@@ -93,6 +94,11 @@ export class ShotPipeline {
 
   /** Pose-based form analyzer (lazy; only alive while pose frames arrive). */
   private form: FormAnalyzer | null = null;
+  /** Pose-gated release detector (lazy, like `form` — zero cost, zero state
+   *  when pose frames never arrive). */
+  private releaseDet: ReleaseDetector | null = null;
+  /** Release-event time to hand the FSM exactly once (on the firing frame). */
+  private pendingReleaseT: number | null = null;
   private formHand: ShootingHand = 'right';
   /** Ball size (Settings > Player) — forwarded to the FSM's depth gate. */
   private ballSize: 7 | 6 | 5 = 7;
@@ -202,6 +208,24 @@ export class ShotPipeline {
     if (pose) {
       if (!this.form) this.form = new FormAnalyzer({ hand: this.formHand, frameHeight: frame.frameHeight });
       this.form.push(pose, ball);
+      // Pose-gated release detection (see src/core/releaseDetector.ts): runs
+      // ONLY while pose frames arrive, so it costs nothing with form analysis
+      // off. On fire, the wrist seed lets the tracker reacquire the faint
+      // just-released ball (effective from the NEXT frame's tracker step —
+      // the pose is decoded after this frame's tracking, and the 0.5 s seed
+      // window dwarfs the one-frame lag), and the FSM receives the event
+      // time below as its fourth, guarded arm path.
+      if (!this.releaseDet) {
+        this.releaseDet = new ReleaseDetector({
+          hand: this.formHand,
+          frameHeight: frame.frameHeight,
+        });
+      }
+      const release = this.releaseDet.push(pose);
+      if (release) {
+        this.tracker.setReleaseEvent(release.wristX, release.wristY, release.t);
+        this.pendingReleaseT = release.t;
+      }
       this.sawPoseThisShot = true;
       // Pose (MoveNet) gives a far more reliable shooter foot than the YOLO
       // person box for the 2/3-point estimate — the ankle keypoints are exactly
@@ -223,11 +247,19 @@ export class ShotPipeline {
         ballInBasketScore: maxScore(frame, 'ball_in_basket'),
         netMotionScore,
         personBox: person,
+        // Delivered exactly once, on the frame the detector fired (the FSM
+        // latches it internally and applies its own staleness windows).
+        ...(this.pendingReleaseT !== null
+          ? { releaseEventT: this.pendingReleaseT }
+          : {}),
       });
       phase = result.phase;
       liveTrajectory = result.liveTrajectory;
       resolved = result.resolved;
     }
+    // An event with no locked rim/FSM dies here: no rim means no shots, and
+    // holding it could deliver a seconds-stale event at a later rim lock.
+    this.pendingReleaseT = null;
 
     // Predicted landing: fit the live arc and extrapolate to the rim plane.
     // Cheap (O(n) over ≤48 samples, only while a shot is live) and it's what
@@ -342,6 +374,8 @@ export class ShotPipeline {
     this.tracker.reset();
     this.rimLock.reset();
     this.form = null;
+    this.releaseDet = null;
+    this.pendingReleaseT = null;
     this.sawPoseThisShot = false;
     this.lastPoseFootPx = null;
     this.fsm = null;

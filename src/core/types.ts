@@ -231,6 +231,14 @@ export interface ResolvedShot {
    * xCross field stays null for an occluded crossing.
    */
   virtualCross?: { xCross: number; tCross: number; r2y: number };
+  /**
+   * Release-to-rim flight time in seconds: rim-plane crossing time (observed,
+   * or the virtual projection when the crossing was occluded) minus the
+   * pose-gated release event time. Present only when form analysis was
+   * running, the ReleaseDetector fired for THIS attempt (staleness-capped by
+   * RELEASE.maxReleaseToRimSec), and a crossing time exists.
+   */
+  releaseToRimSec?: number;
 }
 
 /** Pose-based form metrics + prioritized coaching cues for one shot. */
@@ -255,6 +263,13 @@ export interface FsmFrameInput {
   netMotionScore: number;
   /** Highest-confidence person box this frame, if any. */
   personBox: Box | null;
+  /**
+   * Camera time (seconds) at which the pose-gated ReleaseDetector fired,
+   * set ONLY on the frame the event fired (the FSM latches it internally).
+   * Fourth arm path: a release event arms a shot once a REAL ball sample
+   * corroborates it in the upper frame within RELEASE.armWindowSec.
+   */
+  releaseEventT?: number;
 }
 
 export interface FsmStepResult {

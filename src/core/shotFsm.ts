@@ -4,11 +4,14 @@
  * One instance lives per session. Feed it one {@link FsmFrameInput} per
  * analysed camera frame via {@link ShotFsm.step}. The machine arms when a
  * ball climbs into the rim's up-zone, a player carries the ball above the
- * rim plane near the hoop (the layup path), or a confident ball falls into
+ * rim plane near the hoop (the layup path), a confident ball falls into
  * the hoop ROI off a ballistic arc from outside the zone (the
  * descending-entry / floater path — seeded retroactively from a rolling
- * pre-arm buffer), buffers the live trajectory, and resolves each attempt
- * to make / miss / unsure by fusing three independent signals:
+ * pre-arm buffer), or a pose-gated release event is corroborated by a real
+ * upper-frame ball (the release path — for the dark/small ball the detector
+ * misses at release; see RELEASE in config.ts), buffers the live
+ * trajectory, and resolves each attempt to make / miss / unsure by fusing
+ * three independent signals:
  *
  *  - geo — interpolated x at the rim plane on the FINAL descending crossing
  *    lies within the central rim span. `null` when the ball never crossed
@@ -26,7 +29,7 @@
  *
  * Coordinates are analysis-frame pixels, +y DOWN (ball moving up ⇒ vy < 0).
  */
-import { DETECTION, SHOT_FSM } from './config';
+import { DETECTION, RELEASE, SHOT_FSM } from './config';
 import { depthRatioGate, type BallSizeSetting, type ViewBandName } from './depthRatioGate';
 import { elevationAngleDeg, interpolateXAtY } from './geometry';
 import { ReappearanceTest } from './reappearance';
@@ -58,7 +61,7 @@ export interface FrameSize {
 type ResolveReason = 'belowRim' | 'ballLost' | 'timeout';
 
 /** Which arming branch started the live attempt (internal). */
-type ArmVia = 'jump' | 'layup' | 'descend';
+type ArmVia = 'jump' | 'layup' | 'descend' | 'release';
 
 /**
  * Max samples kept in the live trajectory trail. A release→rim arc at 15–30 fps
@@ -130,6 +133,16 @@ export class ShotFsm {
    */
   private layupLowStreak = 0;
 
+  /**
+   * Camera time of the most recent pose-gated release event (latched from
+   * FsmFrameInput.releaseEventT; -Infinity = never). Drives the 'release'
+   * arm path and the releaseToRimSec metric. Deliberately NOT cleared on
+   * resolve: staleness is enforced by time windows (RELEASE.armWindowSec /
+   * maxReleaseToRimSec), which is robust against events landing during
+   * COOLDOWN just before the next attempt.
+   */
+  private lastReleaseEventT = -Infinity;
+
   // --- stationary-ball suppressor (wedged/resting ball) --------------------
   /** Arming suppressed until the resting ball leaves the layup zone. */
   private restingBallSuppressed = false;
@@ -160,6 +173,15 @@ export class ShotFsm {
   private touchedRim = false;
   private rimBounce = false;
   private lastBallT = 0;
+  /**
+   * The live ball has been above the rim plane at least once (seeded
+   * trajectory counts). Gates the below-rim resolve: the release path arms
+   * at the shooter's HANDS — far below belowY — and without this gate the
+   * very next rising frame would read as "ball fell past the rim" and
+   * instantly kill the attempt. The three ball-kinematic paths arm at/above
+   * the rim band, so they set this at arm time and behave exactly as before.
+   */
+  private wasAbovePlane = false;
 
   /**
    * @param rim   Locked rim geometry for the session (swap via setRim).
@@ -234,6 +256,14 @@ export class ShotFsm {
    */
   step(input: FsmFrameInput): FsmStepResult {
     const t = input.t;
+
+    // Latch a pose-gated release event in EVERY phase: an event arriving
+    // during COOLDOWN must still be armable the moment IDLE resumes (the
+    // window checks in canArmRelease are what keep it honest, not the phase
+    // it happened to arrive in).
+    if (input.releaseEventT !== undefined) {
+      this.lastReleaseEventT = input.releaseEventT;
+    }
 
     // Wedged/resting-ball tracker — runs in EVERY phase so the stillness
     // observed during a doomed live attempt already suppresses the re-arm
@@ -323,6 +353,7 @@ export class ShotFsm {
         }
       }
       this.lastBallT = t;
+      if (ball.cy < this.rim.planeY) this.wasAbovePlane = true;
       if (!this.touchedRim && this.touchesRimRegion(ball)) {
         this.touchedRim = true;
       }
@@ -330,7 +361,18 @@ export class ShotFsm {
       if (this.touchedRim && ball.cy < this.rim.planeY && ball.vy < 0) {
         this.rimBounce = true;
       }
-      if (ball.cy > this.rim.belowY) reason = 'belowRim';
+      // Below-rim resolve: the flight is over once the ball drops past
+      // belowY — but only when it has already been above the plane (normal
+      // completed arc) or is clearly FALLING (vy > 0: a short airball that
+      // never reached rim height still ends promptly). A release-armed ball
+      // RISING through this band is just leaving the shooter's hands and
+      // must be allowed to climb (see wasAbovePlane).
+      if (
+        ball.cy > this.rim.belowY &&
+        (this.wasAbovePlane || ball.vy > 0)
+      ) {
+        reason = 'belowRim';
+      }
     } else if (t - this.lastBallT >= SHOT_FSM.lostBallResolveSec) {
       reason = 'ballLost';
     } else if (this.useReappearance) {
@@ -407,7 +449,41 @@ export class ShotFsm {
     // Descending entry (floater/runner): falls into the hoop too fast for
     // the layup branch, never rose through the up-zone.
     if (this.canArmDescending(ball)) return 'descend';
+    // Pose-gated release (last resort, checked after every ball-kinematic
+    // branch): the ReleaseDetector saw the shooter's release motion but the
+    // ball was too faint for the paths above to fire.
+    if (this.canArmRelease(input, ball)) return 'release';
     return null;
+  }
+
+  /**
+   * Release-path arm test. The pose event alone is NEVER enough — a pump
+   * fake, an overhead pass, or a celebration can mimic the wrist snap — so
+   * it must be corroborated by a REAL (never Kalman-predicted) ball sample
+   * in the upper RELEASE.armUpperFrameFrac of the frame within
+   * RELEASE.armWindowSec AFTER the event. A just-released ball climbs
+   * toward the rim immediately, so "real ball, high in the frame, right
+   * after the release motion" is the physically tight signature; a dribble
+   * or a ball still in the hands lives in the lower frame. Evidence may be
+   * the live ball this frame or any pre-arm buffer sample since the event
+   * (the buffer holds only REAL samples, so a ball glimpsed two frames ago
+   * and lost again still corroborates).
+   */
+  private canArmRelease(input: FsmFrameInput, ball: TrackedBall): boolean {
+    const tEvent = this.lastReleaseEventT;
+    if (input.t < tEvent || input.t > tEvent + RELEASE.armWindowSec) {
+      return false;
+    }
+    const upperY = this.frameH * RELEASE.armUpperFrameFrac;
+    if (!ball.predicted && ball.cy <= upperY) return true;
+    // Newest-first scan of the pre-arm buffer, stopping at pre-event samples
+    // (the buffer is time-ordered; anything before the event is not flight).
+    for (let i = this.preArm.length - 1; i >= 0; i--) {
+      const s = this.preArm[i];
+      if (s.t < tEvent) break;
+      if (s.cy <= upperY) return true;
+    }
+    return false;
   }
 
   /**
@@ -450,6 +526,18 @@ export class ShotFsm {
       for (const s of this.preArm) {
         if (s.t < ball.t) this.trajectory.push(s);
       }
+    } else if (via === 'release') {
+      // Retroactive seed, POST-EVENT samples only. Unlike the descend path
+      // (whose parabola fit guarantees the buffer is flight), this buffer
+      // may also hold pre-release sightings — the ball in the hands, a
+      // dribble — from the last second of IDLE. Those are not flight and
+      // would corrupt the release-point/angle metrics; the event time is
+      // exactly the flight boundary, so seed only what came after it.
+      for (const s of this.preArm) {
+        if (s.t >= this.lastReleaseEventT && s.t < ball.t) {
+          this.trajectory.push(s);
+        }
+      }
     }
     this.preArm = [];
     const p = input.personBox;
@@ -475,6 +563,15 @@ export class ShotFsm {
     this.anyNetPositive = input.netMotionScore > 0;
     this.touchedRim = false;
     this.rimBounce = false;
+    // Seeded samples count: a descend arm's approach was above the plane
+    // even though its arm frame may sit slightly below it.
+    this.wasAbovePlane = false;
+    for (const s of this.trajectory) {
+      if (s.cy < this.rim.planeY) {
+        this.wasAbovePlane = true;
+        break;
+      }
+    }
   }
 
   /** Append a REAL sample to the rolling pre-arm buffer and prune it. */
@@ -760,11 +857,31 @@ export class ShotFsm {
     // (touchedRim can't discriminate here: any in-span crossing overlaps the
     // inflated rim box by construction.) Jump-shot-armed attempts are
     // untouched — a rising ball through the up-zone is already strong
-    // attempt evidence.
+    // attempt evidence. Release-armed attempts stay in the demote set on
+    // purpose: the pose event proves the USER released, not that the
+    // crossing ball was at the rim's depth — an overhead pass right after
+    // the release motion can still sail through the 2D projection, and the
+    // house rule is to never mint a make without corroboration.
     if (outcome === 'make' && this.armedVia !== 'jump' && net !== true && !cls) {
       outcome = 'unsure';
     }
     if (outcome === 'make') this.lastMakeT = t;
+
+    // --- release-to-rim time --------------------------------------------------
+    // Pose-gated release event → rim-plane crossing (observed, or the
+    // virtual projection when the crossing was occluded — the same time the
+    // net window trusts). Stamped only when the event plausibly belongs to
+    // THIS attempt: the crossing must come after the event and within
+    // RELEASE.maxReleaseToRimSec; a longer gap means the latched event is
+    // residue from an earlier motion, and no metric beats a wrong one.
+    let releaseToRimSec: number | null = null;
+    const tCrossAny = tCross !== null ? tCross : virtual !== null ? virtual.tCross : null;
+    if (tCrossAny !== null && Number.isFinite(this.lastReleaseEventT)) {
+      const flight = tCrossAny - this.lastReleaseEventT;
+      if (flight > 0 && flight <= RELEASE.maxReleaseToRimSec) {
+        releaseToRimSec = flight;
+      }
+    }
 
     // --- release metrics -----------------------------------------------------
     let releaseAngleDeg: number | null = null;
@@ -800,6 +917,7 @@ export class ShotFsm {
       trajectory: traj,
       ...(geoDepth ? { geoDepth } : {}),
       ...(virtual ? { virtualCross: virtual } : {}),
+      ...(releaseToRimSec !== null ? { releaseToRimSec } : {}),
     };
 
     // --- reset to COOLDOWN ---------------------------------------------------
@@ -814,6 +932,7 @@ export class ShotFsm {
     this.maxClsScore = 0;
     this.touchedRim = false;
     this.rimBounce = false;
+    this.wasAbovePlane = false;
     this.armedVia = null;
     this.originX = null;
     this.originY = null;
