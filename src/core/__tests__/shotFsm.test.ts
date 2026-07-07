@@ -798,4 +798,105 @@ describe('ShotFsm', () => {
     expect(resolved).toHaveLength(0);
     for (const r of results) expect(r.phase).toBe('IDLE');
   });
+
+  test('(16) release event + real upper-frame ball arms the 4th path and stamps releaseToRimSec', () => {
+    // The (15) floater fixture with a pose-gated release event on frame 0.
+    // Without the event this arc arms via descending entry only at hoop
+    // entry (~t=1.27); the release path must arm it ~1.2 s EARLIER, on the
+    // first REAL ball sample in the upper 60% of the frame (frame 1,
+    // cy ≈ 376 < 0.6 × 640 = 384) inside the 0.7 s corroboration window.
+    const VYF = -734.8;
+    const XF0 = 178.3;
+    const VXF = 110; // descending crossing lands at x ≈ 320 (rim center)
+    const T_CROSS_F =
+      (734.8 + Math.sqrt(734.8 * 734.8 - 4 * (G / 2) * (Y0 - 200))) / (2 * (G / 2));
+    const netF = (t: number): number => (t >= 1.28 && t <= 1.36 ? 0.6 : 0);
+    const frames: FsmFrameInput[] = [];
+    for (let i = 0; i <= 42; i++) {
+      const t = i / FPS;
+      const cy = Y0 + VYF * t + 0.5 * G * t * t;
+      frames.push(
+        fin(t, tb(XF0 + VXF * t, cy, t, VYF + G * t, { vx: VXF }), {
+          netMotionScore: netF(t),
+          ...(i === 0 ? { releaseEventT: 0 } : {}),
+        }),
+      );
+    }
+    const { resolved } = run(newFsm(), frames);
+
+    expect(resolved).toHaveLength(1);
+    const s = resolved[0];
+    expect(s.outcome).toBe('make');
+    expect(s.signals).toEqual({ geo: true, net: true, cls: false });
+    // Armed at release (frame 1), not retroactively at hoop entry.
+    expect(s.tStart).toBeLessThan(0.1);
+    // Release-to-rim time = crossing time − event time (event at t=0).
+    expect(s.releaseToRimSec).toBeDefined();
+    expect(Math.abs(s.releaseToRimSec! - T_CROSS_F)).toBeLessThan(0.05);
+    // Post-event pre-arm samples were seeded as the trajectory head.
+    expect(s.trajectory[0].t).toBeLessThanOrEqual(s.tStart);
+    expect(s.releasePoint).toEqual({ x: s.trajectory[0].cx, y: s.trajectory[0].cy });
+  });
+
+  test('(16b) a release event alone never arms: no ball, or a ball low in the frame', () => {
+    // Pose says "released" but the detector never sees a ball at all — a
+    // pump fake, a pass out of frame. Nothing may arm.
+    const fsm = newFsm();
+    const frames: FsmFrameInput[] = [fin(0, null, { releaseEventT: 0 })];
+    for (let i = 1; i < 30; i++) frames.push(fin(i / FPS, null));
+    const { resolved, results } = run(fsm, frames);
+    expect(resolved).toHaveLength(0);
+    for (const r of results) expect(r.phase).toBe('IDLE');
+
+    // A real ball in the LOWER frame (cy = 500 > 384) right after the event
+    // is a dribble/floor ball, not a climbing shot — still no arm. Placed at
+    // x=150, outside every rim zone, so no other branch can fire either.
+    const fsm2 = newFsm();
+    const frames2: FsmFrameInput[] = [fin(0, null, { releaseEventT: 0 })];
+    for (let i = 1; i < 20; i++) {
+      frames2.push(fin(i / FPS, tb(150, 500, i / FPS, -300)));
+    }
+    const low = run(fsm2, frames2);
+    expect(low.resolved).toHaveLength(0);
+    for (const r of low.results) expect(r.phase).toBe('IDLE');
+  });
+
+  test('(16c) predicted-only ball after a release event does not arm (real evidence required)', () => {
+    // The Kalman coast keeps a ghost ball alive in the upper frame — but a
+    // prediction is the tracker's OPINION, not evidence. The release path
+    // demands a never-predicted sample; coasts must not start attempts.
+    const fsm = newFsm();
+    const frames: FsmFrameInput[] = [
+      fin(0, tb(150, 150, 0, -300, { predicted: true, score: 0 }), { releaseEventT: 0 }),
+    ];
+    for (let i = 1; i < 25; i++) {
+      frames.push(fin(i / FPS, tb(150, 150 + i, i / FPS, -300, { predicted: true, score: 0 })));
+    }
+    const { resolved, results } = run(fsm, frames);
+    expect(resolved).toHaveLength(0);
+    for (const r of results) expect(r.phase).toBe('IDLE');
+  });
+
+  test('(16d) release events respect cooldown, and go stale past armWindowSec', () => {
+    const fsm = newFsm();
+    const first = run(fsm, arcFrames({ x0: X0_CENTER, net: swishNet }));
+    expect(first.resolved).toHaveLength(1);
+    const t1 = first.resolved[0].tResolved;
+
+    // Event + perfectly corroborating real upper-frame ball 0.2 s into the
+    // shot cooldown: must not arm (reuses the same guard every branch obeys).
+    const rCd = fsm.step(
+      fin(t1 + 0.2, tb(150, 150, t1 + 0.2, -300), { releaseEventT: t1 + 0.2 }),
+    );
+    expect(rCd.phase).toBe('COOLDOWN');
+    const rCd2 = fsm.step(fin(t1 + 0.4, tb(150, 150, t1 + 0.4, -300)));
+    expect(rCd2.phase).toBe('COOLDOWN');
+
+    // Once IDLE resumes (t1 + 1.6) the latched event is older than
+    // armWindowSec (0.7 s) — stale, so the upper-frame ball still can't arm
+    // off it. A shot the pose saw during cooldown was residue, not a fresh
+    // attempt window.
+    const rIdle = fsm.step(fin(t1 + 1.6, tb(150, 150, t1 + 1.6, -300)));
+    expect(rIdle.phase).toBe('IDLE');
+  });
 });

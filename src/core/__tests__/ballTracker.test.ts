@@ -75,7 +75,7 @@ jest.mock(
 );
 
 import { BallTracker } from '../ballTracker';
-import { DETECTION, TRACKER } from '../config';
+import { DETECTION, RELEASE, TRACKER } from '../config';
 import type { Box, Detection, FrameDetections } from '../types';
 
 const FPS = 30;
@@ -502,6 +502,47 @@ describe('BallTracker', () => {
       );
       // Either predicted-coast or null — never a real acceptance.
       if (out != null) expect(out.predicted).toBe(true);
+    });
+  });
+
+  describe('wrist-seeded reacquisition (pose release event)', () => {
+    // In the tracking band (>= 0.12) but under cold acquisition (0.2): the
+    // faint just-released ball the wrist prior exists for.
+    const faintScore =
+      (DETECTION.ballScoreMinTracking + DETECTION.ballScoreMin) / 2; // 0.16
+
+    test('STARTS a track from a faint ball near the released wrist', () => {
+      const tracker = new BallTracker({});
+      tracker.setReleaseEvent(300, 200, 0);
+      // 28 px from the wrist — well inside 0.15 × 640 = 96 px. With no prior
+      // track this same detection was rejected before (see the cold-
+      // acquisition test above); the wrist prior substitutes for locality.
+      const out = tracker.step(
+        frameAt(DT, [ballDet(320, 180, { score: faintScore })]),
+        null,
+      );
+      expect(out).not.toBeNull();
+      expect(out!.predicted).toBe(false);
+      expect(out!.cx).toBeCloseTo(320);
+      expect(out!.cy).toBeCloseTo(180);
+    });
+
+    test('a faint ball far from the wrist still needs the cold-acquisition score', () => {
+      const tracker = new BallTracker({});
+      tracker.setReleaseEvent(300, 200, 0);
+      // ~360 px away — the seed must not open a court-wide low-score hole.
+      expect(
+        tracker.step(frameAt(DT, [ballDet(100, 500, { score: faintScore })]), null),
+      ).toBeNull();
+    });
+
+    test('the seed expires after RELEASE.seedWindowSec', () => {
+      const tracker = new BallTracker({});
+      tracker.setReleaseEvent(300, 200, 0);
+      const late = RELEASE.seedWindowSec + 0.1;
+      expect(
+        tracker.step(frameAt(late, [ballDet(320, 180, { score: faintScore })]), null),
+      ).toBeNull();
     });
   });
 

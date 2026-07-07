@@ -3,7 +3,9 @@
  * `TrackedBall` stream.
  *
  * Per frame (see {@link BallTracker.step}):
- *   1. Candidate gating on class + confidence (relaxed inside the hoop ROI).
+ *   1. Candidate gating on class + confidence (relaxed inside the hoop ROI,
+ *      while continuing a fresh flight, and — after a pose-gated release
+ *      event — near the released wrist; see setReleaseEvent).
  *   2. Cleaning gates (avishah3-style): non-round boxes are rejected unless
  *      they look like a motion-blur streak along the current velocity, and
  *      teleporting detections are rejected against the last accepted sample.
@@ -16,7 +18,7 @@
  * camera frame timestamps carried in `FrameDetections.t` (seconds).
  * Coordinates are analysis-frame pixels, +y down (ball rising ⇒ vy < 0).
  */
-import { DETECTION, TRACKER } from './config';
+import { DETECTION, RELEASE, TRACKER } from './config';
 import { boxCenter, boxContains, distance } from './geometry';
 import { BallKalman } from './kalman';
 import type {
@@ -107,6 +109,14 @@ export class BallTracker {
 
   /** Timestamp of the last emitted sample (accepted or predicted), seconds. */
   private lastSampleT: number | null = null;
+
+  /**
+   * Pose-gated release event (wrist position + camera time), or null. While
+   * fresh (RELEASE.seedWindowSec) it opens a wrist-local relaxed score gate
+   * in pickCandidate. Survives resetTrack() on purpose — reacquiring after
+   * the track died at release is exactly its job.
+   */
+  private releaseSeed: { x: number; y: number; t: number } | null = null;
 
   /**
    * @param opts Optional tracker configuration; see {@link BallTrackerOptions}.
@@ -207,11 +217,29 @@ export class BallTracker {
     return this.history;
   }
 
+  /**
+   * Pose-gated release event from the pipeline (analysis px, camera
+   * seconds). For RELEASE.seedWindowSec after `t`, candidates within
+   * RELEASE.seedRadiusFrac of the frame side around (x, y) — the shooting
+   * wrist at release — pass at the relaxed DETECTION.ballScoreMinTracking
+   * even with NO fresh track. WHY: the just-released ball is small, fast
+   * and motion-blurred, scoring in the 0.12–0.19 band exactly when cold
+   * acquisition demands 0.2 — so the flight was often never picked up at
+   * all. The wrist is an independent, pose-derived prior on where the ball
+   * MUST be right now, substituting for the Kalman-prediction locality the
+   * tracking gate normally requires. Positions and times in, no wall clock
+   * — the tracker stays pure and deterministic.
+   */
+  setReleaseEvent(x: number, y: number, t: number): void {
+    this.releaseSeed = { x, y, t };
+  }
+
   /** Clears all tracker state, including the sample history. */
   reset(): void {
     this.resetTrack();
     this.history.length = 0;
     this.frameIndex = 0;
+    this.releaseSeed = null;
   }
 
   // -------------------------------------------------------------------------
@@ -277,14 +305,33 @@ export class BallTracker {
       this.lastAccept !== null &&
       this.frameIndex - this.lastAcceptFrame <= TRACKER.jumpWindowFrames;
 
+    // Wrist-seeded reacquisition (see setReleaseEvent): while the release
+    // seed is fresh, candidates near the released wrist get the SAME relaxed
+    // floor as flight continuation — the wrist position plays the role the
+    // Kalman prediction plays for trackFresh, so a faint just-released ball
+    // can START (not only continue) a track. seedRadius < 0 = inactive.
+    let seedRadius = -1;
+    let seedX = 0;
+    let seedY = 0;
+    const seed = this.releaseSeed;
+    if (seed !== null && t >= seed.t && t - seed.t <= RELEASE.seedWindowSec) {
+      seedRadius =
+        Math.max(frame.frameWidth, frame.frameHeight) * RELEASE.seedRadiusFrac;
+      seedX = seed.x;
+      seedY = seed.y;
+    }
+
     for (const det of frame.detections) {
       if (det.cls !== 'ball') continue;
 
       const center = boxCenter(det.box);
       const inHoopRoi = hoopRoi !== null && boxContains(hoopRoi, center);
+      const nearWrist =
+        seedRadius >= 0 &&
+        Math.hypot(center.x - seedX, center.y - seedY) <= seedRadius;
       const scoreGate = inHoopRoi
         ? DETECTION.ballScoreMinHoopRoi
-        : trackFresh
+        : trackFresh || nearWrist
           ? DETECTION.ballScoreMinTracking
           : DETECTION.ballScoreMin;
       if (det.score < scoreGate) continue;

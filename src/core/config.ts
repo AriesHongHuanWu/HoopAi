@@ -375,6 +375,96 @@ export const SHOT_FSM = {
   useViewBandRouting: false,
 } as const;
 
+/**
+ * Pose-gated release detection (src/core/releaseDetector.ts) and its two
+ * consumers: the shot FSM's 'release' arm path and the ball tracker's
+ * wrist-seeded reacquisition.
+ *
+ * WHY THIS EXISTS: the FSM's three ball-kinematic arm paths (jump / layup /
+ * descend) all require the BALL to be detected at the decisive moment. A
+ * dark or small ball is routinely invisible to the detector exactly at
+ * release — so a real attempt produces no arm at all and the shot silently
+ * disappears. The shooter's BODY, however, is a far larger detection target:
+ * the release MOTION (wrist snapping up past the shoulder on an extending
+ * arm) is visible to the pose model even when the ball is not. The detector
+ * turns that motion into a timestamped event; the tracker uses the wrist
+ * position as a spatial prior to reacquire the faint ball, and the FSM arms
+ * off the event once a REAL ball corroborates it.
+ */
+export const RELEASE = {
+  /**
+   * The three signature conditions (wrist above shoulder, upward wrist
+   * velocity spike, elbow extended) must all have occurred within this
+   * trailing window. A real release snap completes in ~0.10–0.25 s from set
+   * point to full extension; 0.3 s covers slow-motion form shooters while
+   * staying short enough that an unrelated arm raise plus a later wrist
+   * flick can't merge into a false signature.
+   */
+  windowSec: 0.3,
+  /**
+   * angle(shoulder, elbow, wrist) past which the arm counts as extended.
+   * Full extension reads 160–180°, but pose jitter routinely shaves 10–20°
+   * off a genuinely straight arm; 150° catches real releases while a
+   * bent-arm dribble/gather (~90–120°) stays well below. Deliberately a few
+   * degrees under FORM.followThrough.elbowMinDeg (155) — that gate judges a
+   * HELD extension over many filtered frames, this one a single raw instant.
+   */
+  minElbowExtensionDeg: 150,
+  /**
+   * Wrist upward-speed floor, as a FRACTION of frame height per second
+   * (+y down, so rising = negative vy; expressed scale-free so one number
+   * serves any analysis resolution). A release snap drives the wrist up
+   * ~0.5 m in ~0.2 s; with the shooter typically 1/3–1/2 of the frame tall
+   * that is ≳0.4 frame-heights/s. Deliberately raising an arm (calling for
+   * a pass, celebrating) sits well under 0.2. 0.3 splits the two regimes.
+   */
+  minUpwardWristVyFracPerSec: 0.3,
+  /**
+   * At most one event per this interval. Matches SHOT_FSM.shotCooldownSec:
+   * two real attempts can never be closer than the FSM's own cooldown, so a
+   * tighter debounce would only pass follow-through jitter as new events.
+   */
+  debounceSec: 1.5,
+  /**
+   * FSM arming guard: a REAL (never Kalman-predicted) ball sample must be
+   * seen within this many seconds AFTER the event before the release path
+   * arms. The seeded tracker typically reacquires the just-released ball
+   * within a few frames; 0.7 s covers a slow reacquisition while keeping a
+   * pose-only event (pump fake, pass, celebration) from arming off an
+   * unrelated ball that wanders in later.
+   */
+  armWindowSec: 0.7,
+  /**
+   * The corroborating ball must sit in the upper fraction of the frame
+   * (cy < this × frameH). A just-released ball climbs immediately toward
+   * the rim (upper half in any framing where make/miss is judgeable); a
+   * dribble, a ball at the chest, or floor bounces live in the lower frame.
+   */
+  armUpperFrameFrac: 0.6,
+  /**
+   * Tracker reacquisition window after the event (~15 frames at 30 fps).
+   * The wrist prior is only meaningful in the first few frames of flight —
+   * after half a second a 9 m/s ball is metres from the release point and
+   * the prior is stale. Same scale as TRACKER.maxPredictedSec by design.
+   */
+  seedWindowSec: 0.5,
+  /**
+   * Acceptance radius around the released wrist, as a fraction of the
+   * larger frame side. In the frames the window is FOR (right after
+   * release) the ball is within roughly an arm's length (~0.1 frame) of
+   * the wrist; 0.15 adds margin for wrist-keypoint error without opening a
+   * court-wide hole in the low-score gate.
+   */
+  seedRadiusFrac: 0.15,
+  /**
+   * Staleness cap when stamping ResolvedShot.releaseToRimSec: a real
+   * release→rim flight is ~0.5–1.5 s (typical jumper arcs). Past 2.5 s the
+   * latched event belongs to some earlier motion, not this shot's release,
+   * so no metric is emitted rather than a wrong one.
+   */
+  maxReleaseToRimSec: 2.5,
+} as const;
+
 export const FORM = {
   /** One-Euro filter defaults for pose landmarks. */
   oneEuro: { minCutoff: 1.0, beta: 0.007, dCutoff: 1.0 },
