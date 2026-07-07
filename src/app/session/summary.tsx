@@ -1,7 +1,8 @@
 /**
- * Post-session summary — broadcast hero (FG% under the signature arc),
- * stat cards, shot chart, highlights plan and the full shot list with
- * one-tap corrections.
+ * Post-session summary — the broadcast box-score moment: SummaryHero strip
+ * (MAKES | FG% | PTS + one-shot celebration chip) up top, replay/reel media
+ * row, the full SessionRecap under a "Box score" eyebrow, and a grouped
+ * action stack (analysis / share / primary Done).
  *
  * Data source: the live session store when a session just ended
  * (phase === 'ended'); otherwise falls back to the database via the ?id=
@@ -24,6 +25,7 @@ import {
   useUndoableCorrection,
 } from '@/components/ShotList';
 import { CoachMarks, useCoachMarks, type CoachStep } from '@/components/coach/CoachMarks';
+import { SummaryHero } from '@/components/SummaryHero';
 import { Card, Chip, Eyebrow, PillButton, Row, Screen } from '@/components/ui';
 import { color, space, type } from '@/constants/tokens';
 import type { ResolvedShot, ShotOutcome, ShotValue } from '@/core/types';
@@ -214,23 +216,28 @@ export default function SessionSummaryScreen() {
               />
             </View>
           )}
+          <SummaryHero stats={stats} style={styles.hero} />
           {videoPath != null && sessionId != null && (
-            <View ref={replayRef} onLayout={() => {
-              replayRef.current?.measureInWindow((x, y, w, h) =>
-                setReplayRect({ x, y, width: w, height: h }),
-              );
-            }}>
-              <Row gap={space.md} style={styles.replayButton}>
-                <PillButton
-                  label="Watch replay"
-                  icon="play"
-                  onPress={() => router.push(`/video/${sessionId}`)}
-                  style={{ flex: 1 }}
-                />
-                <ReelEntryButton sessionId={sessionId} variant="ghost" style={{ flex: 1 }} />
-              </Row>
+            <View style={styles.mediaSection}>
+              <Eyebrow>Watch it back</Eyebrow>
+              <View ref={replayRef} onLayout={() => {
+                replayRef.current?.measureInWindow((x, y, w, h) =>
+                  setReplayRect({ x, y, width: w, height: h }),
+                );
+              }}>
+                <Row gap={space.md}>
+                  <PillButton
+                    label="Watch replay"
+                    icon="play"
+                    onPress={() => router.push(`/video/${sessionId}`)}
+                    style={{ flex: 1 }}
+                  />
+                  <ReelEntryButton sessionId={sessionId} variant="ghost" style={{ flex: 1 }} />
+                </Row>
+              </View>
             </View>
           )}
+          <Eyebrow>Box score</Eyebrow>
           <SessionRecap
             shots={shots}
             stats={stats}
@@ -244,31 +251,39 @@ export default function SessionSummaryScreen() {
               <Chip label="Couldn't share — try again" tone="unsure" />
             </View>
           )}
-          <PillButton
-            label="Shot Lab — deep analysis"
-            icon="flask"
-            onPress={() => router.push('/shotlab')}
-            disabled={shots.length === 0}
-            style={{ marginTop: shareFailed ? space.md : space.xl }}
-          />
-          <Row gap={space.md} style={{ marginTop: space.md }}>
-            <PillButton label="Done" icon="checkmark" onPress={onDone} style={{ flex: 1 }} />
+          <View style={styles.actionsSection}>
+            <Eyebrow>Next up</Eyebrow>
             <PillButton
               variant="ghost"
-              label={sharing ? 'Preparing…' : 'Share card'}
-              icon="share-social"
-              onPress={onShareCard}
-              disabled={sharing || shots.length === 0}
-              style={{ flex: 1 }}
+              label="Shot Lab — deep analysis"
+              icon="flask"
+              onPress={() => router.push('/shotlab')}
+              disabled={shots.length === 0}
             />
-          </Row>
-          <PillButton
-            variant="ghost"
-            label="View history"
-            icon="time-outline"
-            onPress={() => router.push('/history')}
-            style={{ marginTop: space.md }}
-          />
+            <Row gap={space.md} style={{ marginTop: space.md }}>
+              <PillButton
+                variant="ghost"
+                label={sharing ? 'Preparing…' : 'Share card'}
+                icon="share-social"
+                onPress={onShareCard}
+                disabled={sharing || shots.length === 0}
+                style={{ flex: 1 }}
+              />
+              <PillButton
+                variant="ghost"
+                label="View history"
+                icon="time-outline"
+                onPress={() => router.push('/history')}
+                style={{ flex: 1 }}
+              />
+            </Row>
+            <PillButton
+              label="Done"
+              icon="checkmark"
+              onPress={onDone}
+              style={{ marginTop: space.md }}
+            />
+          </View>
         </>
       )}
     </Screen>
@@ -305,8 +320,16 @@ const styles = StyleSheet.create({
   saveChip: {
     marginBottom: space.md,
   },
-  replayButton: {
-    marginBottom: space.lg,
+  /** Box-score strip: breathing room off the title, section gap below. */
+  hero: {
+    marginTop: space.md,
+    marginBottom: space.xl,
+  },
+  mediaSection: {
+    marginBottom: space.xl,
+  },
+  actionsSection: {
+    marginTop: space.xl,
   },
   heading: {
     ...type.heading,
