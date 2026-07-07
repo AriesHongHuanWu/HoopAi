@@ -132,6 +132,38 @@ describe('gradePlacement', () => {
       PLACEMENT_REASON.lowFps,
     );
   });
+
+  test('dark scene with otherwise-good placement → ok, low-light heads-up', () => {
+    expect(gradePlacement(inputs({ light: 'dark' }))).toEqual({
+      grade: 'ok',
+      reason: PLACEMENT_REASON.tooDark,
+    });
+  });
+
+  test('dim / bright / unknown light never changes the grade', () => {
+    expect(gradePlacement(inputs({ light: 'dim' })).grade).toBe('good');
+    expect(gradePlacement(inputs({ light: 'bright' })).grade).toBe('good');
+    expect(gradePlacement(inputs({ light: null })).grade).toBe('good');
+    expect(gradePlacement(inputs()).grade).toBe('good');
+  });
+
+  test('size reasons outrank the dark heads-up (hard and soft)', () => {
+    expect(
+      gradePlacement(inputs({ rimWidthPx: 0.02 * SIDE, light: 'dark' })).reason,
+    ).toBe(PLACEMENT_REASON.tooSmall);
+    expect(
+      gradePlacement(inputs({ rimWidthPx: 0.05 * SIDE, light: 'dark' })).reason,
+    ).toBe(PLACEMENT_REASON.slightlySmall);
+    expect(
+      gradePlacement(inputs({ rimWidthPx: 0.2 * SIDE, light: 'dark' })).reason,
+    ).toBe(PLACEMENT_REASON.slightlyLarge);
+  });
+
+  test('low fps also outranks the dark heads-up', () => {
+    expect(gradePlacement(inputs({ fps: 6, light: 'dark' })).reason).toBe(
+      PLACEMENT_REASON.lowFps,
+    );
+  });
 });
 
 describe('bestRimWidth', () => {

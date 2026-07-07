@@ -25,6 +25,7 @@ import {
   type FtDistanceCalibration,
 } from '../core/ftCalibration';
 import { evalArc, fitArc, predictLanding } from '../core/trajectory';
+import { classifyLight, type LightProfile } from '../core/lightProfile';
 import { ShotFsm } from '../core/shotFsm';
 import { classifyViewBand } from '../core/viewBand';
 import type {
@@ -50,6 +51,13 @@ export interface FramePayload {
    * and the pose model ran. Null/undefined otherwise (analysis is skipped).
    */
   pose?: PoseFrame | null;
+  /**
+   * EMA'd mean scene luminance 0..1 from the camera worklet (green-channel
+   * proxy, letterbox bars compensated out — see useShotEngine). 0/undefined =
+   * not measured yet (demo mode, model warm-up); the pipeline then leaves the
+   * light profile untouched. Drives the tracker's dark-relaxed cold gate.
+   */
+  light?: number;
 }
 
 export interface PipelineEvents {
@@ -142,6 +150,13 @@ export class ShotPipeline {
   private reappearance = false;
   /** Camera pitch at/around rim lock from the IMU, degrees +up; null = no IMU. */
   private viewPitchDeg: number | null = null;
+  /**
+   * Scene-light profile classified from the worklet's mean-luma estimate
+   * (hysteresis lives in classifyLight, keyed off this previous value).
+   * Forwarded to the tracker ON CHANGE only. Environmental — survives
+   * reset() on purpose: lighting doesn't change with pipeline state.
+   */
+  private lightProfile: LightProfile = 'bright';
   private sawPoseThisShot = false;
   /** Latest pose ankle-midpoint (analysis px) — the pose-based shooter foot for
    *  2/3 estimation. Null until a pose with a visible ankle arrives. */
@@ -268,6 +283,17 @@ export class ShotPipeline {
   step(payload: FramePayload): PipelineFrameState {
     const { frame, netMotionScore } = payload;
     const dims = { width: frame.frameWidth, height: frame.frameHeight };
+
+    // Light-aware detection profile: classify the worklet's luma estimate
+    // (0/undefined = unmeasured → keep the current profile) and push a
+    // CHANGE to the tracker, which relaxes its cold ball gate in 'dark'.
+    if (payload.light !== undefined && payload.light > 0) {
+      const next = classifyLight(payload.light, this.lightProfile);
+      if (next !== this.lightProfile) {
+        this.lightProfile = next;
+        this.tracker.setLightProfile(next);
+      }
+    }
 
     const rim = this.rimLock.step(frame, frame.t) ?? this.rimLock.geometry;
     if (rim && rim !== this.lastRim) this.adoptRim(rim, dims);

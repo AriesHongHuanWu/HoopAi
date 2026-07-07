@@ -131,6 +131,13 @@ export interface OverlayState {
   /** Seconds left on the pre-lock "hold steady" countdown (HUD shows ceil() as a
    *  3-2-1 reticle), or null when not counting / already locked. */
   rimCountdown: number | null;
+  /**
+   * EMA'd mean scene luminance 0..1 from the frame worklet (green-channel
+   * proxy over the detector input, letterbox bars compensated out). 0 until
+   * measured (demo mode / model warm-up). Classified via
+   * src/core/lightProfile.ts by consumers (placement grade's low-light hint).
+   */
+  light: number;
 }
 
 export const EMPTY_OVERLAY: OverlayState = {
@@ -146,6 +153,7 @@ export const EMPTY_OVERLAY: OverlayState = {
   rimCountdown: null,
   pred: null,
   predTraj: [],
+  light: 0,
 };
 
 /** Live diagnostics for the on-screen debug panel (helps fix on-device ML). */
@@ -168,6 +176,12 @@ export interface EngineDebug {
   bufBytes: number;
   /** % of sampled input pixels that are non-zero (0 = black/empty input). */
   nonZeroPct: number;
+  /**
+   * EMA'd mean scene luminance 0..1 (green-channel proxy, letterbox bars
+   * compensated). 0 until measured. The debug panel renders it alongside its
+   * classified profile (bright/dim/dark — src/core/lightProfile.ts).
+   */
+  light: number;
   /** Which delegate the model loaded with ('core-ml' | 'android-gpu' | 'cpu' | 'loading'). */
   delegate: string;
   /** Load failure reason OR per-frame detect-path error, empty when fine. */
@@ -205,6 +219,7 @@ export const EMPTY_DEBUG: EngineDebug = {
   inputMax: 0,
   bufBytes: 0,
   nonZeroPct: 0,
+  light: 0,
   delegate: 'loading',
   modelError: '',
   avgMs: 0,
@@ -458,6 +473,12 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
   // session (orientation is locked), so a 1-frame lag is irrelevant. Feeds the
   // orientation-correct 'contain' letterbox mapping in the HUD overlays.
   const srcDimsSv = useSharedValue({ w: 0, h: 0 });
+  // EMA'd mean scene luminance 0..1 (green-channel proxy over the detector
+  // input, letterbox bars compensated out). 0 = not measured yet — the
+  // sentinel consumers key off, so a real measurement is floored just above 0.
+  // Written by the frame worklet; read on the JS thread for the overlay/debug
+  // publish and the FramePayload's light field (light-aware detection profile).
+  const lightSv = useSharedValue(0);
 
   // Mirror the load state into the debug panel as soon as it changes.
   useEffect(() => {
@@ -559,6 +580,7 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
           rimCountdown: state.rimCountdown,
           pred: state.predictedLanding,
           predTraj: state.predictedPath,
+          light: lightSv.value,
         };
       },
     });
@@ -880,16 +902,30 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
         let mx = -1e9;
         let nz = 0;
         let sampled = 0;
+        // Mean-luma accumulation rides the SAME sparse loop (zero extra
+        // passes): the green channel is a fine luma proxy, and which sampled
+        // indices ARE green depends on the buffer layout (must match the
+        // resizer's pixelLayout): INTERLEAVED (YOLOX, B,G,R triplets) green
+        // is k % 3 === 1; PLANAR (YOLO11) green is the middle S*S plane.
+        const lumaPlaneStart = detInputSize * detInputSize;
+        const lumaPlaneEnd = 2 * lumaPlaneStart;
+        let lumaSum = 0;
+        let lumaN = 0;
         for (let k = 0; k < inArr.length; k += 1499) {
           const v = inArr[k]!;
           if (v < mn) mn = v;
           if (v > mx) mx = v;
           if (v !== 0) nz++;
           sampled++;
+          if (useYolox ? k % 3 === 1 : k >= lumaPlaneStart && k < lumaPlaneEnd) {
+            lumaSum += v;
+            lumaN++;
+          }
         }
         if (mn === 1e9) mn = 0;
         if (mx === -1e9) mx = 0;
         nonZeroPct = sampled > 0 ? Math.round((100 * nz) / sampled) : 0;
+        let meanLuma = lumaN > 0 ? lumaSum / lumaN : 0;
         // Insurance: YOLO expects 0..1 input. If the resizer emits 0..255 floats
         // on some device, normalize — a wrong input range is the classic
         // "model loaded but maxScore stays 0" failure.
@@ -897,9 +933,30 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
           for (let k = 0; k < inArr.length; k++) inArr[k] = inArr[k]! / 255;
           mn /= 255;
           mx /= 255;
+          meanLuma /= 255;
         }
         inMin = mn;
         inMax = mx;
+        // Scene luminance → light profile input. The 'contain' letterbox pads
+        // the square with black bars which would deflate the mean; the bars
+        // read exactly 0, so dividing the whole-square mean by the content-
+        // area fraction recovers the CONTENT mean with no per-sample bounds
+        // test (same geometry as ml/letterboxCull.ts). EMA'd hard — lighting
+        // changes slowly, and classifyLight's hysteresis kills residual
+        // jitter at the profile boundaries.
+        if (lumaN > 0 && frame.width > 0 && frame.height > 0) {
+          const lumaScale = detInputSize / Math.max(frame.width, frame.height);
+          const contentFrac =
+            (frame.width * lumaScale * (frame.height * lumaScale)) /
+            (detInputSize * detInputSize);
+          let luma = contentFrac > 0 ? meanLuma / contentFrac : meanLuma;
+          if (luma > 1) luma = 1;
+          // Floor a real measurement just above 0 so "measured pitch-black"
+          // stays distinguishable from the 0 = never-measured sentinel.
+          if (luma < 0.0001) luma = 0.0001;
+          lightSv.value =
+            lightSv.value === 0 ? luma : lightSv.value * 0.9 + luma * 0.1;
+        }
         // Net-motion signal: sample a 12×12 grid of green-channel values inside
         // the locked rim's net ROI and diff against the previous frame. A made
         // shot whips the net → a burst of change. Score normalizes mean |Δ|
@@ -1226,6 +1283,7 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
           inputMax: inMax,
           bufBytes,
           nonZeroPct,
+          light: lightSv.value,
           delegate: debug.value.delegate,
           modelError: detErr,
           avgMs: Math.round(avgInferMs.value),
@@ -1267,7 +1325,14 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
           }
         }
 
-        scheduleOnRN(onPayload, { frame: parsed, netMotionScore, pose });
+        scheduleOnRN(onPayload, {
+          frame: parsed,
+          netMotionScore,
+          pose,
+          // Light-aware detection profile: the pipeline classifies this and
+          // relaxes the tracker's cold ball gate in genuinely dark scenes.
+          light: lightSv.value,
+        });
       } catch (outerErr) {
         // A throw ANYWHERE in the frame worklet outside the inner detect
         // try/catch (the gate, a debug write, scheduleOnRN, the pose path)

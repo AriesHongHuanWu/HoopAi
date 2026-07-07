@@ -505,6 +505,77 @@ describe('BallTracker', () => {
     });
   });
 
+  describe('dark-scene relaxed cold acquisition (setLightProfile)', () => {
+    // Between the dark cold floor (0.16) and the bright cold floor (0.2):
+    // the low-light regime the 'dark' profile exists for. 0.17 in practice.
+    const darkScore = DETECTION.ballScoreMinDark + 0.01;
+
+    test('the dark floor sits between tracking and cold acquisition', () => {
+      expect(DETECTION.ballScoreMinDark).toBeGreaterThan(
+        DETECTION.ballScoreMinTracking,
+      );
+      expect(DETECTION.ballScoreMinDark).toBeLessThan(DETECTION.ballScoreMin);
+      expect(darkScore).toBeLessThan(DETECTION.ballScoreMin);
+    });
+
+    test("STARTS a track from a 0.17 ball in 'dark'", () => {
+      const tracker = new BallTracker({});
+      tracker.setLightProfile('dark');
+      const out = tracker.step(
+        frameAt(0, [ballDet(200, 200, { score: darkScore })]),
+        null,
+      );
+      expect(out).not.toBeNull();
+      expect(out!.predicted).toBe(false);
+      expect(out!.cx).toBeCloseTo(200);
+      expect(out!.score).toBeCloseTo(darkScore);
+    });
+
+    test('rejects the same ball cold in bright (the default profile)', () => {
+      const tracker = new BallTracker({});
+      expect(
+        tracker.step(frameAt(0, [ballDet(200, 200, { score: darkScore })]), null),
+      ).toBeNull();
+    });
+
+    test("'dim' changes nothing — the full cold gate still applies", () => {
+      const tracker = new BallTracker({});
+      tracker.setLightProfile('dim');
+      expect(
+        tracker.step(frameAt(0, [ballDet(200, 200, { score: darkScore })]), null),
+      ).toBeNull();
+    });
+
+    test('below the dark floor is still rejected cold, even in dark', () => {
+      const tracker = new BallTracker({});
+      tracker.setLightProfile('dark');
+      // Above the tracking floor (0.12) but under the dark cold floor (0.16):
+      // proves dark relaxes cold acquisition to 0.16, NOT to the tracking gate.
+      const tooLow = DETECTION.ballScoreMinDark - 0.01;
+      expect(tooLow).toBeGreaterThan(DETECTION.ballScoreMinTracking);
+      expect(
+        tracker.step(frameAt(0, [ballDet(200, 200, { score: tooLow })]), null),
+      ).toBeNull();
+    });
+
+    test('every other defense stays armed in dark: the giant-box cap still rejects', () => {
+      const tracker = new BallTracker({});
+      tracker.setLightProfile('dark');
+      const giant = ballDet(320, 320, { score: 0.9, w: 600, h: 600 });
+      expect(tracker.step(frameAt(0, [giant]), null)).toBeNull();
+      expect(tracker.getHistory()).toHaveLength(0);
+    });
+
+    test('flipping back to bright re-tightens the cold gate', () => {
+      const tracker = new BallTracker({});
+      tracker.setLightProfile('dark');
+      tracker.setLightProfile('bright');
+      expect(
+        tracker.step(frameAt(0, [ballDet(200, 200, { score: darkScore })]), null),
+      ).toBeNull();
+    });
+  });
+
   describe('wrist-seeded reacquisition (pose release event)', () => {
     // In the tracking band (>= 0.12) but under cold acquisition (0.2): the
     // faint just-released ball the wrist prior exists for.

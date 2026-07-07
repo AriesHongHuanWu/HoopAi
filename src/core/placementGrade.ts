@@ -14,6 +14,7 @@
  * detection degrades enough that the user should physically move the phone.
  */
 import { DETECTION } from './config';
+import type { LightProfile } from './lightProfile';
 
 export type PlacementGradeLevel = 'good' | 'ok' | 'poor';
 
@@ -32,6 +33,13 @@ export interface PlacementInputs {
   msSinceRimSeen: number;
   /** Effective detection fps from the engine debug; 0 = unknown/not measured. */
   fps: number;
+  /**
+   * Scene-light profile classified from the overlay's luma estimate
+   * (src/core/lightProfile.ts), or null/undefined when not yet measured
+   * (demo mode, model warm-up). Only 'dark' affects the grade — a heads-up
+   * that tracking will be weaker, ranked below every size reason.
+   */
+  light?: LightProfile | null;
 }
 
 // --- thresholds (exported for tests + the ghost-rim band) --------------------
@@ -60,6 +68,7 @@ export const PLACEMENT_REASON = {
   lowFps: 'Phone is struggling — close other apps',
   slightlySmall: 'Almost there — a step closer is ideal',
   slightlyLarge: 'Almost there — a small step back is ideal',
+  tooDark: 'Low light — expect weaker tracking; add light if you can',
   good: 'Great framing — hold steady',
 } as const;
 
@@ -70,10 +79,13 @@ export const PLACEMENT_REASON = {
  *   2. No usable signal yet (grace window / no frames) — calm "searching".
  *   3. Hard size failures (too far / too close) — the most actionable fixes.
  *   4. Low detection fps — framing may be fine, but tracking will be choppy.
- *   5. Soft size nudges toward the ideal band, then Good.
+ *   5. Soft size nudges toward the ideal band.
+ *   6. Dark scene — framing and fps are fine, but low light weakens the
+ *      detector; a heads-up (with the mitigations already engaged), ranked
+ *      below every size reason because moving the phone fixes those.
  */
 export function gradePlacement(input: PlacementInputs): PlacementGradeResult {
-  const { rimWidthPx, frameSide, msSinceRimSeen, fps } = input;
+  const { rimWidthPx, frameSide, msSinceRimSeen, fps, light } = input;
 
   if (msSinceRimSeen > NO_RIM_TIMEOUT_MS) {
     return { grade: 'poor', reason: PLACEMENT_REASON.noRim };
@@ -97,6 +109,9 @@ export function gradePlacement(input: PlacementInputs): PlacementGradeResult {
   }
   if (frac > RIM_FRACTION_IDEAL_MAX) {
     return { grade: 'ok', reason: PLACEMENT_REASON.slightlyLarge };
+  }
+  if (light === 'dark') {
+    return { grade: 'ok', reason: PLACEMENT_REASON.tooDark };
   }
   return { grade: 'good', reason: PLACEMENT_REASON.good };
 }
