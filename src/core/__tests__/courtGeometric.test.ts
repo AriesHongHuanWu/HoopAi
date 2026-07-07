@@ -107,4 +107,38 @@ describe('estimateShotValueMetric', () => {
     // Rim drawn far too LOW in frame ⇒ solved camera height goes negative-ish.
     expect(estimateShotValueMetric({ ...s, rimBox: { ...s.rimBox, y: 620 } })).toBeNull();
   });
+
+  test('optional FT calibration scales distanceM and can flip the 2/3 call', () => {
+    const base = scene({ camH: 0.6, zRim: 10, zFeet: 3.6 }); // true 6.4 m → 2PT
+    const uncal = estimateShotValueMetric(base);
+    expect(uncal).not.toBeNull();
+    expect(uncal!.value).toBe(2);
+    const cal = estimateShotValueMetric({
+      ...base,
+      calibration: { correctionFactor: 1.1 },
+    });
+    expect(cal).not.toBeNull();
+    expect(cal!.distanceM).toBeCloseTo(uncal!.distanceM * 1.1, 6);
+    expect(cal!.value).toBe(3); // 6.4 · 1.1 = 7.04 ≥ 6.75
+    // Diagnostics untouched — every gate ran on the RAW geometry.
+    expect(cal!.zRimM).toBeCloseTo(uncal!.zRimM, 10);
+    expect(cal!.zFeetM).toBeCloseTo(uncal!.zFeetM, 10);
+    expect(cal!.camHeightM).toBeCloseTo(uncal!.camHeightM, 10);
+  });
+
+  test('absent or invalid calibration leaves the output identical', () => {
+    const base = scene({ camH: 0.6, zRim: 10, zFeet: 3 });
+    const ref = estimateShotValueMetric(base);
+    expect(ref).not.toBeNull();
+    expect(estimateShotValueMetric({ ...base, calibration: null })).toEqual(ref);
+    expect(
+      estimateShotValueMetric({ ...base, calibration: { correctionFactor: 0 } }),
+    ).toEqual(ref);
+    expect(
+      estimateShotValueMetric({ ...base, calibration: { correctionFactor: NaN } }),
+    ).toEqual(ref);
+    expect(
+      estimateShotValueMetric({ ...base, calibration: { correctionFactor: -2 } }),
+    ).toEqual(ref);
+  });
 });

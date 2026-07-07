@@ -38,7 +38,11 @@ import { parseMoveNet } from '../ml/poseParser';
 import { findMotionCandidate } from '../ml/motionCandidate';
 import { cullLetterboxDetections } from '../ml/letterboxCull';
 import { squareCropRect, remapRoiBox } from '../ml/roiTransform';
-import { ShotPipeline, type FramePayload } from '../pipeline/shotPipeline';
+import {
+  ShotPipeline,
+  type FramePayload,
+  type FtCaptureOutcome,
+} from '../pipeline/shotPipeline';
 import { useSettings } from '../state/settingsStore';
 
 // Bundled detectors (user-selectable in Settings). 'standard' = YOLO11n
@@ -253,6 +257,13 @@ export interface ShotEngine {
   setManualRim: (box: Box) => void;
   /** Drop the rim lock and return to acquiring (the "Re-aim" control). */
   reAim: () => void;
+  /**
+   * OPTIONAL FT-line calibration capture: medians the shooter's foot over the
+   * next few confident frames and derives a per-session 2/3 distance
+   * refinement. Resolves with success or a quiet reject reason; never throws
+   * and never affects shot detection either way.
+   */
+  captureFtAnchor: () => Promise<FtCaptureOutcome>;
 }
 
 export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotEngine {
@@ -1337,6 +1348,7 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
         height: detInputSize,
       }),
     reAim: () => pipeline.reAim(),
+    captureFtAnchor: () => pipeline.captureFtAnchor(),
   };
 }
 

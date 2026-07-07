@@ -35,6 +35,14 @@ export interface MetricShotInput {
   pitchDeg: number | null;
   /** Focal length prior in analysis px (default COURT/DEPTH_GATE prior). */
   focalPx?: number;
+  /**
+   * Optional FT-line calibration (src/core/ftCalibration.ts): multiplies the
+   * final distanceM before the 2/3 threshold. Applied AFTER every confidence
+   * gate — all gates run on the UNCALIBRATED geometry, so a calibration can
+   * only refine the call, never enable or veto an estimate. Absent/invalid
+   * (non-finite or ≤ 0) factors leave the path byte-identical.
+   */
+  calibration?: { correctionFactor: number } | null;
 }
 
 export interface MetricShotEstimate {
@@ -100,9 +108,15 @@ export function estimateShotValueMetric(input: MetricShotInput): MetricShotEstim
   const d = Math.hypot(zFeet - zRim, xFeet - xRim);
   if (!Number.isFinite(d) || d < 0.3 || d > 30) return null;
 
+  // Optional FT-line refinement, applied last: gates above already accepted
+  // the raw geometry, so this only sharpens the distance the 2/3 threshold
+  // sees. Without a (valid) calibration, dOut === d — byte-identical path.
+  const cf = input.calibration?.correctionFactor;
+  const dOut = cf != null && Number.isFinite(cf) && cf > 0 ? d * cf : d;
+
   return {
-    value: d >= COURT.threePtDistanceM ? 3 : 2,
-    distanceM: d,
+    value: dOut >= COURT.threePtDistanceM ? 3 : 2,
+    distanceM: dOut,
     zRimM: zRim,
     zFeetM: zFeet,
     camHeightM: camH,

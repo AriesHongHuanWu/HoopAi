@@ -59,12 +59,17 @@ import { ModeComplete } from '../../components/modes/ModeComplete';
 import { Card, Chip, PillButton, Row, Screen } from '../../components/ui';
 import { color, motion, radius, space, type } from '../../constants/tokens';
 import type { ResolvedShot } from '../../core/types';
+import type { FtCaptureOutcome } from '../../pipeline/shotPipeline';
 import { useMode } from '../../state/modeStore';
 import { useSession } from '../../state/sessionStore';
 import { useSettings } from '../../state/settingsStore';
 
 const DRIFT_BANNER_MS = 4000;
 const PAUSED_CHIP_MS = 4000;
+/** How long the one-time FT-calibration offer lingers after rim lock. */
+const FT_OFFER_MS = 20000;
+/** How long the calibration success/failure chip stays up. */
+const FT_RESULT_MS = 2500;
 /** Width of the docked HUD column in landscape (compact, rim stays clear). */
 const LANDSCAPE_HUD_WIDTH = 300;
 /**
@@ -338,6 +343,14 @@ function LiveSessionScreen() {
     [width, height],
   );
 
+  // FT-line calibration capture — hands the chip a stable callback into the
+  // engine (optional 2/3 refinement; a missing engine just reports a quiet no).
+  const captureFt = useCallback((): Promise<FtCaptureOutcome> => {
+    const eng = engineRef.current;
+    if (eng == null) return Promise.resolve({ ok: false, reason: 'no-rim' });
+    return eng.captureFtAnchor();
+  }, []);
+
   // Re-aim — drop the lock and return to aiming (auto-lock or tap-to-set again).
   const onReAim = useCallback(() => {
     engineRef.current?.reAim();
@@ -540,6 +553,10 @@ function LiveSessionScreen() {
           </View>
         )}
         <ShotToast shot={toastShot} streak={streak} />
+        {/* One-time FT-line calibration offer (optional 2/3 refinement).
+            Mounts fresh at each rim lock (rimLocked flips false on re-aim),
+            self-hides after FT_OFFER_MS, and renders nothing once done. */}
+        {rimLocked && <FtCalibrationChip capture={captureFt} />}
         {engine.activeMode === 'demo' && (
           <View style={styles.topCenter}>
             <Chip label="DEMO MODE — scripted scene" tone="accent" />
@@ -675,6 +692,120 @@ function DetectionHeartbeat({ debug }: { debug: ShotEngine['debug'] }) {
             {label}
           </Text>
         </Row>
+      </HudChip>
+    </View>
+  );
+}
+
+/**
+ * FT-line calibration chip — the one-time, entirely OPTIONAL offer to sharpen
+ * 2/3-point calls: stand at the free-throw line, tap, hold still through a
+ * 3-2-1 countdown while the engine medians the shooter's foot. Success and
+ * failure are equally quiet — skipping (or failing) leaves the default
+ * rim-width ruler untouched. Per-session only; nothing is persisted.
+ */
+function FtCalibrationChip({ capture }: { capture: () => Promise<FtCaptureOutcome> }) {
+  const [stage, setStage] = useState<
+    'offer' | 'countdown' | 'capturing' | 'done' | 'failed' | 'hidden'
+  >('offer');
+  const [count, setCount] = useState(3);
+
+  // Untouched offer self-hides — calibration must never nag or feel required.
+  useEffect(() => {
+    if (stage !== 'offer') return;
+    const id = setTimeout(() => setStage('hidden'), FT_OFFER_MS);
+    return () => clearTimeout(id);
+  }, [stage]);
+
+  // 3-2-1 hold-still countdown, then fire the capture.
+  useEffect(() => {
+    if (stage !== 'countdown') return;
+    if (count <= 0) {
+      setStage('capturing');
+      return;
+    }
+    const id = setTimeout(() => setCount((c) => c - 1), 1000);
+    return () => clearTimeout(id);
+  }, [stage, count]);
+
+  useEffect(() => {
+    if (stage !== 'capturing') return;
+    let alive = true;
+    capture()
+      .then((r) => {
+        if (alive) setStage(r.ok ? 'done' : 'failed');
+      })
+      .catch(() => {
+        if (alive) setStage('failed');
+      });
+    return () => {
+      alive = false;
+    };
+  }, [stage, capture]);
+
+  // Brief result beat, then gone for the rest of the session.
+  useEffect(() => {
+    if (stage !== 'done' && stage !== 'failed') return;
+    const id = setTimeout(() => setStage('hidden'), FT_RESULT_MS);
+    return () => clearTimeout(id);
+  }, [stage]);
+
+  if (stage === 'hidden') return null;
+
+  if (stage === 'offer') {
+    return (
+      <View style={styles.topCenter}>
+        <HudChip>
+          <Row gap={space.sm}>
+            <Pressable
+              onPress={() => {
+                setCount(3);
+                setStage('countdown');
+                void Haptics.selectionAsync();
+              }}
+              accessibilityRole="button"
+              accessibilityLabel="Boost 2 and 3 point accuracy. Stand at the free-throw line, then tap to calibrate."
+              hitSlop={8}
+            >
+              <Text style={styles.ftText}>Boost 2/3 accuracy — stand at the FT line, tap here</Text>
+            </Pressable>
+            <Pressable
+              onPress={() => setStage('hidden')}
+              accessibilityRole="button"
+              accessibilityLabel="Dismiss calibration tip"
+              hitSlop={8}
+            >
+              <Text style={styles.ftDismiss}>✕</Text>
+            </Pressable>
+          </Row>
+        </HudChip>
+      </View>
+    );
+  }
+
+  const label =
+    stage === 'countdown'
+      ? `Hold still at the line… ${count}`
+      : stage === 'capturing'
+        ? 'Hold still at the line…'
+        : stage === 'done'
+          ? 'Calibrated ✓'
+          : 'Couldn’t calibrate — skipped';
+  return (
+    <View style={styles.topCenter} pointerEvents="none">
+      <HudChip>
+        <Text
+          style={
+            stage === 'done'
+              ? styles.ftDoneText
+              : stage === 'failed'
+                ? styles.ftFailText
+                : styles.ftText
+          }
+          accessibilityLiveRegion="polite"
+        >
+          {label}
+        </Text>
       </HudChip>
     </View>
   );
@@ -904,6 +1035,22 @@ const styles = StyleSheet.create({
   pausedText: {
     ...type.bodyMedium,
     color: color.text,
+  },
+  ftText: {
+    ...type.bodyMedium,
+    color: color.text,
+  },
+  ftDoneText: {
+    ...type.bodyMedium,
+    color: color.make,
+  },
+  ftFailText: {
+    ...type.bodyMedium,
+    color: color.textDim,
+  },
+  ftDismiss: {
+    ...type.bodyMedium,
+    color: color.textDim,
   },
   bottomBar: {
     position: 'absolute',

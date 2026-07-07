@@ -16,6 +16,14 @@ import { FormAnalyzer, coachingTips } from '../core/formAnalysis';
 import { ReleaseDetector } from '../core/releaseDetector';
 import { RimLock } from '../core/rimLock';
 import { estimateShotValueMetric } from '../core/courtGeometric';
+import {
+  deriveFtCalibration,
+  medianFootPoint,
+  type FtAnchor,
+  type FtCalibrationRejectReason,
+  type FtCalibrationResult,
+  type FtDistanceCalibration,
+} from '../core/ftCalibration';
 import { evalArc, fitArc, predictLanding } from '../core/trajectory';
 import { ShotFsm } from '../core/shotFsm';
 import { classifyViewBand } from '../core/viewBand';
@@ -84,6 +92,29 @@ export interface PipelineFrameState {
   predictedPath: number[];
 }
 
+/** Why a captureFtAnchor() attempt did not produce a calibration. */
+export type FtCaptureRejectReason =
+  | FtCalibrationRejectReason
+  /** No locked rim to anchor against (at start, or lost during capture). */
+  | 'no-rim'
+  /** Frame budget elapsed without enough confident shooter-foot samples. */
+  | 'no-person'
+  /** A newer captureFtAnchor() call replaced this one. */
+  | 'superseded'
+  /** The pipeline was reset mid-capture. */
+  | 'reset';
+
+/** Outcome of one captureFtAnchor() attempt. Failure is always quiet — the
+ *  uncalibrated rim-ruler path keeps working exactly as before. */
+export type FtCaptureOutcome =
+  | { ok: true; calibration: FtDistanceCalibration }
+  | { ok: false; reason: FtCaptureRejectReason };
+
+/** Confident shooter-foot samples medianed into one FT anchor. */
+const FT_CAPTURE_FRAMES = 8;
+/** Frame budget before an anchor capture gives up (no confident person). */
+const FT_CAPTURE_MAX_FRAMES = 90;
+
 export class ShotPipeline {
   private readonly tracker = new BallTracker({});
   private readonly rimLock = new RimLock({ lockHoldSec: RIM.lockHoldSec });
@@ -119,6 +150,16 @@ export class ShotPipeline {
    *  latched shooter box (see pickShooterBox). */
   private lastHolderBox: Box | null = null;
   private lastHolderT = -Infinity;
+  /** Optional FT-line calibration for the metric 2/3 estimator. Per-session
+   *  only (never persisted — the camera moves between sessions); refinement
+   *  only, never a gate. */
+  private ftCalibration: FtDistanceCalibration | null = null;
+  /** In-flight FT anchor capture, fed by step() frames until it resolves. */
+  private ftCapture: {
+    samples: { x: number; y: number }[];
+    framesSeen: number;
+    resolve: (outcome: FtCaptureOutcome) => void;
+  } | null = null;
 
   constructor(events: PipelineEvents = {}) {
     this.events = events;
@@ -160,6 +201,40 @@ export class ShotPipeline {
     this.viewPitchDeg = pitchDeg;
   }
 
+  /**
+   * Set (or clear) the FT-line calibration from a captured anchor. Derivation
+   * runs through the pure module (src/core/ftCalibration.ts); a rejected
+   * anchor CLEARS any previous calibration rather than keeping a stale one.
+   * Returns the derivation result (null when clearing) for caller feedback.
+   */
+  setFtCalibration(anchor: FtAnchor | null): FtCalibrationResult | null {
+    if (anchor == null) {
+      this.ftCalibration = null;
+      return null;
+    }
+    const result = deriveFtCalibration(anchor);
+    this.ftCalibration = result.ok ? result.calibration : null;
+    return result;
+  }
+
+  /**
+   * Capture an FT-line anchor from the live stream: over the next
+   * {@link FT_CAPTURE_FRAMES} frames with a confident shooter foot (pose
+   * ankles when available, else the best-person box bottom — the same data
+   * path the shooter latch uses), median the foot midpoint, build the anchor
+   * against the locked rim and derive+store the calibration. Resolves with
+   * the outcome; NEVER rejects the promise — a failed capture just leaves the
+   * default uncalibrated path in place.
+   */
+  captureFtAnchor(): Promise<FtCaptureOutcome> {
+    if (!this.lastRim) return Promise.resolve({ ok: false, reason: 'no-rim' });
+    // One capture at a time — a newer request supersedes the old quietly.
+    this.ftCapture?.resolve({ ok: false, reason: 'superseded' });
+    return new Promise((resolve) => {
+      this.ftCapture = { samples: [], framesSeen: 0, resolve };
+    });
+  }
+
   /** Manual rim override from the live tap-to-set-rim. */
   setManualRim(box: Box, frame: { width: number; height: number }): void {
     this.rimLock.setManual(box);
@@ -176,6 +251,13 @@ export class ShotPipeline {
     this.rimLock.reset();
     this.lastRim = null;
     this.wasDrifted = false;
+    // A re-aim means the camera is being physically re-pointed: the FT anchor
+    // was captured against the OLD placement, so its correction is stale.
+    // Drop it (and any in-flight capture) — the default rim ruler takes over
+    // untouched, and the UI re-offers calibration after the next lock.
+    this.ftCapture?.resolve({ ok: false, reason: 'no-rim' });
+    this.ftCapture = null;
+    this.ftCalibration = null;
   }
 
   get rimGeometry(): RimGeometry | null {
@@ -204,6 +286,9 @@ export class ShotPipeline {
     // Form analysis (opt-in): feed each frame's pose to the analyzer so it can
     // track the shot phases (dip → release → follow-through). Entirely skipped
     // when no pose arrives, so it never touches the normal detection path.
+    // THIS frame's pose foot (fresh, not the latched lastPoseFootPx) — the FT
+    // anchor capture below prefers it over the person-box bottom.
+    let poseFootThisFrame: { x: number; y: number } | null = null;
     const pose = payload.pose;
     if (pose) {
       if (!this.form) this.form = new FormAnalyzer({ hand: this.formHand, frameHeight: frame.frameHeight });
@@ -232,8 +317,16 @@ export class ShotPipeline {
       // "where they're standing". Keep the latest ankle midpoint (analysis px);
       // the shooter barely moves during a shot, so the latest is a good origin.
       const foot = poseFootPx(pose);
-      if (foot) this.lastPoseFootPx = foot;
+      if (foot) {
+        this.lastPoseFootPx = foot;
+        poseFootThisFrame = foot;
+      }
     }
+
+    // FT-line anchor capture (optional calibration): pure observation of the
+    // shooter's foot over a few confident frames. Runs beside — never inside —
+    // the shot path: it cannot gate the FSM, delay a shot or block a session.
+    if (this.ftCapture) this.stepFtCapture(frame, ball, poseFootThisFrame);
 
     let phase: ShotPhase = 'IDLE';
     let liveTrajectory: readonly BallSample[] = [];
@@ -333,6 +426,8 @@ export class ShotPipeline {
             footY: originY * frame.frameHeight,
             frameSize: frame.frameWidth,
             pitchDeg: this.viewPitchDeg,
+            // Optional FT-line refinement (null = default path, untouched).
+            calibration: this.ftCalibration,
           });
         }
         const est = estimateShotValue(
@@ -381,6 +476,53 @@ export class ShotPipeline {
     this.fsm = null;
     this.lastRim = null;
     this.wasDrifted = false;
+    this.ftCapture?.resolve({ ok: false, reason: 'reset' });
+    this.ftCapture = null;
+    this.ftCalibration = null;
+  }
+
+  /**
+   * One frame of an in-flight FT anchor capture. Sample source mirrors the
+   * shot-origin priority: THIS frame's pose ankle midpoint when available,
+   * else the confident best-person box's bottom midpoint (the shooter-latch
+   * data path). Completes with a median anchor after FT_CAPTURE_FRAMES
+   * samples, or gives up quietly after FT_CAPTURE_MAX_FRAMES frames.
+   */
+  private stepFtCapture(
+    frame: FrameDetections,
+    ball: TrackedBall | null,
+    poseFoot: { x: number; y: number } | null,
+  ): void {
+    const cap = this.ftCapture!;
+    cap.framesSeen += 1;
+    let foot = poseFoot;
+    if (!foot) {
+      const p = bestPerson(frame, ball);
+      if (p) foot = { x: p.x + p.width / 2, y: p.y + p.height };
+    }
+    if (foot) cap.samples.push(foot);
+    if (cap.samples.length >= FT_CAPTURE_FRAMES) {
+      this.ftCapture = null;
+      const rim = this.lastRim;
+      const footPx = medianFootPoint(cap.samples);
+      if (!rim || !footPx) {
+        cap.resolve({ ok: false, reason: rim ? 'no-person' : 'no-rim' });
+        return;
+      }
+      const anchor: FtAnchor = {
+        footPx,
+        rim,
+        // Same square side the per-shot metric estimator is fed.
+        frameSize: frame.frameWidth,
+        pitchDeg: this.viewPitchDeg,
+      };
+      const result = deriveFtCalibration(anchor);
+      if (result.ok) this.ftCalibration = result.calibration;
+      cap.resolve(result);
+    } else if (cap.framesSeen >= FT_CAPTURE_MAX_FRAMES) {
+      this.ftCapture = null;
+      cap.resolve({ ok: false, reason: 'no-person' });
+    }
   }
 
   /**
