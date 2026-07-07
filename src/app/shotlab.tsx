@@ -181,8 +181,12 @@ export default function ShotLabScreen() {
                     <Text style={styles.archetypeName}>{best.player.name}</Text>
                     <Text style={styles.similarity}>{best.similarity}% match</Text>
                   </Row>
-                  <Text style={styles.archetypeStyle}>{best.player.style}</Text>
-                  <Text style={styles.body}>{best.player.blurb}</Text>
+                  <Row gap={space.sm} style={{ marginTop: space.xs, flexWrap: 'wrap' }}>
+                    <Chip label={best.player.style} tone="accent" />
+                    <Chip label={best.player.motion} />
+                    <Chip label={`release ~${best.player.releaseHeightM.toFixed(1)}m`} />
+                  </Row>
+                  <Text style={styles.body}>{best.player.mechanics}</Text>
                   <View style={{ marginTop: space.md, gap: space.xs }}>
                     {best.rows.map((r) => (
                       <Row key={r.key} gap={space.md}>
@@ -198,6 +202,18 @@ export default function ShotLabScreen() {
                       </Row>
                     ))}
                   </View>
+                  <Text style={styles.sectionLabel}>Steal this</Text>
+                  {best.player.whatToCopy.map((c) => (
+                    <Text key={c} style={styles.bullet}>
+                      {'•'} {c}
+                    </Text>
+                  ))}
+                  <Text style={styles.sectionLabel}>His thing — not yours</Text>
+                  {best.player.idiosyncratic.map((c) => (
+                    <Text key={c} style={[styles.bullet, { color: color.textFaint }]}>
+                      {'•'} {c}
+                    </Text>
+                  ))}
                   {archetypes.length > 1 && (
                     <Row gap={space.sm} style={{ marginTop: space.md, flexWrap: 'wrap' }}>
                       {archetypes.slice(1, 3).map((m) => (
@@ -205,6 +221,11 @@ export default function ShotLabScreen() {
                       ))}
                     </Row>
                   )}
+                  <Text style={styles.caption}>
+                    Player numbers are estimates compiled from public shooting analyses
+                    (ESPN Sport Science, Noah arc research, coaching film), normalized to
+                    this app's measurements — references, not lab data.
+                  </Text>
                 </Card>
               )}
 
@@ -322,6 +343,16 @@ const styles = StyleSheet.create({
     fontVariant: ['tabular-nums'],
     minWidth: 64,
     textAlign: 'right',
+  },
+  sectionLabel: {
+    ...type.bodyMedium,
+    color: color.text,
+    marginTop: space.md,
+  },
+  bullet: {
+    ...type.body,
+    color: color.textDim,
+    marginTop: space.xs,
   },
   planItem: {
     marginTop: space.md,

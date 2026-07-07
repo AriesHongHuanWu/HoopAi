@@ -214,12 +214,13 @@ describe('scoreAxis / radarScores', () => {
 
 describe('matchArchetype', () => {
   test('a Curry-like profile matches Curry first', () => {
+    // Researched Curry profile: 55° launch, ~52° entry, 400ms one-motion.
     const shots = session({
       n: 6,
-      makeRelease: 52,
-      missRelease: 52,
-      makeEntry: 46,
-      missEntry: 46,
+      makeRelease: 55,
+      missRelease: 55,
+      makeEntry: 52,
+      missEntry: 52,
       metricsFor: () => ({ releaseTimeMs: 400 }),
     });
     const matches = matchArchetype(shots);
