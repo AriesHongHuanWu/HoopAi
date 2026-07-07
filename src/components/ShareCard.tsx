@@ -62,6 +62,13 @@ import type { ResolvedShot, SessionStats, ShotOutcome } from '../core/types';
 
 export const CARD_W = 1080;
 export const CARD_H = 1350;
+/** Instagram-Story height (9:16) — the DEFAULT share format: full-bleed
+ *  background, the familiar 4:5 composition centered inside the story-safe
+ *  zone, and a brand hook at the bottom. Every share is an ad. */
+export const CARD_H_STORY = 1920;
+
+/** Card aspect: 'story' (IG-first default) or the classic 4:5 'feed'. */
+export type CardFormat = 'story' | 'feed';
 const PAD = 84;
 const CONTENT_W = CARD_W - PAD * 2;
 
@@ -387,11 +394,17 @@ function ChipRow({ chips, top }: { chips: readonly ChipSpec[]; top: number }) {
 export function ShareCardGraphic({
   data,
   bgImage,
+  format = 'story',
 }: {
   data: ShareCardData;
   /** Pre-decoded shot-frame background (loaded by the caller — offscreen-safe). */
   bgImage?: SkImage | null;
+  format?: CardFormat;
 }) {
+  const H = format === 'story' ? CARD_H_STORY : CARD_H;
+  /** Story mode: the 4:5 composition drops by this much, clearing IG's
+   *  top chrome and centering in the safe zone. */
+  const dy = format === 'story' ? 235 : 0;
   const wordmarkFont = displayFont(60);
   const dateFont = displayFont(30);
   const eyebrowFont = displayFont(30);
@@ -418,33 +431,35 @@ export function ShareCardGraphic({
 
   return (
     <Group>
-      {/* Coal base (also the letterbox fill if the photo isn't a perfect 4:5). */}
-      <Rect x={0} y={0} width={CARD_W} height={CARD_H} color={color.bg} />
+      {/* Coal base (also the letterbox fill if the photo isn't a perfect fit). */}
+      <Rect x={0} y={0} width={CARD_W} height={H} color={color.bg} />
       {bgImage != null ? (
         <>
           {/* Shot-frame photo, full-bleed cover. */}
-          <SkiaImage image={bgImage} x={0} y={0} width={CARD_W} height={CARD_H} fit="cover" />
+          <SkiaImage image={bgImage} x={0} y={0} width={CARD_W} height={H} fit="cover" />
           {/* Legibility scrim: darker at the top (wordmark/title) and bottom
               (hero/pips/chips), letting the photo show through the middle band. */}
-          <Rect x={0} y={0} width={CARD_W} height={CARD_H}>
+          <Rect x={0} y={0} width={CARD_W} height={H}>
             <LinearGradient
               start={vec(0, 0)}
-              end={vec(0, CARD_H)}
+              end={vec(0, H)}
               colors={[SCRIM_TOP, SCRIM_MID, SCRIM_BOT]}
               positions={[0, 0.45, 1]}
             />
           </Rect>
           {/* Keep a touch of the leather glow so the brand read survives. */}
-          <Rect x={0} y={0} width={CARD_W} height={CARD_H}>
-            <RadialGradient c={vec(CARD_W / 2, 840)} r={660} colors={[ACCENT_WASH, GLOW_FADE]} />
+          <Rect x={0} y={0} width={CARD_W} height={H}>
+            <RadialGradient c={vec(CARD_W / 2, 840 + dy)} r={660} colors={[ACCENT_WASH, GLOW_FADE]} />
           </Rect>
         </>
       ) : (
         /* No photo → the original coal + subtle leather radial glow. */
-        <Rect x={0} y={0} width={CARD_W} height={CARD_H}>
-          <RadialGradient c={vec(CARD_W / 2, 840)} r={660} colors={[color.accentTint, GLOW_FADE]} />
+        <Rect x={0} y={0} width={CARD_W} height={H}>
+          <RadialGradient c={vec(CARD_W / 2, 840 + dy)} r={660} colors={[color.accentTint, GLOW_FADE]} />
         </Rect>
       )}
+      {/* The classic 4:5 composition, dropped into the story-safe zone. */}
+      <Group transform={[{ translateY: dy }]}>
       {/* Faint center-court circle grounding the hero numeral. */}
       <Circle
         cx={CARD_W / 2}
@@ -515,6 +530,19 @@ export function ShareCardGraphic({
       {data.chips.map((row, i) => (
         <ChipRow key={i} chips={row} top={1180 + i * 82} />
       ))}
+      </Group>
+
+      {/* Story-only bottom brand hook — the line every viewer reads. */}
+      {format === 'story' && (
+        <TrackedText
+          text="TRACK YOUR GAME · HOOPILOT"
+          x={(CARD_W - trackedWidth(displayFont(30), 'TRACK YOUR GAME · HOOPILOT', 6)) / 2}
+          y={H - 84}
+          font={displayFont(30)}
+          tracking={6}
+          fg={color.textDim}
+        />
+      )}
     </Group>
   );
 }
@@ -528,24 +556,27 @@ export function ShareCard({
   data,
   width = 270,
   style,
+  format = 'story',
 }: {
   data: ShareCardData;
-  /** Rendered width in dp; height follows the 4:5 ratio. */
+  /** Rendered width in dp; height follows the format's aspect. */
   width?: number;
   style?: StyleProp<ViewStyle>;
+  format?: CardFormat;
 }) {
   const scale = width / CARD_W;
+  const H = format === 'story' ? CARD_H_STORY : CARD_H;
   // Load the optional shot-frame background for the inline preview (async, safe
   // to call with null — returns null until/unless a uri decodes).
   const bgImage = useImage(data.backgroundUri ?? null);
   return (
     <Canvas
-      style={[{ width, height: Math.round(CARD_H * scale) }, style]}
+      style={[{ width, height: Math.round(H * scale) }, style]}
       accessible
       accessibilityLabel={`Share card: ${data.title}, ${data.hero} ${data.heroLabel.toLowerCase()}`}
     >
       <Group transform={[{ scale }]}>
-        <ShareCardGraphic data={data} bgImage={bgImage} />
+        <ShareCardGraphic data={data} bgImage={bgImage} format={format} />
       </Group>
     </Canvas>
   );
@@ -602,10 +633,13 @@ export async function shareCardImage(
     }
   }
   try {
-    const image = await drawAsImage(<ShareCardGraphic data={data} bgImage={bgImage} />, {
-      width: CARD_W,
-      height: CARD_H,
-    });
+    const image = await drawAsImage(
+      <ShareCardGraphic data={data} bgImage={bgImage} format="story" />,
+      {
+        width: CARD_W,
+        height: CARD_H_STORY,
+      },
+    );
     const base64 = image?.encodeToBase64(ImageFormat.PNG);
     const dir = FileSystem.cacheDirectory;
     if (image == null || base64 == null || base64.length === 0 || dir == null) {
@@ -626,6 +660,47 @@ export async function shareCardImage(
     bgImage?.dispose?.();
     bgData?.dispose?.();
   }
+}
+
+/**
+ * "My NBA twin" card data — the Shot Lab's most shareable artifact. Reuses
+ * the session-card composition: the similarity % is the hero numeral, the
+ * you-vs-him stat rows become the chips.
+ */
+export function twinCardData(match: {
+  player: { name: string; style: string; motion: string };
+  similarity: number;
+  rows: readonly { label: string; unit: string; user: number; player: number }[];
+}): ShareCardData {
+  const chipRows: ChipSpec[][] = [];
+  let row: ChipSpec[] = [];
+  for (const r of match.rows) {
+    row.push({
+      text: `${r.label.toUpperCase()} ME ${Math.round(r.user)}${r.unit} · HIM ${Math.round(r.player)}${r.unit}`,
+      bg: color.surfaceRaised,
+      fg: color.text,
+    });
+    if (row.length === 2) {
+      chipRows.push(row);
+      row = [];
+    }
+  }
+  if (row.length > 0) chipRows.push(row);
+  return {
+    eyebrow: 'MY NBA TWIN',
+    title: match.player.name,
+    dateLabel: match.player.motion.toUpperCase(),
+    hero: `${match.similarity}%`,
+    heroLabel: match.player.style.toUpperCase(),
+    pips: [],
+    chips: chipRows.slice(0, 2),
+  };
+}
+
+/** Share the "My NBA twin" story card. Never throws. */
+export async function shareTwinCard(match: Parameters<typeof twinCardData>[0]): Promise<boolean> {
+  const fallback = `🏀 My jumper is ${match.similarity}% ${match.player.name} — measured on Hoopilot.`;
+  return shareCardImage(twinCardData(match), fallback);
 }
 
 /**

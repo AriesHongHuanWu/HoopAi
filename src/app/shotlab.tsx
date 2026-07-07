@@ -13,12 +13,13 @@ import { FadeInDown } from 'react-native-reanimated';
 import React, { useEffect, useMemo, useState } from 'react';
 import { ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 
+import { shareTwinCard } from '@/components/ShareCard';
 import { BackPill } from '@/components/ShotList';
 import { ArcCompare } from '@/components/charts/ArcCompare';
 import { MetricDiffRow } from '@/components/charts/MetricDiffRow';
 import { RadarChart } from '@/components/charts/RadarChart';
 import { ReleaseSkeleton } from '@/components/charts/ReleaseSkeleton';
-import { Card, Chip, EmptyState, Eyebrow, Row, Screen } from '@/components/ui';
+import { Card, Chip, EmptyState, Eyebrow, PillButton, Row, Screen } from '@/components/ui';
 import { color, space, type } from '@/constants/tokens';
 import { sessionShots, shotFromRow } from '@/data/db';
 import {
@@ -225,6 +226,14 @@ export default function ShotLabScreen() {
                       ))}
                     </Row>
                   )}
+                  <PillButton
+                    label="Share my NBA twin"
+                    icon="logo-instagram"
+                    onPress={() => {
+                      void shareTwinCard(best);
+                    }}
+                    style={{ marginTop: space.md }}
+                  />
                   <Text style={styles.caption}>
                     Player numbers are estimates compiled from public shooting analyses
                     (ESPN Sport Science, Noah arc research, coaching film), normalized to
