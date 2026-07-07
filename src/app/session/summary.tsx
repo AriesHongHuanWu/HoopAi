@@ -210,6 +210,7 @@ export default function SessionSummaryScreen() {
             }}>
               <PillButton
                 label="Watch replay"
+                icon="play"
                 onPress={() => router.push(`/video/${sessionId}`)}
                 style={styles.replayButton}
               />
@@ -230,15 +231,17 @@ export default function SessionSummaryScreen() {
           )}
           <PillButton
             label="Shot Lab — deep analysis"
+            icon="flask"
             onPress={() => router.push('/shotlab')}
             disabled={shots.length === 0}
             style={{ marginTop: shareFailed ? space.md : space.xl }}
           />
           <Row gap={space.md} style={{ marginTop: space.md }}>
-            <PillButton label="Done" onPress={onDone} style={{ flex: 1 }} />
+            <PillButton label="Done" icon="checkmark" onPress={onDone} style={{ flex: 1 }} />
             <PillButton
               variant="ghost"
               label={sharing ? 'Preparing…' : 'Share card'}
+              icon="share-social"
               onPress={onShareCard}
               disabled={sharing || shots.length === 0}
               style={{ flex: 1 }}
@@ -247,6 +250,7 @@ export default function SessionSummaryScreen() {
           <PillButton
             variant="ghost"
             label="View history"
+            icon="time-outline"
             onPress={() => router.push('/history')}
             style={{ marginTop: space.md }}
           />

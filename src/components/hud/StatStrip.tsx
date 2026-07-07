@@ -9,8 +9,9 @@
  * Subscribes to the session store with narrow selectors so it only re-renders
  * when a shot resolves — the Skia overlay handles everything per-frame.
  */
-import React from 'react';
-import { StyleSheet, Text, View, type StyleProp, type ViewStyle } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
+import React, { useState } from 'react';
+import { Pressable, StyleSheet, Text, View, type StyleProp, type ViewStyle } from 'react-native';
 
 import { color, space, type } from '../../constants/tokens';
 import { useSession } from '../../state/sessionStore';
@@ -48,8 +49,46 @@ export function StatStrip({
     `Twos ${twoPtMakes} of ${twoPtAttempts}. Threes ${threePtMakes} of ${threePtAttempts}. ` +
     `Streak ${streak}.`;
 
+  // MINIMAL BY DEFAULT: the court is the star, not the scoreboard. One tap
+  // toggles between a single glanceable line and the full broadcast cards.
+  const [expanded, setExpanded] = useState(false);
+  if (!expanded) {
+    return (
+      <Pressable
+        accessible
+        accessibilityRole="button"
+        accessibilityLabel={a11y}
+        accessibilityHint="Expands the full scoreboard"
+        onPress={() => setExpanded(true)}
+        style={style}
+      >
+        <HudChip deep style={styles.miniChip}>
+          <Row style={styles.miniRow} gap={space.sm}>
+            <Text style={styles.miniPoints}>{points}</Text>
+            <Text style={styles.miniUnit}>PTS</Text>
+            <View style={styles.divider} />
+            <Text style={styles.miniStat}>
+              {makes}/{attempts}
+            </Text>
+            <View style={styles.divider} />
+            <Text style={styles.miniStat}>{pct(makes, attempts)}%</Text>
+            {hot && <Text style={styles.miniStreak}>🔥{streak}</Text>}
+            <Ionicons name="chevron-down" size={14} color={color.textFaint} />
+          </Row>
+        </HudChip>
+      </Pressable>
+    );
+  }
+
   return (
-    <View accessible accessibilityLabel={a11y} style={style}>
+    <Pressable
+      accessible
+      accessibilityRole="button"
+      accessibilityLabel={a11y}
+      accessibilityHint="Collapses to the compact scoreline"
+      onPress={() => setExpanded(false)}
+      style={style}
+    >
       <Row style={styles.strip} gap={space.sm}>
         <HudChip deep style={[styles.pointsChip, compact && styles.pointsChipCompact]}>
           <StatNumber value={`${points}`} label="Points" size={compact ? 'medium' : 'large'} />
@@ -97,11 +136,38 @@ export function StatStrip({
           </Row>
         </HudChip>
       </Row>
-    </View>
+    </Pressable>
   );
 }
 
 const styles = StyleSheet.create({
+  miniChip: {
+    alignSelf: 'center',
+    paddingVertical: space.xs,
+    paddingHorizontal: space.md,
+  },
+  miniRow: {
+    alignItems: 'center',
+  },
+  miniPoints: {
+    ...type.statMedium,
+    color: color.text,
+    fontVariant: ['tabular-nums'],
+  },
+  miniUnit: {
+    ...type.micro,
+    color: color.textFaint,
+    marginLeft: -2,
+  },
+  miniStat: {
+    ...type.bodyMedium,
+    color: color.textDim,
+    fontVariant: ['tabular-nums'],
+  },
+  miniStreak: {
+    ...type.bodyMedium,
+    color: color.accent,
+  },
   strip: {
     justifyContent: 'center',
     alignItems: 'stretch',

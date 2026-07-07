@@ -13,7 +13,8 @@ import {
   type TextStyle,
   type ViewStyle,
 } from 'react-native';
-import Animated from 'react-native-reanimated';
+import { Ionicons } from '@expo/vector-icons';
+import Animated, { useAnimatedStyle, useSharedValue, withSpring } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { color, radius, space, touch, type } from '../constants/tokens';
@@ -101,40 +102,51 @@ export function PillButton({
   variant = 'primary',
   disabled = false,
   style,
+  icon,
 }: {
   label: string;
   onPress: () => void;
   variant?: 'primary' | 'ghost' | 'danger';
   disabled?: boolean;
   style?: StyleProp<ViewStyle>;
+  /** Optional leading Ionicons glyph — primary actions read faster with one. */
+  icon?: React.ComponentProps<typeof Ionicons>['name'];
 }) {
+  // Press micro-interaction: a quick spring scale-down. One shared value per
+  // button; runs on the UI thread, so every pill in the app feels tactile.
+  const scale = useSharedValue(1);
+  const animStyle = useAnimatedStyle(() => ({ transform: [{ scale: scale.value }] }));
+  const fg = variant === 'ghost' ? color.text : color.onAccent;
   return (
-    <Pressable
-      onPress={onPress}
-      disabled={disabled}
-      accessibilityRole="button"
-      style={({ pressed }) => [
-        styles.pill,
-        variant === 'primary' && {
-          backgroundColor: pressed ? color.accentPressed : color.accent,
-        },
-        variant === 'ghost' && [styles.pillGhost, pressed && { backgroundColor: color.surfaceRaised }],
-        variant === 'danger' && {
-          backgroundColor: pressed ? '#B23E38' : color.miss,
-        },
-        disabled && { opacity: 0.4 },
-        style,
-      ]}
-    >
-      <Text
-        style={[
-          styles.pillLabel,
-          variant === 'ghost' ? { color: color.text } : { color: color.onAccent },
+    <Animated.View style={[animStyle, style]}>
+      <Pressable
+        onPress={onPress}
+        onPressIn={() => {
+          scale.value = withSpring(0.96, { damping: 20, stiffness: 400 });
+        }}
+        onPressOut={() => {
+          scale.value = withSpring(1, { damping: 16, stiffness: 300 });
+        }}
+        disabled={disabled}
+        accessibilityRole="button"
+        style={({ pressed }) => [
+          styles.pill,
+          variant === 'primary' && {
+            backgroundColor: pressed ? color.accentPressed : color.accent,
+          },
+          variant === 'ghost' && [styles.pillGhost, pressed && { backgroundColor: color.surfaceRaised }],
+          variant === 'danger' && {
+            backgroundColor: pressed ? '#B23E38' : color.miss,
+          },
+          disabled && { opacity: 0.4 },
         ]}
       >
-        {label}
-      </Text>
-    </Pressable>
+        <Row gap={space.sm} style={styles.pillContent}>
+          {icon != null && <Ionicons name={icon} size={17} color={fg} />}
+          <Text style={[styles.pillLabel, { color: fg }]}>{label}</Text>
+        </Row>
+      </Pressable>
+    </Animated.View>
   );
 }
 
@@ -359,6 +371,10 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: color.border,
     backgroundColor: 'transparent',
+  },
+  pillContent: {
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   pillLabel: {
     ...type.heading,

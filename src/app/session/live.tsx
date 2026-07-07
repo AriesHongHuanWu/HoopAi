@@ -520,6 +520,7 @@ function LiveSessionScreen() {
           {rimLocked && (
             <PillButton
               label="Re-aim"
+              icon="scan-outline"
               variant="ghost"
               onPress={onReAim}
               style={styles.endButton}
@@ -528,6 +529,7 @@ function LiveSessionScreen() {
         </Row>
         <PillButton
           label="End session"
+          icon="stop-circle-outline"
           variant="ghost"
           onPress={() => setConfirmEnd(true)}
           style={styles.endButton}

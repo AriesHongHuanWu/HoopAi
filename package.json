@@ -6,6 +6,7 @@
     "@expo-google-fonts/barlow-condensed": "^0.4.1",
     "@expo-google-fonts/inter": "^0.4.2",
     "@expo/ui": "~57.0.1",
+    "@expo/vector-icons": "^15.0.2",
     "@shopify/react-native-skia": "2.6.2",
     "expo": "~57.0.1",
     "expo-audio": "~57.0.0",

@@ -291,6 +291,7 @@ export default function SessionDetailScreen() {
           )}
           <PillButton
             label="Shot Lab — deep analysis"
+            icon="flask"
             onPress={() =>
               router.push({ pathname: '/shotlab', params: { sid: String(session.id) } })
             }
@@ -300,6 +301,7 @@ export default function SessionDetailScreen() {
           <PillButton
             variant="ghost"
             label={sharing ? 'Preparing…' : 'Share card'}
+            icon="share-social"
             onPress={onShareCard}
             disabled={sharing || record.shots.length === 0}
             style={{ marginTop: space.md }}
@@ -307,6 +309,7 @@ export default function SessionDetailScreen() {
           {session.videoPath != null && (
             <PillButton
               label="Watch replay"
+              icon="play"
               onPress={() => router.push(`/video/${session.id}`)}
               style={{ marginTop: space.lg }}
             />

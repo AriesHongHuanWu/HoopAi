@@ -7,6 +7,7 @@
  * on first launch; the root layout guarantees the settings store is hydrated
  * before this screen renders, so the check is flash-free.
  */
+import { Ionicons } from '@expo/vector-icons';
 import { Canvas, Circle, Path } from '@shopify/react-native-skia';
 import * as Haptics from 'expo-haptics';
 import { Link, Redirect, router, useFocusEffect } from 'expo-router';
@@ -268,7 +269,7 @@ export default function HomeScreen() {
               hitSlop={space.sm}
               style={({ pressed }) => [styles.gearButton, pressed && styles.gearPressed]}
             >
-              <Text style={styles.gearGlyph}>{'⚙︎'}</Text>
+              <Ionicons name="settings-sharp" size={22} color={color.textDim} />
             </Pressable>
           </Link>
         </Row>
