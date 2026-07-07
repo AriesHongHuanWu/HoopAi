@@ -290,11 +290,19 @@ export default function SessionDetailScreen() {
             </View>
           )}
           <PillButton
+            label="Shot Lab — deep analysis"
+            onPress={() =>
+              router.push({ pathname: '/shotlab', params: { sid: String(session.id) } })
+            }
+            disabled={record.shots.length === 0}
+            style={{ marginTop: space.lg }}
+          />
+          <PillButton
             variant="ghost"
             label={sharing ? 'Preparing…' : 'Share card'}
             onPress={onShareCard}
             disabled={sharing || record.shots.length === 0}
-            style={{ marginTop: space.lg }}
+            style={{ marginTop: space.md }}
           />
           {session.videoPath != null && (
             <PillButton

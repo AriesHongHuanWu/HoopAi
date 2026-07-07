@@ -16,7 +16,7 @@ import * as SQLite from 'expo-sqlite';
 
 import { emptyTotals, type LifetimeTotals } from '../core/achievements';
 import { historyRetentionLimit } from '../core/premium';
-import type { GameModeId, ResolvedShot, SessionStats, ShotOutcome, ShotSignals } from '../core/types';
+import type { FormReport, GameModeId, ResolvedShot, SessionStats, ShotOutcome, ShotSignals } from '../core/types';
 import { recomputeStats } from '../core/stats';
 
 export interface SessionRow {
@@ -192,6 +192,15 @@ async function migrate(db: SQLite.SQLiteDatabase): Promise<void> {
       PRAGMA user_version = 4;
     `);
   }
+  if (version < 5) {
+    // v5: persist the pose-based FormReport (metrics + tips + release pose)
+    // so the Shot Lab's form analysis works on HISTORY sessions, not just the
+    // live one. NULL on rows written before v5 or when form analysis was off.
+    await db.execAsync(`
+      ALTER TABLE shots ADD COLUMN formJson TEXT;
+      PRAGMA user_version = 5;
+    `);
+  }
 }
 
 /** Run a DB operation; on ANY failure log + return the fallback (never throw). */
@@ -349,8 +358,8 @@ export async function insertShot(sessionId: number, shot: ResolvedShot): Promise
       `INSERT INTO shots (
          sessionId, shotIndex, tStart, tResolved, outcome, corrected, rimBounce,
          entryAngleDeg, releaseAngleDeg, xCross, originX, originY,
-         signalsJson, trajectoryJson, shotValue
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         signalsJson, trajectoryJson, shotValue, formJson
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       sessionId,
       shot.id,
       shot.tStart,
@@ -366,6 +375,7 @@ export async function insertShot(sessionId: number, shot: ResolvedShot): Promise
       JSON.stringify(shot.signals),
       JSON.stringify(shot.trajectory),
       shot.shotValue ?? null,
+      shot.form ? JSON.stringify(shot.form) : null,
     );
     return res.lastInsertRowId;
   });
@@ -428,6 +438,8 @@ export interface ShotRow {
    * typecheck — SELECTed rows always carry the column.
    */
   shotValue?: number | null;
+  /** Serialized FormReport; null pre-v5 or when form analysis was off. */
+  formJson?: string | null;
 }
 
 export async function sessionShots(sessionId: number): Promise<ShotRow[]> {
@@ -460,6 +472,9 @@ export function shotFromRow(row: ShotRow): ResolvedShot {
     trajectory: parseJson(row.trajectoryJson, []),
     corrected: row.corrected === 1,
     shotValue: row.shotValue === 3 ? 3 : row.shotValue === 2 ? 2 : undefined,
+    ...(row.formJson
+      ? { form: parseJson<FormReport | undefined>(row.formJson, undefined) }
+      : {}),
   };
 }
 

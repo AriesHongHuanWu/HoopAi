@@ -213,6 +213,12 @@ export interface ResolvedShot {
 export interface FormReport {
   metrics: FormMetrics;
   tips: CoachingTip[];
+  /**
+   * Raw pose snapshot at the release instant (analysis-frame px), when the
+   * analyzer detected a release. Powers the Shot Lab release-skeleton visual;
+   * persisted with the shot (formJson).
+   */
+  releasePose?: PoseFrame;
 }
 
 /** Per-frame input to the shot FSM. All in analysis-frame space. */

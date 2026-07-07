@@ -147,6 +147,13 @@ export class FormAnalyzer {
   private tRelease: number | null = null;
   private releaseWristY: number | null = null;
 
+  /** Raw pose of the CURRENT frame (kept so release can snapshot it). */
+  private lastPose: PoseFrame | null = null;
+  /** Pose at the first frame of the separation streak (pending confirm). */
+  private pendingReleasePose: PoseFrame | null = null;
+  /** Snapshot of the shooter's pose at the confirmed release instant. */
+  private releasePoseFrame: PoseFrame | null = null;
+
   /** Follow-through elbow samples (parallel arrays, numbers only). */
   private readonly ftT: number[] = [];
   private readonly ftDeg: number[] = [];
@@ -170,6 +177,7 @@ export class FormAnalyzer {
    */
   push(pose: PoseFrame, ball: TrackedBall | null): void {
     const t = pose.t;
+    this.lastPose = pose;
 
     // Instantaneous phases advance to their follow-up phase on the next frame.
     if (this.currentPhase === 'DIP') this.currentPhase = 'RISE';
@@ -349,8 +357,20 @@ export class FormAnalyzer {
     this.pendingReleaseElbowDeg = null;
     this.tRelease = null;
     this.releaseWristY = null;
+    this.lastPose = null;
+    this.pendingReleasePose = null;
+    this.releasePoseFrame = null;
     this.ftT.length = 0;
     this.ftDeg.length = 0;
+  }
+
+  /**
+   * The shooter's raw pose at the confirmed release instant (the first frame
+   * of the separation streak), or null when no release was detected. Powers
+   * the Shot Lab's release-skeleton visual.
+   */
+  get releasePose(): PoseFrame | null {
+    return this.releasePoseFrame;
   }
 
   /**
@@ -373,12 +393,14 @@ export class FormAnalyzer {
       if (this.sepStreak === 0) {
         this.pendingReleaseT = t;
         this.pendingReleaseWristY = wrist.y;
+        this.pendingReleasePose = this.lastPose;
         this.pendingReleaseElbowDeg = elbowDeg;
       }
       this.sepStreak++;
       if (this.sepStreak >= RELEASE_CONFIRM_FRAMES) {
         this.tRelease = this.pendingReleaseT;
         this.releaseWristY = this.pendingReleaseWristY;
+        this.releasePoseFrame = this.pendingReleasePose;
         // A release without a detected rise still fixes the dip candidate.
         if (this.tPickup != null) this.dipConfirmed = true;
         if (this.pendingReleaseElbowDeg != null) {

@@ -228,7 +228,13 @@ export default function SessionSummaryScreen() {
               <Chip label="Couldn't share — try again" tone="unsure" />
             </View>
           )}
-          <Row gap={space.md} style={{ marginTop: shareFailed ? space.md : space.xl }}>
+          <PillButton
+            label="Shot Lab — deep analysis"
+            onPress={() => router.push('/shotlab')}
+            disabled={shots.length === 0}
+            style={{ marginTop: shareFailed ? space.md : space.xl }}
+          />
+          <Row gap={space.md} style={{ marginTop: space.md }}>
             <PillButton label="Done" onPress={onDone} style={{ flex: 1 }} />
             <PillButton
               variant="ghost"

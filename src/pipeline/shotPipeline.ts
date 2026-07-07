@@ -214,7 +214,12 @@ export class ShotPipeline {
             entryAngleDeg: resolved.entryAngleDeg,
             releaseAngleDeg: resolved.releaseAngleDeg,
           });
-          resolved.form = { metrics, tips: coachingTips(metrics) };
+          const releasePose = this.form.releasePose;
+          resolved.form = {
+            metrics,
+            tips: coachingTips(metrics),
+            ...(releasePose ? { releasePose } : {}),
+          };
         } catch {
           // Form analysis must never break shot emission.
         }
