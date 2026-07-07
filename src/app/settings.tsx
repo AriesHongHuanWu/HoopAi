@@ -404,6 +404,7 @@ export default function SettingsScreen() {
   const roiZoom = useSettings((s) => s.roiZoom);
   const depthVeto = useSettings((s) => s.depthVeto);
   const reappearance = useSettings((s) => s.reappearance);
+  const motionAssist = useSettings((s) => s.motionAssist);
   const metric23 = useSettings((s) => s.metric23);
   const formAnalysis = useSettings((s) => s.formAnalysis);
   const dailyGoalMakes = useSettings((s) => s.dailyGoalMakes);
@@ -773,6 +774,16 @@ export default function SettingsScreen() {
             onValueChange={(v) => {
               tick();
               set('roiZoom', v);
+            }}
+          />
+          <View style={styles.divider} />
+          <ToggleRow
+            label="Motion assist (experimental)"
+            description="When the detector loses the ball mid-flight, use frame-to-frame motion to keep following the strongest mover. Can mistake other movement for the ball — leave off unless testing."
+            value={motionAssist}
+            onValueChange={(v) => {
+              tick();
+              set('motionAssist', v);
             }}
           />
           </>

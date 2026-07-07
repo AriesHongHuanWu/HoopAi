@@ -202,6 +202,13 @@ export interface SettingsState {
    * parallax and putback fakes; default off pending field validation.
    */
   reappearance: boolean;
+  /**
+   * Frame-diff motion assist (experimental): when the detector loses the ball
+   * mid-flight, the strongest local mover on a coarse luma grid is injected as
+   * a continuation-only synthetic candidate. Default OFF — field testing
+   * showed it can distract the tracker with non-ball movers.
+   */
+  motionAssist: boolean;
   /** Last session orientation — powers the Home quick-start (skip setup). */
   lastOrient: 'portrait' | 'landscape';
   /**
@@ -262,6 +269,7 @@ export const useSettings = create<SettingsState>()(
       depthVeto: false,
       metric23: false,
       reappearance: false,
+      motionAssist: false,
       lastOrient: 'portrait',
       formAnalysis: false,
       tutorialSeen: TUTORIAL_SEEN_DEFAULT,

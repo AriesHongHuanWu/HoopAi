@@ -232,18 +232,19 @@ export default function HomeScreen() {
 
   const startSession = () => {
     if (hapticsEnabled) void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    // Quick-start is an open run — clear any mode picked in a past session so a
-    // stale game HUD never leaks in. The mode picker is the path to a game.
+    // The hero ALWAYS opens setup — orientation choice and the pre-flight
+    // checklist live there. (An earlier "one tap to ball" hero skipped it and
+    // made orientation unpickable; quickStart below is the deliberate shortcut.)
+    router.push('/session/setup');
+  };
+
+  const quickStart = () => {
+    if (hapticsEnabled) void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    // Skip the checklist, reuse the last orientation. An open run — clear any
+    // mode picked in a past session so a stale game HUD never leaks in.
     useMode.getState().reset();
-    // ONE TAP TO BALL: permissions already granted ⇒ skip the setup checklist
-    // and reuse the last session's orientation. First run (or a revoked
-    // permission) still gets the full pre-flight.
-    if (cameraPermission.hasPermission) {
-      useSession.getState().beginSetup();
-      router.push(`/session/live?orient=${useSettings.getState().lastOrient}`);
-    } else {
-      router.push('/session/setup');
-    }
+    useSession.getState().beginSetup();
+    router.push(`/session/live?orient=${useSettings.getState().lastOrient}`);
   };
 
   return (
@@ -299,6 +300,21 @@ export default function HomeScreen() {
             <Text style={styles.heroSub}>Point your phone at the hoop — we do the counting.</Text>
           </Pressable>
         </View>
+
+        {/* Quick start — the deliberate skip-setup shortcut (repeat sessions
+            only: it needs a granted camera and reuses the last orientation). */}
+        {cameraPermission.hasPermission && (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Quick start"
+            accessibilityHint={`Skips setup and starts in ${useSettings.getState().lastOrient} like last time`}
+            onPress={quickStart}
+            style={({ pressed }) => [styles.quickStart, pressed && styles.quickStartPressed]}
+          >
+            <Ionicons name="flash" size={15} color={color.accent} />
+            <Text style={styles.quickStartLabel}>Quick start — same setup as last time</Text>
+          </Pressable>
+        )}
 
         {/* Choose a game mode */}
         <View ref={modeRowRef} onLayout={() => measure(modeRowRef, setModeRowRect)}>
@@ -512,6 +528,24 @@ const styles = StyleSheet.create({
     ...type.body,
     color: color.onAccent,
     opacity: 0.85,
+  },
+  quickStart: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: space.sm,
+    minHeight: touch.minTarget,
+    borderRadius: radius.pill,
+    borderWidth: 1,
+    borderColor: color.border,
+    paddingHorizontal: space.lg,
+  },
+  quickStartPressed: {
+    backgroundColor: color.surfaceRaised,
+  },
+  quickStartLabel: {
+    ...type.caption,
+    color: color.textDim,
   },
   modeRow: {
     flexDirection: 'row',

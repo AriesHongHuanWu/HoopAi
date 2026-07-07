@@ -685,6 +685,10 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
   // phase it needs are published from JS via hoopRoiSv/phaseSv (declared beside
   // netRoiSv above); cadence/timing/diagnostic counters live worklet-side.
   const roiZoom = useSettings((s) => s.roiZoom);
+  // Frame-diff motion assist — experimental, default OFF (field reports showed
+  // non-ball movers distracting the tracker). Captured by the worklet like
+  // roiZoom, so toggling re-registers the frame processor.
+  const motionAssist = useSettings((s) => s.motionAssist);
   const lastRoiRunMs = useSharedValue(0);
   const avgRoiMs = useSharedValue(0);
   const roiFramesSv = useSharedValue(0); // ROI passes actually run
@@ -1097,8 +1101,9 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
         // mover (outside people + the net) is injected as a synthetic 'ball'
         // candidate at score 0.13 — continuation-only by construction (the
         // tracker's cold gate is 0.2). inArr must be read HERE, before the
-        // finally frees its buffer.
-        {
+        // finally frees its buffer. Gated behind the experimental motionAssist
+        // setting (default OFF) — zero cost when disabled.
+        if (motionAssist) {
           const MG = DETECTION.motionCandidate.grid;
           const S = detInputSize;
           const gPlane = S * S;
