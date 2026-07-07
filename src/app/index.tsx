@@ -11,7 +11,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { Canvas, Circle, Path } from '@shopify/react-native-skia';
 import * as Haptics from 'expo-haptics';
 import { Link, Redirect, router, useFocusEffect } from 'expo-router';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Pressable,
   StyleSheet,
@@ -34,12 +34,24 @@ import { BootIntro, bootIntroDelayMs } from '@/components/BootIntro';
 import { Sparkline } from '@/components/charts/Sparkline';
 import { CoachMarks, useCoachMarks, type CoachStep } from '@/components/coach/CoachMarks';
 import { GoalRing } from '@/components/GoalRing';
-import { Card, EmptyState, ErrorCard, Eyebrow, Row, Screen, StatNumber } from '@/components/ui';
+import { Card, Chip, EmptyState, ErrorCard, Eyebrow, Row, Screen, StatNumber } from '@/components/ui';
 import { color, radius, space, touch, type } from '@/constants/tokens';
+import {
+  PERFECT_DAY_BONUS,
+  PERFECT_DAY_ID,
+  challengeGoalTarget,
+  dateKeyFor,
+  emptyDayAggregate,
+  isChallengeComplete,
+  pickDailyChallenges,
+  progressFor,
+  type DayAggregate,
+} from '@/core/dailyChallenges';
 import { todayMakes } from '@/core/goals';
 import { listSessions, type SessionSummaryRow } from '@/data/db';
 import { useCameraPermission } from 'react-native-vision-camera';
 
+import { loadTodayAggregate, useChallenges } from '@/state/challengeStore';
 import { useMode } from '@/state/modeStore';
 import { useSession } from '@/state/sessionStore';
 import { useSettings } from '@/state/settingsStore';
@@ -160,6 +172,11 @@ export default function HomeScreen() {
   const [dbFailed, setDbFailed] = useState(false);
   /** Makes so far today, for the goal ring (src/core/goals.ts todayMakes). */
   const [goalMakes, setGoalMakes] = useState(0);
+  /** Local day key driving today's deterministic challenge picks. */
+  const [challengeDay, setChallengeDay] = useState(() => dateKeyFor(Date.now()));
+  /** Today's aggregate for challenge progress (src/state/challengeStore.ts). */
+  const [dayAgg, setDayAgg] = useState<DayAggregate>(emptyDayAggregate);
+  const totalPoints = useChallenges((s) => s.totalPoints);
 
   // Coach marks: measured target rects for the hero CTA, mode row and quick
   // links, filled in as each view lays out. Steps render centered until a
@@ -241,6 +258,45 @@ export default function HomeScreen() {
       };
     }, [dailyGoalMakes]),
   );
+
+  // Daily challenges: recompute today's aggregate on every focus (same rhythm
+  // as the goal ring above) and bank points for anything newly complete —
+  // awards are idempotent per day, so refocusing never double-counts.
+  useFocusEffect(
+    useCallback(() => {
+      let alive = true;
+      const key = dateKeyFor(Date.now());
+      setChallengeDay(key);
+      useChallenges.getState().ensureDay(key);
+      loadTodayAggregate()
+        .then((agg) => {
+          if (!alive) return;
+          setDayAgg(agg);
+          const picks = pickDailyChallenges(key);
+          const { award } = useChallenges.getState();
+          let allDone = picks.length > 0;
+          for (const c of picks) {
+            if (isChallengeComplete(c, agg)) award(key, c.id, c.points);
+            else allDone = false;
+          }
+          if (allDone) award(key, PERFECT_DAY_ID, PERFECT_DAY_BONUS);
+        })
+        .catch(() => {
+          if (!alive) return;
+          setDayAgg(emptyDayAggregate());
+        });
+      return () => {
+        alive = false;
+      };
+    }, []),
+  );
+
+  /** Today's three challenges — deterministic for the day key, so stable
+   *  across re-renders and refocuses until local midnight. */
+  const dailyChallenges = useMemo(() => pickDailyChallenges(challengeDay), [challengeDay]);
+  const allChallengesDone =
+    dailyChallenges.length > 0 &&
+    dailyChallenges.every((c) => isChallengeComplete(c, dayAgg));
 
   if (!onboardingDone) return <Redirect href="/onboarding" />;
 
@@ -383,8 +439,88 @@ export default function HomeScreen() {
           </Card>
         )}
 
+        {/* Daily challenges — three per day, drawn deterministically from the
+            date, progress recomputed from today's sessions on focus. Display
+            only: no navigation, the loop lives right here. */}
+        <Card entering={enter(4)}>
+          <Row style={styles.challengeHeader}>
+            <Eyebrow>Daily challenges</Eyebrow>
+            <Text
+              style={styles.challengeTotal}
+              accessibilityLabel={`${totalPoints} total challenge points`}
+            >
+              {`${totalPoints} PTS`}
+            </Text>
+          </Row>
+          <View style={styles.challengeList}>
+            {dailyChallenges.map((c) => {
+              const target = challengeGoalTarget(c.goal);
+              const progress = progressFor(c, dayAgg);
+              const done = isChallengeComplete(c, dayAgg);
+              const frac = target > 0 ? Math.min(1, progress / target) : 0;
+              return (
+                <View
+                  key={c.id}
+                  accessible
+                  accessibilityLabel={`${c.title}, ${progress} of ${target}${
+                    done ? ', completed' : ''
+                  }, worth ${c.points} points`}
+                  style={styles.challengeRow}
+                >
+                  <View
+                    style={[styles.challengeIconChip, done && styles.challengeIconChipDone]}
+                  >
+                    <Ionicons
+                      name={
+                        done
+                          ? 'checkmark'
+                          : (c.icon as React.ComponentProps<typeof Ionicons>['name'])
+                      }
+                      size={15}
+                      color={done ? color.make : color.accent}
+                    />
+                  </View>
+                  <View style={styles.challengeBody}>
+                    <Row style={styles.challengeTitleRow}>
+                      <Text
+                        style={[styles.challengeTitle, done && styles.challengeTitleDone]}
+                        numberOfLines={1}
+                      >
+                        {c.title}
+                      </Text>
+                      <Text style={styles.challengeCount}>{`${progress}/${target}`}</Text>
+                    </Row>
+                    <View style={styles.challengeTrack}>
+                      <View
+                        style={[
+                          styles.challengeFill,
+                          { width: `${frac * 100}%` },
+                          done && styles.challengeFillDone,
+                        ]}
+                      />
+                    </View>
+                  </View>
+                  <Chip compact label={`+${c.points}`} tone={done ? 'make' : 'accent'} />
+                </View>
+              );
+            })}
+          </View>
+          {allChallengesDone && (
+            <View
+              accessible
+              accessibilityLabel={`Perfect day, all challenges done, ${PERFECT_DAY_BONUS} bonus points`}
+              style={styles.perfectBanner}
+            >
+              <Ionicons name="trophy" size={15} color={color.make} />
+              <Text style={styles.perfectLabel} numberOfLines={1}>
+                {`Perfect day — all three done. +${PERFECT_DAY_BONUS} bonus`}
+              </Text>
+            </View>
+          )}
+        </Card>
+
         {/* Last session */}
-        <Animated.View entering={enter(4)}>
+        <Animated.View entering={enter(5)}>
         {lastSession === undefined ? (
           <Card>
             <Eyebrow>Last session</Eyebrow>
@@ -468,7 +604,7 @@ export default function HomeScreen() {
         </Animated.View>
 
         {/* Quick links */}
-        <Animated.View entering={enter(5)}>
+        <Animated.View entering={enter(6)}>
         <View
           ref={quickLinksRef}
           onLayout={() => measure(quickLinksRef, setQuickLinksRect)}
@@ -655,6 +791,85 @@ const styles = StyleSheet.create({
   goalHeadlineDone: {
     flex: 1,
     minWidth: 0,
+  },
+  challengeHeader: {
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+  },
+  challengeTotal: {
+    ...type.caption,
+    color: color.textFaint,
+    fontVariant: ['tabular-nums'],
+  },
+  challengeList: {
+    gap: space.md,
+  },
+  challengeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: space.md,
+  },
+  challengeIconChip: {
+    // Same tinted circle as the quick-link chips below — one icon voice.
+    width: 26,
+    height: 26,
+    borderRadius: radius.pill,
+    backgroundColor: color.accentTint,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  challengeIconChipDone: {
+    backgroundColor: color.makeTint,
+  },
+  challengeBody: {
+    flex: 1,
+    minWidth: 0,
+    gap: space.xs,
+  },
+  challengeTitleRow: {
+    justifyContent: 'space-between',
+  },
+  challengeTitle: {
+    ...type.bodyMedium,
+    color: color.text,
+    flexShrink: 1,
+  },
+  challengeTitleDone: {
+    color: color.textDim,
+  },
+  challengeCount: {
+    ...type.micro,
+    color: color.textFaint,
+    fontVariant: ['tabular-nums'],
+  },
+  challengeTrack: {
+    height: 5,
+    borderRadius: radius.pill,
+    backgroundColor: color.surfaceRaised,
+    overflow: 'hidden',
+  },
+  challengeFill: {
+    height: '100%',
+    borderRadius: radius.pill,
+    backgroundColor: color.accent,
+  },
+  challengeFillDone: {
+    backgroundColor: color.make,
+  },
+  perfectBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: space.sm,
+    marginTop: space.md,
+    paddingVertical: space.sm,
+    paddingHorizontal: space.md,
+    borderRadius: radius.md,
+    backgroundColor: color.makeTint,
+  },
+  perfectLabel: {
+    ...type.caption,
+    color: color.make,
+    flexShrink: 1,
   },
   sessionEyebrowRow: {
     justifyContent: 'space-between',
