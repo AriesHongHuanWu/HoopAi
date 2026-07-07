@@ -1,22 +1,29 @@
 /**
  * ShotTimeline — the replay scrubber (the signature of the video screen).
  *
- * A slim leather-orange progress track with a marker for every shot placed at
- * its video timestamp:
- *   - make   → swish-green dot
- *   - miss   → tiny brick-red X
+ * A slim leather-orange progress track with an outcome-coloured dot for every
+ * shot placed at its video timestamp:
+ *   - make   → solid swish-green dot
+ *   - miss   → brick-red donut (the open centre keeps the silhouette distinct
+ *              from a make for colorblind viewers)
  *   - unsure → chalk-yellow ring
  *   - 3-pointers get a downtown-gold outer ring
+ * The shot nearest the playhead (`activeShotId`) is emphasised: scaled up to
+ * full opacity with a chalk halo, stacked above its neighbours; the rest sit
+ * back slightly so the timeline reads current-first.
  *
  * Tap or drag anywhere on the track to seek; tap a marker to jump to that
- * shot (the parent seeks ~preRoll before it). Every marker is a ≥24dp touch
- * target inside the 48dp-tall track; the visuals stay small.
+ * shot (the parent seeks ~preRoll before it). Every marker is a ≥44pt touch
+ * target inside the 48dp-tall track; the visuals stay small. The playhead
+ * swells while scrubbing so the grab point stays visible under a thumb.
  *
- * Pure view-based (no Skia) so hit testing, accessibility and layout stay
- * plain RN. Times are VIDEO seconds — the parent maps shot-clock times
- * through recordingStartSec before passing markers in.
+ * Motion runs through reanimated and respects reduced-motion. The
+ * PanResponder seek mechanics and time mapping are untouched — pure
+ * view-based (no Skia) so hit testing, accessibility and layout stay plain
+ * RN. Times are VIDEO seconds — the parent maps shot-clock times through
+ * recordingStartSec before passing markers in.
  */
-import React, { useCallback, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   PanResponder,
   Pressable,
@@ -27,9 +34,15 @@ import {
   type StyleProp,
   type ViewStyle,
 } from 'react-native';
+import Animated, {
+  useAnimatedStyle,
+  useReducedMotion,
+  useSharedValue,
+  withTiming,
+} from 'react-native-reanimated';
 
 import { formatClock } from '@/components/ShotList';
-import { color, radius, touch } from '@/constants/tokens';
+import { color, motion, radius, touch } from '@/constants/tokens';
 import type { ShotOutcome } from '@/core/types';
 
 export interface TimelineMarker {
@@ -44,8 +57,8 @@ export interface TimelineMarker {
 
 /** Seconds moved per accessibility increment/decrement action. */
 const A11Y_STEP_SEC = 5;
-/** Touch column width per marker (>= 24dp requirement). */
-const MARKER_TARGET_W = 32;
+/** Touch column width per marker (>= 44pt tap-target requirement). */
+const MARKER_TARGET_W = 44;
 
 const OUTCOME_WORD: Record<ShotOutcome, string> = {
   make: 'make',
@@ -53,22 +66,68 @@ const OUTCOME_WORD: Record<ShotOutcome, string> = {
   unsure: 'unsure',
 };
 
-function MarkerGlyph({ outcome, is3 }: { outcome: ShotOutcome; is3: boolean }) {
-  let core: React.ReactElement;
-  if (outcome === 'make') {
-    core = <View style={styles.makeDot} />;
-  } else if (outcome === 'miss') {
-    core = (
-      <View style={styles.missBox}>
-        <View style={[styles.missBar, { transform: [{ rotate: '45deg' }] }]} />
-        <View style={[styles.missBar, { transform: [{ rotate: '-45deg' }] }]} />
-      </View>
-    );
-  } else {
-    core = <View style={styles.unsureRing} />;
-  }
+function MarkerGlyph({ outcome }: { outcome: ShotOutcome }) {
+  if (outcome === 'make') return <View style={styles.makeDot} />;
+  if (outcome === 'miss') return <View style={styles.missDot} />;
+  return <View style={styles.unsureRing} />;
+}
+
+/**
+ * One tappable shot dot. Emphasis (scale, opacity, halo) animates on
+ * active-state changes; reduced motion snaps instead of easing.
+ */
+function TimelineMarkerDot({
+  marker,
+  active,
+  reducedMotion,
+  leftPx,
+  onPress,
+}: {
+  marker: TimelineMarker;
+  active: boolean;
+  reducedMotion: boolean;
+  leftPx: number;
+  onPress?: (marker: TimelineMarker) => void;
+}) {
+  const emphasis = useSharedValue(active ? 1 : 0);
+  useEffect(() => {
+    emphasis.value = withTiming(active ? 1 : 0, {
+      duration: reducedMotion ? 0 : motion.quick,
+    });
+  }, [active, reducedMotion, emphasis]);
+
+  const glyphStyle = useAnimatedStyle(() => ({
+    opacity: 0.72 + emphasis.value * 0.28,
+    transform: [{ scale: 1 + emphasis.value * 0.3 }],
+  }));
+  const haloStyle = useAnimatedStyle(() => ({
+    opacity: emphasis.value,
+    transform: [{ scale: 0.8 + emphasis.value * 0.2 }],
+  }));
+
   return (
-    <View style={[styles.glyphFrame, is3 && styles.threeRing]}>{core}</View>
+    <Pressable
+      onPress={() => onPress?.(marker)}
+      accessibilityRole="button"
+      accessibilityLabel={
+        `Shot ${marker.shotId}, ${OUTCOME_WORD[marker.outcome]}` +
+        `${marker.is3 ? ', 3 pointer' : ''}, at ${formatClock(marker.timeSec)}`
+      }
+      accessibilityHint="Seeks playback to just before this shot"
+      accessibilityState={{ selected: active }}
+      style={[
+        styles.markerHit,
+        { left: leftPx - MARKER_TARGET_W / 2 },
+        active && styles.markerHitActive,
+      ]}
+    >
+      <Animated.View pointerEvents="none" style={[styles.activeHalo, haloStyle]} />
+      <Animated.View
+        style={[styles.glyphFrame, marker.is3 && styles.threeRing, glyphStyle]}
+      >
+        <MarkerGlyph outcome={marker.outcome} />
+      </Animated.View>
+    </Pressable>
   );
 }
 
@@ -76,6 +135,7 @@ export function ShotTimeline({
   durationSec,
   currentSec,
   markers,
+  activeShotId = null,
   onScrub,
   onScrubStart,
   onScrubEnd,
@@ -87,6 +147,8 @@ export function ShotTimeline({
   /** Current playback position, seconds. */
   currentSec: number;
   markers: readonly TimelineMarker[];
+  /** Shot nearest the playhead — its marker renders emphasised. */
+  activeShotId?: number | null;
   /** Continuous seek callback while tapping/dragging the track. */
   onScrub: (sec: number) => void;
   /** Called when a drag/tap begins (parent may pause playback). */
@@ -99,12 +161,17 @@ export function ShotTimeline({
 }) {
   const [width, setWidth] = useState(0);
   const viewRef = useRef<View>(null);
+  const reducedMotion = useReducedMotion();
+
+  /** Scrub-in-progress emphasis for the playhead (visual only). */
+  const scrubbing = useSharedValue(0);
 
   // Latest props for the once-created PanResponder.
   const stateRef = useRef({
     width: 0,
     durationSec: 0,
     currentSec: 0,
+    reducedMotion,
     onScrub,
     onScrubStart,
     onScrubEnd,
@@ -113,6 +180,7 @@ export function ShotTimeline({
     width,
     durationSec,
     currentSec,
+    reducedMotion,
     onScrub,
     onScrubStart,
     onScrubEnd,
@@ -139,12 +207,25 @@ export function ShotTimeline({
         viewRef.current?.measureInWindow((x) => {
           if (Number.isFinite(x)) originXRef.current = x;
         });
+        scrubbing.value = withTiming(1, {
+          duration: stateRef.current.reducedMotion ? 0 : motion.instant,
+        });
         stateRef.current.onScrubStart?.();
         seekFromPageX(evt.nativeEvent.pageX);
       },
       onPanResponderMove: (evt) => seekFromPageX(evt.nativeEvent.pageX),
-      onPanResponderRelease: () => stateRef.current.onScrubEnd?.(),
-      onPanResponderTerminate: () => stateRef.current.onScrubEnd?.(),
+      onPanResponderRelease: () => {
+        scrubbing.value = withTiming(0, {
+          duration: stateRef.current.reducedMotion ? 0 : motion.quick,
+        });
+        stateRef.current.onScrubEnd?.();
+      },
+      onPanResponderTerminate: () => {
+        scrubbing.value = withTiming(0, {
+          duration: stateRef.current.reducedMotion ? 0 : motion.quick,
+        });
+        stateRef.current.onScrubEnd?.();
+      },
     }),
   ).current;
 
@@ -162,6 +243,10 @@ export function ShotTimeline({
     },
     [],
   );
+
+  const playheadStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: 1 + scrubbing.value * 0.35 }],
+  }));
 
   const frac =
     durationSec > 0 ? Math.min(1, Math.max(0, currentSec / durationSec)) : 0;
@@ -196,29 +281,21 @@ export function ShotTimeline({
       </View>
 
       {ready &&
-        markers.map((m, i) => {
-          const cx = (m.timeSec / durationSec) * width;
-          return (
-            <Pressable
-              key={`${m.shotId}-${i}`}
-              onPress={() => onMarkerPress?.(m)}
-              accessibilityRole="button"
-              accessibilityLabel={
-                `Shot ${m.shotId}, ${OUTCOME_WORD[m.outcome]}` +
-                `${m.is3 ? ', 3 pointer' : ''}, at ${formatClock(m.timeSec)}`
-              }
-              accessibilityHint="Seeks playback to just before this shot"
-              style={[styles.markerHit, { left: cx - MARKER_TARGET_W / 2 }]}
-            >
-              <MarkerGlyph outcome={m.outcome} is3={m.is3} />
-            </Pressable>
-          );
-        })}
+        markers.map((m, i) => (
+          <TimelineMarkerDot
+            key={`${m.shotId}-${i}`}
+            marker={m}
+            active={m.shotId === activeShotId}
+            reducedMotion={reducedMotion}
+            leftPx={(m.timeSec / durationSec) * width}
+            onPress={onMarkerPress}
+          />
+        ))}
 
       {ready && (
-        <View
+        <Animated.View
           pointerEvents="none"
-          style={[styles.playhead, { left: frac * width - 7 }]}
+          style={[styles.playhead, { left: frac * width - 7 }, playheadStyle]}
         />
       )}
     </View>
@@ -259,6 +336,17 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  markerHitActive: {
+    zIndex: 2,
+  },
+  activeHalo: {
+    position: 'absolute',
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    borderWidth: 1.5,
+    borderColor: color.text,
+  },
   glyphFrame: {
     width: 18,
     height: 18,
@@ -271,23 +359,18 @@ const styles = StyleSheet.create({
     borderColor: color.threePt,
   },
   makeDot: {
-    width: 9,
-    height: 9,
-    borderRadius: 4.5,
+    width: 10,
+    height: 10,
+    borderRadius: 5,
     backgroundColor: color.make,
   },
-  missBox: {
-    width: 11,
-    height: 11,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  missBar: {
-    position: 'absolute',
-    width: 2,
-    height: 12,
-    borderRadius: 1,
-    backgroundColor: color.miss,
+  /** Donut, not a filled dot — shape keeps make/miss apart without color. */
+  missDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    borderWidth: 3,
+    borderColor: color.miss,
   },
   unsureRing: {
     width: 9,

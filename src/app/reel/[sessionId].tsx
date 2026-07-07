@@ -8,15 +8,19 @@
  * mechanic as the replay player's highlights mode (src/app/video/[id].tsx),
  * but hands-free: playback starts on load and rolls through every window.
  *
- * Chrome: a "Make i of n" chip, an outcome-tinted segmented progress rail,
- * and tap-to-pause on the video. When the last window finishes the reel ends
- * on the branded ShareCard stat frame (src/components/ShareCard.tsx) with the
- * existing shareSessionCard flow wired to a share button — the reel's whole
+ * Chrome: a "Make i of n" counter pill, an outcome-tinted segmented progress
+ * rail (the live segment animates its fill; reduced-motion snaps), a brief
+ * broadcast-style outcome flash as each new clip lands, and tap-to-pause on
+ * the video. When the last window finishes the reel ends on the branded
+ * ShareCard stat frame (src/components/ShareCard.tsx) given a hero
+ * treatment — warm glow, staged entrance — with the existing
+ * shareSessionCard flow wired to the primary share CTA; the reel's whole
  * point is leaving the gym with something Instagram-ready.
  *
  * Graceful exits (EmptyState): session missing, no recording, pre-v2
  * recordings without a recordingStartSec offset, and sessions with no makes.
  */
+import { Ionicons } from '@expo/vector-icons';
 import { useEvent, useEventListener } from 'expo';
 import * as Haptics from 'expo-haptics';
 import { useLocalSearchParams } from 'expo-router';
@@ -28,6 +32,7 @@ import {
 } from 'expo-video';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ActivityIndicator,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -35,6 +40,16 @@ import {
   useWindowDimensions,
   View,
 } from 'react-native';
+import Animated, {
+  Easing,
+  FadeInDown,
+  FadeOut,
+  useAnimatedStyle,
+  useReducedMotion,
+  useSharedValue,
+  withTiming,
+  ZoomIn,
+} from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import {
@@ -48,7 +63,7 @@ import {
   useSessionRecord,
 } from '@/components/ShotList';
 import { Chip, EmptyState, ErrorCard, Eyebrow, PillButton, Row, Screen } from '@/components/ui';
-import { color, radius, space, type } from '@/constants/tokens';
+import { color, font, motion, radius, space, type } from '@/constants/tokens';
 import { planClips } from '@/core/clipPlanner';
 import { clamp } from '@/core/geometry';
 import type { ResolvedShot, SessionStats, ShotOutcome } from '@/core/types';
@@ -79,9 +94,66 @@ function outcomeTint(outcome: ShotOutcome): string {
   return color.unsure;
 }
 
+function outcomeTintBg(outcome: ShotOutcome): string {
+  if (outcome === 'make') return color.makeTint;
+  if (outcome === 'miss') return color.missTint;
+  // Matches the ui.tsx Chip "unsure" tone tint.
+  return 'rgba(232, 184, 79, 0.14)';
+}
+
+const OUTCOME_ICON: Record<ShotOutcome, React.ComponentProps<typeof Ionicons>['name']> = {
+  make: 'checkmark-circle',
+  miss: 'close-circle',
+  unsure: 'help-circle',
+};
+
+const OUTCOME_FLASH_WORD: Record<ShotOutcome, string> = {
+  make: 'MAKE',
+  miss: 'MISS',
+  unsure: 'SHOT',
+};
+
+/** How long the between-clips outcome flash stays on screen (ms). */
+const FLASH_HOLD_MS = 900;
+
 // ---------------------------------------------------------------------------
-// Progress rail — one outcome-tinted segment per window
+// Progress rail — one outcome-tinted segment per window; the live segment
+// animates its fill and sits a touch taller than its neighbours
 // ---------------------------------------------------------------------------
+
+function RailSegment({
+  frac,
+  tint,
+  state,
+  reducedMotion,
+}: {
+  frac: number;
+  tint: string;
+  state: 'done' | 'active' | 'upcoming';
+  reducedMotion: boolean;
+}) {
+  const fill = useSharedValue(frac);
+  useEffect(() => {
+    fill.value = reducedMotion
+      ? frac
+      : withTiming(frac, { duration: motion.standard, easing: Easing.linear });
+  }, [frac, reducedMotion, fill]);
+  const fillStyle = useAnimatedStyle(() => ({
+    width: `${fill.value * 100}%`,
+  }));
+  return (
+    <View style={[styles.progressTrack, state === 'active' && styles.progressTrackActive]}>
+      <Animated.View
+        style={[
+          styles.progressFill,
+          { backgroundColor: tint },
+          state === 'done' && styles.progressFillDone,
+          fillStyle,
+        ]}
+      />
+    </View>
+  );
+}
 
 function ReelProgress({
   windows,
@@ -94,6 +166,7 @@ function ReelProgress({
   currentSec: number;
   done: boolean;
 }) {
+  const reducedMotion = useReducedMotion();
   return (
     <View
       style={styles.progressRow}
@@ -106,15 +179,16 @@ function ReelProgress({
           : i > index
             ? 0
             : clamp((currentSec - w.startSec) / Math.max(0.1, w.endSec - w.startSec), 0, 1);
+        const state: 'done' | 'active' | 'upcoming' =
+          done || i < index ? 'done' : i === index ? 'active' : 'upcoming';
         return (
-          <View key={`${w.shotId}-${i}`} style={styles.progressTrack}>
-            <View
-              style={[
-                styles.progressFill,
-                { width: `${frac * 100}%`, backgroundColor: outcomeTint(w.outcome) },
-              ]}
-            />
-          </View>
+          <RailSegment
+            key={`${w.shotId}-${i}`}
+            frac={frac}
+            tint={outcomeTint(w.outcome)}
+            state={state}
+            reducedMotion={reducedMotion}
+          />
         );
       })}
     </View>
@@ -122,7 +196,36 @@ function ReelProgress({
 }
 
 // ---------------------------------------------------------------------------
-// End frame — the branded stat card as the reel's closing shot
+// Outcome flash — a broadcast bug that lands as each new clip starts
+// ---------------------------------------------------------------------------
+
+function OutcomeFlash({
+  outcome,
+  reducedMotion,
+}: {
+  outcome: ShotOutcome;
+  reducedMotion: boolean;
+}) {
+  const tint = outcomeTint(outcome);
+  return (
+    <Animated.View
+      pointerEvents="none"
+      entering={reducedMotion ? undefined : ZoomIn.duration(motion.quick)}
+      exiting={reducedMotion ? undefined : FadeOut.duration(motion.quick)}
+      style={styles.flashWrap}
+    >
+      <View style={[styles.flashPill, { borderColor: tint }]}>
+        <Ionicons name={OUTCOME_ICON[outcome]} size={18} color={tint} />
+        <Text style={[styles.flashWord, { color: tint }]}>
+          {OUTCOME_FLASH_WORD[outcome]}
+        </Text>
+      </View>
+    </Animated.View>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// End frame — the branded stat card as the reel's closing shot, hero-staged
 // ---------------------------------------------------------------------------
 
 function ReelEndFrame({
@@ -137,6 +240,7 @@ function ReelEndFrame({
   onReplay: () => void;
 }) {
   const { width } = useWindowDimensions();
+  const reducedMotion = useReducedMotion();
   const [sharing, setSharing] = useState(false);
   const [shareFailed, setShareFailed] = useState(false);
 
@@ -147,6 +251,13 @@ function ReelEndFrame({
     [stats, shots, label, session.startedAt],
   );
   const cardW = Math.min(width - space.lg * 2, 280);
+
+  // Staged entrance: title → hero card → CTAs. Reduced motion renders still.
+  const enter = (delayMs: number) =>
+    reducedMotion ? undefined : FadeInDown.duration(motion.standard).delay(delayMs);
+  const cardEnter = reducedMotion
+    ? undefined
+    : ZoomIn.duration(motion.celebrate).delay(120);
 
   // Share the same story card the summary/history flows produce
   // (shareSessionCard never throws; a failure just shows a quiet chip).
@@ -172,33 +283,45 @@ function ReelEndFrame({
       contentContainerStyle={styles.endFrame}
       showsVerticalScrollIndicator={false}
     >
-      <Text style={styles.endTitle}>That&apos;s the reel.</Text>
-      <Text style={styles.endMeta}>
-        {stats.makes}/{stats.attempts} makes · best run {stats.bestStreak}
-      </Text>
-      <ShareCard data={cardData} width={cardW} style={{ marginTop: space.lg }} />
+      <Animated.View entering={enter(0)} style={{ alignItems: 'center' }}>
+        <Text style={styles.endTitle}>That&apos;s the reel.</Text>
+        <Text style={styles.endMeta}>
+          {stats.makes}/{stats.attempts} makes · best run {stats.bestStreak}
+        </Text>
+      </Animated.View>
+
+      <Animated.View entering={cardEnter} style={styles.cardHero}>
+        {/* Warm spotlight behind the card (leather at whisper opacity). */}
+        <View pointerEvents="none" style={styles.cardGlowOuter} />
+        <View pointerEvents="none" style={styles.cardGlowInner} />
+        <ShareCard data={cardData} width={cardW} />
+      </Animated.View>
+
       {shareFailed && (
         <View style={{ marginTop: space.md }}>
           <Chip label="Couldn't share — try again" tone="unsure" />
         </View>
       )}
-      <PillButton
-        label={sharing ? 'Preparing…' : 'Share my card'}
-        icon="share-social"
-        onPress={onShare}
-        disabled={sharing}
-        style={{ marginTop: space.lg, alignSelf: 'stretch' }}
-      />
-      <PillButton
-        variant="ghost"
-        label="Replay reel"
-        icon="refresh"
-        onPress={() => {
-          void Haptics.selectionAsync();
-          onReplay();
-        }}
-        style={{ marginTop: space.md, alignSelf: 'stretch' }}
-      />
+
+      <Animated.View entering={enter(220)} style={styles.endActions}>
+        <PillButton
+          label={sharing ? 'Preparing…' : 'Share my card'}
+          icon="share-social"
+          onPress={onShare}
+          disabled={sharing}
+          style={{ alignSelf: 'stretch' }}
+        />
+        <PillButton
+          variant="ghost"
+          label="Replay reel"
+          icon="refresh"
+          onPress={() => {
+            void Haptics.selectionAsync();
+            onReplay();
+          }}
+          style={{ marginTop: space.md, alignSelf: 'center' }}
+        />
+      </Animated.View>
     </ScrollView>
   );
 }
@@ -312,6 +435,7 @@ function ReelPlayer({
   stats: SessionStats;
 }) {
   const insets = useSafeAreaInsets();
+  const reducedMotion = useReducedMotion();
   const preRollSec = useSettings((s) => s.clipPreRollSec);
   const postRollSec = useSettings((s) => s.clipPostRollSec);
 
@@ -404,6 +528,20 @@ function ReelPlayer({
   );
   useEventListener(player, 'timeUpdate', handleTimeUpdate);
 
+  // Between-clips outcome flash: fires whenever a new window lands (visual
+  // chrome only — playback and window math above are untouched).
+  const [flash, setFlash] = useState<{ key: number; outcome: ShotOutcome } | null>(null);
+  const prevIndexRef = useRef(0);
+  useEffect(() => {
+    if (index === prevIndexRef.current) return;
+    prevIndexRef.current = index;
+    const w = windows[index];
+    if (w == null || done) return;
+    setFlash({ key: index, outcome: w.outcome });
+    const t = setTimeout(() => setFlash(null), FLASH_HOLD_MS);
+    return () => clearTimeout(t);
+  }, [index, windows, done]);
+
   const togglePlay = () => {
     if (done) return;
     void Haptics.selectionAsync();
@@ -412,12 +550,8 @@ function ReelPlayer({
   };
 
   const current = windows[Math.min(index, Math.max(0, windows.length - 1))];
-  const chipTone =
-    current == null || current.outcome === 'make'
-      ? 'make'
-      : current.outcome === 'miss'
-        ? 'miss'
-        : 'unsure';
+  const counterOutcome: ShotOutcome = current?.outcome ?? 'make';
+  const counterTint = outcomeTint(counterOutcome);
 
   return (
     <View style={styles.root}>
@@ -464,8 +598,18 @@ function ReelPlayer({
             )}
             {!isPlaying && status !== 'error' && windows.length > 0 && (
               <View style={styles.videoOverlay} pointerEvents="none">
-                <Text style={styles.overlayText}>Paused — tap to resume</Text>
+                <View style={styles.pausePill}>
+                  <Ionicons name="play" size={16} color={color.text} />
+                  <Text style={styles.overlayText}>Paused — tap to resume</Text>
+                </View>
               </View>
+            )}
+            {flash != null && status !== 'error' && (
+              <OutcomeFlash
+                key={flash.key}
+                outcome={flash.outcome}
+                reducedMotion={reducedMotion}
+              />
             )}
           </Pressable>
 
@@ -477,7 +621,10 @@ function ReelPlayer({
                   body="Your makes fall outside the recorded video, so there's nothing to reel."
                 />
               ) : (
-                <Text style={styles.dim}>Cueing up your makes…</Text>
+                <Row gap={space.sm}>
+                  <ActivityIndicator size="small" color={color.accent} />
+                  <Text style={styles.dim}>Cueing up your makes…</Text>
+                </Row>
               )
             ) : (
               <>
@@ -488,10 +635,23 @@ function ReelPlayer({
                   done={done}
                 />
                 <Row style={{ justifyContent: 'space-between' }}>
-                  <Chip
-                    label={`Make ${Math.min(index + 1, windows.length)} of ${windows.length}`}
-                    tone={chipTone}
-                  />
+                  <View
+                    style={[
+                      styles.counterPill,
+                      { backgroundColor: outcomeTintBg(counterOutcome) },
+                    ]}
+                    accessible
+                    accessibilityLabel={`Make ${Math.min(index + 1, windows.length)} of ${windows.length}`}
+                  >
+                    <Ionicons
+                      name={OUTCOME_ICON[counterOutcome]}
+                      size={14}
+                      color={counterTint}
+                    />
+                    <Text style={[styles.counterLabel, { color: counterTint }]}>
+                      Make {Math.min(index + 1, windows.length)} of {windows.length}
+                    </Text>
+                  </View>
                   <Text style={styles.countMeta}>
                     {stats.makes}/{stats.attempts} FG
                   </Text>
@@ -542,6 +702,42 @@ const styles = StyleSheet.create({
     ...type.bodyMedium,
     color: color.text,
   },
+  pausePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: space.sm,
+    backgroundColor: color.hudGlassDeep,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: color.hudGlassBorder,
+    borderRadius: radius.pill,
+    paddingHorizontal: space.lg,
+    paddingVertical: space.sm,
+  },
+  flashWrap: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  flashPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: space.sm,
+    backgroundColor: color.hudGlassDeep,
+    borderWidth: 1,
+    borderRadius: radius.pill,
+    paddingHorizontal: space.xl,
+    paddingVertical: space.sm,
+  },
+  flashWord: {
+    fontFamily: font.display,
+    fontSize: 24,
+    lineHeight: 28,
+    letterSpacing: 2,
+  },
   chrome: {
     flex: 1,
     paddingHorizontal: space.lg,
@@ -551,18 +747,39 @@ const styles = StyleSheet.create({
   },
   progressRow: {
     flexDirection: 'row',
+    alignItems: 'center',
     gap: space.xs,
   },
   progressTrack: {
     flex: 1,
-    height: 4,
-    borderRadius: radius.sm,
+    height: 6,
+    borderRadius: radius.pill,
     backgroundColor: color.surfaceRaised,
     overflow: 'hidden',
   },
+  progressTrackActive: {
+    height: 8,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: color.hudGlassBorder,
+  },
   progressFill: {
     height: '100%',
-    borderRadius: radius.sm,
+    borderRadius: radius.pill,
+  },
+  progressFillDone: {
+    opacity: 0.55,
+  },
+  counterPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: space.sm,
+    borderRadius: radius.pill,
+    paddingHorizontal: space.md,
+    paddingVertical: 5,
+  },
+  counterLabel: {
+    ...type.caption,
+    fontVariant: ['tabular-nums'],
   },
   countMeta: {
     ...type.caption,
@@ -586,5 +803,30 @@ const styles = StyleSheet.create({
     ...type.body,
     color: color.textDim,
     marginTop: space.xs,
+  },
+  cardHero: {
+    marginTop: space.lg,
+    alignSelf: 'stretch',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  /** Leather spotlight rings behind the hero card (whisper opacity). */
+  cardGlowOuter: {
+    position: 'absolute',
+    width: 300,
+    height: 300,
+    borderRadius: 150,
+    backgroundColor: 'rgba(240, 90, 36, 0.05)',
+  },
+  cardGlowInner: {
+    position: 'absolute',
+    width: 220,
+    height: 220,
+    borderRadius: 110,
+    backgroundColor: 'rgba(240, 90, 36, 0.09)',
+  },
+  endActions: {
+    alignSelf: 'stretch',
+    marginTop: space.xl,
   },
 });
