@@ -4,6 +4,7 @@ import {
   entryAngleDegAtPlane,
   evalArc,
   fitArc,
+  predictLanding,
   releaseAngleDeg,
   sampleArc,
   xAtPlaneY,
@@ -310,5 +311,42 @@ describe('xAtPlaneY', () => {
     expect(xAtPlaneY(projectile({ frames: 12 }), PLANE_Y)).toBeNull();
     expect(xAtPlaneY(projectile(), APEX.y - 50)).toBeNull();
     expect(xAtPlaneY([], PLANE_Y)).toBeNull();
+  });
+});
+
+describe('predictLanding', () => {
+  test('predicts the FUTURE crossing from early-flight samples only', () => {
+    // 12 frames = t 0..0.367s, far before the analytic crossing at ~1.138s —
+    // this is the mid-flight "where will it come down" projection.
+    const fit = fitArc(projectile({ frames: 12 }));
+    expect(fit).not.toBeNull();
+    const p = predictLanding(fit!, PLANE_Y);
+    expect(p).not.toBeNull();
+    expect(Math.abs(p!.x - X_CROSS)).toBeLessThan(2);
+    expect(p!.y).toBe(PLANE_Y);
+    expect(p!.t).toBeCloseTo(T_CROSS, 2);
+  });
+
+  test('tolerates measurement noise', () => {
+    const fit = fitArc(
+      projectile({ frames: 14, noiseY: (i) => ((i * 37) % 7) - 3 }),
+    );
+    expect(fit).not.toBeNull();
+    const p = predictLanding(fit!, PLANE_Y);
+    expect(p).not.toBeNull();
+    expect(Math.abs(p!.x - X_CROSS)).toBeLessThan(12);
+  });
+
+  test('null when the arc apex never reaches the plane', () => {
+    const fit = fitArc(projectile({ frames: 12 }));
+    // A plane ABOVE the apex (smaller y than apex.y) is unreachable.
+    expect(predictLanding(fit!, APEX.y - 50)).toBeNull();
+  });
+
+  test('null for a fit without a gravity signature', () => {
+    const flat: Parameters<typeof predictLanding>[0] = {
+      ya: -10, yb: 0, yc: 500, xm: 100, xq: 0, r2y: 0.9, tMin: 0, tMax: 1,
+    };
+    expect(predictLanding(flat, 400)).toBeNull();
   });
 });

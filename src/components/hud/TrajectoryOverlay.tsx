@@ -216,6 +216,35 @@ export function TrajectoryOverlay({
       : 0,
   );
 
+  // --- predicted landing ghost ---------------------------------------------
+  // Where the fitted arc says the ball is COMING DOWN through the rim plane —
+  // drawn as a pulsing crosshair target mid-flight, green when the prediction
+  // is inside the rim span (on target), miss-red when it's sailing wide.
+  const predPath = useDerivedValue(() => {
+    const p = Skia.Path.Make();
+    const o = overlay.value;
+    const m = mapping.value;
+    if (!m.ok || o.pred == null || o.phase !== 'SHOT_LIVE') return p;
+    const x = o.pred.x * m.scale + m.ox;
+    const y = o.pred.y * m.scale + m.oy;
+    const r = 10;
+    p.addCircle(x, y, r);
+    // four crosshair ticks (gap between ring and tick keeps it airy)
+    p.moveTo(x - r * 1.8, y); p.lineTo(x - r * 0.7, y);
+    p.moveTo(x + r * 0.7, y); p.lineTo(x + r * 1.8, y);
+    p.moveTo(x, y - r * 1.8); p.lineTo(x, y - r * 0.7);
+    p.moveTo(x, y + r * 0.7); p.lineTo(x, y + r * 1.8);
+    return p;
+  });
+  const predColor = useDerivedValue(() =>
+    overlay.value.pred?.inSpan === true ? glow.rimLive : color.miss,
+  );
+  const predOpacity = useDerivedValue(() =>
+    overlay.value.pred != null && overlay.value.phase === 'SHOT_LIVE'
+      ? 0.55 + pulse.value * 0.35
+      : 0,
+  );
+
   // --- rim lock-on ---------------------------------------------------------
   const rimRect = useDerivedValue(() => {
     const o = overlay.value;
@@ -342,6 +371,26 @@ export function TrajectoryOverlay({
         strokeJoin="round"
         color={glow.cometHalo}
         opacity={trailOpacity}
+      />
+
+      {/* Predicted landing ghost: soft glow pass + crisp crosshair */}
+      <Path
+        path={predPath}
+        style="stroke"
+        strokeWidth={4.5}
+        strokeCap="round"
+        color={predColor}
+        opacity={predOpacity}
+      >
+        <BlurMask blur={6} style="normal" />
+      </Path>
+      <Path
+        path={predPath}
+        style="stroke"
+        strokeWidth={2}
+        strokeCap="round"
+        color={predColor}
+        opacity={predOpacity}
       />
 
       {/* Idle ball reticle */}

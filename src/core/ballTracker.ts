@@ -269,6 +269,14 @@ export class BallTracker {
     let best: Candidate | null = null;
     let bestWeight = Number.NEGATIVE_INFINITY;
 
+    // Fresh track ⇒ flight-continuation mode: the jump gate is still armed
+    // (a candidate must land near the prediction), so the score floor drops
+    // to ballScoreMinTracking. See the config rationale — this is what keeps
+    // the ball tracked THROUGH its flight instead of only near the rim.
+    const trackFresh =
+      this.lastAccept !== null &&
+      this.frameIndex - this.lastAcceptFrame <= TRACKER.jumpWindowFrames;
+
     for (const det of frame.detections) {
       if (det.cls !== 'ball') continue;
 
@@ -276,7 +284,9 @@ export class BallTracker {
       const inHoopRoi = hoopRoi !== null && boxContains(hoopRoi, center);
       const scoreGate = inHoopRoi
         ? DETECTION.ballScoreMinHoopRoi
-        : DETECTION.ballScoreMin;
+        : trackFresh
+          ? DETECTION.ballScoreMinTracking
+          : DETECTION.ballScoreMin;
       if (det.score < scoreGate) continue;
 
       // Reject an implausibly LARGE ball box (a near-frame-size false positive

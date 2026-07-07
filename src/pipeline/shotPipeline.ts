@@ -14,9 +14,11 @@ import { BallTracker } from '../core/ballTracker';
 import { estimateShotValue } from '../core/court';
 import { FormAnalyzer, coachingTips } from '../core/formAnalysis';
 import { RimLock } from '../core/rimLock';
+import { fitArc, predictLanding } from '../core/trajectory';
 import { ShotFsm } from '../core/shotFsm';
 import { classifyViewBand } from '../core/viewBand';
 import type {
+  BallSample,
   Box,
   Detection,
   FrameDetections,
@@ -64,6 +66,13 @@ export interface PipelineFrameState {
   /** Seconds left on the pre-lock "hold steady" countdown (rounds up to a 3-2-1
    *  reticle in the HUD), or null when not counting / already locked. */
   rimCountdown: number | null;
+  /**
+   * PREDICTED landing point of the live shot (analysis px): the fitted arc
+   * extrapolated to the rim plane, updated every frame while the shot flies.
+   * inSpan = the prediction lands within the rim's crossing span (on target).
+   * Null outside SHOT_LIVE or before the fit is trustworthy.
+   */
+  predictedLanding: { x: number; y: number; inSpan: boolean } | null;
 }
 
 export class ShotPipeline {
@@ -169,7 +178,7 @@ export class ShotPipeline {
     }
 
     let phase: ShotPhase = 'IDLE';
-    let liveTrajectory: readonly { cx: number; cy: number }[] = [];
+    let liveTrajectory: readonly BallSample[] = [];
     let resolved: ResolvedShot | null = null;
 
     if (this.fsm && this.lastRim) {
@@ -186,6 +195,25 @@ export class ShotPipeline {
       resolved = result.resolved;
     }
 
+    // Predicted landing: fit the live arc and extrapolate to the rim plane.
+    // Cheap (O(n) over ≤48 samples, only while a shot is live) and it's what
+    // powers the on-screen "this is where it's coming down" ghost target.
+    let predictedLanding: PipelineFrameState['predictedLanding'] = null;
+    if (phase === 'SHOT_LIVE' && this.lastRim && liveTrajectory.length >= 6) {
+      const fit = fitArc(liveTrajectory);
+      if (fit && fit.ya > 0 && fit.r2y >= 0.35) {
+        const p = predictLanding(fit, this.lastRim.planeY);
+        if (p) {
+          predictedLanding = {
+            x: p.x,
+            y: p.y,
+            inSpan:
+              p.x >= this.lastRim.spanLeft && p.x <= this.lastRim.spanRight,
+          };
+        }
+      }
+    }
+
     const state: PipelineFrameState = {
       t: frame.t,
       ball,
@@ -197,6 +225,7 @@ export class ShotPipeline {
       detections: frame.detections,
       // Pre-lock countdown (null once locked) so the HUD can show 3-2-1.
       rimCountdown: this.lastRim ? null : this.rimLock.lockCountdown,
+      predictedLanding,
     };
     this.events.onFrame?.(state);
     if (resolved) {

@@ -300,6 +300,34 @@ export function apexPoint(fit: ArcFit): Point | null {
 }
 
 /**
+ * PREDICTED landing: where the fitted arc will descend through `planeY`,
+ * extrapolated into the FUTURE — the "where is this ball coming down" marker,
+ * available mid-flight long before the ball actually gets there.
+ *
+ * Solves ya·t² + yb·t + yc = planeY and takes the DESCENDING root (dy/dt > 0,
+ * +y down; for a gravity fit ya > 0 that is the larger root). Returns null
+ * when the fit has no gravity signature (ya ≤ 0), the arc's apex never
+ * reaches the plane (a flight that can't get up to rim height), or the
+ * crossing would precede the fit's own start (backward extrapolation).
+ */
+export function predictLanding(
+  fit: ArcFit,
+  planeY: number,
+): { x: number; y: number; t: number } | null {
+  if (fit.ya <= 0) return null;
+  const a = fit.ya;
+  const b = fit.yb;
+  const c = fit.yc - planeY;
+  const disc = b * b - 4 * a * c;
+  if (disc < 0) return null; // apex never reaches the plane
+  const t = (-b + Math.sqrt(disc)) / (2 * a); // larger root = descending
+  if (!Number.isFinite(t) || t < fit.tMin) return null;
+  const x = fit.xm * t + fit.xq;
+  if (!Number.isFinite(x)) return null;
+  return { x, y: planeY, t };
+}
+
+/**
  * Interpolated x (analysis px) where the trajectory first descends through
  * `planeY`, from linear interpolation over the bracketing sample pair.
  * Returns null when the trajectory never descends through the plane.

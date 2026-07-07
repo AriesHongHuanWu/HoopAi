@@ -115,6 +115,9 @@ export interface OverlayState {
   srcH: number;
   /** Every raw detection this frame (for the debug box overlay). */
   dets: OverlayDet[];
+  /** Predicted landing point of the live shot (analysis px) + on-target flag.
+   *  Null outside SHOT_LIVE / before the arc fit is trustworthy. */
+  pred: { x: number; y: number; inSpan: boolean } | null;
   /** Seconds left on the pre-lock "hold steady" countdown (HUD shows ceil() as a
    *  3-2-1 reticle), or null when not counting / already locked. */
   rimCountdown: number | null;
@@ -131,6 +134,7 @@ export const EMPTY_OVERLAY: OverlayState = {
   srcH: 0,
   dets: [],
   rimCountdown: null,
+  pred: null,
 };
 
 /** Live diagnostics for the on-screen debug panel (helps fix on-device ML). */
@@ -533,6 +537,7 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
             score: d.score,
           })),
           rimCountdown: state.rimCountdown,
+          pred: state.predictedLanding,
         };
       },
     });

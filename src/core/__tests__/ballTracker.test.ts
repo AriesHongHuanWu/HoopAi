@@ -458,6 +458,53 @@ describe('BallTracker', () => {
     expect(tracker.getHistory()).toHaveLength(1);
   });
 
+  describe('flight-continuation relaxed gate', () => {
+    // Between hoop-ROI floor (0.1) and the tracking floor (0.12)? No — pick a
+    // score between tracking (0.12) and open-court (0.2): real mid-flight band.
+    const flightScore =
+      (DETECTION.ballScoreMinTracking + DETECTION.ballScoreMin) / 2; // 0.16
+
+    test('continues a fresh track through low-score flight detections', () => {
+      const tracker = new BallTracker({});
+      warmUp(tracker, 3, 100, 100); // strong acquisitions at 0.8
+      // Mid-flight: the dark/small ball now scores ~0.16 — previously dropped.
+      const out = tracker.step(
+        frameAt(3 * DT, [ballDet(110, 90, { score: flightScore })]),
+        null,
+      );
+      expect(out).not.toBeNull();
+      expect(out!.predicted).toBe(false); // REAL detection accepted
+      expect(out!.cx).toBeCloseTo(110);
+    });
+
+    test('never STARTS a track from a low score (cold acquisition needs 0.2)', () => {
+      const tracker = new BallTracker({});
+      const out = tracker.step(
+        frameAt(0, [ballDet(200, 200, { score: flightScore })]),
+        null,
+      );
+      expect(out).toBeNull();
+    });
+
+    test('gate re-tightens once the track goes stale (window expired)', () => {
+      const tracker = new BallTracker({});
+      warmUp(tracker, 3, 100, 100);
+      // Starve the track past the jump window (all empty frames).
+      let step = 3;
+      for (let k = 0; k <= TRACKER.jumpWindowFrames; k++) {
+        tracker.step(frameAt(step * DT, []), null);
+        step++;
+      }
+      // Track is no longer fresh: a 0.16 far detection must NOT re-acquire.
+      const out = tracker.step(
+        frameAt(step * DT, [ballDet(400, 400, { score: flightScore })]),
+        null,
+      );
+      // Either predicted-coast or null — never a real acceptance.
+      if (out != null) expect(out.predicted).toBe(true);
+    });
+  });
+
   test('history interleaves accepted and predicted samples in order', () => {
     const tracker = new BallTracker({});
     warmUp(tracker, 2, 300, 300);

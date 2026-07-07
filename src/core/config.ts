@@ -22,6 +22,20 @@ export const DETECTION = {
   /** Relaxed ball gate inside the hoop ROI (occlusion/blur near the rim). */
   ballScoreMinHoopRoi: 0.1,
   /**
+   * Relaxed ball gate while a FRESH TRACK is being continued (the tracker
+   * accepted a real ball within the last jumpWindowFrames). THE flight-
+   * continuity fix: a small/fast/dark ball in mid-flight scores 0.12-0.19 —
+   * real detections the 0.2 open-court gate was throwing away, which is why
+   * flight tracking (release, comet, landing prediction) collapsed while
+   * near-rim rescue still worked. Continuation is safe at this floor because
+   * FOUR other defenses still vet every candidate: the jump gate (must be
+   * near the prediction), the aspect gate, ballMaxSizeFraction, and the
+   * Kalman's doubled measurement noise for sub-ballScoreMin samples. COLD
+   * acquisition (no fresh track) still requires the full 0.2 — noise can
+   * continue a track, never start one.
+   */
+  ballScoreMinTracking: 0.12,
+  /**
    * Rim confidence gate. The rim is a small, static, net-occluded object a nano
    * detector scores in the 0.3-0.5 band from a 15-30 ft side view — gating at
    * 0.5 discarded most of those frames and made the lock finicky. 0.35 lets that
