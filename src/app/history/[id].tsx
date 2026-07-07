@@ -9,7 +9,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { router, useLocalSearchParams } from 'expo-router';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { shareSessionCard } from '@/components/ShareCard';
@@ -29,6 +29,7 @@ import {
   decidedEntryAngles,
 } from '@/components/charts/AngleHistogram';
 import { CompareBars } from '@/components/charts/CompareBars';
+import { RecheckPanel } from '@/components/RecheckPanel';
 import { ReelEntryButton } from '@/components/ReelEntryButton';
 import { Card, Chip, ErrorCard, Eyebrow, PillButton, Row, Screen } from '@/components/ui';
 import { color, radius, space, touch, type } from '@/constants/tokens';
@@ -192,6 +193,23 @@ export default function SessionDetailScreen() {
   // the shared ~4 s undo window; the snackbar renders outside the ScrollView.
   const undoable = useUndoableCorrection(record.correct);
 
+  // Offline re-check (RecheckPanel): unsure, uncorrected shots the second
+  // pass could still decide; verdicts land through the same persisted-record
+  // pathway with corrected=false (machine re-read, not a user edit).
+  const recordShots = record.shots;
+  const recordCorrect = record.correct;
+  const unsureCount = useMemo(
+    () => recordShots.filter((s) => s.outcome === 'unsure' && s.corrected !== true).length,
+    [recordShots],
+  );
+  const onRecheckVerdict = useCallback(
+    (shotIndex: number, outcome: 'make' | 'miss') => {
+      const shot = recordShots.find((s) => s.id === shotIndex);
+      if (shot) recordCorrect(shot, outcome, false);
+    },
+    [recordShots, recordCorrect],
+  );
+
   // Tag: optimistic local override on top of the persisted label so the
   // pill updates immediately; persists via updateSessionLabel (never throws).
   const [tagOverride, setTagOverride] = useState<string | null>(null);
@@ -352,6 +370,14 @@ export default function SessionDetailScreen() {
               />
               <ReelEntryButton sessionId={session.id} variant="ghost" style={{ flex: 1 }} />
             </Row>
+          )}
+          {session.videoPath != null && recStartSec != null && (
+            <RecheckPanel
+              sessionId={session.id}
+              unsureCount={unsureCount}
+              onVerdict={onRecheckVerdict}
+              style={{ marginTop: space.md }}
+            />
           )}
           {session.modeId != null && (
             <View style={{ marginTop: space.lg }}>

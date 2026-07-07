@@ -208,6 +208,16 @@ async function migrate(db: SQLite.SQLiteDatabase): Promise<void> {
       PRAGMA user_version = 5;
     `);
   }
+  if (version < 6) {
+    // v6: offline re-check bookkeeping (src/core/recheck.ts). 1 once the
+    // machine has re-analysed this shot against the recording — whether or
+    // not the verdict changed — so a second "Re-check" tap never redoes the
+    // same expensive pass. DEFAULT 0 covers all pre-v6 rows.
+    await db.execAsync(`
+      ALTER TABLE shots ADD COLUMN rechecked INTEGER NOT NULL DEFAULT 0;
+      PRAGMA user_version = 6;
+    `);
+  }
 }
 
 /** Run a DB operation; on ANY failure log + return the fallback (never throw). */
@@ -410,6 +420,18 @@ export async function updateShotOutcome(
   });
 }
 
+/**
+ * Stamp a shot as machine-re-checked (offline recheck ran over it, whatever
+ * the verdict) so the pass is never repeated for the same shot. Distinct from
+ * `corrected`, which marks USER edits.
+ */
+export async function markShotRechecked(shotRowId: number): Promise<void> {
+  return safe('markShotRechecked', undefined, async () => {
+    const db = await getDb();
+    await db.runAsync('UPDATE shots SET rechecked = 1 WHERE id = ?', shotRowId);
+  });
+}
+
 /** One-tap 2↔3 correction: persist a shot's corrected point value. */
 export async function updateShotValue(shotRowId: number, value: 2 | 3): Promise<void> {
   return safe('updateShotValue', undefined, async () => {
@@ -454,6 +476,11 @@ export interface ShotRow {
   shotValue?: number | null;
   /** Serialized FormReport; null pre-v5 or when form analysis was off. */
   formJson?: string | null;
+  /**
+   * 1 once the offline re-check pass ran over this shot (v6). Optional so
+   * hand-built rows (tests, fixtures) predating v6 still typecheck.
+   */
+  rechecked?: number | null;
 }
 
 export async function sessionShots(sessionId: number): Promise<ShotRow[]> {
