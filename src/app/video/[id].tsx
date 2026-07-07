@@ -2,15 +2,19 @@
  * Session replay — broadcast-grade playback of the session recording.
  *
  * - 16:9 letterboxed VideoView (full-bleed with overlay chrome in landscape).
- * - Custom chrome: play/pause pill, prev/next shot, m:ss clock and the
- *   ShotTimeline scrubber with a marker per shot at
- *   videoTime = shot.tResolved − recordingStartSec.
- * - Highlights mode: auto-plays only the planClips windows (shot-clock plan
- *   times mapped through recordingStartSec), with a "Clip i/n" chip and a
- *   "Replay highlights" overlay at the end.
+ * - Custom chrome: Ionicons transport (play/pause pill, prev/next shot) with
+ *   spring press feedback, m:ss clock and the ShotTimeline scrubber with an
+ *   outcome-coloured dot per shot at
+ *   videoTime = shot.tResolved − recordingStartSec; the shot nearest the
+ *   playhead renders emphasised.
+ * - Highlights mode: a Full game / Highlights segmented control (sliding
+ *   thumb, reduced-motion aware) that auto-plays only the planClips windows
+ *   (shot-clock plan times mapped through recordingStartSec), with a
+ *   "Clip i/n" chip and a "Replay highlights" overlay at the end.
  * - recordingStartSec == null (unrecorded / pre-v2 sessions) hides all
  *   time-mapped features gracefully; the plain player still works.
  */
+import { Ionicons } from '@expo/vector-icons';
 import { useEvent, useEventListener } from 'expo';
 import * as Haptics from 'expo-haptics';
 import { useLocalSearchParams } from 'expo-router';
@@ -20,7 +24,7 @@ import {
   type SourceLoadEventPayload,
   type TimeUpdateEventPayload,
 } from 'expo-video';
-import React, { useCallback, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Pressable,
   StyleSheet,
@@ -28,6 +32,13 @@ import {
   useWindowDimensions,
   View,
 } from 'react-native';
+import Animated, {
+  useAnimatedStyle,
+  useReducedMotion,
+  useSharedValue,
+  withSpring,
+  withTiming,
+} from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import {
@@ -39,7 +50,7 @@ import {
 import { Chip, ErrorCard, Eyebrow, PillButton, Row, Screen } from '@/components/ui';
 import { ShotInfoStrip } from '@/components/video/ShotInfoStrip';
 import { ShotTimeline, type TimelineMarker } from '@/components/video/ShotTimeline';
-import { color, radius, space, touch, type } from '@/constants/tokens';
+import { color, motion, radius, space, touch, type } from '@/constants/tokens';
 import { planClips } from '@/core/clipPlanner';
 import { clamp } from '@/core/geometry';
 import type { ResolvedShot } from '@/core/types';
@@ -66,61 +77,11 @@ interface ClipWindow {
 /** Seek epsilon so prev/next don't re-target the shot we just jumped to. */
 const SEEK_EPS_SEC = 0.5;
 
+const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
+
 // ---------------------------------------------------------------------------
-// Transport glyphs (pure views — no icon font dependency)
+// Transport — Ionicons glyphs on spring-pressed pills
 // ---------------------------------------------------------------------------
-
-function PlayGlyph({ tint }: { tint: string }) {
-  return (
-    <View
-      style={{
-        width: 0,
-        height: 0,
-        marginLeft: 3,
-        borderTopWidth: 9,
-        borderBottomWidth: 9,
-        borderLeftWidth: 15,
-        borderTopColor: 'transparent',
-        borderBottomColor: 'transparent',
-        borderLeftColor: tint,
-      }}
-    />
-  );
-}
-
-function PauseGlyph({ tint }: { tint: string }) {
-  return (
-    <View style={{ flexDirection: 'row', gap: 5 }}>
-      <View style={[styles.pauseBar, { backgroundColor: tint }]} />
-      <View style={[styles.pauseBar, { backgroundColor: tint }]} />
-    </View>
-  );
-}
-
-function SkipGlyph({ direction, tint }: { direction: 'prev' | 'next'; tint: string }) {
-  const triangle = (
-    <View
-      style={{
-        width: 0,
-        height: 0,
-        borderTopWidth: 6,
-        borderBottomWidth: 6,
-        borderTopColor: 'transparent',
-        borderBottomColor: 'transparent',
-        ...(direction === 'prev'
-          ? { borderRightWidth: 10, borderRightColor: tint }
-          : { borderLeftWidth: 10, borderLeftColor: tint }),
-      }}
-    />
-  );
-  const bar = <View style={[styles.skipBar, { backgroundColor: tint }]} />;
-  return (
-    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 2 }}>
-      {direction === 'prev' ? bar : triangle}
-      {direction === 'prev' ? triangle : bar}
-    </View>
-  );
-}
 
 function TransportButton({
   label,
@@ -128,23 +89,46 @@ function TransportButton({
   onPress,
   disabled = false,
   primary = false,
-  children,
+  icon,
+  iconSize = 20,
 }: {
   label: string;
   hint?: string;
   onPress: () => void;
   disabled?: boolean;
   primary?: boolean;
-  children: React.ReactNode;
+  icon: React.ComponentProps<typeof Ionicons>['name'];
+  iconSize?: number;
 }) {
+  const reducedMotion = useReducedMotion();
+  const [pressed, setPressed] = useState(false);
+  // Press micro-interaction: a quick spring scale-down, applied directly on
+  // the Pressable so call-site row layout is untouched.
+  const scale = useSharedValue(1);
+  const animStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: scale.value }],
+  }));
   return (
-    <Pressable
+    <AnimatedPressable
       onPress={onPress}
+      onPressIn={() => {
+        setPressed(true);
+        if (!reducedMotion) {
+          scale.value = withSpring(0.92, { damping: 20, stiffness: 400 });
+        }
+      }}
+      onPressOut={() => {
+        setPressed(false);
+        if (!reducedMotion) {
+          scale.value = withSpring(1, { damping: 16, stiffness: 300 });
+        }
+      }}
       disabled={disabled}
       accessibilityRole="button"
       accessibilityLabel={label}
       accessibilityHint={hint}
-      style={({ pressed }) => [
+      accessibilityState={{ disabled }}
+      style={[
         styles.transportBtn,
         primary && styles.transportBtnPrimary,
         pressed &&
@@ -153,10 +137,82 @@ function TransportButton({
             ? { backgroundColor: color.accentPressed }
             : { backgroundColor: color.surfaceRaised }),
         disabled && { opacity: 0.35 },
+        animStyle,
       ]}
     >
-      {children}
-    </Pressable>
+      <Ionicons
+        name={icon}
+        size={iconSize}
+        color={primary ? color.onAccent : color.text}
+        // The play triangle is optically left-heavy; nudge it to centre.
+        style={icon === 'play' ? { marginLeft: 3 } : undefined}
+      />
+    </AnimatedPressable>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Full game / Highlights segmented control (styling only — the parent still
+// owns the exact same toggle logic)
+// ---------------------------------------------------------------------------
+
+const SEGMENT_W = 116;
+const SEGMENT_PAD = 2;
+
+function HighlightsSegmented({
+  highlightsOn,
+  onSelect,
+  highlightsDisabled,
+}: {
+  highlightsOn: boolean;
+  onSelect: (mode: 'full' | 'highlights') => void;
+  highlightsDisabled: boolean;
+}) {
+  const reducedMotion = useReducedMotion();
+  const offset = useSharedValue(highlightsOn ? 1 : 0);
+  useEffect(() => {
+    offset.value = withTiming(highlightsOn ? 1 : 0, {
+      duration: reducedMotion ? 0 : motion.quick,
+    });
+  }, [highlightsOn, reducedMotion, offset]);
+  const thumbStyle = useAnimatedStyle(() => ({
+    transform: [{ translateX: offset.value * SEGMENT_W }],
+  }));
+
+  return (
+    <View style={styles.segmented} accessibilityRole="radiogroup">
+      <Animated.View pointerEvents="none" style={[styles.segThumb, thumbStyle]} />
+      <Pressable
+        onPress={() => onSelect('full')}
+        accessibilityRole="radio"
+        accessibilityLabel="Full game"
+        accessibilityHint="Plays the whole recording"
+        accessibilityState={{ checked: !highlightsOn }}
+        style={styles.segment}
+      >
+        <Text style={[styles.segLabel, !highlightsOn && styles.segLabelActive]}>
+          Full game
+        </Text>
+      </Pressable>
+      <Pressable
+        onPress={() => onSelect('highlights')}
+        disabled={highlightsDisabled}
+        accessibilityRole="radio"
+        accessibilityLabel="Highlights"
+        accessibilityHint="Plays only the moments around your shots"
+        accessibilityState={{ checked: highlightsOn, disabled: highlightsDisabled }}
+        style={[styles.segment, highlightsDisabled && { opacity: 0.35 }]}
+      >
+        <Ionicons
+          name="sparkles"
+          size={12}
+          color={highlightsOn ? color.accent : color.textFaint}
+        />
+        <Text style={[styles.segLabel, highlightsOn && styles.segLabelHot]}>
+          Highlights
+        </Text>
+      </Pressable>
+    </View>
   );
 }
 
@@ -407,6 +463,13 @@ function ReplayPlayer({
     }
   };
 
+  /** Segmented control adapter — same toggle logic, no-op on reselect. */
+  const selectMode = (mode: 'full' | 'highlights') => {
+    const wantsHighlights = mode === 'highlights';
+    if (wantsHighlights === highlightsOn) return;
+    toggleHighlights();
+  };
+
   // Nearest shot to the playhead for the info strip.
   const currentShot = useMemo<ResolvedShot | null>(() => {
     if (markers.length === 0) return null;
@@ -431,6 +494,7 @@ function ReplayPlayer({
       durationSec={durationSec}
       currentSec={currentSec}
       markers={markers}
+      activeShotId={currentShot?.id ?? null}
       onScrub={seekTo}
       onScrubStart={onScrubStart}
       onScrubEnd={onScrubEnd}
@@ -445,28 +509,22 @@ function ReplayPlayer({
         hint="Seeks to just before the previous shot"
         onPress={goPrev}
         disabled={!hasMarkers}
-      >
-        <SkipGlyph direction="prev" tint={color.text} />
-      </TransportButton>
+        icon="play-skip-back"
+      />
       <TransportButton
         label={isPlaying ? 'Pause' : 'Play'}
         onPress={togglePlay}
         primary
-      >
-        {isPlaying ? (
-          <PauseGlyph tint={color.onAccent} />
-        ) : (
-          <PlayGlyph tint={color.onAccent} />
-        )}
-      </TransportButton>
+        icon={isPlaying ? 'pause' : 'play'}
+        iconSize={26}
+      />
       <TransportButton
         label="Next shot"
         hint="Seeks to just before the next shot"
         onPress={goNext}
         disabled={!hasMarkers || nextTarget == null}
-      >
-        <SkipGlyph direction="next" tint={color.text} />
-      </TransportButton>
+        icon="play-skip-forward"
+      />
     </Row>
   );
 
@@ -477,27 +535,13 @@ function ReplayPlayer({
     </Text>
   );
 
-  const highlightsChip = hasMarkers ? (
-    <Row gap={space.sm}>
-      <Pressable
-        onPress={toggleHighlights}
-        disabled={clips.length === 0}
-        accessibilityRole="button"
-        accessibilityLabel="Highlights"
-        accessibilityState={{ selected: highlightsOn, disabled: clips.length === 0 }}
-        accessibilityHint="Plays only the moments around your shots"
-        style={({ pressed }) => [
-          styles.hlChip,
-          highlightsOn && styles.hlChipOn,
-          pressed && clips.length > 0 && { opacity: 0.8 },
-          clips.length === 0 && { opacity: 0.35 },
-        ]}
-      >
-        <View style={[styles.hlDot, highlightsOn && { backgroundColor: color.accent }]} />
-        <Text style={[styles.hlLabel, highlightsOn && { color: color.accent }]}>
-          Highlights
-        </Text>
-      </Pressable>
+  const highlightsControl = hasMarkers ? (
+    <Row gap={space.sm} style={{ flexWrap: 'wrap' }}>
+      <HighlightsSegmented
+        highlightsOn={highlightsOn}
+        onSelect={selectMode}
+        highlightsDisabled={clips.length === 0}
+      />
       {highlightsOn && clips.length > 0 && (
         <Chip
           label={`Clip ${Math.min(clipIndex + 1, clips.length)}/${clips.length}`}
@@ -516,7 +560,7 @@ function ReplayPlayer({
       )}
       {highlightsDone && (
         <View style={styles.videoOverlay}>
-          <PillButton label="Replay highlights" onPress={startHighlights} />
+          <PillButton label="Replay highlights" icon="refresh" onPress={startHighlights} />
         </View>
       )}
     </>
@@ -558,7 +602,7 @@ function ReplayPlayer({
           {timeline}
           <Row style={{ justifyContent: 'space-between', flexWrap: 'wrap' }} gap={space.md}>
             {transport}
-            {highlightsChip}
+            {highlightsControl}
             {clock}
           </Row>
         </View>
@@ -597,15 +641,22 @@ function ReplayPlayer({
       <View style={styles.chrome}>
         {timeline}
         {recordingStartSec == null && (
-          <Text style={styles.markerNote}>
-            Shot markers aren't available for this recording.
-          </Text>
+          <Row gap={space.xs}>
+            <Ionicons
+              name="information-circle-outline"
+              size={14}
+              color={color.textFaint}
+            />
+            <Text style={styles.markerNote}>
+              Shot markers aren't available for this recording.
+            </Text>
+          </Row>
         )}
         <Row style={{ justifyContent: 'space-between' }}>
           {transport}
           {clock}
         </Row>
-        {highlightsChip}
+        {highlightsControl}
         <ShotInfoStrip shot={currentShot} />
       </View>
     </View>
@@ -683,39 +734,43 @@ const styles = StyleSheet.create({
     borderWidth: 0,
     backgroundColor: color.accent,
   },
-  pauseBar: {
-    width: 5,
-    height: 18,
-    borderRadius: 2,
-  },
-  skipBar: {
-    width: 2.5,
-    height: 13,
-    borderRadius: 1,
-  },
-  hlChip: {
+  segmented: {
     flexDirection: 'row',
-    alignItems: 'center',
-    gap: space.sm,
-    minHeight: touch.minTarget,
-    paddingHorizontal: space.lg,
+    alignSelf: 'flex-start',
+    padding: SEGMENT_PAD,
     borderRadius: radius.pill,
     borderWidth: 1,
     borderColor: color.border,
+    backgroundColor: color.surface,
   },
-  hlChipOn: {
-    borderColor: color.accent,
-    backgroundColor: color.accentTint,
+  segThumb: {
+    position: 'absolute',
+    top: SEGMENT_PAD,
+    bottom: SEGMENT_PAD,
+    left: SEGMENT_PAD,
+    width: SEGMENT_W,
+    borderRadius: radius.pill,
+    backgroundColor: color.surfaceRaised,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: color.hudGlassBorder,
   },
-  hlDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    backgroundColor: color.textFaint,
+  segment: {
+    width: SEGMENT_W,
+    minHeight: touch.minTarget - SEGMENT_PAD * 2,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: space.xs,
   },
-  hlLabel: {
+  segLabel: {
     ...type.caption,
     color: color.textDim,
+  },
+  segLabelActive: {
+    color: color.text,
+  },
+  segLabelHot: {
+    color: color.accent,
   },
   backGlass: {
     backgroundColor: color.hudGlassDeep,
