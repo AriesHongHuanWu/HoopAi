@@ -9,6 +9,7 @@ import {
   Circle,
   LinearGradient,
   Path,
+  Rect,
   Skia,
   vec,
   type SkPath,
@@ -22,6 +23,8 @@ import { color } from '@/constants/tokens';
 const PAD = 6;
 /** Radius of the dot on the last point, px. */
 const DOT_R = 4;
+/** Radius of the chalk core inside the last-point dot, px. */
+const CORE_R = 1.75;
 /** Radius of the soft halo behind the last-point dot, px. */
 const HALO_R = 9;
 
@@ -98,6 +101,31 @@ export function Sparkline({ data, width, height, accessibilityLabel }: Sparkline
       style={{ width, height }}
     >
       <Canvas style={{ width, height }}>
+        {/* quiet reference grid: 100% / 50% lines, solid baseline at 0 */}
+        <Rect
+          x={PAD}
+          y={PAD}
+          width={width - PAD * 2}
+          height={1}
+          color={color.border}
+          opacity={0.35}
+        />
+        <Rect
+          x={PAD}
+          y={height / 2}
+          width={width - PAD * 2}
+          height={1}
+          color={color.border}
+          opacity={0.5}
+        />
+        <Rect
+          x={PAD}
+          y={height - PAD}
+          width={width - PAD * 2}
+          height={1}
+          color={color.border}
+          opacity={0.9}
+        />
         {data.length > 1 && (
           <Path path={geom.area}>
             <LinearGradient
@@ -119,6 +147,7 @@ export function Sparkline({ data, width, height, accessibilityLabel }: Sparkline
         )}
         <Circle cx={geom.last.x} cy={geom.last.y} r={HALO_R} color={HALO_TINT} />
         <Circle cx={geom.last.x} cy={geom.last.y} r={DOT_R} color={color.accent} />
+        <Circle cx={geom.last.x} cy={geom.last.y} r={CORE_R} color={color.text} />
       </Canvas>
     </View>
   );

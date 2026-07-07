@@ -7,6 +7,7 @@
  * sorted nearest-to-unlock first). Rows cascade in with a small stagger;
  * under reduced motion they render statically.
  */
+import { Ionicons } from '@expo/vector-icons';
 import { router, useFocusEffect } from 'expo-router';
 import React, { useCallback, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
@@ -16,13 +17,46 @@ import { AchievementRow } from '@/components/AchievementRow';
 import { ProBadge } from '@/components/ProBadge';
 import { BackPill } from '@/components/ShotList';
 import { Card, Chip, Eyebrow, PillButton, Row, Screen, StatNumber } from '@/components/ui';
-import { color, motion, space, type } from '@/constants/tokens';
+import { color, motion, radius, space, type } from '@/constants/tokens';
 import { ACHIEVEMENTS, evaluate, type LifetimeTotals } from '@/core/achievements';
 import { lifetimeTotals } from '@/data/db';
 
 /** Cascade step between badge rows (ms), capped so long boards stay snappy. */
 const STAGGER_MS = 40;
 const STAGGER_CAP = 8;
+
+/** Icon circle diameter on a personal-best tile, px. */
+const PB_ICON_SIZE = 28;
+
+/**
+ * Personal-best tile — one lifetime number with a real identity: an Ionicons
+ * glyph in a tinted circle, the value in broadcast condensed numerals, a
+ * micro label underneath. Raised surface so the trio reads as a scoreboard
+ * strip inside the hero card.
+ */
+function PbTile({
+  icon,
+  tint,
+  tintBg,
+  value,
+  label,
+}: {
+  icon: React.ComponentProps<typeof Ionicons>['name'];
+  tint: string;
+  tintBg: string;
+  value: string;
+  label: string;
+}) {
+  return (
+    <View style={styles.pbTile} accessible accessibilityLabel={`${label}: ${value}`}>
+      <View style={[styles.pbIcon, { backgroundColor: tintBg }]}>
+        <Ionicons name={icon} size={15} color={tint} />
+      </View>
+      <Text style={styles.pbValue}>{value}</Text>
+      <Text style={styles.pbLabel}>{label.toUpperCase()}</Text>
+    </View>
+  );
+}
 
 function BadgeList({
   defs,
@@ -112,10 +146,28 @@ export default function RecordsScreen() {
             label="career makes"
             tint={color.accent}
           />
-          <Row style={styles.heroRow}>
-            <StatNumber value={String(totals.attempts)} size="medium" label="attempts" />
-            <StatNumber value={`${makeRate}%`} size="medium" label="make rate" />
-            <StatNumber value={String(totals.bestStreak)} size="medium" label="best streak" />
+          <Row gap={space.sm} style={styles.heroRow}>
+            <PbTile
+              icon="basketball-outline"
+              tint={color.accent}
+              tintBg={color.accentTint}
+              value={String(totals.attempts)}
+              label="attempts"
+            />
+            <PbTile
+              icon="analytics-outline"
+              tint={color.make}
+              tintBg={color.makeTint}
+              value={`${makeRate}%`}
+              label="make rate"
+            />
+            <PbTile
+              icon="flame-outline"
+              tint={color.threePt}
+              tintBg={color.threePtTint}
+              value={String(totals.bestStreak)}
+              label="best streak"
+            />
           </Row>
         </Card>
 
@@ -144,6 +196,15 @@ export default function RecordsScreen() {
               </View>
               <Chip label={`${unlocked.length} of ${ACHIEVEMENTS.length}`} tone="accent" />
             </Row>
+            {/* Board completion — decorative; the chip above carries the count. */}
+            <View style={styles.boardTrack} importantForAccessibility="no-hide-descendants">
+              <View
+                style={[
+                  styles.boardFill,
+                  { width: `${Math.round((unlocked.length / ACHIEVEMENTS.length) * 100)}%` },
+                ]}
+              />
+            </View>
             <BadgeList defs={unlocked} totals={totals} unlocked />
           </View>
         )}
@@ -178,8 +239,44 @@ const styles = StyleSheet.create({
     gap: space.xl,
   },
   heroRow: {
-    justifyContent: 'space-around',
+    alignItems: 'stretch',
     marginTop: space.lg,
+  },
+  pbTile: {
+    flex: 1,
+    backgroundColor: color.surfaceRaised,
+    borderRadius: radius.md,
+    padding: space.md,
+    gap: space.xs,
+  },
+  pbIcon: {
+    width: PB_ICON_SIZE,
+    height: PB_ICON_SIZE,
+    borderRadius: PB_ICON_SIZE / 2,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 2,
+  },
+  pbValue: {
+    ...type.statMedium,
+    color: color.text,
+    fontVariant: ['tabular-nums'],
+  },
+  pbLabel: {
+    ...type.micro,
+    color: color.textFaint,
+  },
+  boardTrack: {
+    height: 3,
+    borderRadius: radius.pill,
+    backgroundColor: color.surfaceRaised,
+    overflow: 'hidden',
+    marginBottom: space.md,
+  },
+  boardFill: {
+    height: '100%',
+    borderRadius: radius.pill,
+    backgroundColor: color.accent,
   },
   sectionHeader: {
     justifyContent: 'space-between',

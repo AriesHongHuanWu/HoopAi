@@ -5,10 +5,12 @@
  * long-pressing offers delete (which also removes the local recording).
  * The empty state draws the signature shot arc waiting for its first make.
  */
+import { Ionicons } from '@expo/vector-icons';
 import { Canvas, Circle, DashPathEffect, Line, Path, vec } from '@shopify/react-native-skia';
 import { router, useFocusEffect } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import Animated, { FadeInDown, useReducedMotion } from 'react-native-reanimated';
 
 import {
   BackPill,
@@ -25,7 +27,7 @@ import {
   Screen,
   StatNumber,
 } from '@/components/ui';
-import { color, radius, space, touch, type } from '@/constants/tokens';
+import { color, font, motion, radius, space, touch, type } from '@/constants/tokens';
 import { exportCsv, sessionsToCsv } from '@/core/csvExport';
 import { getModeDef } from '@/core/gameModes';
 import type { ShotOutcome } from '@/core/types';
@@ -88,7 +90,12 @@ function EmptyArc() {
   );
 }
 
+/** Cascade step between session cards (ms), capped so long lists stay snappy. */
+const STAGGER_MS = 40;
+const STAGGER_CAP = 8;
+
 export default function HistoryScreen() {
+  const reducedMotion = useReducedMotion();
   const [items, setItems] = useState<HistoryItem[] | null>(null);
   /** Selected tag chip filter; null = show every session (no filter active). */
   const [tagFilter, setTagFilter] = useState<string | null>(null);
@@ -269,7 +276,7 @@ export default function HistoryScreen() {
         </Card>
       ) : (
         <View style={{ gap: space.md }}>
-          {(visibleItems ?? []).map(({ row, pips }) => {
+          {(visibleItems ?? []).map(({ row, pips }, index) => {
             const makes = row.makes ?? 0;
             const fg = Math.round(row.fgPct * 100);
             const hasVideo = row.videoPath != null;
@@ -284,11 +291,10 @@ export default function HistoryScreen() {
                   })()
                 : null;
             const tag = row.label.trim();
-            return (
+            const card = (
               <Pressable
-                key={row.id}
                 accessibilityRole="button"
-                accessibilityLabel={`Session on ${formatSessionDate(row.startedAt)}${modeName != null ? `, ${modeName}` : ''}, ${fg} percent field goals${hasVideo ? ', has replay video' : ''}${tag.length > 0 ? `, tagged ${tag}` : ''}`}
+                accessibilityLabel={`Session on ${formatSessionDate(row.startedAt)}${modeName != null ? `, ${modeName}` : ''}, ${makes} of ${row.attempts} makes, ${fg} percent field goals${hasVideo ? ', has replay video' : ''}${tag.length > 0 ? `, tagged ${tag}` : ''}`}
                 accessibilityHint="Opens the session detail. Long press to delete."
                 onPress={() =>
                   router.push({
@@ -300,7 +306,7 @@ export default function HistoryScreen() {
                 style={({ pressed }) => pressed && { opacity: 0.8 }}
               >
                 <Card>
-                  <Row style={{ justifyContent: 'space-between' }} gap={space.lg}>
+                  <Row style={styles.cardHeader} gap={space.lg}>
                     <View style={styles.cardInfo}>
                       <Text style={styles.heading}>
                         {formatSessionDate(row.startedAt)}
@@ -311,33 +317,53 @@ export default function HistoryScreen() {
                         </Text>
                         {hasVideo && (
                           <View style={styles.videoBadge} importantForAccessibility="no">
-                            <Text style={styles.videoGlyph}>▶</Text>
+                            <Ionicons name="play" size={9} color={color.accent} />
                           </View>
                         )}
                         <ModeChip modeId={row.modeId} />
                       </Row>
-                      <Text style={[styles.meta, { marginTop: space.sm }]}>
-                        {row.attempts} {row.attempts === 1 ? 'shot' : 'shots'} ·{' '}
-                        {makes} {makes === 1 ? 'make' : 'makes'}
-                      </Text>
+                      <Row gap={space.xs} style={styles.statLine}>
+                        <Text style={styles.makesNum}>{makes}</Text>
+                        <Text style={styles.attemptsNum}>/{row.attempts}</Text>
+                        <Text style={styles.statWord}>
+                          {makes === 1 ? 'MAKE' : 'MAKES'}
+                        </Text>
+                      </Row>
                       {tag.length > 0 && (
-                        <View style={{ marginTop: space.xs, alignSelf: 'flex-start' }}>
+                        <View style={{ marginTop: space.sm, alignSelf: 'flex-start' }}>
                           <Chip label={tag} />
                         </View>
                       )}
                     </View>
-                    <StatNumber value={`${fg}%`} size="medium" label="FG" />
+                    <Row gap={space.sm}>
+                      <StatNumber value={`${fg}%`} size="medium" label="FG" />
+                      <Ionicons
+                        name="chevron-forward"
+                        size={16}
+                        color={color.textFaint}
+                        importantForAccessibility="no"
+                      />
+                    </Row>
                   </Row>
                   {pips.length > 0 && (
-                    <PipRow
-                      outcomes={pips}
-                      size={10}
-                      max={24}
-                      style={{ marginTop: space.md }}
-                    />
+                    <View style={styles.pipStrip}>
+                      <PipRow outcomes={pips} size={10} max={24} />
+                    </View>
                   )}
                 </Card>
               </Pressable>
+            );
+            return reducedMotion ? (
+              <View key={row.id}>{card}</View>
+            ) : (
+              <Animated.View
+                key={row.id}
+                entering={FadeInDown.duration(motion.standard).delay(
+                  Math.min(index, STAGGER_CAP) * STAGGER_MS,
+                )}
+              >
+                {card}
+              </Animated.View>
             );
           })}
         </View>
@@ -386,24 +412,49 @@ const styles = StyleSheet.create({
     color: color.textFaint,
     fontVariant: ['tabular-nums'],
   },
-  meta: {
-    ...type.body,
-    color: color.textDim,
-    fontVariant: ['tabular-nums'],
+  cardHeader: {
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
   },
   cardInfo: {
     flex: 1,
     minWidth: 0,
     gap: 2,
   },
+  statLine: {
+    marginTop: space.sm,
+    alignItems: 'baseline',
+  },
+  makesNum: {
+    fontFamily: font.display,
+    fontSize: 22,
+    lineHeight: 26,
+    color: color.text,
+    fontVariant: ['tabular-nums'],
+  },
+  attemptsNum: {
+    fontFamily: font.displayMedium,
+    fontSize: 22,
+    lineHeight: 26,
+    color: color.textFaint,
+    fontVariant: ['tabular-nums'],
+  },
+  statWord: {
+    ...type.micro,
+    color: color.textFaint,
+    marginLeft: 2,
+  },
   videoBadge: {
     paddingHorizontal: space.xs,
+    paddingVertical: 2,
     borderRadius: radius.sm,
     backgroundColor: color.accentTint,
   },
-  videoGlyph: {
-    ...type.micro,
-    color: color.accent,
+  pipStrip: {
+    marginTop: space.md,
+    paddingTop: space.md,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: color.border,
   },
   modeChip: {
     flexDirection: 'row',
