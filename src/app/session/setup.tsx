@@ -5,6 +5,14 @@
 import React, { useState } from 'react';
 import { Linking, Pressable, StyleSheet, Switch, Text, View } from 'react-native';
 import { router } from 'expo-router';
+import { Ionicons } from '@expo/vector-icons';
+import Animated, {
+  FadeInDown,
+  useAnimatedStyle,
+  useReducedMotion,
+  useSharedValue,
+  withSpring,
+} from 'react-native-reanimated';
 import {
   useCameraPermission,
   useMicrophonePermission,
@@ -12,7 +20,7 @@ import {
 
 import { BackPill } from '@/components/ShotList';
 import { Card, Chip, Eyebrow, PillButton, Row, Screen } from '@/components/ui';
-import { color, radius, space, touch, type } from '@/constants/tokens';
+import { color, font, motion, radius, space, touch, type } from '@/constants/tokens';
 import { getModeDef } from '@/core/gameModes';
 import { useMode } from '@/state/modeStore';
 import { useSession } from '@/state/sessionStore';
@@ -47,6 +55,86 @@ const KEEP_OPTIONS: { mode: KeepMode; label: string }[] = [
   { mode: 'none', label: 'No clips' },
 ];
 
+/** Last-glance placement reminders next to the GO button — copy only. */
+const PLACEMENT_TIPS: { icon: React.ComponentProps<typeof Ionicons>['name']; label: string }[] = [
+  { icon: 'footsteps-outline', label: '15–30 FT SIDE VIEW' },
+  { icon: 'scan-outline', label: 'WHOLE RIM VISIBLE' },
+  { icon: 'lock-closed-outline', label: 'STEADY PROP' },
+];
+
+/**
+ * Tiny viewfinder diagram for the orientation cards: a phone silhouette
+ * framing a minimal court sketch (floor, backboard, rim, ball). Pure Views —
+ * decorative only, the card label carries the accessible name.
+ */
+function OrientDiagram({
+  orient,
+  selected,
+}: {
+  orient: 'portrait' | 'landscape';
+  selected: boolean;
+}) {
+  return (
+    <View style={styles.orientDiagram}>
+      <View
+        style={[
+          styles.phoneFrame,
+          orient === 'portrait' ? styles.phonePortrait : styles.phoneLandscape,
+          selected && styles.phoneFrameSelected,
+        ]}
+      >
+        {/* Front camera dot — sells the phone silhouette. */}
+        <View
+          style={[
+            styles.camDot,
+            orient === 'portrait' ? styles.camDotPortrait : styles.camDotLandscape,
+          ]}
+        />
+        {/* Court sketch inside the frame: what the camera should see. */}
+        <View style={styles.sketchFloor} />
+        <View style={styles.sketchBoard} />
+        <View style={[styles.sketchRim, selected && styles.sketchRimSelected]} />
+        <View style={styles.sketchBall} />
+      </View>
+    </View>
+  );
+}
+
+const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
+
+/**
+ * The broadcast GO moment — one oversized live-style button. Same press
+ * spring as PillButton, same disabled semantics as the old CTA.
+ */
+function GoCta({ onPress, disabled }: { onPress: () => void; disabled: boolean }) {
+  const scale = useSharedValue(1);
+  const animStyle = useAnimatedStyle(() => ({ transform: [{ scale: scale.value }] }));
+  return (
+    <AnimatedPressable
+      onPress={onPress}
+      disabled={disabled}
+      onPressIn={() => {
+        scale.value = withSpring(0.97, { damping: 20, stiffness: 400 });
+      }}
+      onPressOut={() => {
+        scale.value = withSpring(1, { damping: 16, stiffness: 300 });
+      }}
+      accessibilityRole="button"
+      accessibilityLabel="Start session — open the camera"
+      accessibilityState={{ disabled }}
+      style={[styles.go, disabled && styles.goDisabled, animStyle]}
+    >
+      <View style={styles.goIcon}>
+        <Ionicons name="videocam" size={22} color={color.onAccent} />
+      </View>
+      <View style={styles.goBody}>
+        <Text style={styles.goLabel}>START SESSION</Text>
+        <Text style={styles.goSub}>Opens the camera — tracking starts with your first shot</Text>
+      </View>
+    </AnimatedPressable>
+  );
+}
+
 export default function SessionSetupScreen() {
   const camera = useCameraPermission();
   const mic = useMicrophonePermission();
@@ -69,6 +157,11 @@ export default function SessionSetupScreen() {
   // dislocate on a portrait/landscape flip. Defaults to portrait.
   const [orient, setOrient] = useState<'portrait' | 'landscape'>('portrait');
 
+  // Entrance stagger — cards drop in one after another; off under reduced motion.
+  const reducedMotion = useReducedMotion();
+  const enter = (i: number) =>
+    reducedMotion ? undefined : FadeInDown.duration(motion.standard).delay(i * 70);
+
   const openCamera = async () => {
     if (!camera.hasPermission && camera.canRequestPermission) {
       const granted = await camera.requestPermission();
@@ -89,14 +182,18 @@ export default function SessionSetupScreen() {
       <Row style={styles.backRow}>
         <BackPill />
       </Row>
-      <Eyebrow>New session</Eyebrow>
-      <Text style={styles.title}>Get the hoop in frame</Text>
-      <Text style={styles.lede}>
-        One minute of setup keeps make/miss calls accurate all session.
-      </Text>
+      <Animated.View entering={enter(0)}>
+        <Eyebrow>New session</Eyebrow>
+        <Text style={styles.title} accessibilityRole="header">
+          Get the hoop in frame
+        </Text>
+        <Text style={styles.lede}>
+          One minute of setup keeps make/miss calls accurate all session.
+        </Text>
+      </Animated.View>
 
       {/* Chosen game mode (or Free Play when none picked) */}
-      <Card style={styles.card}>
+      <Card entering={enter(1)} style={styles.card}>
         <Row style={styles.modeRow} gap={space.md}>
           <View style={styles.modeBadge}>
             <Text style={styles.modeEmoji}>{modeDef?.emoji ?? '🏀'}</Text>
@@ -181,13 +278,18 @@ export default function SessionSetupScreen() {
         )}
       </Card>
 
-      <Card style={styles.card}>
+      {/* Placement checklist — check-circle rail from step to step. */}
+      <Card entering={enter(2)} style={styles.card}>
+        <Eyebrow>Placement checklist</Eyebrow>
         {CHECKLIST.map((item, i) => (
-          <Row key={item.title} style={[styles.checkRow, i > 0 && styles.checkRowGap]} gap={space.md}>
-            <View style={styles.badge}>
-              <Text style={styles.badgeNum}>{i + 1}</Text>
+          <Row key={item.title} style={styles.checkRow} gap={space.md}>
+            <View style={styles.checkRail}>
+              <View style={styles.badge}>
+                <Ionicons name="checkmark" size={16} color={color.accent} />
+              </View>
+              {i < CHECKLIST.length - 1 && <View style={styles.railLine} />}
             </View>
-            <View style={styles.checkBody}>
+            <View style={[styles.checkBody, i < CHECKLIST.length - 1 && styles.checkBodyGap]}>
               <Text style={styles.itemTitle}>{item.title}</Text>
               <Text style={styles.itemBody}>{item.body}</Text>
             </View>
@@ -195,7 +297,7 @@ export default function SessionSetupScreen() {
         ))}
       </Card>
 
-      <Card style={styles.card}>
+      <Card entering={enter(3)} style={styles.card}>
         <Row style={styles.optionRow} gap={space.md}>
           <View style={styles.checkBody}>
             <Text style={styles.itemTitle}>Record video</Text>
@@ -239,8 +341,20 @@ export default function SessionSetupScreen() {
         )}
       </Card>
 
-      <Card style={styles.card}>
+      <Card entering={enter(4)} style={styles.card}>
         <Row style={styles.optionRow} gap={space.md}>
+          <View
+            style={[
+              styles.permBadge,
+              { backgroundColor: camera.hasPermission ? color.makeTint : color.accentTint },
+            ]}
+          >
+            <Ionicons
+              name={camera.hasPermission ? 'videocam' : 'videocam-outline'}
+              size={20}
+              color={camera.hasPermission ? color.make : color.accent}
+            />
+          </View>
           <View style={styles.checkBody}>
             <Text style={styles.itemTitle}>Camera access</Text>
             <Text style={styles.itemBody}>
@@ -265,49 +379,85 @@ export default function SessionSetupScreen() {
           />
         )}
         {recordVideo && !mic.hasPermission && (
-          <Text style={styles.micNote}>
-            The microphone is only used for game audio in recordings.
-          </Text>
+          <Row gap={space.xs} style={styles.micNoteRow}>
+            <Ionicons name="mic-outline" size={13} color={color.textFaint} />
+            <Text style={styles.micNote}>
+              The microphone is only used for game audio in recordings.
+            </Text>
+          </Row>
         )}
       </Card>
 
-      <Card style={styles.card}>
+      {/* Orientation — two rich cards with mini viewfinder diagrams. */}
+      <Card entering={enter(5)} style={styles.card}>
         <Eyebrow>Orientation</Eyebrow>
         <Text style={styles.itemBody}>
           Lock the camera to how you'll prop your phone — it won't rotate mid-session.
         </Text>
-        <Row gap={space.sm} style={styles.orientRow}>
+        <Row gap={space.md} style={styles.orientRow}>
           {(['portrait', 'landscape'] as const).map((o) => {
             const selected = orient === o;
             return (
               <Pressable
                 key={o}
                 accessibilityRole="button"
-                accessibilityLabel={o === 'portrait' ? 'Portrait' : 'Landscape'}
+                accessibilityLabel={
+                  o === 'portrait'
+                    ? 'Portrait — phone propped upright'
+                    : 'Landscape — phone propped on its side'
+                }
                 accessibilityState={{ selected }}
                 onPress={() => setOrient(o)}
                 style={({ pressed }) => [
-                  styles.keepChip,
-                  styles.orientChip,
-                  selected && styles.keepChipSelected,
-                  pressed && styles.keepChipPressed,
+                  styles.orientCard,
+                  selected && styles.orientCardSelected,
+                  pressed && styles.orientCardPressed,
                 ]}
               >
-                <Text style={[styles.keepChipLabel, selected && styles.keepChipLabelSelected]}>
+                <OrientDiagram orient={o} selected={selected} />
+                <Text style={[styles.orientLabel, selected && styles.orientLabelSelected]}>
                   {o === 'portrait' ? 'Portrait' : 'Landscape'}
                 </Text>
+                <Text style={styles.orientHint}>
+                  {o === 'portrait' ? 'Propped upright' : 'Propped sideways'}
+                </Text>
+                {selected && (
+                  <View style={styles.orientCheck}>
+                    <Ionicons name="checkmark-circle" size={20} color={color.accent} />
+                  </View>
+                )}
               </Pressable>
             );
           })}
         </Row>
       </Card>
 
-      <PillButton
-        label="Open camera"
-        onPress={() => void openCamera()}
-        disabled={!camera.hasPermission && !camera.canRequestPermission}
-        style={styles.cta}
-      />
+      {/* Final glance: placement tips strip, then the GO moment. */}
+      <Animated.View entering={enter(6)} style={styles.ctaBlock}>
+        <View style={styles.tipsStrip}>
+          {PLACEMENT_TIPS.map((tip, i) => (
+            <React.Fragment key={tip.label}>
+              {i > 0 && (
+                <Text
+                  style={styles.tipDivider}
+                  accessible={false}
+                  importantForAccessibility="no"
+                >
+                  ·
+                </Text>
+              )}
+              <View style={styles.tipItem}>
+                <Ionicons name={tip.icon} size={12} color={color.accent} />
+                <Text style={styles.tipLabel}>{tip.label}</Text>
+              </View>
+            </React.Fragment>
+          ))}
+        </View>
+        <GoCta
+          onPress={() => void openCamera()}
+          disabled={!camera.hasPermission && !camera.canRequestPermission}
+        />
+      </Animated.View>
     </Screen>
   );
 }
@@ -350,10 +500,18 @@ const styles = StyleSheet.create({
     paddingHorizontal: space.lg,
   },
   checkRow: {
-    alignItems: 'flex-start',
+    alignItems: 'stretch',
   },
-  checkRowGap: {
-    marginTop: space.lg,
+  checkRail: {
+    width: 28,
+    alignItems: 'center',
+  },
+  railLine: {
+    flex: 1,
+    width: 1.5,
+    borderRadius: 1,
+    backgroundColor: color.border,
+    marginTop: space.xs,
   },
   badge: {
     width: 28,
@@ -363,12 +521,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  badgeNum: {
-    ...type.heading,
-    color: color.accent,
-  },
   checkBody: {
     flex: 1,
+  },
+  checkBodyGap: {
+    paddingBottom: space.lg,
   },
   itemTitle: {
     ...type.heading,
@@ -402,13 +559,6 @@ const styles = StyleSheet.create({
     borderColor: color.accent,
     backgroundColor: color.accentTint,
   },
-  orientRow: {
-    marginTop: space.md,
-  },
-  orientChip: {
-    flex: 1,
-    alignItems: 'center',
-  },
   keepChipPressed: {
     backgroundColor: color.surfaceRaised,
   },
@@ -419,16 +569,202 @@ const styles = StyleSheet.create({
   keepChipLabelSelected: {
     color: color.accent,
   },
+  permBadge: {
+    width: 40,
+    height: 40,
+    borderRadius: radius.md,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   permissionButton: {
     marginTop: space.md,
+  },
+  micNoteRow: {
+    marginTop: space.md,
+    alignItems: 'flex-start',
   },
   micNote: {
     ...type.caption,
     color: color.textFaint,
-    marginTop: space.md,
+    flex: 1,
   },
-  cta: {
+  // --- Orientation cards ------------------------------------------------
+  orientRow: {
+    marginTop: space.md,
+    alignItems: 'stretch',
+  },
+  orientCard: {
+    flex: 1,
+    alignItems: 'center',
+    borderWidth: 1.5,
+    borderColor: color.border,
+    borderRadius: radius.md,
+    paddingVertical: space.md,
+    paddingHorizontal: space.sm,
+  },
+  orientCardSelected: {
+    borderColor: color.accent,
+    backgroundColor: color.accentTint,
+  },
+  orientCardPressed: {
+    backgroundColor: color.surfaceRaised,
+  },
+  orientCheck: {
+    position: 'absolute',
+    top: space.sm,
+    right: space.sm,
+  },
+  orientDiagram: {
+    height: 64,
+    justifyContent: 'center',
+    marginBottom: space.sm,
+  },
+  phoneFrame: {
+    borderWidth: 1.5,
+    borderColor: color.textDim,
+    borderRadius: 6,
+    overflow: 'hidden',
+    alignSelf: 'center',
+  },
+  phoneFrameSelected: {
+    borderColor: color.accent,
+  },
+  phonePortrait: {
+    width: 34,
+    height: 56,
+  },
+  phoneLandscape: {
+    width: 56,
+    height: 34,
+  },
+  camDot: {
+    position: 'absolute',
+    width: 3,
+    height: 3,
+    borderRadius: 1.5,
+    backgroundColor: color.textFaint,
+  },
+  camDotPortrait: {
+    top: 3,
+    alignSelf: 'center',
+  },
+  camDotLandscape: {
+    left: 3,
+    top: '50%',
+    marginTop: -1.5,
+  },
+  sketchFloor: {
+    position: 'absolute',
+    left: '8%',
+    right: '8%',
+    bottom: '10%',
+    height: 1.5,
+    backgroundColor: color.border,
+  },
+  sketchBoard: {
+    position: 'absolute',
+    right: '16%',
+    top: '22%',
+    width: 2,
+    height: '32%',
+    borderRadius: 1,
+    backgroundColor: color.textDim,
+  },
+  sketchRim: {
+    position: 'absolute',
+    right: '26%',
+    top: '44%',
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    borderWidth: 1.5,
+    borderColor: color.textDim,
+  },
+  sketchRimSelected: {
+    borderColor: color.accent,
+  },
+  sketchBall: {
+    position: 'absolute',
+    left: '18%',
+    bottom: '18%',
+    width: 5,
+    height: 5,
+    borderRadius: 2.5,
+    backgroundColor: color.accent,
+  },
+  orientLabel: {
+    ...type.heading,
+    color: color.text,
+  },
+  orientLabelSelected: {
+    color: color.accent,
+  },
+  orientHint: {
+    ...type.caption,
+    color: color.textFaint,
+    marginTop: 2,
+  },
+  // --- Tips strip + GO CTA ----------------------------------------------
+  ctaBlock: {
     marginTop: space.sm,
     marginBottom: space.xl,
+  },
+  tipsStrip: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: space.sm,
+    marginBottom: space.md,
+  },
+  tipItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: space.xs,
+  },
+  tipLabel: {
+    ...type.micro,
+    color: color.textFaint,
+  },
+  tipDivider: {
+    ...type.micro,
+    color: color.textFaint,
+  },
+  go: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: space.md,
+    minHeight: 72,
+    backgroundColor: color.accent,
+    borderRadius: radius.lg,
+    paddingVertical: space.lg,
+    paddingHorizontal: space.lg,
+  },
+  goDisabled: {
+    opacity: 0.4,
+  },
+  goIcon: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(20, 10, 5, 0.18)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  goBody: {
+    flex: 1,
+  },
+  goLabel: {
+    fontFamily: font.display,
+    fontSize: 24,
+    lineHeight: 26,
+    letterSpacing: 1,
+    color: color.onAccent,
+  },
+  goSub: {
+    ...type.caption,
+    color: color.onAccent,
+    opacity: 0.7,
+    marginTop: 2,
   },
 });
