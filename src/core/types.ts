@@ -224,6 +224,13 @@ export interface ResolvedShot {
     decision: 'silent' | 'veto_front' | 'veto_behind';
     disableReason?: string;
   };
+  /**
+   * Virtual-crossing diagnostics (present when the occluded-shot arc
+   * projection produced a usable fit, whether or not it corroborated a
+   * make). xCross/tCross are PROJECTED, not observed — the shot's own
+   * xCross field stays null for an occluded crossing.
+   */
+  virtualCross?: { xCross: number; tCross: number; r2y: number };
 }
 
 /** Pose-based form metrics + prioritized coaching cues for one shot. */

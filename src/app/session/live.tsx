@@ -15,7 +15,7 @@
  * session store and renders store state. No per-frame React updates.
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Linking, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
+import { Dimensions, Linking, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import { router, useLocalSearchParams, useNavigation } from 'expo-router';
 import * as ScreenOrientation from 'expo-screen-orientation';
 import * as Haptics from 'expo-haptics';
@@ -141,6 +141,7 @@ function LiveSessionScreen() {
   const liveCoach = useCoachMarks('live', LIVE_STEPS);
 
   const engineRef = useRef<ShotEngine | null>(null);
+  const cameraRef = useRef<React.ComponentRef<typeof Camera>>(null);
   const driftTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pausedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -199,8 +200,36 @@ function LiveSessionScreen() {
     }
   }, []);
 
+  // LOCK the full 3A pipeline (focus + exposure + white balance) on the rim
+  // the moment it locks. Mid-session AF/AE hunting changes the ball's
+  // appearance frame-to-frame — a prime suspect for dark/small-ball dropouts
+  // — and the rim region is exactly where make/miss is decided. 'steady'
+  // (we're filming), locked until re-aim resets it. Fire-and-forget: devices
+  // without metering support just keep continuous auto — no worse than before.
+  const focusOnRim = useCallback(() => {
+    const eng = engineRef.current;
+    const camera = cameraRef.current;
+    if (eng == null || camera == null) return;
+    const o = eng.overlay.value;
+    if (o.rim == null) return;
+    const win = Dimensions.get('window');
+    const m = mapAnalysisToView(o, { w: win.width, h: win.height });
+    if (!m.ok || m.scale <= 0) return;
+    const fx = (o.rim.x + o.rim.width / 2) * m.scale + m.ox;
+    const fy = (o.rim.y + o.rim.height / 2) * m.scale + m.oy;
+    camera
+      .focusTo(
+        { x: fx, y: fy },
+        { responsiveness: 'steady', adaptiveness: 'locked', autoResetAfter: null },
+      )
+      .catch(() => {
+        // Unsupported device or metering race — continuous auto keeps working.
+      });
+  }, []);
+
   const onRimLocked = useCallback(() => {
     setDrift(false);
+    focusOnRim();
     const store = useSession.getState();
     if (store.rimLocked) return; // re-lock after drift — already live
     store.setRimLocked(true);
@@ -232,7 +261,7 @@ function LiveSessionScreen() {
         }
       }
     })();
-  }, []);
+  }, [focusOnRim]);
 
   const onRimDrift = useCallback(() => {
     setDrift(true);
@@ -278,6 +307,13 @@ function LiveSessionScreen() {
       const w = o.rim != null && o.rim.width > 0 ? o.rim.width : S * 0.12;
       const h = o.rim != null && o.rim.height > 0 ? o.rim.height : Math.max(8, w * 0.5);
       eng.setManualRim({ x: ax - w / 2, y: ay - h / 2, width: w, height: h });
+      // Lock 3A where the user says the rim is — same reasoning as focusOnRim.
+      cameraRef.current
+        ?.focusTo(
+          { x, y },
+          { responsiveness: 'steady', adaptiveness: 'locked', autoResetAfter: null },
+        )
+        .catch(() => {});
       void Haptics.selectionAsync();
     },
     [width, height],
@@ -286,6 +322,8 @@ function LiveSessionScreen() {
   // Re-aim — drop the lock and return to aiming (auto-lock or tap-to-set again).
   const onReAim = useCallback(() => {
     engineRef.current?.reAim();
+    // Release the 3A lock so aiming at a new spot re-meters continuously.
+    cameraRef.current?.resetFocus().catch(() => {});
     useSession.getState().setRimLocked(false);
     void Haptics.selectionAsync();
   }, []);
@@ -399,6 +437,7 @@ function LiveSessionScreen() {
     <View style={styles.root}>
       {cam != null && cam.device != null ? (
         <Camera
+          ref={cameraRef}
           style={StyleSheet.absoluteFill}
           isActive={!ending}
           device={cam.device}
@@ -425,7 +464,13 @@ function LiveSessionScreen() {
       {debugMode && <DetectionBoxes overlay={engine.overlay} />}
       {debugMode && <DebugPanel debug={engine.debug} overlay={engine.overlay} />}
 
-      {!rimLocked && <AimingOverlay countdown={countdown} onTap={onTapSetRim} />}
+      {!rimLocked && (
+        <AimingOverlay
+          countdown={countdown}
+          warming={engine.activeMode === 'camera' && !engine.isModelLoaded}
+          onTap={onTapSetRim}
+        />
+      )}
 
       {!rimLocked && liveCoach.visible && (
         <CoachMarks
@@ -612,9 +657,12 @@ function DetectionHeartbeat({ debug }: { debug: ShotEngine['debug'] }) {
 
 function AimingOverlay({
   countdown,
+  warming,
   onTap,
 }: {
   countdown: number | null;
+  /** Detector still loading — first seconds after the camera opens. */
+  warming: boolean;
   /** Tap anywhere on the court to place the rim there (view px). */
   onTap: (x: number, y: number) => void;
 }) {
@@ -631,8 +679,9 @@ function AimingOverlay({
     transform: [{ scale: 1 + pulse.value * 0.04 }],
   }));
 
-  // Counting down: the rim is stable and locking in N seconds — show a big 3-2-1
-  // inside the reticle so the user knows to hold the camera still.
+  // Three stages, one overlay: warming (model loading — the previously-blank
+  // dead seconds now say what's happening), aiming, and counting down (rim
+  // stable, locking in N — big 3-2-1 inside the reticle).
   const counting = countdown != null;
   return (
     <Pressable
@@ -641,21 +690,29 @@ function AimingOverlay({
       accessibilityRole="button"
       accessibilityLiveRegion="polite"
       accessibilityLabel={
-        counting
-          ? `Rim found. Locking in ${countdown}. Hold steady, or tap the rim to set it yourself.`
-          : 'Point the camera at the hoop. It locks automatically, or tap the rim to set it yourself.'
+        warming
+          ? 'Starting the shot tracker.'
+          : counting
+            ? `Rim found. Locking in ${countdown}. Hold steady, or tap the rim to set it yourself.`
+            : 'Point the camera at the hoop. It locks automatically, or tap the rim to set it yourself.'
       }
     >
       <Animated.View style={[styles.rimPlaceholder, boxStyle, counting && styles.rimPlaceholderCounting]}>
         {counting && <Text style={styles.countdownNum}>{countdown}</Text>}
       </Animated.View>
       <Text style={styles.aimTitle}>
-        {counting ? 'Hold steady — locking on the rim' : 'Point the camera at the hoop'}
+        {warming
+          ? 'Waking up the AI…'
+          : counting
+            ? 'Hold steady — locking on the rim'
+            : 'Point the camera at the hoop'}
       </Text>
       <Text style={styles.aimSub}>
-        {counting
-          ? `Locking in ${countdown}… or tap the rim to set it now`
-          : 'It locks automatically — or tap the rim to place it yourself'}
+        {warming
+          ? 'A second or two — then point at the hoop'
+          : counting
+            ? `Locking in ${countdown}… or tap the rim to set it now`
+            : 'It locks automatically — or tap the rim to place it yourself'}
       </Text>
     </Pressable>
   );

@@ -525,6 +525,81 @@ describe('ShotFsm', () => {
     expect(swished.resolved[0].outcome).toBe('make');
   });
 
+  test('(13) virtual crossing: occluded swish (track dies above the plane) + net burst → make', () => {
+    // Jump-shot arc that vanishes ~0.15s BEFORE crossing the plane (net/rim
+    // occlusion) — no observed crossing pair, so geo would be null and the
+    // shot 'unsure'. The trailing real descending samples fit a clean
+    // parabola ending at the hoop; with a net burst at the PROJECTED
+    // crossing time, the virtual-crossing corroborator upgrades geo → make.
+    const lostT = T_CROSS_DOWN - 0.15;
+    const frames = arcFrames({
+      x0: X0_CENTER,
+      frames: Math.floor(lostT * FPS),
+      net: (t) => (t >= T_CROSS_DOWN - 0.02 && t <= T_CROSS_DOWN + 0.1 ? 0.6 : 0),
+    });
+    // Ball fully lost after lostT; net keeps reporting through the crossing.
+    for (let i = Math.floor(lostT * FPS); i <= Math.floor((lostT + 1.6) * FPS); i++) {
+      const t = i / FPS;
+      frames.push(
+        fin(t, null, {
+          netMotionScore: t >= T_CROSS_DOWN - 0.02 && t <= T_CROSS_DOWN + 0.1 ? 0.6 : 0,
+        }),
+      );
+    }
+    const { resolved } = run(newFsm(), frames);
+    expect(resolved).toHaveLength(1);
+    const s = resolved[0];
+    expect(s.virtualCross).toBeDefined();
+    expect(s.virtualCross!.r2y).toBeGreaterThanOrEqual(0.9);
+    // Projected crossing lands on the rim center (fixture built that way).
+    expect(Math.abs(s.virtualCross!.xCross - 320)).toBeLessThan(6);
+    expect(s.signals.geo).toBe(true); // upgraded by the corroborator
+    expect(s.signals.net).toBe(true); // burst matched the PROJECTED time
+    expect(s.outcome).toBe('make');
+  });
+
+  test('(13b) virtual crossing NEVER acts alone: same occluded arc, silent net, no cls → unsure', () => {
+    const lostT = T_CROSS_DOWN - 0.15;
+    const frames = arcFrames({ x0: X0_CENTER, frames: Math.floor(lostT * FPS) });
+    for (let i = Math.floor(lostT * FPS); i <= Math.floor((lostT + 1.6) * FPS); i++) {
+      frames.push(fin(i / FPS, null));
+    }
+    const { resolved } = run(newFsm(), frames);
+    expect(resolved).toHaveLength(1);
+    const s = resolved[0];
+    // The projection ran (diagnostics present) but with zero corroboration
+    // the naive-projection fake-make bug stays blocked: geo stays null.
+    expect(s.virtualCross).toBeDefined();
+    expect(s.signals.geo).toBeNull();
+    expect(s.outcome).not.toBe('make');
+  });
+
+  test('(13c) virtual crossing refuses an off-target projection even with a net burst', () => {
+    // Same occluded arc but aimed ~30px LEFT of the rim center — still rises
+    // through the up-zone (arms normally) but the projected crossing lands
+    // OUTSIDE the span, so even a (spurious) net burst can't upgrade geo.
+    // Off-target stays null, not miss: projection isn't precise enough to
+    // convict.
+    const lostT = T_CROSS_DOWN - 0.15;
+    const frames = arcFrames({
+      x0: X0_CENTER - 30,
+      frames: Math.floor(lostT * FPS),
+      net: (t) => (t >= T_CROSS_DOWN - 0.02 && t <= T_CROSS_DOWN + 0.1 ? 0.6 : 0),
+    });
+    for (let i = Math.floor(lostT * FPS); i <= Math.floor((lostT + 1.6) * FPS); i++) {
+      const t = i / FPS;
+      frames.push(
+        fin(t, null, {
+          netMotionScore: t >= T_CROSS_DOWN - 0.02 && t <= T_CROSS_DOWN + 0.1 ? 0.6 : 0,
+        }),
+      );
+    }
+    const { resolved } = run(newFsm(), frames);
+    expect(resolved).toHaveLength(1);
+    expect(resolved[0].signals.geo).toBeNull();
+    expect(resolved[0].outcome).not.toBe('make');
+  });
+
   test('(12) resolve prefers a real (non-predicted) descending crossing over a later predicted one', () => {
     const fsm = newFsm();
     // Arm, then a REAL descending crossing well inside the span (cx=320,

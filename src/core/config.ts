@@ -280,6 +280,33 @@ export const SHOT_FSM = {
    */
   putbackWindowSec: 2.0,
   /**
+   * Virtual-crossing corroborator (occlusion inference). The net/rim hides
+   * the ball at exactly the decisive moment, so an armed shot often dies
+   * ABOVE the plane with no observed crossing → geo null → 'unsure'. When
+   * the trailing REAL samples form a confident descending parabola ending
+   * in the layup zone, project it to the rim plane and treat the projected
+   * crossing like the reappearance corroborator: it may upgrade geo
+   * null→true ONLY with net/cls agreement, never as sole evidence, never
+   * flipping an explicit geo=false. (The DIY-app failure mode — naive
+   * projection minting fake makes on short misses — is exactly what the
+   * corroboration requirement blocks.)
+   */
+  virtualCross: {
+    /** Trailing real, descending, above-plane samples required for the fit. */
+    minRealSamples: 5,
+    /** Vertical-fit R² floor — the tail must be cleanly ballistic. */
+    minR2y: 0.9,
+    /** Max seconds past the last real sample the crossing may be projected. */
+    maxProjectSec: 0.6,
+    /**
+     * The track must die within this many rim WIDTHS above the plane (net/
+     * backboard occlusion starts a little above the rim) and horizontally
+     * inside the layup zone — a ball lost far from the hoop is a dropout,
+     * not an occlusion, and must not be projected.
+     */
+    maxAbovePlaneRimWidths: 1.5,
+  },
+  /**
    * KILL-SWITCHES for the depth-aware judgment mechanisms. All ship FALSE:
    * the code lands fully tested but inert, and flips only after the labeled-
    * clip benchmark passes (see the depth-aware research spec). The FSM reads

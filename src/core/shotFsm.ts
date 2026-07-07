@@ -29,7 +29,7 @@ import { depthRatioGate, type BallSizeSetting, type ViewBandName } from './depth
 import { elevationAngleDeg, interpolateXAtY } from './geometry';
 import { ReappearanceTest } from './reappearance';
 import { selectDepthSamples } from './sampleQuality';
-import { backfillPredictedGap } from './trajectory';
+import { backfillPredictedGap, fitArc, predictLanding } from './trajectory';
 import type {
   BallSample,
   Box,
@@ -405,6 +405,49 @@ export class ShotFsm {
     );
   }
 
+  /**
+   * Project the trailing descending arc to the rim plane (see resolve()).
+   * Returns null unless the tail is trustworthy: ≥ minRealSamples REAL
+   * (never Kalman-coast) samples, all above the plane, net downward motion,
+   * ending inside the layup zone (the occlusion region), fitting a gravity
+   * parabola at r2y ≥ minR2y whose descending crossing lies within
+   * maxProjectSec of the last real sample.
+   */
+  private projectVirtualCross(
+    traj: readonly BallSample[],
+  ): { xCross: number; tCross: number; r2y: number } | null {
+    const cfg = SHOT_FSM.virtualCross;
+    // Trailing run of REAL samples above the plane, oldest-first.
+    const tail: BallSample[] = [];
+    for (let i = traj.length - 1; i >= 0; i--) {
+      const s = traj[i];
+      if (s.predicted) continue; // skip coasts, keep scanning real support
+      if (s.cy >= this.rim.planeY) break; // reached below-plane history
+      tail.unshift(s);
+      if (tail.length >= 12) break; // enough support; older samples add bias
+    }
+    if (tail.length < cfg.minRealSamples) return null;
+    const last = tail[tail.length - 1];
+    // Net downward motion across the tail, ending where occlusion is
+    // physically plausible: horizontally at the hoop (layup-zone x-range)
+    // and no more than a rim-width or two above the plane.
+    if (last.cy <= tail[0].cy) return null;
+    const zone = this.layupZone;
+    if (last.cx < zone.x || last.cx > zone.x + zone.width) return null;
+    if (
+      this.rim.planeY - last.cy >
+      cfg.maxAbovePlaneRimWidths * this.rim.box.width
+    ) {
+      return null;
+    }
+    const fit = fitArc(tail);
+    if (fit === null || fit.ya <= 0 || fit.r2y < cfg.minR2y) return null;
+    const p = predictLanding(fit, this.rim.planeY);
+    if (p === null) return null;
+    if (p.t < last.t || p.t > last.t + cfg.maxProjectSec) return null;
+    return { xCross: p.x, tCross: p.t, r2y: fit.r2y };
+  }
+
   // -------------------------------------------------------------------------
   // Resolution
   // -------------------------------------------------------------------------
@@ -482,13 +525,22 @@ export class ShotFsm {
       if (gate.decision !== 'silent') geo = false;
     }
 
+    // --- virtual crossing (occlusion inference) ---------------------------
+    // No observed crossing: the ball died above the plane, occluded by the
+    // rim/net. If its trailing REAL samples form a confident descending
+    // parabola ending at the hoop, project where/when it would cross. Used
+    // ONLY (a) as the net window's time reference below — the net whips at
+    // the real crossing, not at the resolve timeout 1.5s later — and (b) as
+    // a corroborated geo upgrade after the net/cls channels are known.
+    const virtual = crossIdx < 0 ? this.projectVirtualCross(traj) : null;
+
     // --- net: burst near the crossing (or resolve time) ------------------
     let net: boolean | null = null;
     if (this.anyNetPositive) {
       const threshold =
         SHOT_FSM.netMotionThreshold *
         (this.rimBounce ? SHOT_FSM.netMotionRimBounceFactor : 1);
-      const ref = tCross !== null ? tCross : t;
+      const ref = tCross !== null ? tCross : virtual !== null ? virtual.tCross : t;
       net = false;
       for (let i = 0; i < this.netSamples.length; i++) {
         const ns = this.netSamples[i];
@@ -510,6 +562,25 @@ export class ShotFsm {
     // explicit geo=false (a seen miss stays a miss).
     if (this.useReappearance && this.reappCorroborated && geo == null) {
       if (net === true || (net === null && cls)) geo = true;
+    }
+
+    // --- virtual-crossing corroborator ---------------------------------------
+    // Same contract as reappearance: an occluded (geo null) shot whose
+    // projected crossing lands IN the span may upgrade to geo=true, but only
+    // with net-motion or ball_in_basket agreement — never sole evidence, and
+    // an out-of-span projection stays null (projection is not precise enough
+    // to convict a miss). This converts the most trust-damaging output
+    // ('unsure' on a clean swish that vanished into the net) into a decided
+    // make while the corroboration requirement blocks the classic naive-
+    // projection bug of minting makes from short misses.
+    if (
+      geo == null &&
+      virtual !== null &&
+      (net === true || (net === null && cls)) &&
+      virtual.xCross >= rim.spanLeft &&
+      virtual.xCross <= rim.spanRight
+    ) {
+      geo = true;
     }
 
     // --- occlusion at the rim ----------------------------------------------
@@ -582,6 +653,7 @@ export class ShotFsm {
       originY: this.originY,
       trajectory: traj,
       ...(geoDepth ? { geoDepth } : {}),
+      ...(virtual ? { virtualCross: virtual } : {}),
     };
 
     // --- reset to COOLDOWN ---------------------------------------------------

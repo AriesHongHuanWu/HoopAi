@@ -20,8 +20,9 @@ import {
   useWindowDimensions,
   type LayoutRectangle,
 } from 'react-native';
-import {
+import Animated, {
   Easing,
+  FadeInDown,
   useDerivedValue,
   useReducedMotion,
   useSharedValue,
@@ -29,6 +30,7 @@ import {
   withTiming,
 } from 'react-native-reanimated';
 
+import { BootIntro, bootIntroDelayMs } from '@/components/BootIntro';
 import { Sparkline } from '@/components/charts/Sparkline';
 import { CoachMarks, useCoachMarks, type CoachStep } from '@/components/coach/CoachMarks';
 import { GoalRing } from '@/components/GoalRing';
@@ -138,6 +140,11 @@ export default function HomeScreen() {
   const dailyGoalMakes = useSettings((s) => s.dailyGoalMakes);
   const { width } = useWindowDimensions();
   const contentWidth = width - space.lg * 2;
+  const reducedMotion = useReducedMotion();
+  // Captured once per mount: on a cold start the cards wait for the boot
+  // intro's cover to lift, on every later mount they rise immediately.
+  const [introDelay] = useState(() => bootIntroDelayMs(reducedMotion));
+  const enter = (i: number) => FadeInDown.duration(420).delay(introDelay + i * 70);
 
   // undefined = loading, null = no sessions yet.
   const [lastSession, setLastSession] = useState<SessionSummaryRow | null | undefined>(undefined);
@@ -276,6 +283,7 @@ export default function HomeScreen() {
         </Row>
 
         {/* Hero Start CTA */}
+        <Animated.View entering={enter(0)}>
         <View ref={heroRef} onLayout={() => measure(heroRef, setHeroRect)}>
           <Pressable
             accessibilityRole="button"
@@ -300,10 +308,12 @@ export default function HomeScreen() {
             <Text style={styles.heroSub}>Point your phone at the hoop — we do the counting.</Text>
           </Pressable>
         </View>
+        </Animated.View>
 
         {/* Quick start — the deliberate skip-setup shortcut (repeat sessions
             only: it needs a granted camera and reuses the last orientation). */}
         {cameraPermission.hasPermission && (
+          <Animated.View entering={enter(1)}>
           <Pressable
             accessibilityRole="button"
             accessibilityLabel="Quick start"
@@ -314,9 +324,11 @@ export default function HomeScreen() {
             <Ionicons name="flash" size={15} color={color.accent} />
             <Text style={styles.quickStartLabel}>Quick start — same setup as last time</Text>
           </Pressable>
+          </Animated.View>
         )}
 
         {/* Choose a game mode */}
+        <Animated.View entering={enter(2)}>
         <View ref={modeRowRef} onLayout={() => measure(modeRowRef, setModeRowRect)}>
         <Pressable
           accessibilityRole="button"
@@ -337,10 +349,11 @@ export default function HomeScreen() {
           <Text style={styles.modeChevron}>{'›'}</Text>
         </Pressable>
         </View>
+        </Animated.View>
 
         {/* Daily goal */}
         {dailyGoalMakes > 0 && (
-          <Card style={styles.goalCard}>
+          <Card entering={enter(3)} style={styles.goalCard}>
             <View style={styles.goalText}>
               <Eyebrow>Daily goal</Eyebrow>
               <Text style={styles.goalHeadline}>
@@ -354,6 +367,7 @@ export default function HomeScreen() {
         )}
 
         {/* Last session */}
+        <Animated.View entering={enter(4)}>
         {lastSession === undefined ? (
           <Card>
             <Eyebrow>Last session</Eyebrow>
@@ -420,8 +434,10 @@ export default function HomeScreen() {
             />
           </View>
         )}
+        </Animated.View>
 
         {/* Quick links */}
+        <Animated.View entering={enter(5)}>
         <View
           ref={quickLinksRef}
           onLayout={() => measure(quickLinksRef, setQuickLinksRect)}
@@ -462,11 +478,13 @@ export default function HomeScreen() {
             />
           </Row>
         </View>
+        </Animated.View>
       </View>
     </Screen>
     {coach.visible && (
       <CoachMarks steps={coach.steps} onFinish={coach.finish} onSkip={coach.finish} />
     )}
+    <BootIntro />
     </View>
   );
 }
