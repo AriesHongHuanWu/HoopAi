@@ -23,6 +23,7 @@ import { BackPill } from '@/components/ShotList';
 import { Card, Eyebrow, Row, Screen } from '@/components/ui';
 import { color, radius, space, touch, type } from '@/constants/tokens';
 import type { ShootingHand } from '@/core/types';
+import { countHardExamples, exportHardExamples } from '@/data/hardExamples';
 
 /** Staggered card entrance (i = card index top-to-bottom). */
 const cardEnter = (i: number) => FadeInDown.delay(i * 70).duration(380);
@@ -340,10 +341,12 @@ function OptionRow({
 function ActionRow({
   label,
   description,
+  disabled,
   onPress,
 }: {
   label: string;
   description: string;
+  disabled?: boolean;
   onPress: () => void;
 }) {
   return (
@@ -351,10 +354,13 @@ function ActionRow({
       accessibilityRole="button"
       accessibilityLabel={label}
       accessibilityHint={description}
+      accessibilityState={{ disabled: disabled === true }}
+      disabled={disabled === true}
       onPress={onPress}
       style={({ pressed }) => [
         styles.optionRow,
         pressed && { backgroundColor: color.surfaceRaised },
+        disabled === true && styles.disabled,
       ]}
     >
       <View style={styles.settingText}>
@@ -508,11 +514,30 @@ export default function SettingsScreen() {
   const [tutorialNotice, setTutorialNotice] = useState(false);
   const tutorialNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Correction flywheel (Debug-gated "Improve detection" block): live count of
+  // exportable hard examples + a transient caption when an export can't run.
+  const [hardExampleCount, setHardExampleCount] = useState<number | null>(null);
+  const [exportNotice, setExportNotice] = useState<string | null>(null);
+  const exportNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   // Release the sound-pack preview player when leaving the screen.
   useEffect(() => releasePreview, []);
-  // Clear the pending notice timer on unmount.
+  // Clear the pending notice timers on unmount.
   useEffect(() => () => {
     if (tutorialNoticeTimer.current != null) clearTimeout(tutorialNoticeTimer.current);
+    if (exportNoticeTimer.current != null) clearTimeout(exportNoticeTimer.current);
+  }, []);
+
+  // Count once on mount — corrections happen on other screens, so the number
+  // is stable while Settings is open.
+  useEffect(() => {
+    let alive = true;
+    void countHardExamples().then((n) => {
+      if (alive) setHardExampleCount(n);
+    });
+    return () => {
+      alive = false;
+    };
   }, []);
 
   const restartTutorial = () => {
@@ -529,6 +554,18 @@ export default function SettingsScreen() {
     tick();
     set('onboardingDone', false);
     router.push('/onboarding');
+  };
+
+  const runHardExampleExport = async () => {
+    tick();
+    const result = await exportHardExamples();
+    if (!result.ok && result.count > 0) {
+      // Collected fine but the share sheet never opened — worth a caption.
+      // (ok:false with count 0 can't happen here; the row is disabled at 0.)
+      setExportNotice("Couldn't open the share sheet — try again.");
+      if (exportNoticeTimer.current != null) clearTimeout(exportNoticeTimer.current);
+      exportNoticeTimer.current = setTimeout(() => setExportNotice(null), 3000);
+    }
   };
 
   const bumpHeight = (delta: number) => {
@@ -873,6 +910,23 @@ export default function SettingsScreen() {
               set('motionAssist', v);
             }}
           />
+          <View style={styles.divider} />
+          {/* Correction flywheel — fully manual, opt-in, one tap. */}
+          <View style={styles.settingText}>
+            <Text style={styles.settingLabel}>Improve detection</Text>
+            <Text style={styles.settingDesc}>
+              Export a manifest of your corrected and unsure shots — the exact
+              clips the AI got wrong — to help train better models. Video stays
+              on your phone; the export is a text manifest.
+            </Text>
+          </View>
+          <ActionRow
+            label={`Export hard examples (${hardExampleCount ?? 0} available)`}
+            description="Opens the share sheet with a JSON manifest of shot timings. No video is attached or uploaded."
+            disabled={hardExampleCount == null || hardExampleCount === 0}
+            onPress={() => void runHardExampleExport()}
+          />
+          {exportNotice != null && <Text style={styles.exportNotice}>{exportNotice}</Text>}
           </>
           )}
         </Card>
@@ -1204,6 +1258,12 @@ const styles = StyleSheet.create({
   tutorialNotice: {
     ...type.caption,
     color: color.accent,
+    marginTop: space.sm,
+  },
+  /** Transient failure caption under the hard-example export row. */
+  exportNotice: {
+    ...type.caption,
+    color: color.unsure,
     marginTop: space.sm,
   },
   divider: {
