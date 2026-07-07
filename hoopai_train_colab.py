@@ -195,12 +195,6 @@ def _atomic_put(src, dst):
 # --------------------------------------------------------------------------- #
 def preflight():
     print("=== STEP 0: Colab preflight ===", flush=True)
-    if not ROBOFLOW_KEY:
-        raise RuntimeError(
-            "ROBOFLOW_KEY env var is empty. In a Colab cell run:\n"
-            "    import os, getpass\n"
-            "    os.environ['ROBOFLOW_KEY'] = getpass.getpass('Roboflow key: ')\n"
-            "BEFORE running this script. (Rotate the old exposed key first.)")
     drive_root = "/content/drive"
     if not os.path.isdir(drive_root):
         raise RuntimeError(
@@ -208,8 +202,26 @@ def preflight():
             "    from google.colab import drive; drive.mount('/content/drive')")
     os.makedirs(DRIVE_DIR, exist_ok=True)
     os.makedirs(DRIVE_CKPT_DIR, exist_ok=True)
-    print("  Drive OK -> %s | key present (%d chars)"
-          % (DRIVE_DIR, len(ROBOFLOW_KEY)), flush=True)
+    # The Roboflow key is ONLY needed to DOWNLOAD the datasets. After the first
+    # session caches the merged dataset to Drive, every RESUME skips the download
+    # -- so don't force the key then. Hard-require it only when there's no cached
+    # dataset to fall back on (a true first run).
+    dataset_cached = os.path.isfile(DRIVE_DATA_TAR) or _dataset_ready()
+    if not ROBOFLOW_KEY and not dataset_cached:
+        raise RuntimeError(
+            "ROBOFLOW_KEY env var is empty and no cached dataset on Drive yet. In "
+            "a Colab cell run BEFORE this script:\n"
+            "    import os, getpass\n"
+            "    os.environ['ROBOFLOW_KEY'] = getpass.getpass('Roboflow key: ')\n"
+            "(Rotate the old exposed key first.)")
+    if not ROBOFLOW_KEY:
+        print("  RESUME: no key set, but a cached dataset exists on Drive -- the "
+              "download is skipped, so the key is not needed.", flush=True)
+    print("  Drive OK -> %s | key %s"
+          % (DRIVE_DIR,
+             ("present (%d chars)" % len(ROBOFLOW_KEY)) if ROBOFLOW_KEY
+             else "not set (resuming from cache)"),
+          flush=True)
 
 
 # --------------------------------------------------------------------------- #
