@@ -10,6 +10,8 @@ jest.mock('expo-sqlite', () => ({
   deleteDatabaseAsync: jest.fn(),
 }));
 
+import { emptyTotals } from '../achievements';
+
 type DbModule = typeof import('../../data/db');
 type SqliteMock = {
   openDatabaseAsync: jest.Mock;
@@ -108,6 +110,82 @@ describe('query failures return fallbacks', () => {
     await expect(db.sessionShots(3)).resolves.toEqual([]);
     const stats = await db.sessionStatsFromDb(3);
     expect(stats.attempts).toBe(0);
+    // Lifetime totals fall back to all-zeros; career bests to null (NOT
+    // zeros — zeros would let a broken read fire a false PB celebration).
+    await expect(db.lifetimeTotals()).resolves.toEqual(emptyTotals());
+    await expect(db.careerBests(1)).resolves.toBeNull();
+  });
+});
+
+describe('lifetimeTotals session scan', () => {
+  it('classifies tip-off hours, weekly cadence and mode results', async () => {
+    const fake = fakeDatabase();
+    sqlite.openDatabaseAsync.mockResolvedValue(fake);
+    fake.getFirstAsync.mockImplementation(async (sql: string) => {
+      if (sql.includes('user_version')) return { user_version: 1 };
+      if (sql.includes('COUNT(DISTINCT sessionId)')) {
+        return { sessions: 4, attempts: 30, makes: 15, threes: 4, correctedCalls: 7 };
+      }
+      return { best: 0.55 };
+    });
+    // Local-time Date constructor keeps the hour assertions timezone-proof.
+    const at = (dayIdx: number, hour: number) =>
+      new Date(2026, 0, 5 + dayIdx, hour, 30).getTime();
+    fake.getAllAsync.mockImplementation(async (sql: string) => {
+      if (sql.includes('modeResultJson')) {
+        return [
+          { startedAt: at(0, 23), modeId: null, modeResultJson: null },
+          {
+            startedAt: at(1, 6),
+            modeId: 'aroundTheWorld',
+            modeResultJson: JSON.stringify({ done: true, progress: 1 }),
+          },
+          { startedAt: at(2, 14), modeId: 'horse', modeResultJson: JSON.stringify({ done: true }) },
+          { startedAt: at(2, 20), modeId: 'timed', modeResultJson: JSON.stringify({ done: false }) },
+        ];
+      }
+      // Streak walk rows: 3 in a row in session 1, then a fresh session.
+      return [
+        { sessionId: 1, outcome: 'make' },
+        { sessionId: 1, outcome: 'make' },
+        { sessionId: 1, outcome: 'make' },
+        { sessionId: 2, outcome: 'make' },
+      ];
+    });
+
+    const totals = await db.lifetimeTotals();
+    expect(totals.correctedCalls).toBe(7);
+    expect(totals.nightSessions).toBe(1);
+    expect(totals.dawnSessions).toBe(1);
+    expect(totals.bestWeekSessions).toBe(4);
+    expect(totals.atwWins).toBe(1);
+    expect(totals.horseGames).toBe(1);
+    expect(totals.modesPlayed).toBe(3);
+    expect(totals.bestStreak).toBe(3);
+    expect(totals.bestSessionFgPct).toBe(0.55);
+  });
+});
+
+describe('careerBests', () => {
+  it('excludes the given session id and walks streaks per session', async () => {
+    const fake = fakeDatabase();
+    sqlite.openDatabaseAsync.mockResolvedValue(fake);
+    fake.getFirstAsync
+      .mockResolvedValueOnce({ user_version: 1 }) // migrate
+      .mockResolvedValueOnce({ mostMakes: 12, bestFg: 0.6 }); // aggregates
+    fake.getAllAsync.mockResolvedValue([
+      { sessionId: 2, outcome: 'make' },
+      { sessionId: 2, outcome: 'make' },
+      { sessionId: 2, outcome: 'miss' },
+      { sessionId: 3, outcome: 'make' },
+    ]);
+
+    const bests = await db.careerBests(7);
+
+    expect(bests).toEqual({ bestStreak: 2, bestFgPct: 0.6, mostMakes: 12 });
+    // Both queries carry the exclusion parameter.
+    expect(fake.getFirstAsync.mock.calls.at(-1)?.[1]).toBe(7);
+    expect(fake.getAllAsync.mock.calls.at(-1)?.[1]).toBe(7);
   });
 });
 
