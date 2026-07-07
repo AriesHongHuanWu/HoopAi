@@ -36,6 +36,22 @@ export const DETECTION = {
    */
   ballScoreMinTracking: 0.12,
   /**
+   * COLD acquisition floor when the scene is genuinely DARK (the tracker's
+   * light profile is 'dark' — see src/core/lightProfile.ts). In low light the
+   * detector scores a REAL ball systematically lower (the exact regime
+   * ballScoreMinTracking exists for mid-flight), so the 0.2 cold gate starts
+   * rejecting the ball while it is still in the shooter's hands and no track
+   * ever starts. 0.16 sits deliberately BETWEEN cold (0.2) and tracking
+   * (0.12): a meaningful rescue in the dark, while staying above the
+   * continuation floor so pure noise still can't start a track as easily as
+   * it could continue one. TRACKER-side only — the parser's scoreMin is NOT
+   * lowered (that would flood NMS with noise boxes); every other defense
+   * (jump gate, aspect gate, ballMaxSizeFraction, doubled Kalman measurement
+   * noise for sub-ballScoreMin samples) stays fully armed. 'dim' and
+   * 'bright' scenes use ballScoreMin unchanged.
+   */
+  ballScoreMinDark: 0.16,
+  /**
    * Frame-difference motion assist (src/ml/motionCandidate.ts): when the
    * detector misses the ball entirely, the strongest local mover on a coarse
    * luma grid is injected as a synthetic 'ball' candidate. score sits BETWEEN

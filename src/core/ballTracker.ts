@@ -21,6 +21,7 @@
 import { DETECTION, RELEASE, TRACKER } from './config';
 import { boxCenter, boxContains, distance } from './geometry';
 import { BallKalman } from './kalman';
+import type { LightProfile } from './lightProfile';
 import type {
   BallSample,
   Box,
@@ -117,6 +118,13 @@ export class BallTracker {
    * the track died at release is exactly its job.
    */
   private releaseSeed: { x: number; y: number; t: number } | null = null;
+
+  /**
+   * Scene-light profile from the pipeline (see setLightProfile). An
+   * ENVIRONMENTAL setting, not track state: it survives resetTrack()/reset()
+   * on purpose — the gym doesn't get brighter because the track died.
+   */
+  private lightProfile: LightProfile = 'bright';
 
   /**
    * @param opts Optional tracker configuration; see {@link BallTrackerOptions}.
@@ -234,6 +242,20 @@ export class BallTracker {
     this.releaseSeed = { x, y, t };
   }
 
+  /**
+   * Scene-light profile from the pipeline (classified in
+   * src/core/lightProfile.ts off the worklet's mean-luma estimate). In
+   * 'dark' scenes ONLY, the COLD acquisition score floor relaxes from
+   * DETECTION.ballScoreMin to DETECTION.ballScoreMinDark — a real ball in
+   * low light scores systematically lower, so the 0.2 gate was rejecting it
+   * before a track could ever start. 'dim' and 'bright' change nothing.
+   * Every other defense (jump gate, aspect gate, size cap, doubled Kalman
+   * measurement noise for sub-ballScoreMin samples) stays fully armed.
+   */
+  setLightProfile(profile: LightProfile): void {
+    this.lightProfile = profile;
+  }
+
   /** Clears all tracker state, including the sample history. */
   reset(): void {
     this.resetTrack();
@@ -329,11 +351,18 @@ export class BallTracker {
       const nearWrist =
         seedRadius >= 0 &&
         Math.hypot(center.x - seedX, center.y - seedY) <= seedRadius;
+      // Cold-acquisition floor: relaxed to ballScoreMinDark in genuinely
+      // DARK scenes only (see setLightProfile) — a real low-light ball
+      // scores under the 0.2 open-court gate, so no track ever started.
+      const coldFloor =
+        this.lightProfile === 'dark'
+          ? DETECTION.ballScoreMinDark
+          : DETECTION.ballScoreMin;
       const scoreGate = inHoopRoi
         ? DETECTION.ballScoreMinHoopRoi
         : trackFresh || nearWrist
           ? DETECTION.ballScoreMinTracking
-          : DETECTION.ballScoreMin;
+          : coldFloor;
       if (det.score < scoreGate) continue;
 
       // Reject an implausibly LARGE ball box (a near-frame-size false positive
@@ -450,7 +479,12 @@ export class BallTracker {
       this.kalman.init(cx, cy, t);
       est = this.kalman.state ?? { x: cx, y: cy, vx: 0, vy: 0 };
     } else {
-      // Low-confidence (hoop-ROI relaxed) detections are noisier measurements.
+      // Low-confidence detections are noisier measurements: anything under
+      // the full open-court gate (hoop-ROI relaxed, flight-continuation,
+      // wrist-seeded AND dark-relaxed cold accepts alike) gets the doubled
+      // measurement noise so it nudges rather than yanks the track. The
+      // reference is deliberately ballScoreMin — NOT the dark floor — so a
+      // sub-0.2 sample accepted in the dark is still down-weighted.
       const noiseScale =
         det.score >= DETECTION.ballScoreMin ? undefined : 2;
       est = this.kalman.update(cx, cy, t, noiseScale);

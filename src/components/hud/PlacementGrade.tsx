@@ -17,6 +17,7 @@ import type { SharedValue } from 'react-native-reanimated';
 
 import type { EngineDebug, OverlayState } from '../../camera/useShotEngine';
 import { color, glow, space, type } from '../../constants/tokens';
+import { classifyLight, type LightProfile } from '../../core/lightProfile';
 import {
   GRADE_POLL_MS,
   bestRimWidth,
@@ -55,6 +56,10 @@ export function usePlacementGrade(
   // through the same no-rim timeout as "lost the rim".
   const lastSeenMs = useRef(Date.now());
   const lastWidthPx = useRef<number | null>(null);
+  // Scene-light profile with hysteresis: classifyLight is keyed off the
+  // PREVIOUS profile so the low-light hint can't flap at a boundary. Null
+  // until the engine publishes a real luma (overlay.light > 0).
+  const lightRef = useRef<LightProfile | null>(null);
 
   useEffect(() => {
     if (!enabled) {
@@ -63,6 +68,7 @@ export function usePlacementGrade(
     }
     lastSeenMs.current = Date.now();
     lastWidthPx.current = null;
+    lightRef.current = null;
     const id = setInterval(() => {
       const o = overlay.value;
       const now = Date.now();
@@ -71,11 +77,15 @@ export function usePlacementGrade(
         lastSeenMs.current = now;
         lastWidthPx.current = w;
       }
+      if (o.light > 0) {
+        lightRef.current = classifyLight(o.light, lightRef.current);
+      }
       const next = gradePlacement({
         rimWidthPx: lastWidthPx.current,
         frameSide: Math.max(o.frameW, o.frameH),
         msSinceRimSeen: now - lastSeenMs.current,
         fps: debug.value.fps,
+        light: lightRef.current,
       });
       // Re-render only when the grade actually changes, not 5x/second.
       setResult((prev) =>

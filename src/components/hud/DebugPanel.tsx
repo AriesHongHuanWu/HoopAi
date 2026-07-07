@@ -18,6 +18,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import type { EngineDebug, OverlayState } from '../../camera/useShotEngine';
 import { color, radius, space, type } from '../../constants/tokens';
+import { classifyLight } from '../../core/lightProfile';
 
 /** Fields worth a re-render — a static frame between detections shouldn't
  * force React to redraw the panel 4x/second. */
@@ -37,6 +38,9 @@ function debugChanged(a: EngineDebug, b: EngineDebug): boolean {
     a.layout !== b.layout ||
     a.inputMin !== b.inputMin ||
     a.inputMax !== b.inputMax ||
+    // Same displayed-precision compare as maxScore — the EMA'd luma jitters
+    // in the 3rd decimal every frame.
+    a.light.toFixed(2) !== b.light.toFixed(2) ||
     a.roiFrames !== b.roiFrames ||
     a.roiHits !== b.roiHits
   );
@@ -99,6 +103,17 @@ export function DebugPanel({
       <Row k="rim asp" v={rimAsp > 0 ? rimAsp.toFixed(2) : '--'} vc={rimAsp > 0 ? color.text : color.textFaint} />
       <Row k="input" v={`${d.inputMin.toFixed(2)}..${d.inputMax.toFixed(2)}`} vc={inputOk ? color.text : color.miss} />
       <Row k="pixels" v={`${d.nonZeroPct}% nz`} vc={d.nonZeroPct > 5 ? color.make : color.miss} />
+      <Row
+        k="light"
+        v={d.light > 0 ? `${d.light.toFixed(2)} · ${classifyLight(d.light)}` : '--'}
+        vc={
+          d.light <= 0
+            ? color.textFaint
+            : classifyLight(d.light) === 'bright'
+              ? color.text
+              : color.unsure
+        }
+      />
       <Row k="buf" v={`${Math.round(d.bufBytes / 1024)} KB`} vc={d.bufBytes > 0 ? color.text : color.miss} />
       <Row
         k="speed"
