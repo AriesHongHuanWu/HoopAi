@@ -1,13 +1,21 @@
 /**
- * Trends — FG% across the last 30 sessions: hero sparkline, per-session bars
- * (Skia rects, latest highlighted in the hot accent), an averages row, the
- * entry-angle histogram of the last session and a lifetime strip.
+ * Trends — FG% across the last 30 sessions, hero-first.
+ *
+ * The hero card leads with an emphasized latest-FG% numeral and a
+ * trend-direction chip (up/down/flat vs the previous session, computed from
+ * the same series the sparkline draws), over the accent sparkline with
+ * labelled ends. Below it: per-session bars with a real y-axis (Skia rects,
+ * recency-ramped accent, latest bar hot), a hairline-divided stat grid, the
+ * last session's entry-angle histogram and a lifetime strip. Cards cascade
+ * in with a small stagger; under reduced motion they render statically.
  * Empty state until at least two sessions exist.
  */
+import { Ionicons } from '@expo/vector-icons';
 import { Canvas, Rect, RoundedRect } from '@shopify/react-native-skia';
 import { router, useFocusEffect } from 'expo-router';
 import React, { useCallback, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
+import { FadeInDown, useReducedMotion } from 'react-native-reanimated';
 
 import { BackPill } from '@/components/ShotList';
 import {
@@ -15,22 +23,16 @@ import {
   decidedEntryAngles,
 } from '@/components/charts/AngleHistogram';
 import { Sparkline } from '@/components/charts/Sparkline';
-import {
-  Card,
-  Chip,
-  Eyebrow,
-  PillButton,
-  Row,
-  Screen,
-  StatNumber,
-} from '@/components/ui';
-import { color, space, type } from '@/constants/tokens';
+import { Card, EmptyState, Eyebrow, Row, Screen, StatNumber } from '@/components/ui';
+import { color, font, motion, radius, space, type } from '@/constants/tokens';
 import { fgTrend, listSessions, sessionShots } from '@/data/db';
 
 type TrendPoint = Awaited<ReturnType<typeof fgTrend>>[number];
 
-const SPARK_H = 120;
+const SPARK_H = 132;
 const BARS_H = 110;
+/** Cascade step between cards (ms). */
+const STAGGER_MS = 70;
 
 function clamp01(v: number): number {
   return v < 0 ? 0 : v > 1 ? 1 : v;
@@ -56,7 +58,46 @@ function MeasuredWidth({
   );
 }
 
-/** One bar per session, rounded caps; the latest session gets the full accent. */
+/**
+ * Trend-direction chip: up/down/flat vs the previous session. Purely derived
+ * from the delta already shown on screen — color + icon shape so the
+ * direction never relies on color alone.
+ */
+function TrendChip({ deltaPct }: { deltaPct: number }) {
+  const dir = deltaPct > 0 ? 'up' : deltaPct < 0 ? 'down' : 'flat';
+  const tone =
+    dir === 'up'
+      ? { bg: color.makeTint, fg: color.make }
+      : dir === 'down'
+        ? { bg: color.missTint, fg: color.miss }
+        : { bg: color.surfaceRaised, fg: color.textDim };
+  const icon =
+    dir === 'up' ? 'trending-up' : dir === 'down' ? 'trending-down' : 'remove';
+  const label =
+    dir === 'flat'
+      ? 'Even vs last'
+      : `${deltaPct > 0 ? '+' : ''}${deltaPct}% vs last`;
+  const a11y =
+    dir === 'flat'
+      ? 'Trend flat: even with the previous session'
+      : `Trending ${dir}: ${Math.abs(deltaPct)} percentage points ${dir === 'up' ? 'above' : 'below'} the previous session`;
+  return (
+    <View
+      accessible
+      accessibilityLabel={a11y}
+      style={[styles.trendChip, { backgroundColor: tone.bg }]}
+    >
+      <Ionicons name={icon} size={14} color={tone.fg} />
+      <Text style={[styles.trendChipLabel, { color: tone.fg }]}>{label}</Text>
+    </View>
+  );
+}
+
+/**
+ * One bar per session, rounded caps. Accent-consistent recency ramp: older
+ * bars sit low-heat, the latest runs full leather. Gridlines at 100 / 50 /
+ * baseline anchor the y-axis labels beside the canvas.
+ */
 function TrendBars({
   data,
   width,
@@ -70,21 +111,31 @@ function TrendBars({
   const slot = width / n;
   const barW = Math.min(28, Math.max(4, slot * 0.55));
   const capR = Math.min(4, barW / 2);
+  /** Same value→y mapping the bars use, so gridlines are honest. */
+  const yFor = (v: number) => height - clamp01(v) * (height - 4);
   return (
     <Canvas style={{ width, height }}>
-      {/* 50% reference line, then the baseline. */}
       <Rect
         x={0}
-        y={Math.round(height / 2)}
+        y={Math.round(yFor(1))}
         width={width}
         height={1}
         color={color.border}
-        opacity={0.55}
+        opacity={0.35}
+      />
+      <Rect
+        x={0}
+        y={Math.round(yFor(0.5))}
+        width={width}
+        height={1}
+        color={color.border}
+        opacity={0.6}
       />
       <Rect x={0} y={height - 1} width={width} height={1} color={color.border} />
       {data.map((v, i) => {
         const h = Math.max(3, clamp01(v) * (height - 4));
         const x = slot * i + (slot - barW) / 2;
+        const latest = i === n - 1;
         return (
           <RoundedRect
             key={i}
@@ -93,7 +144,8 @@ function TrendBars({
             width={barW}
             height={h}
             r={capR}
-            color={i === n - 1 ? color.accent : color.accentTint}
+            color={color.accent}
+            opacity={latest ? 1 : 0.16 + (n > 1 ? (i / (n - 1)) * 0.22 : 0)}
           />
         );
       })}
@@ -109,6 +161,11 @@ export default function TrendsScreen() {
     sessions: number;
     makes: number;
   } | null>(null);
+  const reducedMotion = useReducedMotion();
+  const enter = (i: number) =>
+    reducedMotion
+      ? undefined
+      : FadeInDown.duration(motion.standard).delay(i * STAGGER_MS);
 
   useFocusEffect(
     useCallback(() => {
@@ -157,41 +214,36 @@ export default function TrendsScreen() {
         <BackPill />
       </Row>
       <Eyebrow>Trends</Eyebrow>
-      <Text style={styles.title}>FG% over time</Text>
+      <Text style={styles.title} accessibilityRole="header">
+        FG% over time
+      </Text>
 
       {trend === null ? (
         <Card>
           <Text style={styles.dim}>Loading trends…</Text>
         </Card>
       ) : !enough ? (
-        <Card>
-          <Text style={styles.heading}>Not enough sessions yet</Text>
-          <Text style={[styles.dim, { marginTop: space.xs }]}>
-            Finish at least two tracked sessions and your FG% trend will draw
-            itself here.
-          </Text>
-          <PillButton
-            variant="ghost"
-            label="View history"
-            onPress={() => router.push('/history')}
-            style={{ marginTop: space.lg, alignSelf: 'flex-start' }}
-          />
-        </Card>
+        <EmptyState
+          title="Not enough sessions yet"
+          body="Finish at least two tracked sessions and your FG% trend will draw itself here."
+          actionLabel="View history"
+          onAction={() => router.push('/history')}
+        />
       ) : (
         <View style={{ gap: space.lg }}>
-          <Card>
+          <Card entering={enter(0)}>
             <Eyebrow>Field goal %</Eyebrow>
             <Row style={{ justifyContent: 'space-between' }}>
-              <StatNumber
-                value={`${Math.round(latest * 100)}%`}
-                size="large"
-                label="latest session"
-                style={{ alignItems: 'flex-start' }}
-              />
-              <Chip
-                label={`${deltaPct >= 0 ? '+' : ''}${deltaPct}% vs last`}
-                tone={deltaPct > 0 ? 'make' : deltaPct < 0 ? 'miss' : 'default'}
-              />
+              <View
+                accessible
+                accessibilityLabel={`Latest session field goal ${Math.round(latest * 100)} percent`}
+              >
+                <Text style={styles.heroValue}>
+                  {`${Math.round(latest * 100)}%`}
+                </Text>
+                <Text style={styles.heroLabel}>LATEST SESSION</Text>
+              </View>
+              <TrendChip deltaPct={deltaPct} />
             </Row>
             <View style={{ marginTop: space.lg }}>
               <MeasuredWidth
@@ -204,70 +256,93 @@ export default function TrendsScreen() {
               style={{ justifyContent: 'space-between', marginTop: space.xs }}
             >
               <Text style={styles.micro}>OLDEST</Text>
+              <Text style={styles.micro}>{`${points.length} SESSIONS`}</Text>
               <Text style={styles.micro}>LATEST</Text>
             </Row>
           </Card>
 
-          <Card>
+          <Card entering={enter(1)}>
             <Eyebrow>By session</Eyebrow>
-            <MeasuredWidth
-              accessibilityLabel={`Bar chart of FG% for the last ${points.length} sessions`}
-            >
-              {(w) => <TrendBars data={points} width={w} height={BARS_H} />}
-            </MeasuredWidth>
+            <Row style={{ alignItems: 'stretch' }} gap={space.sm}>
+              <View style={styles.axisGutter}>
+                <Text style={styles.micro}>100</Text>
+                <Text style={styles.micro}>50</Text>
+                <Text style={styles.micro}>0</Text>
+              </View>
+              <View style={{ flex: 1 }}>
+                <MeasuredWidth
+                  accessibilityLabel={`Bar chart of FG% for the last ${points.length} sessions`}
+                >
+                  {(w) => <TrendBars data={points} width={w} height={BARS_H} />}
+                </MeasuredWidth>
+              </View>
+            </Row>
             <Row
               style={{ justifyContent: 'space-between', marginTop: space.xs }}
             >
               <Text style={styles.caption}>
-                One bar per session — the latest is highlighted.
+                One bar per session — the latest runs hot.
               </Text>
-              <Text style={styles.micro}>50% LINE</Text>
+              <Text style={styles.micro}>FG%</Text>
             </Row>
           </Card>
 
-          <Card>
+          <Card entering={enter(2)}>
             <Eyebrow>{`Across ${points.length} sessions`}</Eyebrow>
-            <Row style={{ justifyContent: 'space-around' }}>
-              <StatNumber
-                value={`${Math.round(avg * 100)}%`}
-                size="medium"
-                label="avg FG"
-              />
-              <StatNumber
-                value={`${Math.round(best * 100)}%`}
-                size="medium"
-                label="best"
-              />
-              <StatNumber
-                value={String(attempts)}
-                size="medium"
-                label="attempts"
-              />
-            </Row>
+            <View style={styles.statGrid}>
+              <View style={styles.statCell}>
+                <StatNumber
+                  value={`${Math.round(avg * 100)}%`}
+                  size="medium"
+                  label="avg FG"
+                />
+              </View>
+              <View style={styles.statDivider} />
+              <View style={styles.statCell}>
+                <StatNumber
+                  value={`${Math.round(best * 100)}%`}
+                  size="medium"
+                  label="best"
+                />
+              </View>
+              <View style={styles.statDivider} />
+              <View style={styles.statCell}>
+                <StatNumber
+                  value={String(attempts)}
+                  size="medium"
+                  label="attempts"
+                />
+              </View>
+            </View>
           </Card>
 
           {lastAngles != null && (
-            <Card>
+            <Card entering={enter(3)}>
               <Eyebrow>Entry angles — last session</Eyebrow>
               <AngleHistogram angles={lastAngles} />
             </Card>
           )}
 
           {lifetime != null && lifetime.sessions > 0 && (
-            <Card>
+            <Card entering={enter(4)}>
               <Eyebrow>Lifetime</Eyebrow>
-              <Row style={{ justifyContent: 'space-around' }}>
-                <StatNumber
-                  value={String(lifetime.sessions)}
-                  size="medium"
-                  label="sessions"
-                />
-                <StatNumber
-                  value={String(lifetime.makes)}
-                  size="medium"
-                  label="total makes"
-                />
-              </Row>
+              <View style={styles.statGrid}>
+                <View style={styles.statCell}>
+                  <StatNumber
+                    value={String(lifetime.sessions)}
+                    size="medium"
+                    label="sessions"
+                  />
+                </View>
+                <View style={styles.statDivider} />
+                <View style={styles.statCell}>
+                  <StatNumber
+                    value={String(lifetime.makes)}
+                    size="medium"
+                    label="total makes"
+                  />
+                </View>
+              </View>
             </Card>
           )}
         </View>
@@ -282,10 +357,6 @@ const styles = StyleSheet.create({
     color: color.text,
     marginBottom: space.lg,
   },
-  heading: {
-    ...type.heading,
-    color: color.text,
-  },
   dim: {
     ...type.body,
     color: color.textDim,
@@ -299,5 +370,50 @@ const styles = StyleSheet.create({
     ...type.micro,
     color: color.textFaint,
     fontVariant: ['tabular-nums'],
+  },
+  /** Emphasized hero numeral — broadcast display face, between statLarge and scoreboard. */
+  heroValue: {
+    fontFamily: font.display,
+    fontSize: 72,
+    lineHeight: 76,
+    color: color.text,
+    fontVariant: ['tabular-nums'],
+  },
+  heroLabel: {
+    ...type.micro,
+    color: color.textFaint,
+    marginTop: 2,
+  },
+  trendChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    borderRadius: radius.pill,
+    paddingHorizontal: space.md,
+    paddingVertical: 5,
+  },
+  trendChipLabel: {
+    ...type.caption,
+  },
+  /** Y-axis labels beside the bar canvas, pinned to the 100/50/0 gridlines. */
+  axisGutter: {
+    height: BARS_H,
+    justifyContent: 'space-between',
+    alignItems: 'flex-end',
+    paddingBottom: 1,
+  },
+  statGrid: {
+    flexDirection: 'row',
+    alignItems: 'stretch',
+  },
+  statCell: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  statDivider: {
+    width: StyleSheet.hairlineWidth,
+    backgroundColor: color.border,
+    marginVertical: space.xs,
   },
 });

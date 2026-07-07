@@ -1,25 +1,33 @@
 /**
- * Scoreboard — standalone two-team tap-to-score screen for pickup games.
+ * Scoreboard — standalone two-team tap-to-score screen for pickup games,
+ * styled as a broadcast scorebug (two surface panels with team-tinted rules
+ * and giant tabular numerals around a clock/period center column).
  *
  * Fully self-contained: does not read or touch the camera/detection session
  * (src/state/sessionStore.ts) or anything under src/core shot-tracking. State
  * lives in src/state/scoreboardStore.ts, persisted across launches.
  *
  * Layout: portrait stacks Home / center controls / Away top to bottom;
- * landscape places the two huge score numerals side by side with the center
+ * landscape places the two scorebug panels side by side with the center
  * column (clock, period, leading-by, swap, reset) between them so it reads
- * well propped up courtside.
+ * like a real scoreboard propped up courtside. Panels cascade in with a
+ * small stagger; under reduced motion they render statically.
  */
+import { Ionicons } from '@expo/vector-icons';
 import * as Haptics from 'expo-haptics';
 import { Alert, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
+import Animated, { FadeInDown, useReducedMotion } from 'react-native-reanimated';
 
 import { BackPill } from '@/components/ShotList';
 import { GameClock } from '@/components/scoreboard/GameClock';
 import { TeamPanel } from '@/components/scoreboard/TeamPanel';
 import { Chip, Screen } from '@/components/ui';
-import { color, radius, space, touch, type } from '@/constants/tokens';
+import { color, motion, radius, space, touch, type } from '@/constants/tokens';
 import { useSettings } from '@/state/settingsStore';
 import { useScoreboard } from '@/state/scoreboardStore';
+
+/** Cascade step between the two panels and the center column (ms). */
+const STAGGER_MS = 60;
 
 function tick() {
   if (useSettings.getState().hapticsEnabled) void Haptics.selectionAsync();
@@ -35,6 +43,11 @@ function leadingByLabel(homeName: string, awayName: string, homeScore: number, a
 export default function ScoreboardScreen() {
   const { width, height } = useWindowDimensions();
   const isLandscape = width > height;
+  const reducedMotion = useReducedMotion();
+  const enter = (i: number) =>
+    reducedMotion
+      ? undefined
+      : FadeInDown.duration(motion.standard).delay(i * STAGGER_MS);
 
   const homeName = useScoreboard((s) => s.homeName);
   const awayName = useScoreboard((s) => s.awayName);
@@ -103,7 +116,7 @@ export default function ScoreboardScreen() {
           }}
           style={({ pressed }) => [styles.utilityButton, pressed && styles.utilityButtonPressed]}
         >
-          <Text style={styles.utilityGlyph}>{'⇄'}</Text>
+          <Ionicons name="swap-horizontal" size={20} color={color.textDim} />
           <Text style={styles.utilityLabel}>SWAP</Text>
         </Pressable>
         <Pressable
@@ -113,7 +126,7 @@ export default function ScoreboardScreen() {
           onPress={confirmAndReset}
           style={({ pressed }) => [styles.utilityButton, pressed && styles.utilityButtonPressed]}
         >
-          <Text style={[styles.utilityGlyph, { color: color.miss }]}>{'↺'}</Text>
+          <Ionicons name="refresh-outline" size={20} color={color.miss} />
           <Text style={[styles.utilityLabel, { color: color.miss }]}>RESET</Text>
         </Pressable>
       </View>
@@ -160,15 +173,23 @@ export default function ScoreboardScreen() {
 
       {isLandscape ? (
         <View style={styles.landscapeBody}>
-          <View style={styles.landscapeTeam}>{homePanel}</View>
-          {centerColumn}
-          <View style={styles.landscapeTeam}>{awayPanel}</View>
+          <Animated.View entering={enter(0)} style={styles.landscapeTeam}>
+            {homePanel}
+          </Animated.View>
+          <Animated.View entering={enter(1)}>{centerColumn}</Animated.View>
+          <Animated.View entering={enter(2)} style={styles.landscapeTeam}>
+            {awayPanel}
+          </Animated.View>
         </View>
       ) : (
         <View style={styles.portraitBody}>
-          {homePanel}
-          {centerColumn}
-          {awayPanel}
+          <Animated.View entering={enter(0)} style={styles.portraitPanel}>
+            {homePanel}
+          </Animated.View>
+          <Animated.View entering={enter(1)}>{centerColumn}</Animated.View>
+          <Animated.View entering={enter(2)} style={styles.portraitPanel}>
+            {awayPanel}
+          </Animated.View>
         </View>
       )}
     </Screen>
@@ -197,8 +218,11 @@ const styles = StyleSheet.create({
   portraitBody: {
     flex: 1,
     justifyContent: 'space-evenly',
-    gap: space.xl,
+    gap: space.lg,
     paddingBottom: space.xl,
+  },
+  portraitPanel: {
+    flex: 1,
   },
   landscapeBody: {
     flex: 1,
@@ -206,6 +230,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     gap: space.md,
+    paddingVertical: space.md,
   },
   landscapeTeam: {
     flex: 1,
@@ -256,10 +281,6 @@ const styles = StyleSheet.create({
   },
   utilityButtonPressed: {
     backgroundColor: color.surfaceRaised,
-  },
-  utilityGlyph: {
-    ...type.heading,
-    color: color.textDim,
   },
   utilityLabel: {
     ...type.micro,
