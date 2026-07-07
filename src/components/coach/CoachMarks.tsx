@@ -1,11 +1,12 @@
 /**
  * CoachMarks — reusable spotlight/tooltip walkthrough.
  *
- * Given an ordered list of steps, dims the screen behind a hudGlass scrim and
- * shows one teaching card at a time with Next/Skip actions, progress dots,
- * and a reduced-motion-aware fade. When a step provides a targetRect, the
- * card is positioned near it and a soft highlight ring is cut into the scrim
- * around that rect; otherwise the card is centered.
+ * Given an ordered list of steps, dims the screen behind a deep scrim (darker
+ * than hudGlass so the teaching card clearly owns the moment) and shows one
+ * card at a time with Next/Skip actions, animated progress dots, and a
+ * reduced-motion-aware fade. When a step provides a targetRect, the card is
+ * positioned near it and a soft highlight ring is cut into the scrim around
+ * that rect; otherwise the card is centered.
  *
  * Skia is not required — plain Views are enough for the highlight ring, kept
  * simple so this mounts cheaply over camera/session screens.
@@ -33,7 +34,13 @@ import {
   View,
   type LayoutRectangle,
 } from 'react-native';
-import Animated, { FadeIn, FadeOut, ReduceMotion } from 'react-native-reanimated';
+import Animated, {
+  FadeIn,
+  FadeInDown,
+  FadeOut,
+  LinearTransition,
+  ReduceMotion,
+} from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { color, motion, radius, space, touch, type } from '../../constants/tokens';
@@ -59,9 +66,13 @@ export interface CoachStep {
 const CARD_MAX_WIDTH = 360;
 const HIGHLIGHT_PAD = 10;
 
+/** Darker than hudGlass: while teaching, the app behind should clearly recede. */
+const SCRIM_COLOR = 'rgba(10, 9, 9, 0.82)';
+
+const dotGrow = LinearTransition.duration(motion.quick).reduceMotion(ReduceMotion.System);
+
 /** Soft highlight ring cut around a target rect — four dim panels + a border. */
 function Highlight({ rect }: { rect: LayoutRectangle }) {
-  const { width: screenW, height: screenH } = Dimensions.get('window');
   const x = rect.x - HIGHLIGHT_PAD;
   const y = rect.y - HIGHLIGHT_PAD;
   const w = rect.width + HIGHLIGHT_PAD * 2;
@@ -78,9 +89,9 @@ function Highlight({ rect }: { rect: LayoutRectangle }) {
   );
 }
 
-/** One progress dot; grows into a pill when active. */
+/** One progress dot; grows into an accent pill when active (animated width). */
 function StepDot({ active }: { active: boolean }) {
-  return <View style={[styles.dot, active && styles.dotActive]} />;
+  return <Animated.View layout={dotGrow} style={[styles.dot, active && styles.dotActive]} />;
 }
 
 export function CoachMarks({
@@ -137,10 +148,14 @@ export function CoachMarks({
       >
         <Animated.View
           key={step.title}
-          entering={FadeIn.duration(motion.quick).reduceMotion(ReduceMotion.System)}
+          entering={FadeInDown.duration(motion.standard).reduceMotion(ReduceMotion.System)}
           style={styles.card}
         >
-          <Text style={styles.cardTitle} accessibilityRole="header">
+          <Text
+            style={styles.cardTitle}
+            accessibilityRole="header"
+            accessibilityLabel={`Step ${index + 1} of ${steps.length}. ${step.title}`}
+          >
             {step.title}
           </Text>
           <Text style={styles.cardText}>{step.text}</Text>
@@ -206,7 +221,7 @@ export function useCoachMarks(screenKey: TutorialScreen, steps: CoachStep[]) {
 const styles = StyleSheet.create({
   scrim: {
     ...absoluteFill,
-    backgroundColor: color.hudGlass,
+    backgroundColor: SCRIM_COLOR,
     paddingHorizontal: space.lg,
   },
   highlightRing: {
@@ -235,6 +250,12 @@ const styles = StyleSheet.create({
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: color.hudGlassBorder,
     padding: space.lg,
+    // Soft, wide drop — lifts the card off the darkened app without a harsh edge.
+    shadowColor: '#000',
+    shadowOpacity: 0.4,
+    shadowRadius: 24,
+    shadowOffset: { width: 0, height: 12 },
+    elevation: 12,
   },
   cardTitle: {
     ...type.heading,
