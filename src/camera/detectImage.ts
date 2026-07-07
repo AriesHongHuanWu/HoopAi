@@ -38,6 +38,7 @@ import { Platform } from 'react-native';
 
 import { DETECTION } from '../core/config';
 import type { DetClass } from '../core/types';
+import { cullLetterboxDetections } from '../ml/letterboxCull';
 import { parseYoloOutput } from '../ml/yoloParser';
 import { useSettings } from '../state/settingsStore';
 
@@ -149,7 +150,10 @@ export async function loadDetector(config: DetectorConfig): Promise<TensorflowMo
  * `config.scaleMode`, and pack a float32 buffer (0..1) in the model's layout +
  * channel order. All Skia objects are disposed before returning.
  */
-async function packInput(uri: string, config: DetectorConfig): Promise<ArrayBuffer> {
+async function packInput(
+  uri: string,
+  config: DetectorConfig,
+): Promise<{ buf: ArrayBuffer; srcW: number; srcH: number }> {
   const S = config.input;
   const data = await Skia.Data.fromURI(uri);
   let image: SkImage | null = null;
@@ -231,7 +235,7 @@ async function packInput(uri: string, config: DetectorConfig): Promise<ArrayBuff
           out[b2 + i] = c2;
         }
       }
-      return out.buffer;
+      return { buf: out.buffer, srcW: iw, srcH: ih };
     } finally {
       snapshot.dispose();
     }
@@ -254,7 +258,7 @@ export async function detectImageToBoxes(
   model: TensorflowModel,
   config: DetectorConfig,
 ): Promise<DetBox[]> {
-  const buf = await packInput(uri, config);
+  const { buf, srcW, srcH } = await packInput(uri, config);
   const outputs = await model.run([buf]);
   const out0 = outputs[0];
   if (out0 == null) return [];
@@ -265,8 +269,16 @@ export async function detectImageToBoxes(
     hasObjectness: config.hasObjectness,
   });
 
+  // 'contain' pads the square with black bars, and the model hallucinates
+  // detections there — same phantom-person problem as the live path, same
+  // fix (ml/letterboxCull.ts). 'cover' has no bars, so nothing to cull.
+  const detections =
+    config.scaleMode === 'contain'
+      ? cullLetterboxDetections(parsed.detections, S, srcW, srcH)
+      : parsed.detections;
+
   const result: DetBox[] = [];
-  for (const d of parsed.detections) {
+  for (const d of detections) {
     if (!passesGate(d.cls, d.score)) continue;
     // Drop any box covering ~the whole frame (a mis-scaled/degenerate box) so the
     // screen meant to PROVE detection never renders a screen-covering phantom.

@@ -26,7 +26,7 @@
  */
 import { DETECTION, SHOT_FSM } from './config';
 import { depthRatioGate, type BallSizeSetting, type ViewBandName } from './depthRatioGate';
-import { boxesIntersect, elevationAngleDeg, interpolateXAtY } from './geometry';
+import { elevationAngleDeg, interpolateXAtY } from './geometry';
 import { ReappearanceTest } from './reappearance';
 import { selectDepthSamples } from './sampleQuality';
 import { backfillPredictedGap } from './trajectory';
@@ -88,6 +88,8 @@ export class ShotFsm {
   private rimInflated!: Box;
   /** Lower half of rim.hoopRoi (touch test), cached on setRim. */
   private hoopRoiLowerHalf!: Box;
+  /** hoopRoi inflated by layupHoopRoiInflate (layup arming), cached on setRim. */
+  private layupZone!: Box;
   private readonly frameW: number;
   private readonly frameH: number;
 
@@ -109,8 +111,17 @@ export class ShotFsm {
   /** Slow EMA of the net-motion score (drives the net-hang TTL extension). */
   private netScoreEma = 0;
 
+  /**
+   * Consecutive REAL in-zone ball samples at ≥ layupArmLowScore while IDLE —
+   * lets an occluded/blurred at-rim ball (0.12–0.19, the normal presentation
+   * of a layup finish) arm via persistence instead of raw confidence.
+   */
+  private layupLowStreak = 0;
+
   // --- live-shot state (valid only while phase === 'SHOT_LIVE') ------------
   private tStart = 0;
+  /** Whether the live attempt armed via the layup branch (vs up-zone rise). */
+  private armedViaLayup = false;
   private originX: number | null = null;
   private originY: number | null = null;
   private trajectory: BallSample[] = [];
@@ -168,6 +179,20 @@ export class ShotFsm {
       width: hr.width,
       height: hr.height / 2,
     };
+    // Layup arming zone: hoopRoi inflated about its center. The BALL must be
+    // here to arm the layup path (ball-first — see canArm). Height gets a
+    // floor from the rim WIDTH: on flat side views the rim box (and thus
+    // hoopRoi) is only a few px tall, and a height-proportional zone would
+    // leave an above-plane band thinner than one ball diameter — real layups
+    // would never be sampled inside it.
+    const f = SHOT_FSM.layupHoopRoiInflate;
+    const zoneH = Math.max(hr.height, rim.box.width) * f;
+    this.layupZone = {
+      x: hr.x - (hr.width * (f - 1)) / 2,
+      y: hr.y + hr.height / 2 - zoneH / 2,
+      width: hr.width * f,
+      height: zoneH,
+    };
   }
 
   /**
@@ -187,8 +212,23 @@ export class ShotFsm {
 
     if (this.phase === 'IDLE') {
       const ball = input.ball;
-      if (ball !== null && this.canArm(input, ball)) {
-        this.arm(input, ball);
+      // Low-score layup persistence counter (see canArm): consecutive REAL
+      // in-zone samples above the plane. Updated BEFORE canArm so the frame
+      // that completes the streak can arm.
+      if (
+        ball !== null &&
+        !ball.predicted &&
+        ball.score >= SHOT_FSM.layupArmLowScore &&
+        ball.cy < this.rim.planeY &&
+        pointInBox(this.layupZone, ball.cx, ball.cy)
+      ) {
+        this.layupLowStreak++;
+      } else {
+        this.layupLowStreak = 0;
+      }
+      if (ball !== null) {
+        const via = this.canArm(input, ball);
+        if (via !== null) this.arm(input, ball, via);
       }
       return { phase: this.phase, liveTrajectory: this.trajectory, resolved: null };
     }
@@ -275,40 +315,54 @@ export class ShotFsm {
   // Arming
   // -------------------------------------------------------------------------
 
-  private canArm(input: FsmFrameInput, ball: TrackedBall): boolean {
+  private canArm(input: FsmFrameInput, ball: TrackedBall): 'jump' | 'layup' | null {
     // Shot cooldown (redundant with COOLDOWN phase gating, kept as a guard).
-    if (input.t < this.lastResolveT + SHOT_FSM.shotCooldownSec) return false;
+    if (input.t < this.lastResolveT + SHOT_FSM.shotCooldownSec) return null;
     // Putback guard: after a rim-bounce resolve, hold arming a little longer
     // so a tip-in doesn't double-count off the first attempt's residue.
     if (input.t < this.lastBounceResolveT + SHOT_FSM.putbackWindowSec) {
-      return false;
+      return null;
     }
     const rim = this.rim;
     // Jump shot: ball rising through the up-zone.
-    if (ball.vy < 0 && pointInBox(rim.upZone, ball.cx, ball.cy)) return true;
-    // Layup: ball above the rim plane while a player carries/lays it in near
-    // the hoop. Gated on vy to reject phantom arms on a ball that is clearly
-    // falling FAST (rebound, pass, loose ball retrieved near the rim) rather
-    // than being carried up in a controlled layup motion — a soft layup can
-    // still have the ball drifting down gently in the hand right at the
-    // hoop, so the allowance (SHOT_FSM.layupMaxFallVyRimHeightsPerSec) is a
-    // generous sanity backstop, not a tight vy < 0 requirement like the
-    // jump-shot branch.
-    const maxFallVy =
-      SHOT_FSM.layupMaxFallVyRimHeightsPerSec * rim.box.height;
+    if (ball.vy < 0 && pointInBox(rim.upZone, ball.cx, ball.cy)) return 'jump';
+    // Layup — BALL-FIRST. The ball itself must be AT the hoop (inside the
+    // inflated hoopRoi), above the rim plane, and not falling fast. The old
+    // requirement that a YOLO person box intersect the hoopRoi is gone:
+    // person detection was unreliable in both directions (a missed shooter
+    // silently dropped real layups; a hallucinated box near the hoop opened
+    // false arms). The ball being at the hoop is the direct evidence.
+    //
+    // Because this branch can arm WITHOUT the rising-ball signature, it
+    // additionally demands REAL evidence: never a Kalman coast, and either a
+    // confident single frame (≥ layupArmMinBallScore) or a persistent run of
+    // lower-score real samples (layupLowStreak — occluded at-rim balls
+    // routinely score 0.12–0.19). One-frame noise can't start an attempt.
+    //
+    // The vy gate rejects a ball clearly falling FAST (rebound, pass, loose
+    // ball dropping past the hoop); a soft layup can still drift down gently
+    // in the hand right at the hoop, so the allowance
+    // (SHOT_FSM.layupMaxFallVyRimWidthsPerSec — rim WIDTHS, the scale-stable
+    // reference) is a generous sanity backstop, not a tight vy < 0
+    // requirement like the jump-shot branch.
+    const maxFallVy = SHOT_FSM.layupMaxFallVyRimWidthsPerSec * rim.box.width;
     if (
       ball.cy < rim.planeY &&
       ball.vy <= maxFallVy &&
-      input.personBox !== null &&
-      boxesIntersect(input.personBox, rim.hoopRoi)
+      !ball.predicted &&
+      (ball.score >= SHOT_FSM.layupArmMinBallScore ||
+        this.layupLowStreak >= SHOT_FSM.layupArmLowScorePersistFrames) &&
+      pointInBox(this.layupZone, ball.cx, ball.cy)
     ) {
-      return true;
+      return 'layup';
     }
-    return false;
+    return null;
   }
 
-  private arm(input: FsmFrameInput, ball: TrackedBall): void {
+  private arm(input: FsmFrameInput, ball: TrackedBall, via: 'jump' | 'layup'): void {
     this.phase = 'SHOT_LIVE';
+    this.armedViaLayup = via === 'layup';
+    this.layupLowStreak = 0;
     this.tStart = input.t;
     const p = input.personBox;
     if (p !== null) {
@@ -480,6 +534,19 @@ export class ShotFsm {
     ) {
       outcome = 'unsure';
     }
+    // Pass-through guard: the ball-first layup branch can be armed by a pass
+    // or lob whose 2D path merely CROSSES the rim's projection (in front of
+    // or behind the hoop in depth) — and an in-span descending crossing then
+    // reads geo=true. A real layup make virtually always corroborates via a
+    // net burst or the ball_in_basket class; a geo-ONLY "make" on a
+    // layup-armed attempt is exactly the pass-through signature, so demote
+    // it to unsure rather than minting a phantom make. (touchedRim can't
+    // discriminate here: any in-span crossing overlaps the inflated rim box
+    // by construction.) Jump-shot-armed attempts are untouched — a rising
+    // ball through the up-zone is already strong attempt evidence.
+    if (outcome === 'make' && this.armedViaLayup && net !== true && !cls) {
+      outcome = 'unsure';
+    }
     if (outcome === 'make') this.lastMakeT = t;
 
     // --- release metrics -----------------------------------------------------
@@ -529,6 +596,7 @@ export class ShotFsm {
     this.maxClsScore = 0;
     this.touchedRim = false;
     this.rimBounce = false;
+    this.armedViaLayup = false;
     this.originX = null;
     this.originY = null;
 

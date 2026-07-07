@@ -36,6 +36,7 @@ import { createMockDetector } from '../ml/mockDetector';
 import { parseYoloOutput, nmsPerClass } from '../ml/yoloParser';
 import { parseMoveNet } from '../ml/poseParser';
 import { findMotionCandidate } from '../ml/motionCandidate';
+import { cullLetterboxDetections } from '../ml/letterboxCull';
 import { squareCropRect, remapRoiBox } from '../ml/roiTransform';
 import { ShotPipeline, type FramePayload } from '../pipeline/shotPipeline';
 import { useSettings } from '../state/settingsStore';
@@ -954,6 +955,23 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
           prevLayoutSv.value = parsed.debug.layout;
         }
 
+        // Letterbox phantom cull: the 'contain' resize pads the square with
+        // black bars, and the model hallucinates detections there (worst:
+        // 'person' boxes hugging the frame edges). Nothing physical can be in
+        // the bars — drop every detection centered in them BEFORE the ROI
+        // recall gate, tracker, FSM or HUD see it. See ml/letterboxCull.ts.
+        {
+          const culled = cullLetterboxDetections(
+            parsed.detections,
+            detInputSize,
+            frame.width,
+            frame.height,
+          );
+          if (culled !== parsed.detections) {
+            parsed = { ...parsed, detections: culled as typeof parsed.detections };
+          }
+        }
+
         // --- Rim-anchored ROI ("digital zoom") second pass -----------------
         // Recover a small, net-occluded ball at the make/miss instant that the
         // cheap full-frame pass missed: crop the locked-rim region out of the
@@ -1080,6 +1098,14 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
             // Merge the FULL primary list (already capped at maxDetections) with
             // the ROI balls, then NMS + cap — no pre-slice that could drop a real
             // off-court ball before the union.
+            //
+            // The remapped ROI boxes get the SAME letterbox cull as the primary
+            // pass: squareCropRect clamps the crop to the S×S square, NOT the
+            // content rect, so a hoop near a content edge puts magnified black
+            // bar INTO the crop — the exact padding the model hallucinates in,
+            // at the exact make/miss instant the ROI pass fires. Without this
+            // re-cull, a bar-phantom ball would ride the relaxed hoopRoi score
+            // gate straight into the tracker.
             const merged = parsed.detections.slice();
             let added = 0;
             for (let i = 0; i < roiParsed.detections.length; i++) {
@@ -1089,7 +1115,16 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
               added++;
             }
             if (added > 0) {
-              parsed = { ...parsed, detections: nmsPerClass(merged, 0.45).slice(0, 16) };
+              const culledMerged = cullLetterboxDetections(
+                merged,
+                detInputSize,
+                frame.width,
+                frame.height,
+              );
+              parsed = {
+                ...parsed,
+                detections: nmsPerClass(culledMerged as typeof merged, 0.45).slice(0, 16),
+              };
               roiHitsSv.value = roiHitsSv.value + 1;
             }
           }

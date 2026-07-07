@@ -237,16 +237,42 @@ export const SHOT_FSM = {
   /** Max seconds a shot may stay live before force-resolving as unsure. */
   maxLiveSec: 4.0,
   /**
-   * Layup-arm velocity gate: max downward ball speed (rim heights/sec, +y
+   * Layup-arm velocity gate: max downward ball speed (rim WIDTHS/sec, +y
    * down) tolerated when arming the layup path. Rejects phantom arms from a
    * ball that is clearly falling fast (rebound, pass, loose ball dropping
    * past a player boxing out/retrieving it) rather than being carried/laid
    * up near the hoop. Soft layups routinely have the ball drifting down
    * gently in the hand right before the lay-in motion takes over, so the
-   * allowance is generous (rim heights, not ball diameters) — this is a
-   * sanity backstop against clearly-falling balls, not a tight gate.
+   * allowance is generous — a sanity backstop against clearly-falling
+   * balls, not a tight gate. Scaled by rim WIDTH (not height): the rim box
+   * height varies ~2.4× across the supported side-view aspect band, which
+   * made the height-scaled gate collapse on flat side views; width is the
+   * scale-stable reference (0.45 m regardless of camera pitch), as COURT
+   * and DEPTH_GATE already use.
    */
-  layupMaxFallVyRimHeightsPerSec: 10,
+  layupMaxFallVyRimWidthsPerSec: 5,
+  /**
+   * Layup arming is BALL-FIRST: the ball's center must sit inside the hoopRoi
+   * inflated by this factor about its center. This replaced the old
+   * "person box ∩ hoopRoi" requirement — the ball being AT the hoop is direct
+   * evidence of a layup/putback attempt, while YOLO person boxes were
+   * unreliable both ways (missed shooter ⇒ missed layup; hallucinated edge
+   * boxes ⇒ false arms).
+   */
+  layupHoopRoiInflate: 1.5,
+  /**
+   * Layup arming needs a REAL ball (never a Kalman-predicted coast). A single
+   * frame arms at ≥ layupArmMinBallScore; below that, PERSISTENCE substitutes
+   * for confidence: layupArmLowScorePersistFrames consecutive real in-zone
+   * samples at ≥ layupArmLowScore also arm. Rationale: a ball at the rim is
+   * routinely occluded/blurred and scores 0.12–0.19 (the same regime
+   * DETECTION.ballScoreMinHoopRoi exists for), so a hard 0.2 gate silently
+   * dropped the most common real layup presentation — while one-frame noise
+   * still can't start an attempt.
+   */
+  layupArmMinBallScore: 0.2,
+  layupArmLowScore: 0.12,
+  layupArmLowScorePersistFrames: 3,
   /**
    * Putback guard: after a resolve with rimBounce=true, arming is refused for
    * this long (extends shotCooldownSec) so a tip-in doesn't double-count or

@@ -109,6 +109,10 @@ export class ShotPipeline {
   /** Latest pose ankle-midpoint (analysis px) — the pose-based shooter foot for
    *  2/3 estimation. Null until a pose with a visible ankle arrives. */
   private lastPoseFootPx: { x: number; y: number } | null = null;
+  /** Person nearest the ball LAST TIME the ball was away from the rim — the
+   *  latched shooter box (see pickShooterBox). */
+  private lastHolderBox: Box | null = null;
+  private lastHolderT = -Infinity;
 
   constructor(events: PipelineEvents = {}) {
     this.events = events;
@@ -212,7 +216,7 @@ export class ShotPipeline {
     let resolved: ResolvedShot | null = null;
 
     if (this.fsm && this.lastRim) {
-      const person = bestPerson(frame);
+      const person = this.pickShooterBox(frame, ball);
       const result = this.fsm.step({
         t: frame.t,
         ball,
@@ -345,6 +349,36 @@ export class ShotPipeline {
     this.wasDrifted = false;
   }
 
+  /**
+   * The person box handed to the FSM (origin / 2-3pt annotation ONLY — person
+   * boxes no longer gate arming). The FSM samples it at ARM time, when the
+   * ball is by construction AT the rim — so "person nearest the ball right
+   * now" would systematically pick whoever stands under the basket, not the
+   * shooter. Instead, LATCH the person nearest the ball while the ball is
+   * still away from the hoop (i.e. in the shooter's hands / just released)
+   * and serve the latched box while it's fresh; a layup finisher is
+   * re-latched naturally since their ball only reaches the rim area moments
+   * after they carried it there.
+   */
+  private pickShooterBox(frame: FrameDetections, ball: TrackedBall | null): Box | null {
+    const rim = this.lastRim;
+    if (ball && rim) {
+      const nearRim =
+        inBox(rim.upZone, ball.cx, ball.cy) || inBox(rim.hoopRoi, ball.cx, ball.cy);
+      if (!nearRim) {
+        const p = bestPerson(frame, ball);
+        if (p) {
+          this.lastHolderBox = p;
+          this.lastHolderT = frame.t;
+        }
+      }
+    }
+    if (this.lastHolderBox && frame.t - this.lastHolderT <= HOLDER_TTL_SEC) {
+      return this.lastHolderBox;
+    }
+    return bestPerson(frame, ball);
+  }
+
   private adoptRim(rim: RimGeometry, frame: { width: number; height: number }): void {
     const first = this.lastRim == null;
     this.lastRim = rim;
@@ -382,18 +416,43 @@ function poseFootPx(pose: PoseFrame): { x: number; y: number } | null {
   return null;
 }
 
-function bestPerson(frame: FrameDetections): Box | null {
-  let best: { score: number; box: Box } | null = null;
+/** How long a latched shooter box stays valid without re-confirmation. Long
+ *  enough to cover release → arm → resolve of one attempt; short enough that
+ *  a player who left the frame doesn't haunt the next shot's origin. */
+const HOLDER_TTL_SEC = 3;
+
+function inBox(b: Box, x: number, y: number): boolean {
+  return x >= b.x && x <= b.x + b.width && y >= b.y && y <= b.y + b.height;
+}
+
+/**
+ * The person box most likely to be holding/nearest the ball THIS frame. On a
+ * court with several people, "highest score" routinely picked a bystander;
+ * distance to the ball is the useful key — but only while the ball is away
+ * from the rim, which is why callers latch via pickShooterBox instead of
+ * calling this at arm time. Falls back to highest score when no ball is
+ * tracked. Origin/annotation use ONLY — person boxes no longer gate arming.
+ */
+function bestPerson(
+  frame: FrameDetections,
+  ball: { cx: number; cy: number } | null,
+): Box | null {
+  let best: { key: number; box: Box } | null = null;
   for (const d of frame.detections) {
     // Gate on personScoreMin: a low-confidence spurious 'person' box (~0.15)
-    // must not arm phantom layups or corrupt the shooter-origin 2/3 estimate.
-    if (
-      d.cls === 'person' &&
-      d.score >= DETECTION.personScoreMin &&
-      (best == null || d.score > best.score)
-    ) {
-      best = { score: d.score, box: d.box };
+    // must not corrupt the shooter-origin 2/3 estimate.
+    if (d.cls !== 'person' || d.score < DETECTION.personScoreMin) continue;
+    // Lower key wins. With a ball: squared distance from box center to the
+    // ball. Without: negative score (so the highest score wins).
+    let key: number;
+    if (ball) {
+      const dx = d.box.x + d.box.width / 2 - ball.cx;
+      const dy = d.box.y + d.box.height / 2 - ball.cy;
+      key = dx * dx + dy * dy;
+    } else {
+      key = -d.score;
     }
+    if (best == null || key < best.key) best = { key, box: d.box };
   }
   return best?.box ?? null;
 }

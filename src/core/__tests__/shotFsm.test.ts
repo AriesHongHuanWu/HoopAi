@@ -281,12 +281,13 @@ describe('ShotFsm', () => {
     }
   });
 
-  test('(5) occluded layup: person overlaps hoopRoi, ball lost at rim, cls 0.5 → make', () => {
+  test('(5) occluded layup: ball at the hoop, lost at rim, cls 0.5 → make', () => {
     const fsm = newFsm();
     const person: Box = { x: 280, y: 180, width: 60, height: 120 };
     const frames: FsmFrameInput[] = [
-      // Ball above the plane, descending (vy > 0 so the up-zone branch cannot
-      // arm) while the person overlaps the hoop ROI → layup arming path.
+      // Ball above the plane, descending gently (vy > 0 so the up-zone branch
+      // cannot arm) INSIDE the layup zone → ball-first layup arming. The
+      // person box is only along for the origin annotation.
       fin(0 / 30, tb(310, 190, 0 / 30, 80), { personBox: person }),
       fin(1 / 30, tb(312, 193, 1 / 30, 80), { personBox: person }),
       fin(2 / 30, tb(313, 196, 2 / 30, 80, { predicted: true, score: 0 }), {
@@ -416,15 +417,15 @@ describe('ShotFsm', () => {
     expect(s.signals.geo).toBeNull();
   });
 
-  test('(10) layup arming gate rejects a clearly falling ball near the hoop (rebound/pass), even with person overlap', () => {
+  test('(10) layup arming gate rejects a clearly falling ball near the hoop (rebound/pass)', () => {
     const fsm = newFsm();
-    const person: Box = { x: 280, y: 180, width: 60, height: 120 };
-    // Ball above the plane but falling fast (vy=300 >> maxFallVy = 10 * rimHeight(20) = 200 px/s)
-    // while a person overlaps the hoop ROI — must NOT arm as a layup.
+    // Ball above the plane, inside the layup zone, but falling fast
+    // (vy=300 >> maxFallVy = 5 * rimWidth(40) = 200 px/s) — a rebound or
+    // pass dropping past the hoop, must NOT arm as a layup.
     const frames: FsmFrameInput[] = [];
     for (let i = 0; i < 10; i++) {
       const t = i / FPS;
-      frames.push(fin(t, tb(310, 190 + i, t, 300), { personBox: person }));
+      frames.push(fin(t, tb(310, 190 + i, t, 300)));
     }
     const { resolved, results } = run(fsm, frames);
     expect(resolved).toHaveLength(0);
@@ -433,24 +434,95 @@ describe('ShotFsm', () => {
     }
   });
 
-  test('(11) layup arming gate allows a slowly-rising or gently-descending ball near the hoop with person overlap', () => {
+  test('(11) layup arming allows a slowly-rising or gently-descending ball at the hoop — no person needed', () => {
     const fsm = newFsm();
-    const person: Box = { x: 280, y: 180, width: 60, height: 120 };
     // Ball above the plane, still descending well past the fall-fast gate
     // (vy=250 > maxFallVy=200) — must NOT arm.
-    const notArmed = fsm.step(fin(0, tb(310, 190, 0, 250), { personBox: person }));
+    const notArmed = fsm.step(fin(0, tb(310, 190, 0, 250)));
     expect(notArmed.phase).toBe('IDLE');
 
     // A soft layup: ball gently descending in the hand right at the hoop
-    // (vy=80, well under the fall-fast gate) — arms normally.
+    // (vy=80, well under the fall-fast gate) — arms with NO person box at
+    // all. This is the ball-first headline: a missed/absent person detection
+    // can no longer silently drop a real layup attempt.
     const fsm2 = newFsm();
-    const armed = fsm2.step(fin(0, tb(310, 190, 0, 80), { personBox: person }));
+    const armed = fsm2.step(fin(0, tb(310, 190, 0, 80)));
     expect(armed.phase).toBe('SHOT_LIVE');
 
     // A controlled rising layup (vy < 0) above the plane near the hoop also arms.
     const fsm3 = newFsm();
-    const armedRising = fsm3.step(fin(0, tb(310, 190, 0, -50), { personBox: person }));
+    const armedRising = fsm3.step(fin(0, tb(310, 190, 0, -50)));
     expect(armedRising.phase).toBe('SHOT_LIVE');
+  });
+
+  test('(11b) layup arming is BALL-first: a ball far from the hoop cannot arm, even with a person at the hoop', () => {
+    // Under the old person-gated logic this ARMED: any ball above the plane
+    // anywhere on screen + a (possibly hallucinated) person box touching the
+    // hoopRoi. A ball dribbled high in the frame across the court + a phantom
+    // edge person = phantom attempt. Ball-first arming requires the BALL in
+    // the layup zone (hoopRoi ×1.5 ≈ x 245..395), so cx=100 must not arm.
+    const fsm = newFsm();
+    const person: Box = { x: 280, y: 180, width: 60, height: 120 }; // ∩ hoopRoi
+    const r = fsm.step(fin(0, tb(100, 190, 0, 80), { personBox: person }));
+    expect(r.phase).toBe('IDLE');
+  });
+
+  test('(11c) layup arming demands a real ball — coasts and one-frame crumbs cannot start attempts', () => {
+    // A Kalman-predicted coast at the hoop: no arm.
+    const fsm = newFsm();
+    const coast = fsm.step(fin(0, tb(310, 190, 0, 80, { predicted: true })));
+    expect(coast.phase).toBe('IDLE');
+
+    // A single relaxed-gate tracking crumb (score 0.12 < layupArmMinBallScore
+    // 0.2, streak 1 < persist 3) may CONTINUE a flight but not START one.
+    const fsm2 = newFsm();
+    const crumb = fsm2.step(fin(0, tb(310, 190, 0, 80, { score: 0.12 })));
+    expect(crumb.phase).toBe('IDLE');
+  });
+
+  test('(11d) occluded low-score layup arms via persistence: 3 consecutive real in-zone samples at 0.15', () => {
+    // A ball at the rim is routinely occluded/blurred and scores 0.12-0.19 —
+    // a hard 0.2 gate would silently drop the most common layup presentation.
+    // Persistence substitutes for confidence: the 3rd consecutive real
+    // in-zone sample arms.
+    const fsm = newFsm();
+    const r1 = fsm.step(fin(0 / 30, tb(310, 190, 0 / 30, 80, { score: 0.15 })));
+    expect(r1.phase).toBe('IDLE');
+    const r2 = fsm.step(fin(1 / 30, tb(311, 191, 1 / 30, 80, { score: 0.15 })));
+    expect(r2.phase).toBe('IDLE');
+    const r3 = fsm.step(fin(2 / 30, tb(312, 192, 2 / 30, 80, { score: 0.15 })));
+    expect(r3.phase).toBe('SHOT_LIVE');
+
+    // A predicted coast in the middle breaks the streak — no arm on frame 3.
+    const fsm2 = newFsm();
+    fsm2.step(fin(0 / 30, tb(310, 190, 0 / 30, 80, { score: 0.15 })));
+    fsm2.step(fin(1 / 30, tb(311, 191, 1 / 30, 80, { score: 0.15, predicted: true })));
+    const broken = fsm2.step(fin(2 / 30, tb(312, 192, 2 / 30, 80, { score: 0.15 })));
+    expect(broken.phase).toBe('IDLE');
+  });
+
+  test('(11e) pass-through guard: a layup-armed geo-only "make" (no net, no cls) demotes to unsure', () => {
+    // A pass/lob crossing the rim's 2D projection can arm the ball-first
+    // layup branch and then descend through the plane in-span — geo=true
+    // with zero corroboration. That must NOT mint a make.
+    const cross = (net: (t: number) => number): FsmFrameInput[] => [
+      fin(0, tb(310, 190, 0, 80)), // arms (layup branch, score 0.8)
+      fin(1 / 30, tb(312, 195, 1 / 30, 150), { netMotionScore: net(1 / 30) }),
+      fin(2 / 30, tb(314, 210, 2 / 30, 200), { netMotionScore: net(2 / 30) }),
+      fin(3 / 30, tb(316, 232, 3 / 30, 250), { netMotionScore: net(3 / 30) }), // belowY → resolve
+    ];
+
+    const silent = run(newFsm(), cross(() => 0));
+    expect(silent.resolved).toHaveLength(1);
+    expect(silent.resolved[0].signals.geo).toBe(true);
+    expect(silent.resolved[0].signals.net).toBeNull();
+    expect(silent.resolved[0].signals.cls).toBe(false);
+    expect(silent.resolved[0].outcome).toBe('unsure'); // NOT 'make'
+
+    // The same crossing WITH a net burst is a real layup make — untouched.
+    const swished = run(newFsm(), cross(() => 0.7));
+    expect(swished.resolved).toHaveLength(1);
+    expect(swished.resolved[0].outcome).toBe('make');
   });
 
   test('(12) resolve prefers a real (non-predicted) descending crossing over a later predicted one', () => {

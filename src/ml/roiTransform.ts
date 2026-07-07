@@ -35,7 +35,10 @@ export interface CropRect {
  * square training input and keeping the back-map a single scale. The side is
  * `min(S, max(hoop.width, hoop.height))` so a tall or wide hoopRoi is still
  * fully covered, and the square never exceeds the frame. The top-left is
- * clamped into `[0, S-rs]` so the crop never straddles the letterbox bars.
+ * clamped into `[0, S-rs]` so the square never leaves the S×S frame — note it
+ * CAN still include letterbox-bar pixels when the hoop sits near a content
+ * edge, so ROI outputs MUST be letterbox-culled after remapping (the merge
+ * site in useShotEngine.ts does this).
  */
 export function squareCropRect(hoop: Box, S: number): CropRect {
   'worklet';
