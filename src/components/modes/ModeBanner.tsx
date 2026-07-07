@@ -1,22 +1,28 @@
 /**
  * ModeBanner — the in-mode HUD overlay for the live session.
  *
- * A single glassy chip stack, top-center over the camera: the mode's status
- * {message}, a big score/streak numeral labelled per mode, and the mode's own
- * progress widget (spot rail, timer ring, HORSE board, contest racks, or a
- * plain progress bar). Reads {@link ModeState} directly and renders nothing for
- * the free-play mode (its score already shows in the shared StatStrip).
+ * A single tight glass panel, top-center over the camera: the mode's Ionicons
+ * mark on an accent-tinted plate, name, a big score/streak numeral labelled per
+ * mode, and the mode's own progress widget (spot rail, timer ring, HORSE board,
+ * contest racks, or a plain progress bar). The glass recipe (deep rgba fill +
+ * hairline border + top highlight) is deliberately the same treatment as
+ * HudChip so the banner sits flush with the rest of the HUD, tightened here
+ * with a per-mode accent rail on the left edge. Reads {@link ModeState}
+ * directly and renders nothing for the free-play mode (its score already shows
+ * in the shared StatStrip).
  *
  * Pure presentation — the live screen wires modeStore.applyShot / tick.
  */
+import { Ionicons } from '@expo/vector-icons';
 import React from 'react';
 import { StyleSheet, Text, View } from 'react-native';
+import Animated, { FadeInDown, ReduceMotion } from 'react-native-reanimated';
 
-import { HudChip } from '../hud/HudChip';
-import { color, radius, space, type } from '../../constants/tokens';
+import { color, motion, radius, space, type } from '../../constants/tokens';
 import { getModeDef, type ModeState } from '../../core/gameModes';
 import { ContestRacks } from './ContestRacks';
 import { HorseLetters } from './HorseLetters';
+import { MODE_IDENTITY } from './modeIdentity';
 import { SpotTracker } from './SpotTracker';
 import { TimerRing } from './TimerRing';
 
@@ -60,20 +66,29 @@ export function ModeBanner({ mode }: { mode: ModeState }) {
   // already carries makes / FG% / streak.
   if (mode.modeId === 'free') return null;
 
+  const id = MODE_IDENTITY[mode.modeId];
   const showBar =
     !def.needsTimer && !def.needsSpots && mode.modeId !== 'horse' && mode.modeId !== 'threePoint';
 
   return (
-    <HudChip
-      style={styles.chip}
+    <Animated.View
+      entering={FadeInDown.duration(motion.standard).reduceMotion(ReduceMotion.System)}
+      style={styles.glass}
       accessible
       accessibilityLiveRegion="polite"
       accessibilityLabel={bannerA11yLabel(mode, def)}
     >
-      {/* Header: emoji + mode name + score numeral */}
+      {/* top highlight — the single hairline that sells the glass (HudChip recipe) */}
+      <View pointerEvents="none" style={styles.highlight} />
+      {/* per-mode accent rail on the left edge — the banner's identity stripe */}
+      <View pointerEvents="none" style={[styles.rail, { backgroundColor: id.accent }]} />
+
+      {/* Header: mode mark + name + score numeral (or timer ring) */}
       <View style={styles.header}>
         <View style={styles.title}>
-          <Text style={styles.emoji}>{def.emoji}</Text>
+          <View style={[styles.iconPlate, { backgroundColor: id.tint }]}>
+            <Ionicons name={id.icon} size={13} color={id.accent} />
+          </View>
           <Text style={styles.name} numberOfLines={1}>
             {def.name.toUpperCase()}
           </Text>
@@ -85,7 +100,9 @@ export function ModeBanner({ mode }: { mode: ModeState }) {
             <Text style={styles.score}>
               {mode.modeId === 'horse' ? (mode.letters?.length ?? 0) : mode.score}
             </Text>
-            <Text style={styles.scoreLabel}>{scoreLabel(mode).toUpperCase()}</Text>
+            <Text style={[styles.scoreLabel, { color: id.accent }]}>
+              {scoreLabel(mode).toUpperCase()}
+            </Text>
           </View>
         )}
       </View>
@@ -116,7 +133,12 @@ export function ModeBanner({ mode }: { mode: ModeState }) {
 
       {showBar && (
         <View style={styles.bar}>
-          <View style={[styles.barFill, { width: `${Math.round(mode.progress * 100)}%` }]} />
+          <View
+            style={[
+              styles.barFill,
+              { width: `${Math.round(mode.progress * 100)}%`, backgroundColor: id.accent },
+            ]}
+          />
         </View>
       )}
 
@@ -124,16 +146,40 @@ export function ModeBanner({ mode }: { mode: ModeState }) {
       <Text style={styles.message} numberOfLines={1}>
         {mode.message}
       </Text>
-    </HudChip>
+    </Animated.View>
   );
 }
 
 const styles = StyleSheet.create({
-  chip: {
+  glass: {
     alignSelf: 'stretch',
     alignItems: 'stretch',
-    paddingVertical: space.md,
+    // Same glass recipe as HudChip (deep fill + hairline border + highlight),
+    // tightened: less vertical padding so the court stays the star.
+    backgroundColor: color.hudGlassDeep,
+    borderColor: color.hudGlassBorder,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderRadius: radius.lg,
+    overflow: 'hidden',
+    paddingHorizontal: space.lg,
+    paddingVertical: space.sm,
     gap: space.sm,
+  },
+  highlight: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: 'rgba(245, 241, 236, 0.22)',
+  },
+  rail: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    left: 0,
+    width: 3,
+    opacity: 0.9,
   },
   header: {
     flexDirection: 'row',
@@ -147,8 +193,12 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: space.sm,
   },
-  emoji: {
-    fontSize: 20,
+  iconPlate: {
+    width: 24,
+    height: 24,
+    borderRadius: radius.sm,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   name: {
     ...type.caption,
@@ -166,7 +216,6 @@ const styles = StyleSheet.create({
   },
   scoreLabel: {
     ...type.micro,
-    color: color.textFaint,
     marginTop: -2,
   },
   widget: {
@@ -183,7 +232,6 @@ const styles = StyleSheet.create({
   barFill: {
     height: '100%',
     borderRadius: radius.pill,
-    backgroundColor: color.accent,
   },
   message: {
     ...type.bodyMedium,

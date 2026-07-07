@@ -1,17 +1,19 @@
 /**
  * ModeComplete — the celebratory sheet shown when a game mode finishes.
  *
- * Fades up a scrim with a glass card: the mode's headline result, a springy
- * hero numeral under a Skia arc-and-sparks flourish (the signature shot arc —
- * no confetti), an optional per-spot or contest breakdown, and three actions —
- * share the result (a rendered ShareCard image, text share as fallback), play
- * the mode again, or exit to the session summary. All entering animations respect the system reduce-motion
- * setting.
+ * Fades up a deep scrim with a glass card: the mode's Ionicons mark on its
+ * accent plate, the result headline in scoreboard numerals under a Skia
+ * arc-and-sparks flourish tinted in the mode's hue (the signature shot arc —
+ * no confetti), a per-mode stat line row, an optional per-spot breakdown, and
+ * a clear action hierarchy — bold Play again on top, Share result / Done as
+ * ghosts. Everything enters as one staggered celebratory beat; all animations
+ * respect the system reduce-motion setting.
  *
  * Presentation only; the live screen owns when to mount it and what the buttons
  * do (replay re-inits the mode, exit runs the normal end-session flow).
  */
 import { BlurMask, Canvas, Circle, Path, Skia } from '@shopify/react-native-skia';
+import { Ionicons } from '@expo/vector-icons';
 import React, { useMemo, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import Animated, {
@@ -19,6 +21,7 @@ import Animated, {
   FadeInDown,
   ReduceMotion,
   ZoomIn,
+  useReducedMotion,
 } from 'react-native-reanimated';
 
 import { modeCardData, shareCardImage } from '../ShareCard';
@@ -26,6 +29,7 @@ import { Card, PillButton, Row } from '../ui';
 import { color, motion, space, type } from '../../constants/tokens';
 import { getModeDef, type ModeState } from '../../core/gameModes';
 import { useSession } from '../../state/sessionStore';
+import { MODE_IDENTITY } from './modeIdentity';
 
 /** RN 0.86 dropped StyleSheet.absoluteFillObject — local equivalent. */
 const absoluteFill = {
@@ -119,11 +123,52 @@ function headlineFor(mode: ModeState): Headline {
 }
 
 /**
- * Arc flourish — the signature shot arc landing at a glowing ball, with a few
- * spark ticks radiating from the landing point. Static (reduced-motion safe);
- * the celebration energy comes from the springy numeral beneath it.
+ * Per-mode stat lines under the hero — small scoreboard cells that tell the
+ * rest of the story (clock, pace, accuracy…). Empty when the hero numeral
+ * already says everything (HORSE, streak, free play).
  */
-function ArcFlourish() {
+function statLinesFor(mode: ModeState): { label: string; value: string }[] {
+  switch (mode.modeId) {
+    case 'timed': {
+      const dur = mode.config?.durationSec ?? 60;
+      const perMin = dur > 0 ? (mode.score * 60) / dur : mode.score;
+      return [
+        { label: 'Clock', value: `${dur}s` },
+        { label: 'Pace', value: `${perMin.toFixed(1)}/min` },
+      ];
+    }
+    case 'aroundTheWorld':
+    case 'spotShooting': {
+      const makes = mode.spots?.reduce((a, s) => a + s.makes, 0) ?? mode.score;
+      const attempts = mode.spots?.reduce((a, s) => a + s.attempts, 0) ?? 0;
+      return [
+        { label: 'Shots', value: `${attempts}` },
+        {
+          label: 'Accuracy',
+          value: attempts > 0 ? `${Math.round((makes / attempts) * 100)}%` : '—',
+        },
+      ];
+    }
+    case 'threePoint':
+      return [
+        { label: 'Possible', value: '30' },
+        { label: 'Racks', value: '5' },
+      ];
+    case 'ftStreak':
+    case 'horse':
+    case 'free':
+    default:
+      return [];
+  }
+}
+
+/**
+ * Arc flourish — the signature shot arc landing at a glowing ball, with a few
+ * spark ticks radiating from the landing point, inked in the mode's accent.
+ * Static (reduced-motion safe); the celebration energy comes from the springy
+ * numeral beneath it.
+ */
+function ArcFlourish({ accent }: { accent: string }) {
   const [width, setWidth] = useState(0);
 
   const geom = useMemo(() => {
@@ -161,7 +206,7 @@ function ArcFlourish() {
             style="stroke"
             strokeWidth={7}
             strokeCap="round"
-            color={color.accent}
+            color={accent}
             opacity={0.25}
           >
             <BlurMask blur={8} style="normal" />
@@ -171,7 +216,7 @@ function ArcFlourish() {
             style="stroke"
             strokeWidth={2.5}
             strokeCap="round"
-            color={color.accent}
+            color={accent}
             opacity={0.7}
           />
           <Path
@@ -182,10 +227,10 @@ function ArcFlourish() {
             color={color.threePt}
             opacity={0.9}
           />
-          <Circle cx={geom.landX} cy={geom.landY} r={9} color={color.accent} opacity={0.35}>
+          <Circle cx={geom.landX} cy={geom.landY} r={9} color={accent} opacity={0.35}>
             <BlurMask blur={6} style="normal" />
           </Circle>
-          <Circle cx={geom.landX} cy={geom.landY} r={4.5} color={color.accent} />
+          <Circle cx={geom.landX} cy={geom.landY} r={4.5} color={accent} />
         </Canvas>
       )}
     </View>
@@ -204,7 +249,12 @@ export function ModeComplete({
   onExit: () => void;
 }) {
   const def = getModeDef(mode.modeId);
+  const id = MODE_IDENTITY[mode.modeId];
   const h = headlineFor(mode);
+  const statRows = statLinesFor(mode);
+  const reducedMotion = useReducedMotion();
+  /** Stagger delays collapse under reduced motion so nothing appears to lag. */
+  const d = (ms: number) => (reducedMotion ? 0 : ms);
 
   // Share the score-led image card (session stats/shots from the live store);
   // shareCardImage falls back to the plain-text caption itself and never
@@ -237,12 +287,16 @@ export function ModeComplete({
           .reduceMotion(ReduceMotion.System)}
       >
         <Card style={styles.card}>
-          <ArcFlourish />
-          <Text style={styles.emoji}>{def.emoji}</Text>
-          <Text style={styles.banner}>{h.banner}</Text>
+          <ArcFlourish accent={id.accent} />
+
+          <View style={[styles.iconBadge, { backgroundColor: id.tint, borderColor: id.accent }]}>
+            <Ionicons name={id.icon} size={26} color={id.accent} />
+          </View>
+          <Text style={styles.modeName}>{def.name.toUpperCase()}</Text>
+          <Text style={[styles.banner, { color: id.accent }]}>{h.banner}</Text>
 
           <Animated.View
-            entering={ZoomIn.delay(120)
+            entering={ZoomIn.delay(d(120))
               .duration(motion.celebrate)
               .springify()
               .damping(11)
@@ -257,8 +311,32 @@ export function ModeComplete({
 
           <Text style={styles.sub}>{h.sub}</Text>
 
+          {statRows.length > 0 && (
+            <Animated.View
+              entering={FadeInDown.delay(d(220))
+                .duration(motion.standard)
+                .reduceMotion(ReduceMotion.System)}
+              style={styles.statRow}
+            >
+              {statRows.map((r, i) => (
+                <React.Fragment key={r.label}>
+                  {i > 0 && <View style={styles.statDivider} />}
+                  <View style={styles.statCell}>
+                    <Text style={styles.statValue}>{r.value}</Text>
+                    <Text style={styles.statLabel}>{r.label.toUpperCase()}</Text>
+                  </View>
+                </React.Fragment>
+              ))}
+            </Animated.View>
+          )}
+
           {mode.spots != null && mode.spots.length > 0 && (
-            <View style={styles.breakdown}>
+            <Animated.View
+              entering={FadeInDown.delay(d(280))
+                .duration(motion.standard)
+                .reduceMotion(ReduceMotion.System)}
+              style={styles.breakdown}
+            >
               {mode.spots.map((s) => (
                 <Row key={s.label} style={styles.breakRow}>
                   <Text style={styles.breakLabel} numberOfLines={1}>
@@ -269,30 +347,33 @@ export function ModeComplete({
                   </Text>
                 </Row>
               ))}
-            </View>
+            </Animated.View>
           )}
 
-          <View style={styles.actions}>
-            <PillButton
-              label={sharing ? 'Preparing…' : 'Share result'}
-              onPress={onShare}
-              disabled={sharing}
-            />
+          <Animated.View
+            entering={FadeInDown.delay(d(340))
+              .duration(motion.standard)
+              .reduceMotion(ReduceMotion.System)}
+            style={styles.actions}
+          >
+            <PillButton label="Play again" icon="refresh" onPress={onReplay} />
             <Row gap={space.md} style={styles.secondaryRow}>
               <PillButton
-                label="Play again"
+                label={sharing ? 'Preparing…' : 'Share result'}
+                icon="share-outline"
                 variant="ghost"
-                onPress={onReplay}
+                onPress={onShare}
+                disabled={sharing}
                 style={styles.secondaryBtn}
               />
               <PillButton
-                label="End session"
+                label="Done"
                 variant="ghost"
                 onPress={onExit}
                 style={styles.secondaryBtn}
               />
             </Row>
-          </View>
+          </Animated.View>
         </Card>
       </Animated.View>
     </Animated.View>
@@ -302,7 +383,7 @@ export function ModeComplete({
 const styles = StyleSheet.create({
   scrim: {
     ...absoluteFill,
-    backgroundColor: color.hudGlass,
+    backgroundColor: color.hudGlassDeep,
     alignItems: 'center',
     justifyContent: 'center',
     padding: space.xl,
@@ -318,13 +399,23 @@ const styles = StyleSheet.create({
     bottom: undefined,
     height: FLOURISH_H,
   },
-  emoji: {
-    fontSize: 40,
-    marginBottom: space.xs,
+  iconBadge: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    borderWidth: 1.5,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: space.sm,
+  },
+  modeName: {
+    ...type.micro,
+    color: color.textFaint,
+    letterSpacing: 1.2,
+    marginBottom: 2,
   },
   banner: {
     ...type.caption,
-    color: color.accent,
     letterSpacing: 2,
   },
   heroRow: {
@@ -347,6 +438,32 @@ const styles = StyleSheet.create({
     color: color.textDim,
     textAlign: 'center',
     marginTop: space.md,
+  },
+  statRow: {
+    flexDirection: 'row',
+    alignItems: 'stretch',
+    justifyContent: 'center',
+    gap: space.lg,
+    marginTop: space.lg,
+  },
+  statCell: {
+    alignItems: 'center',
+    minWidth: 72,
+  },
+  statValue: {
+    ...type.statMedium,
+    color: color.text,
+    fontVariant: ['tabular-nums'],
+  },
+  statLabel: {
+    ...type.micro,
+    color: color.textFaint,
+    marginTop: 2,
+  },
+  statDivider: {
+    width: StyleSheet.hairlineWidth,
+    alignSelf: 'stretch',
+    backgroundColor: color.border,
   },
   breakdown: {
     alignSelf: 'stretch',
