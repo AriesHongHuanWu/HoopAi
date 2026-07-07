@@ -144,6 +144,12 @@ export interface SettingsState {
   clipPostRollSec: number;
   voiceMetric: VoiceMetric;
   shootingHand: ShootingHand;
+  /**
+   * Ball size (7 men's standard / 6 women+youth / 5 kids). Feeds the depth-
+   * ratio parallax gate — the ball's REAL diameter is the metric ruler, so a
+   * mis-set size costs about half the far-range discrimination signal.
+   */
+  ballSize: 7 | 6 | 5;
   /** For jump/release-height calibration. Null until profile setup. */
   playerHeightCm: number | null;
   onboardingDone: boolean;
@@ -174,6 +180,13 @@ export interface SettingsState {
    * because its on-device recall gain is unverified. See useShotEngine.ts.
    */
   roiZoom: boolean;
+  /**
+   * Depth-ratio parallax veto (experimental): uses the ball's known size vs
+   * the rim's to catch airballs crossing IN FRONT of the hoop being miscalled
+   * as makes. Veto-only (can only turn a false make into a miss), silent
+   * outside its verified envelope. Default off pending field validation.
+   */
+  depthVeto: boolean;
   /**
    * Run the pose model for shooting-form analysis + coaching. Default off — it
    * runs a second model per frame, best on recent phones. See formAnalysis.ts.
@@ -218,6 +231,7 @@ export const useSettings = create<SettingsState>()(
       clipPostRollSec: 2,
       voiceMetric: 'none',
       shootingHand: 'right',
+      ballSize: 7,
       playerHeightCm: null,
       onboardingDone: false,
       detectorModel: 'auto',
@@ -228,6 +242,7 @@ export const useSettings = create<SettingsState>()(
       lastBenchmark: null,
       debugMode: false,
       roiZoom: true,
+      depthVeto: false,
       formAnalysis: false,
       tutorialSeen: TUTORIAL_SEEN_DEFAULT,
       dailyGoalMakes: 0,

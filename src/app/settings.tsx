@@ -77,6 +77,12 @@ const HAND_OPTIONS: { value: ShootingHand; label: string }[] = [
   { value: 'right', label: 'Right' },
 ];
 
+const BALL_OPTIONS: { value: 7 | 6 | 5; label: string }[] = [
+  { value: 7, label: 'Size 7 · standard' },
+  { value: 6, label: 'Size 6 · women/youth' },
+  { value: 5, label: 'Size 5 · kids' },
+];
+
 const DETECTION_RATE_OPTIONS: { value: DetectionRate; label: string; blurb: string }[] = [
   { value: 'auto', label: 'Auto · recommended', blurb: 'Smooth tracking on every supported phone.' },
   { value: 'battery', label: 'Battery saver', blurb: 'Cooler phone, longer sessions.' },
@@ -382,6 +388,7 @@ export default function SettingsScreen() {
   const clipPostRollSec = useSettings((s) => s.clipPostRollSec);
   const voiceMetric = useSettings((s) => s.voiceMetric);
   const shootingHand = useSettings((s) => s.shootingHand);
+  const ballSize = useSettings((s) => s.ballSize);
   const playerHeightCm = useSettings((s) => s.playerHeightCm);
   const detectorModel = useSettings((s) => s.detectorModel);
   const detectionRate = useSettings((s) => s.detectionRate);
@@ -391,6 +398,7 @@ export default function SettingsScreen() {
   const lastBenchmark = useSettings((s) => s.lastBenchmark);
   const debugMode = useSettings((s) => s.debugMode);
   const roiZoom = useSettings((s) => s.roiZoom);
+  const depthVeto = useSettings((s) => s.depthVeto);
   const formAnalysis = useSettings((s) => s.formAnalysis);
   const dailyGoalMakes = useSettings((s) => s.dailyGoalMakes);
   const set = useSettings((s) => s.set);
@@ -738,6 +746,16 @@ export default function SettingsScreen() {
           ))}
           <View style={styles.divider} />
           <ToggleRow
+            label="Parallax guard (experimental)"
+            description="Uses your ball's real size vs the rim's to catch airballs flying IN FRONT of the hoop that would otherwise count as makes. Veto-only: it can cancel a fake make, never invent one, and stays silent beyond its verified range (~1m separation up to ~6m; needs the right Ball size set in Player). Takes effect at the next rim lock."
+            value={depthVeto}
+            onValueChange={(v) => {
+              tick();
+              set('depthVeto', v);
+            }}
+          />
+          <View style={styles.divider} />
+          <ToggleRow
             label="Rim zoom (experimental)"
             description="When the ball is missed near the basket, re-run the detector on a magnified crop of the rim to recover it at the make/miss moment. Self-limiting — only fires during a shot, only when needed, and only on phones fast enough. Turn on Debug mode to see it working (the 'roi zoom' row)."
             value={roiZoom}
@@ -869,6 +887,27 @@ export default function SettingsScreen() {
                 onPress={() => {
                   tick();
                   set('shootingHand', opt.value);
+                }}
+              />
+            ))}
+          </View>
+          <View style={styles.divider} />
+          <View style={styles.settingText}>
+            <Text style={styles.settingLabel}>Ball size</Text>
+            <Text style={styles.settingDesc}>
+              The ball is used as a real-world size reference for depth checks
+              and distance estimates — set it to what you actually play with.
+            </Text>
+          </View>
+          <View style={styles.chipWrap}>
+            {BALL_OPTIONS.map((opt) => (
+              <SelectChip
+                key={opt.value}
+                label={opt.label}
+                selected={ballSize === opt.value}
+                onPress={() => {
+                  tick();
+                  set('ballSize', opt.value);
                 }}
               />
             ))}

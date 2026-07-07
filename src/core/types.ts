@@ -207,6 +207,18 @@ export interface ResolvedShot {
    * Undefined when form analysis was off or the pose was never seen.
    */
   form?: FormReport;
+  /**
+   * Depth-ratio parallax gate diagnostics (present only when the veto flag
+   * ran for this shot). decision 'veto_front'/'veto_behind' means geo was
+   * flipped to false; 'silent' means the gate measured but stayed quiet.
+   */
+  geoDepth?: {
+    ratio: number;
+    sigmaLn: number;
+    snr: number;
+    decision: 'silent' | 'veto_front' | 'veto_behind';
+    disableReason?: string;
+  };
 }
 
 /** Pose-based form metrics + prioritized coaching cues for one shot. */

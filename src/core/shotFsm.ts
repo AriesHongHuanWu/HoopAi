@@ -25,7 +25,9 @@
  * Coordinates are analysis-frame pixels, +y DOWN (ball moving up ⇒ vy < 0).
  */
 import { DETECTION, SHOT_FSM } from './config';
+import { depthRatioGate, type BallSizeSetting, type ViewBandName } from './depthRatioGate';
 import { boxesIntersect, elevationAngleDeg, interpolateXAtY } from './geometry';
+import { selectDepthSamples } from './sampleQuality';
 import type {
   BallSample,
   Box,
@@ -90,6 +92,14 @@ export class ShotFsm {
   private nextId = 1;
   private lastResolveT = -Infinity;
   private lastMakeT = -Infinity;
+  /** Last resolve that ended with a rim bounce (putback guard). */
+  private lastBounceResolveT = -Infinity;
+
+  // --- depth-aware judgment (all inert unless the veto flag is on) ---------
+  /** Kill-switch: run the depth-ratio parallax veto in resolve(). */
+  private readonly useDepthVeto: boolean;
+  private ballSize: BallSizeSetting = 7;
+  private viewBand: ViewBandName = 'side_wing';
 
   // --- live-shot state (valid only while phase === 'SHOT_LIVE') ------------
   private tStart = 0;
@@ -107,10 +117,25 @@ export class ShotFsm {
    * @param rim   Locked rim geometry for the session (swap via setRim).
    * @param frame Analysis-frame dimensions, used to normalize shot origin.
    */
-  constructor(rim: RimGeometry, frame: FrameSize) {
+  constructor(
+    rim: RimGeometry,
+    frame: FrameSize,
+    opts: { useDepthRatioVeto?: boolean } = {},
+  ) {
     this.frameW = frame.width;
     this.frameH = frame.height;
+    this.useDepthVeto = opts.useDepthRatioVeto ?? SHOT_FSM.useDepthRatioVeto;
     this.setRim(rim);
+  }
+
+  /** Ball-size setting (7/6/5) feeding the depth-ratio gate. */
+  setBallSize(size: BallSizeSetting): void {
+    this.ballSize = size;
+  }
+
+  /** View band from the placement classifier (default 'side_wing'). */
+  setViewBand(band: ViewBandName): void {
+    this.viewBand = band;
   }
 
   /**
@@ -219,6 +244,11 @@ export class ShotFsm {
   private canArm(input: FsmFrameInput, ball: TrackedBall): boolean {
     // Shot cooldown (redundant with COOLDOWN phase gating, kept as a guard).
     if (input.t < this.lastResolveT + SHOT_FSM.shotCooldownSec) return false;
+    // Putback guard: after a rim-bounce resolve, hold arming a little longer
+    // so a tip-in doesn't double-count off the first attempt's residue.
+    if (input.t < this.lastBounceResolveT + SHOT_FSM.putbackWindowSec) {
+      return false;
+    }
     const rim = this.rim;
     // Jump shot: ball rising through the up-zone.
     if (ball.vy < 0 && pointInBox(rim.upZone, ball.cx, ball.cy)) return true;
@@ -334,6 +364,36 @@ export class ShotFsm {
       entryAngleDeg = Math.abs(elevationAngleDeg(b.cx - a.cx, b.cy - a.cy));
     }
 
+    // --- depth-ratio parallax VETO (kill-switched; one-directional) --------
+    // A 2D crossing inside the span can still be an airball flying in FRONT
+    // of the hoop (or a pass behind it). The size-based depth ratio catches
+    // the separations it can prove (see depthRatioGate); on a confident veto
+    // geo flips true -> false. It NEVER confirms a make. Diagnostics ride on
+    // the resolved shot either way so telemetry can tune thresholds.
+    let geoDepth: ResolvedShot['geoDepth'];
+    if (this.useDepthVeto && geo === true) {
+      const sel = selectDepthSamples(traj, rim.box);
+      const gate = depthRatioGate({
+        ballDiaPxAvg: sel.avgDiaPx,
+        nRealSamples: sel.nReal,
+        rimWidthPx: rim.box.width,
+        rimLockContaminated: false,
+        ballSize: this.ballSize,
+        viewBand: this.viewBand,
+        crossingReal: realCrossIdx >= 0,
+        rimBounce: this.rimBounce,
+        clsStrongContext: this.maxClsScore >= DETECTION.ballInBasketScoreMin,
+      });
+      geoDepth = {
+        ratio: gate.ratio,
+        sigmaLn: gate.sigmaLn,
+        snr: gate.snr,
+        decision: gate.decision,
+        ...(gate.disableReason ? { disableReason: gate.disableReason } : {}),
+      };
+      if (gate.decision !== 'silent') geo = false;
+    }
+
     // --- net: burst near the crossing (or resolve time) ------------------
     let net: boolean | null = null;
     if (this.anyNetPositive) {
@@ -410,11 +470,13 @@ export class ShotFsm {
       originX: this.originX,
       originY: this.originY,
       trajectory: traj,
+      ...(geoDepth ? { geoDepth } : {}),
     };
 
     // --- reset to COOLDOWN ---------------------------------------------------
     this.phase = 'COOLDOWN';
     this.lastResolveT = t;
+    if (this.rimBounce) this.lastBounceResolveT = t;
     this.trajectory = [];
     this.netSamples = [];
     this.anyNetPositive = false;

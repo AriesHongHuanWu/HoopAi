@@ -218,6 +218,21 @@ export const SHOT_FSM = {
    * sanity backstop against clearly-falling balls, not a tight gate.
    */
   layupMaxFallVyRimHeightsPerSec: 10,
+  /**
+   * Putback guard: after a resolve with rimBounce=true, arming is refused for
+   * this long (extends shotCooldownSec) so a tip-in doesn't double-count or
+   * inherit the first attempt's stale state.
+   */
+  putbackWindowSec: 2.0,
+  /**
+   * KILL-SWITCHES for the depth-aware judgment mechanisms. All ship FALSE:
+   * the code lands fully tested but inert, and flips only after the labeled-
+   * clip benchmark passes (see the depth-aware research spec). The FSM reads
+   * these as constructor defaults — tests override per-instance.
+   */
+  useDepthRatioVeto: false,
+  useReappearance: false,
+  useViewBandRouting: false,
 } as const;
 
 export const FORM = {
@@ -285,3 +300,99 @@ export const COURT = {
 
 /** Exposed constant: default rim-width distance that classifies a shot as a 3. */
 export const DEFAULT_3PT_RIMWIDTHS = COURT.default3ptRimWidths;
+
+/**
+ * Official ball OUTER diameters by size, meters (FIBA circumference specs:
+ * size 7 749-780mm, size 6 ~724-737mm, size 5 ~690-710mm). The user picks
+ * their ball in Settings > Player; a mis-set size shifts the depth ratio by
+ * ~±10% — half the far-range discrimination signal — so this is load-bearing.
+ */
+export const BALL_SIZES_M: Record<7 | 6 | 5, number> = {
+  7: 0.243,
+  6: 0.23,
+  5: 0.22,
+};
+
+/**
+ * Depth-ratio parallax gate (src/core/depthRatioGate.ts): the size-based
+ * "is the ball at the rim's depth at the crossing instant" VETO. Focal length
+ * cancels in the ratio; only the ball-size setting + pixel measurements are
+ * needed. All thresholds are the POST-adversarial-verification numbers from
+ * the depth-aware research pass; they are analytically derived and must be
+ * re-fit on labeled clips before the flag flips on.
+ */
+export const DEPTH_GATE = {
+  /** Sigma multiplier for the veto rule. */
+  k: 2.5,
+  /** Residual motion-blur bias allowance AFTER the aspect filter, ln space. */
+  blurAllowanceLn: Math.log(1.05),
+  /** Ball radius measurement noise, px (1σ). */
+  sigmaBallRadiusPx: 1.0,
+  /** Locked rim width noise, px (1σ). */
+  sigmaRimWidthPx: 2.0,
+  /** Widened rim σ when the lock's box aspect looks contaminated. */
+  sigmaRimWidthContaminatedPx: 4.0,
+  /**
+   * Averaging noise divisor over N samples: systematic blur bias floors the
+   * reduction at ~0.72·√N (NOT √N — the errors are partially correlated).
+   */
+  avgNoiseDivisor: (n: number): number => Math.max(1, 0.72 * Math.sqrt(n)),
+  /** Pixel-size enablement floors (replace any metric max-distance rule —
+   *  framing-dependent; these self-select the verified-working regimes). */
+  minRimWidthPx: 40,
+  minBallDiaPx: 16,
+  /** Min surviving real samples in the pre-crossing average. */
+  minRealSamples: 3,
+  /** Max samples averaged (last N real detections before rim overlap). */
+  avgWindow: 5,
+  /** Blur rejection: box aspect deviation from round beyond this is dropped. */
+  blurAspectRejectFrac: 0.15,
+  /** Make-zone half-width: z = clamp(makeZoneScaleM / Z_est, lo, hi). */
+  makeZoneScaleM: 0.3,
+  makeZoneClampLo: 0.03,
+  makeZoneClampHi: 0.08,
+  /** f prior (px) used ONLY to shape the make zone, never in the ratio. */
+  focalPxDefault: 850,
+} as const;
+
+/**
+ * Gap-crossing reappearance corroborator (src/core/reappearance.ts): judge
+ * the shot through a detection dropout at the rim. Demoted by verification to
+ * a CORROBORATOR — it may upgrade an occluded crossing only when net or
+ * persistent cls agrees; it never mints a make alone.
+ */
+export const REAPPEAR = {
+  /** Min real pre-gap detections for a trustworthy parabola fit. */
+  minRealSamplesPreGap: 5,
+  /** Min vertical-fit R² before the cached arc is used. */
+  minArcR2y: 0.5,
+  /** Baseline max dropout the corroborator will bridge, seconds. */
+  maxGapSec: 1.0,
+  /** Extended window while net motion stays elevated (net-hang), seconds. */
+  maxGapNetHangSec: 2.0,
+  /** Trap hard-clears this long after the predicted crossing, seconds. */
+  ttlAfterPredictedCrossSec: 0.7,
+  /** Reappearance must sit within this of the arc's predicted y, px. */
+  yResidualMaxPx: 40,
+  /** Span test widening (net deflection alone is ~21px at 6m). */
+  spanWidenFrac: 0.15,
+  /** Post-gap samples that must be descending. */
+  vyDownSamples: 2,
+} as const;
+
+/**
+ * View-band routing (src/core/viewBand.ts): which mechanisms are valid from
+ * which camera placement, classified from rim-box aspect + IMU pitch (aspect
+ * alone cannot separate under-hoop from overhead). Boundaries expected to
+ * move ±0.2-0.5 from telemetry before the routing flag flips.
+ */
+export const VIEW = {
+  /** Aspect range where planeY geo + depth gate are PRIMARY (real side views). */
+  bandGeoPrimaryAspect: [2.5, 6.0] as readonly [number, number],
+  /** Below this aspect the view is under-hoop or overhead (pitch decides). */
+  bandUnderOverAspect: 1.5,
+  /** Above this aspect the geometry is degraded (warn + net/cls only). */
+  bandDegradedAspect: 6.5,
+  /** Pitch-up beyond this = under-hoop (vs overhead looking down). */
+  underHoopPitchDeg: 25,
+} as const;

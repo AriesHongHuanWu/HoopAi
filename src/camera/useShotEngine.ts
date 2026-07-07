@@ -587,10 +587,18 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
   // the detector so the frame worklet reads it fresh (never a stale closure).
   const formAnalysis = useSettings((s) => s.formAnalysis);
   const shootingHand = useSettings((s) => s.shootingHand);
+  const ballSize = useSettings((s) => s.ballSize);
   const boxedPoseSv = useSharedValue<ReturnType<typeof NitroModules.box> | null>(null);
   useEffect(() => {
     pipeline.setFormHand(shootingHand);
   }, [pipeline, shootingHand]);
+  useEffect(() => {
+    pipeline.setBallSize(ballSize);
+  }, [pipeline, ballSize]);
+  const depthVeto = useSettings((s) => s.depthVeto);
+  useEffect(() => {
+    pipeline.setDepthVeto(depthVeto);
+  }, [pipeline, depthVeto]);
   useEffect(() => {
     let alive = true;
     if (!formAnalysis) {

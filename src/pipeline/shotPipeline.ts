@@ -15,6 +15,7 @@ import { estimateShotValue } from '../core/court';
 import { FormAnalyzer, coachingTips } from '../core/formAnalysis';
 import { RimLock } from '../core/rimLock';
 import { ShotFsm } from '../core/shotFsm';
+import { classifyViewBand } from '../core/viewBand';
 import type {
   Box,
   Detection,
@@ -76,6 +77,11 @@ export class ShotPipeline {
   /** Pose-based form analyzer (lazy; only alive while pose frames arrive). */
   private form: FormAnalyzer | null = null;
   private formHand: ShootingHand = 'right';
+  /** Ball size (Settings > Player) — forwarded to the FSM's depth gate. */
+  private ballSize: 7 | 6 | 5 = 7;
+  /** Depth-ratio parallax veto flag (Settings, experimental). Applied when
+   *  the FSM is created at rim lock — i.e. per session. */
+  private depthVeto = false;
   private sawPoseThisShot = false;
   /** Latest pose ankle-midpoint (analysis px) — the pose-based shooter foot for
    *  2/3 estimation. Null until a pose with a visible ankle arrives. */
@@ -92,6 +98,17 @@ export class ShotPipeline {
   /** Shooting hand for form analysis (from Settings). */
   setFormHand(hand: ShootingHand): void {
     this.formHand = hand;
+  }
+
+  /** Ball size (from Settings) — the depth gate's metric ruler. */
+  setBallSize(size: 7 | 6 | 5): void {
+    this.ballSize = size;
+    this.fsm?.setBallSize(size);
+  }
+
+  /** Depth-ratio parallax veto (from Settings). Takes effect at rim lock. */
+  setDepthVeto(enabled: boolean): void {
+    this.depthVeto = enabled;
   }
 
   /** Manual rim override from the live tap-to-set-rim. */
@@ -249,8 +266,15 @@ export class ShotPipeline {
     if (this.fsm) {
       this.fsm.setRim(rim);
     } else {
-      this.fsm = new ShotFsm(rim, frame);
+      this.fsm = new ShotFsm(rim, frame, { useDepthRatioVeto: this.depthVeto });
+      this.fsm.setBallSize(this.ballSize);
     }
+    // Placement classification from the locked rim's aspect (IMU pitch not
+    // wired yet -> null; the classifier is conservative without it). Only the
+    // depth gate consumes the band today, so with the veto flag off this is
+    // pure telemetry.
+    const aspect = rim.box.height > 0 ? rim.box.width / rim.box.height : 1;
+    this.fsm.setViewBand(classifyViewBand(aspect, null).band);
     if (first) this.events.onRimLocked?.(rim);
   }
 }
