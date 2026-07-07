@@ -381,16 +381,23 @@ export async function insertShot(sessionId: number, shot: ResolvedShot): Promise
   });
 }
 
-/** One-tap correction: flip a persisted shot's outcome. */
+/**
+ * Correction write: set a persisted shot's outcome. `corrected` stamps or
+ * clears the user-edited flag — the default (true) is the one-tap/swipe
+ * correction; pass false when restoring the original detection (undo) or
+ * flushing an outcome that was never hand-edited (late insert sync).
+ */
 export async function updateShotOutcome(
   shotRowId: number,
   outcome: ShotOutcome,
+  corrected = true,
 ): Promise<void> {
   return safe('updateShotOutcome', undefined, async () => {
     const db = await getDb();
     await db.runAsync(
-      'UPDATE shots SET outcome = ?, corrected = 1 WHERE id = ?',
+      'UPDATE shots SET outcome = ?, corrected = ? WHERE id = ?',
       outcome,
+      corrected ? 1 : 0,
       shotRowId,
     );
   });

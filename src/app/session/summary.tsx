@@ -8,7 +8,7 @@
  * search param so the screen also works after a reload / deep link.
  */
 import { router, useLocalSearchParams } from 'expo-router';
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { StyleSheet, Text, View, type LayoutRectangle } from 'react-native';
 
 import { shareSessionCard } from '@/components/ShareCard';
@@ -18,7 +18,9 @@ import {
   persistSessionLabel,
   SessionRecap,
   SessionTitle,
+  UndoSnackbar,
   useSessionRecord,
+  useUndoableCorrection,
 } from '@/components/ShotList';
 import { CoachMarks, useCoachMarks, type CoachStep } from '@/components/coach/CoachMarks';
 import { Card, Chip, Eyebrow, PillButton, Row, Screen } from '@/components/ui';
@@ -81,10 +83,19 @@ export default function SessionSummaryScreen() {
     if (sessionId != null) persistSessionLabel(sessionId, next);
   };
 
-  const onCorrect = (shot: ResolvedShot, outcome: ShotOutcome) => {
-    if (storeMode) correctShot(shot.id, outcome);
-    else record.correct(shot, outcome);
-  };
+  // Corrections route through the mode-appropriate pathway (live store vs.
+  // persisted record), wrapped with the shared undo window. `corrected` is
+  // forwarded so undo can restore the pre-correction edited flag exactly.
+  const recordCorrect = record.correct;
+  const applyCorrection = useCallback(
+    (shot: ResolvedShot, outcome: ShotOutcome, corrected?: boolean) => {
+      if (storeMode) correctShot(shot.id, outcome, corrected);
+      else recordCorrect(shot, outcome, corrected);
+    },
+    [storeMode, correctShot, recordCorrect],
+  );
+  const undoable = useUndoableCorrection(applyCorrection);
+  const onCorrect = undoable.correct;
 
   const onCorrectValue = (shot: ResolvedShot, value: ShotValue) => {
     if (storeMode) correctShotValue(shot.id, value);
@@ -157,7 +168,7 @@ export default function SessionSummaryScreen() {
   const summarySteps: CoachStep[] = [
     {
       title: 'Fix a make, miss or 2/3',
-      text: "Tap any shot in the list below to correct it — make, miss, unsure, or 2-point vs. 3-point. Every correction you make trains sharper detection for next time.",
+      text: "Swipe a shot right to mark a make, left for a miss — or tap to correct it, including 2-point vs. 3-point. Every correction you make trains sharper detection for next time.",
     },
     {
       title: 'Watch the replay',
@@ -257,6 +268,7 @@ export default function SessionSummaryScreen() {
         </>
       )}
     </Screen>
+    <UndoSnackbar pending={undoable.pending} onUndo={undoable.undo} />
     {!loading && !empty && coach.visible && (
       <CoachMarks steps={coach.steps} onFinish={coach.finish} onSkip={coach.finish} />
     )}

@@ -192,9 +192,12 @@ export function Eyebrow({ children }: { children: string }) {
 export function Chip({
   label,
   tone = 'default',
+  compact = false,
 }: {
   label: string;
   tone?: 'default' | 'make' | 'miss' | 'accent' | 'unsure';
+  /** Micro-type, tighter-padding variant for dense sub-rows (evidence receipts). */
+  compact?: boolean;
 }) {
   const tones: Record<string, { bg: string; fg: string }> = {
     default: { bg: color.surfaceRaised, fg: color.textDim },
@@ -205,8 +208,10 @@ export function Chip({
   };
   const t = tones[tone]!;
   return (
-    <View style={[styles.chip, { backgroundColor: t.bg }]}>
-      <Text style={[styles.chipLabel, { color: t.fg }]}>{label}</Text>
+    <View style={[styles.chip, compact && styles.chipCompact, { backgroundColor: t.bg }]}>
+      <Text style={[compact ? styles.chipLabelCompact : styles.chipLabel, { color: t.fg }]}>
+        {label}
+      </Text>
     </View>
   );
 }
@@ -397,8 +402,15 @@ const styles = StyleSheet.create({
     paddingVertical: 5,
     alignSelf: 'flex-start',
   },
+  chipCompact: {
+    paddingHorizontal: space.sm,
+    paddingVertical: 2,
+  },
   chipLabel: {
     ...type.caption,
+  },
+  chipLabelCompact: {
+    ...type.micro,
   },
   errorTitle: {
     ...type.heading,

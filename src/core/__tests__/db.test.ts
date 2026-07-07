@@ -111,6 +111,36 @@ describe('query failures return fallbacks', () => {
   });
 });
 
+describe('updateShotOutcome', () => {
+  it('stamps corrected=1 by default (one-tap/swipe correction)', async () => {
+    const fake = fakeDatabase();
+    sqlite.openDatabaseAsync.mockResolvedValue(fake);
+
+    await db.updateShotOutcome(9, 'make');
+
+    expect(fake.runAsync).toHaveBeenCalledWith(
+      'UPDATE shots SET outcome = ?, corrected = ? WHERE id = ?',
+      'make',
+      1,
+      9,
+    );
+  });
+
+  it('clears the flag when restoring the original detection (undo)', async () => {
+    const fake = fakeDatabase();
+    sqlite.openDatabaseAsync.mockResolvedValue(fake);
+
+    await db.updateShotOutcome(9, 'miss', false);
+
+    expect(fake.runAsync).toHaveBeenCalledWith(
+      'UPDATE shots SET outcome = ?, corrected = ? WHERE id = ?',
+      'miss',
+      0,
+      9,
+    );
+  });
+});
+
 describe('shotFromRow', () => {
   const baseRow = {
     id: 10,
