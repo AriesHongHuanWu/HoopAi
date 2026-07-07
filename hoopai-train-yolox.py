@@ -80,12 +80,12 @@ ROBOFLOW_KEY  = "4wYE6hxRLYRBQWE7DEkz"
 # 40 epochs of YOLOX-Nano at FIXED 416 on P100 over the merged corpus is a far
 # safer fit for a single 8-12h session than the original 80 (which, combined
 # with multiscale-to-640, plausibly needed 15-30h).
-MAX_EPOCH     = 12            # 35 datasets x Tiny x 416 ~= 58min/epoch -> ~12 fits a
-                             # 12h session. CRITICAL: set to the ACHIEVABLE count so the
-                             # cosine LR fully decays (the 50-epoch run cut at 34 left LR
-                             # high = under-converged). Finetune-from-pretrained needs few.
-BATCH_SIZE    = 16            # Tiny (non-depthwise) is heavier than nano; 16 fits P100/T4 15-16GB at 416+fp16
-INPUT_SIZE    = (416, 416)
+MAX_EPOCH     = 7             # SMALL-BALL recipe: multiscale 416-640 (~1.38x/epoch) +
+                             # small-ball oversampling (~+10%) => ~90min/epoch on P100.
+                             # 7 epochs (~10.5h) + ~1h setup fits the 12h wall with the
+                             # cosine LR FULLY decayed (the 50-epoch-cut-at-34 lesson).
+BATCH_SIZE    = 16            # Tiny @640 multiscale fp16 fits P100 16GB (~ bs38 @416 equiv)
+INPUT_SIZE    = (640, 640)    # training base; random_size spans 416-640 (both exports)
 
 # Unified target classes.  index -> name.  COCO category ids are index+1 (1..4).
 TARGET_NAMES  = ["ball", "rim", "ball_in_basket", "person"]
@@ -357,6 +357,63 @@ def _read_wh(path):
     return 0, 0
 
 
+def _oversample_small_balls(split_doc):
+    """SMALL-BALL OVERSAMPLING (train split only): duplicate every image that
+    contains a SMALL ball annotation -- relative bbox area < 0.25% of the image
+    (~ COCO 'small' 32x32 on a 640 square; a 10-20px real-court ball qualifies)
+    -- so the loss sees far more tiny-ball examples per epoch. Research: +3-5%
+    AP_small for ~+8-10% epoch time. Duplicates reference the SAME image file
+    (no disk copy) under fresh image/ann ids; YOLOX's COCODataset handles that
+    fine. Capped at +30% images so a small-ball-heavy corpus can't explode."""
+    imgs = split_doc["images"]
+    anns = split_doc["annotations"]
+    by_img = {}
+    for a in anns:
+        by_img.setdefault(a["image_id"], []).append(a)
+    dims = {im["id"]: im for im in imgs}
+    cap = int(len(imgs) * 0.30)
+    next_img = max((im["id"] for im in imgs), default=0) + 1
+    next_ann = max((a["id"] for a in anns), default=0) + 1
+    new_imgs = []
+    new_anns = []
+    added = 0
+    for iid, ilist in by_img.items():
+        if added >= cap:
+            break
+        im = dims.get(iid)
+        if not im:
+            continue
+        w = im.get("width") or 0
+        h = im.get("height") or 0
+        if w <= 0 or h <= 0:
+            continue
+        img_area = float(w * h)
+        has_small_ball = False
+        for a in ilist:
+            # category_id 1 == 'ball' (TARGET_NAMES index 0 + 1)
+            if a["category_id"] == 1 and (a.get("area") or 0) > 0 \
+                    and a["area"] / img_area < 0.0025:
+                has_small_ball = True
+                break
+        if not has_small_ball:
+            continue
+        dup = dict(im)
+        dup["id"] = next_img
+        new_imgs.append(dup)
+        for a in ilist:
+            na = dict(a)
+            na["id"] = next_ann
+            na["image_id"] = next_img
+            new_anns.append(na)
+            next_ann += 1
+        next_img += 1
+        added += 1
+    imgs.extend(new_imgs)
+    anns.extend(new_anns)
+    print("  small-ball oversample: +%d duplicated images (cap %d)" % (added, cap),
+          flush=True)
+
+
 def merge_datasets(downloaded):
     """Merge all downloaded COCO datasets into one YOLOX/COCO dataset at
     COCO_DIR with train2017/, val2017/, annotations/instances_{train,val}2017.json.
@@ -557,6 +614,10 @@ def merge_datasets(downloaded):
         copied["val"] = len(val_imgs)
         copied["train"] = len(merged["train"]["images"])
 
+    # Small-ball oversampling on the TRAIN split (never val -- eval must stay
+    # an honest, un-inflated distribution).
+    _oversample_small_balls(merged["train"])
+
     # write the two annotation files
     for target, ann_name in (("train", TRAIN_ANN), ("val", VAL_ANN)):
         doc = {
@@ -664,14 +725,19 @@ class Exp(MyExp):
         #      capacity of nano, the key upgrade for the small/fast BALL ----
         self.depth = 0.33
         self.width = 0.375
-        self.input_size = (416, 416)
-        # PIN resolution to 416 (13*32=416). Nano default is (10, 20) => random
-        # 320-640px multiscale, which blows up per-iter cost/memory on P100 and
-        # breaks the batch-fit + wall-clock budget. Fixed 416 keeps both honest.
-        self.random_size = (13, 13)
-        self.mosaic_scale = (0.5, 1.5)
-        self.test_size = (416, 416)
-        self.mosaic_prob = 0.5
+        # SMALL-BALL RECIPE: train at the 640 deployment resolution with
+        # MULTISCALE 416-640 (random_size 13..20 x32) so BOTH shipped exports
+        # (416 Speed / 640 Quality) are in-distribution. Resolution alignment
+        # beats absolute resolution for small objects, and 640 keeps a 10-15px
+        # ball above the stride-8 detectability floor.
+        self.input_size = (640, 640)
+        self.random_size = (13, 20)
+        # Widened mosaic (0.1,2.0) + prob 0.7 aggressively SYNTHESIZES small
+        # ball instances (Megvii ships (0.1,2.0) on larger models; widening is
+        # the documented small-object lever). Mixup stays off (Tiny-class).
+        self.mosaic_scale = (0.1, 2.0)
+        self.test_size = (640, 640)
+        self.mosaic_prob = 0.7
         self.enable_mixup = False
 
         # ---- dataset ----
@@ -687,8 +753,8 @@ class Exp(MyExp):
         # guaranteeing an evaluated checkpoint well before any Kaggle cutoff.
         self.eval_interval = 1
         self.print_interval = 20
-        self.warmup_epochs = 2
-        self.no_aug_epochs = 3  # short no-aug fine-tune tail (max_epoch is only 12)
+        self.warmup_epochs = 1  # finetuning from pretrained: short ramp
+        self.no_aug_epochs = 2  # no-mosaic tail (max_epoch is only 7)
         self.save_history_ckpt = False
 
         # persist checkpoints to /kaggle/working so a cutoff still yields them
@@ -902,44 +968,58 @@ def save_and_export():
     except Exception as e:
         print("  !! eval skipped: %r" % e, flush=True)
 
-    # 5c. Export ONNX -- best-effort. export_onnx.py has NO -o flag.
-    onnx_out = os.path.join(WORK, "hoopai-yolox.onnx")
-    onnx_ok = False
-    try:
-        export_py = os.path.join(YOLOX_DIR, "tools", "export_onnx.py")
-        sh("python %s -f %s -c %s --output-name %s --opset 12"
-           % (export_py, EXP_FILE, pth_out, onnx_out),
-           check=False, env=env)
-        onnx_ok = os.path.isfile(onnx_out) and os.path.getsize(onnx_out) > 1000
-        if onnx_ok:
-            print("SAVED %s" % onnx_out, flush=True)
-    except Exception as e:
-        print("  !! onnx export failed: %r" % e, flush=True)
+    # 5c+5d. Export ONNX -> tflite at BOTH deployment sizes (416 Speed / 640
+    # Quality -- the app ships both and picks by perfMode). The training Exp is
+    # 640 multiscale; for each export size we emit a size-patched copy of the
+    # Exp so export_onnx.py builds the graph at that input. Toolchain installed
+    # LAZILY (never in setup_env) so its heavy deps can't destabilise training's
+    # numpy/opencv/torch stack. Everything best-effort: a conversion failure
+    # never loses the .pth.
+    export_py = os.path.join(YOLOX_DIR, "tools", "export_onnx.py")
+    exported = []  # (size, onnx_path)
+    for size in (640, 416):
+        exp_exp = os.path.join(TMP, "hoop_exp_export_%d.py" % size)
+        try:
+            with open(EXP_FILE, "r", encoding="utf-8") as f:
+                src = f.read()
+            src = src.replace("self.input_size = (640, 640)",
+                              "self.input_size = (%d, %d)" % (size, size))
+            src = src.replace("self.test_size = (640, 640)",
+                              "self.test_size = (%d, %d)" % (size, size))
+            with open(exp_exp, "w", encoding="utf-8") as f:
+                f.write(src)
+            onnx_out = os.path.join(WORK, "hoopai-yolox-%d.onnx" % size)
+            sh("python %s -f %s -c %s --output-name %s --opset 12"
+               % (export_py, exp_exp, pth_out, onnx_out), check=False, env=env)
+            if os.path.isfile(onnx_out) and os.path.getsize(onnx_out) > 1000:
+                exported.append((size, onnx_out))
+                print("SAVED %s" % onnx_out, flush=True)
+        except Exception as e:
+            print("  !! onnx export @%d failed: %r" % (size, e), flush=True)
 
-    # 5d. ONNX -> tflite via onnx2tf -- strictly best-effort. Install the toolchain
-    # LAZILY here (never during setup_env) so its heavy deps can't destabilise
-    # training's numpy/opencv/torch stack. A failure never loses .pth/.onnx.
-    if onnx_ok:
+    tflites = []
+    if exported:
         try:
             print("  installing onnx2tf toolchain (lazy)...", flush=True)
             sh("pip install -q onnx2tf onnxsim onnx_graphsurgeon sng4onnx "
                "'tensorflow-cpu' 'tf-keras' || true", check=False)
-            tf_dir = os.path.join(TMP, "onnx2tf_out")
-            shutil.rmtree(tf_dir, ignore_errors=True)
-            rc = sh("onnx2tf -i %s -o %s -osd" % (onnx_out, tf_dir),
-                    check=False, env=env)
-            # onnx2tf writes *_float32.tflite (and int variants) into tf_dir
-            cands = sorted(
-                glob.glob(os.path.join(tf_dir, "*float32.tflite")) +
-                glob.glob(os.path.join(tf_dir, "*.tflite"))
-            )
-            if cands:
-                tfl_out = os.path.join(WORK, "hoopai-yolox.tflite")
-                shutil.copyfile(cands[0], tfl_out)
-                print("SAVED %s (from %s)" % (tfl_out, cands[0]), flush=True)
-            else:
-                print("  !! onnx2tf produced no .tflite (rc=%d) -- skipping" % rc,
-                      flush=True)
+            for size, onnx_out in exported:
+                tf_dir = os.path.join(TMP, "onnx2tf_out_%d" % size)
+                shutil.rmtree(tf_dir, ignore_errors=True)
+                rc = sh("onnx2tf -i %s -o %s -osd" % (onnx_out, tf_dir),
+                        check=False, env=env)
+                # onnx2tf writes *_float32.tflite (and int variants) into tf_dir
+                cands = sorted(
+                    glob.glob(os.path.join(tf_dir, "*float32.tflite")) +
+                    glob.glob(os.path.join(tf_dir, "*.tflite")))
+                if cands:
+                    tfl_out = os.path.join(WORK, "hoopai-yolox-%d.tflite" % size)
+                    shutil.copyfile(cands[0], tfl_out)
+                    tflites.append(os.path.basename(tfl_out))
+                    print("SAVED %s (from %s)" % (tfl_out, cands[0]), flush=True)
+                else:
+                    print("  !! onnx2tf @%d produced no .tflite (rc=%d)"
+                          % (size, rc), flush=True)
         except Exception as e:
             print("  !! tflite conversion failed (kept .pth/.onnx): %r" % e,
                   flush=True)
@@ -948,17 +1028,19 @@ def save_and_export():
 
     # 5e. Emit a small metadata file for the app.
     try:
-        tfl = os.path.join(WORK, "hoopai-yolox.tflite")
         meta = {
             "classes": TARGET_NAMES,
             "num_classes": len(TARGET_NAMES),
-            "input_size": list(INPUT_SIZE),
+            "train_input_size": list(INPUT_SIZE),
+            "multiscale": [416, 640],
             "arch": "yolox_tiny",
+            "recipe": "small-ball: multiscale 416-640, mosaic (0.1,2.0) p0.7, "
+                      "small-ball oversample (<0.25% rel-area, cap +30%), "
+                      "7 epochs finetune",
             "artifacts": {
                 "pth": os.path.basename(pth_out),
-                "onnx": os.path.basename(onnx_out) if onnx_ok else None,
-                "tflite": ("hoopai-yolox.tflite"
-                           if os.path.isfile(tfl) else None),
+                "onnx": [os.path.basename(p) for _, p in exported],
+                "tflite": tflites,
             },
         }
         with open(os.path.join(WORK, "hoopai-yolox.meta.json"),
