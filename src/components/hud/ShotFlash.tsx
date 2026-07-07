@@ -2,14 +2,17 @@
  * ShotFlash — the full-screen result celebration for the live HUD.
  *
  * make   → a Skia "splash" burst (expanding ring + radiating spokes) blooms
- *          behind a scoreboard "SPLASH", scale-punched in on a spring; the shot's
- *          point value rides along as a gold "3" ring for downtown makes; a
- *          flame "🔥 ×N" joins at streak ≥ 3.
+ *          behind a scoreboard "SPLASH", scale-punched in on a stiff spring
+ *          (fast in, gentle settle); the shot's point value rides along as a
+ *          gold "3" ring for downtown makes; a flame "🔥 ×N" joins at streak ≥ 3.
  * miss   → a quiet neutral "MISS" (never punishing — no wash, no shake).
- * unsure → a quiet "UNSURE" in chalk yellow (fix later in the summary).
+ * unsure → the quietest treatment: small chalk-yellow "UNSURE" with a faint
+ *          "saved for review" line, eased in gently (fix later in the summary).
  *
  * The burst runs entirely on Skia/Reanimated shared values (no per-frame React
- * state). Auto-dismisses after motion.celebrate + fade headroom.
+ * state) and is skipped when the system requests reduced motion. Everything is
+ * pointerEvents="none" — the flash can never block a tap. Auto-dismisses after
+ * motion.celebrate + fade headroom.
  */
 import React, { useEffect, useState } from 'react';
 import { AccessibilityInfo, StyleSheet, Text, View } from 'react-native';
@@ -17,8 +20,10 @@ import Animated, {
   Easing,
   FadeIn,
   FadeOut,
+  ReduceMotion,
   ZoomIn,
   useDerivedValue,
+  useReducedMotion,
   useSharedValue,
   withTiming,
 } from 'react-native-reanimated';
@@ -37,6 +42,10 @@ import { useSession } from '../../state/sessionStore';
 
 const FLASH_MS = motion.celebrate + 100;
 const BURST_SPOKES = 12;
+
+/** Fast-in / gentle-out: expo-style deceleration so the burst leaps off the
+ * rim in the first frames and settles softly instead of easing in lazily. */
+const BURST_EASING = Easing.bezier(0.16, 1, 0.3, 1);
 
 /** RN 0.86 dropped StyleSheet.absoluteFillObject — local equivalent. */
 const absoluteFill = {
@@ -60,7 +69,7 @@ function MakeBurst({ is3 }: { is3: boolean }) {
     t.value = 0;
     t.value = withTiming(1, {
       duration: motion.celebrate,
-      easing: Easing.out(Easing.cubic),
+      easing: BURST_EASING,
     });
   }, [t]);
 
@@ -158,6 +167,7 @@ function announcement(shot: ResolvedShot, streak: number): string {
 export function ShotFlash() {
   const lastShot = useSession((s) => s.lastShot);
   const streak = useSession((s) => s.stats.currentStreak);
+  const reducedMotion = useReducedMotion();
   const [shot, setShot] = useState<ResolvedShot | null>(null);
 
   useEffect(() => {
@@ -184,17 +194,24 @@ export function ShotFlash() {
       >
         <Animated.View
           key={`wash-${shot.id}`}
-          entering={FadeIn.duration(motion.instant)}
-          exiting={FadeOut.duration(motion.standard)}
+          entering={FadeIn.duration(motion.instant).reduceMotion(ReduceMotion.System)}
+          exiting={FadeOut.duration(motion.standard).reduceMotion(ReduceMotion.System)}
           style={[styles.fill, is3 ? styles.downtownWash : styles.makeWash]}
         />
-        <View style={styles.fill} pointerEvents="none">
-          <MakeBurst key={`burst-${shot.id}`} is3={is3} />
-        </View>
+        {/* Skia burst is pure motion — drop it entirely under reduced motion. */}
+        {!reducedMotion && (
+          <View style={styles.fill} pointerEvents="none">
+            <MakeBurst key={`burst-${shot.id}`} is3={is3} />
+          </View>
+        )}
         <Animated.View
           key={`splash-${shot.id}`}
-          entering={ZoomIn.springify().damping(11).stiffness(180)}
-          exiting={FadeOut.duration(motion.standard)}
+          entering={ZoomIn.springify()
+            .damping(14)
+            .stiffness(320)
+            .mass(0.8)
+            .reduceMotion(ReduceMotion.System)}
+          exiting={FadeOut.duration(motion.standard).reduceMotion(ReduceMotion.System)}
           style={styles.center}
         >
           <View style={styles.splashRow}>
@@ -219,13 +236,22 @@ export function ShotFlash() {
     >
       <Animated.View
         key={`${shot.outcome}-${shot.id}`}
-        entering={FadeIn.duration(motion.quick)}
-        exiting={FadeOut.duration(motion.standard)}
+        entering={FadeIn.duration(isMiss ? motion.quick : motion.standard).reduceMotion(
+          ReduceMotion.System,
+        )}
+        exiting={FadeOut.duration(motion.standard).reduceMotion(ReduceMotion.System)}
         style={styles.center}
       >
-        <Text style={[styles.quiet, !isMiss && styles.unsure]}>
-          {isMiss ? 'MISS' : 'UNSURE'}
-        </Text>
+        {isMiss ? (
+          <Text style={styles.quiet}>MISS</Text>
+        ) : (
+          // Unsure is deliberately the quietest state: it's a "we'll sort it
+          // out later", not a verdict — smaller type, no wash, soft fade.
+          <View style={styles.unsureWrap}>
+            <Text style={styles.unsureTitle}>UNSURE</Text>
+            <Text style={styles.unsureSub}>SAVED FOR REVIEW</Text>
+          </View>
+        )}
       </Animated.View>
     </View>
   );
@@ -270,8 +296,21 @@ const styles = StyleSheet.create({
     ...type.statMedium,
     color: color.textDim,
   },
-  unsure: {
-    color: color.unsure,
+  unsureWrap: {
+    alignItems: 'center',
+  },
+  unsureTitle: {
+    ...type.statMedium,
+    fontSize: 24,
+    lineHeight: 26,
+    color: 'rgba(232, 184, 79, 0.9)',
+    letterSpacing: 1,
+  },
+  unsureSub: {
+    ...type.micro,
+    color: color.textFaint,
+    letterSpacing: 1.2,
+    marginTop: space.xs,
   },
   badge: {
     width: 52,

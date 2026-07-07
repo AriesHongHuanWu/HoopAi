@@ -2,24 +2,41 @@
  * StatStrip — the glanceable scoreboard on the live HUD.
  *
  * Broadcast layout on frosted glass:
- *   • a lead POINTS panel (huge scoreboard numeral),
- *   • FG% and the current streak (streak goes hot ≥ 3),
- *   • a compact 2PT / 3PT split line, the 3s inked in downtown gold.
+ *   • collapsed: one scoreline — scoreboard numeral for points, dot-separated
+ *     made/FG% figures on a shared baseline, flame pill when the streak is hot;
+ *   • expanded: a lead POINTS panel (huge scoreboard numeral), an aligned
+ *     Made | FG% grid, the current streak (goes hot ≥ 3), and a compact
+ *     2PT / 3PT split line, the 3s inked in downtown gold.
  *
- * Subscribes to the session store with narrow selectors so it only re-renders
- * when a shot resolves — the Skia overlay handles everything per-frame.
+ * Expand/collapse cross-fades and re-flows via Reanimated layout transitions
+ * (system reduced-motion respected). Subscribes to the session store with
+ * narrow selectors so it only re-renders when a shot resolves — the Skia
+ * overlay handles everything per-frame.
  */
 import { Ionicons } from '@expo/vector-icons';
 import React, { useState } from 'react';
 import { Pressable, StyleSheet, Text, View, type StyleProp, type ViewStyle } from 'react-native';
+import Animated, {
+  FadeIn,
+  FadeInDown,
+  LinearTransition,
+  ReduceMotion,
+} from 'react-native-reanimated';
 
-import { color, space, type } from '../../constants/tokens';
+import { color, motion, radius, space, type } from '../../constants/tokens';
 import { useSession } from '../../state/sessionStore';
 import { Row, StatNumber } from '../ui';
 import { HudChip } from './HudChip';
 
 function pct(makes: number, attempts: number): string {
   return attempts > 0 ? `${Math.round((makes / attempts) * 100)}` : '—';
+}
+
+const reflow = LinearTransition.duration(motion.standard).reduceMotion(ReduceMotion.System);
+
+/** Middle dot separator — quieter than a hairline, keeps the scoreline one phrase. */
+function DotSep() {
+  return <Text style={styles.dotSep}>·</Text>;
 }
 
 export function StatStrip({
@@ -52,90 +69,117 @@ export function StatStrip({
   // MINIMAL BY DEFAULT: the court is the star, not the scoreboard. One tap
   // toggles between a single glanceable line and the full broadcast cards.
   const [expanded, setExpanded] = useState(false);
-  if (!expanded) {
-    return (
-      <Pressable
-        accessible
-        accessibilityRole="button"
-        accessibilityLabel={a11y}
-        accessibilityHint="Expands the full scoreboard"
-        onPress={() => setExpanded(true)}
-        style={style}
-      >
-        <HudChip deep style={styles.miniChip}>
-          <Row style={styles.miniRow} gap={space.sm}>
-            <Text style={styles.miniPoints}>{points}</Text>
-            <Text style={styles.miniUnit}>PTS</Text>
-            <View style={styles.divider} />
-            <Text style={styles.miniStat}>
-              {makes}/{attempts}
-            </Text>
-            <View style={styles.divider} />
-            <Text style={styles.miniStat}>{pct(makes, attempts)}%</Text>
-            {hot && <Text style={styles.miniStreak}>🔥{streak}</Text>}
-            <Ionicons name="chevron-down" size={14} color={color.textFaint} />
-          </Row>
-        </HudChip>
-      </Pressable>
-    );
-  }
 
   return (
     <Pressable
       accessible
       accessibilityRole="button"
       accessibilityLabel={a11y}
-      accessibilityHint="Collapses to the compact scoreline"
-      onPress={() => setExpanded(false)}
+      accessibilityHint={expanded ? 'Collapses to the compact scoreline' : 'Expands the full scoreboard'}
+      onPress={() => setExpanded((e) => !e)}
       style={style}
     >
-      <Row style={styles.strip} gap={space.sm}>
-        <HudChip deep style={[styles.pointsChip, compact && styles.pointsChipCompact]}>
-          <StatNumber value={`${points}`} label="Points" size={compact ? 'medium' : 'large'} />
-        </HudChip>
-        <View style={styles.sideCol}>
-          <HudChip style={[styles.sideChip, compact && styles.sideChipCompact]}>
-            <Row style={styles.sideRow}>
-              <StatNumber value={`${makes}/${attempts}`} label="Made" size="medium" />
-              <View style={styles.divider} />
-              <StatNumber value={pct(makes, attempts)} label="FG%" size="medium" />
-            </Row>
-          </HudChip>
-          <HudChip
-            style={[styles.sideChip, compact && styles.sideChipCompact]}
-            tone={hot ? 'accent' : 'default'}
+      <Animated.View layout={reflow}>
+        {!expanded ? (
+          <Animated.View
+            key="mini"
+            entering={FadeIn.duration(motion.quick).reduceMotion(ReduceMotion.System)}
           >
-            <StatNumber
-              value={hot ? `🔥 ${streak}` : `${streak}`}
-              label="Streak"
-              size="medium"
-              tint={hot ? color.accent : undefined}
-            />
-          </HudChip>
-        </View>
-      </Row>
+            <HudChip deep style={styles.miniChip}>
+              {/* Shared text baseline: the 32pt numeral and 15pt figures sit on
+                  one line instead of floating at their own vertical centers. */}
+              <Row style={styles.miniRow} gap={space.sm}>
+                <Text style={styles.miniPoints}>{points}</Text>
+                <Text style={styles.miniUnit}>PTS</Text>
+                <DotSep />
+                <Text style={styles.miniStat}>
+                  {makes}/{attempts}
+                </Text>
+                <DotSep />
+                <Text style={styles.miniStat}>
+                  {pct(makes, attempts)}
+                  <Text style={styles.miniStatUnit}>%</Text>
+                </Text>
+                {hot && (
+                  <View style={styles.flamePill}>
+                    <Text style={styles.flameText}>{`🔥${streak}`}</Text>
+                  </View>
+                )}
+                <Ionicons
+                  name="chevron-down"
+                  size={14}
+                  color={color.textFaint}
+                  style={styles.chevron}
+                />
+              </Row>
+            </HudChip>
+          </Animated.View>
+        ) : (
+          <Animated.View
+            key="full"
+            entering={FadeInDown.duration(motion.quick).reduceMotion(ReduceMotion.System)}
+          >
+            <Row style={styles.strip} gap={space.sm}>
+              <HudChip deep style={[styles.pointsChip, compact && styles.pointsChipCompact]}>
+                <StatNumber value={`${points}`} label="Points" size={compact ? 'medium' : 'large'} />
+              </HudChip>
+              <View style={styles.sideCol}>
+                <HudChip style={[styles.sideChip, compact && styles.sideChipCompact]}>
+                  {/* Equal-flex columns so Made | FG% land on a real grid. */}
+                  <Row style={styles.sideRow}>
+                    <StatNumber
+                      value={`${makes}/${attempts}`}
+                      label="Made"
+                      size="medium"
+                      style={styles.sideStat}
+                    />
+                    <View style={styles.divider} />
+                    <StatNumber
+                      value={pct(makes, attempts)}
+                      label="FG%"
+                      size="medium"
+                      style={styles.sideStat}
+                    />
+                  </Row>
+                </HudChip>
+                <HudChip
+                  style={[styles.sideChip, compact && styles.sideChipCompact]}
+                  tone={hot ? 'accent' : 'default'}
+                >
+                  <StatNumber
+                    value={hot ? `🔥 ${streak}` : `${streak}`}
+                    label="Streak"
+                    size="medium"
+                    tint={hot ? color.accent : undefined}
+                  />
+                </HudChip>
+              </View>
+            </Row>
 
-      {/* 2PT / 3PT split — downtown gold on the threes */}
-      <Row style={styles.splitRow} gap={space.sm}>
-        <HudChip style={styles.splitChip}>
-          <Row style={styles.splitInner}>
-            <Text style={styles.splitLabel}>2PT</Text>
-            <Text style={styles.splitValue}>
-              {twoPtMakes}
-              <Text style={styles.splitDim}>/{twoPtAttempts}</Text>
-            </Text>
-          </Row>
-        </HudChip>
-        <HudChip style={styles.splitChip} tone="downtown">
-          <Row style={styles.splitInner}>
-            <Text style={[styles.splitLabel, styles.splitLabelGold]}>3PT</Text>
-            <Text style={[styles.splitValue, styles.splitValueGold]}>
-              {threePtMakes}
-              <Text style={styles.splitDimGold}>/{threePtAttempts}</Text>
-            </Text>
-          </Row>
-        </HudChip>
-      </Row>
+            {/* 2PT / 3PT split — downtown gold on the threes */}
+            <Row style={styles.splitRow} gap={space.sm}>
+              <HudChip style={styles.splitChip}>
+                <Row style={styles.splitInner}>
+                  <Text style={styles.splitLabel}>2PT</Text>
+                  <Text style={styles.splitValue}>
+                    {twoPtMakes}
+                    <Text style={styles.splitDim}>/{twoPtAttempts}</Text>
+                  </Text>
+                </Row>
+              </HudChip>
+              <HudChip style={styles.splitChip} tone="downtown">
+                <Row style={styles.splitInner}>
+                  <Text style={[styles.splitLabel, styles.splitLabelGold]}>3PT</Text>
+                  <Text style={[styles.splitValue, styles.splitValueGold]}>
+                    {threePtMakes}
+                    <Text style={styles.splitDimGold}>/{threePtAttempts}</Text>
+                  </Text>
+                </Row>
+              </HudChip>
+            </Row>
+          </Animated.View>
+        )}
+      </Animated.View>
     </Pressable>
   );
 }
@@ -147,7 +191,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: space.md,
   },
   miniRow: {
-    alignItems: 'center',
+    alignItems: 'baseline',
   },
   miniPoints: {
     ...type.statMedium,
@@ -157,16 +201,34 @@ const styles = StyleSheet.create({
   miniUnit: {
     ...type.micro,
     color: color.textFaint,
-    marginLeft: -2,
+    marginLeft: -space.xs,
+  },
+  dotSep: {
+    ...type.bodyMedium,
+    color: color.textFaint,
   },
   miniStat: {
     ...type.bodyMedium,
     color: color.textDim,
     fontVariant: ['tabular-nums'],
   },
-  miniStreak: {
-    ...type.bodyMedium,
+  miniStatUnit: {
+    color: color.textFaint,
+  },
+  flamePill: {
+    alignSelf: 'center',
+    backgroundColor: color.accentTint,
+    borderRadius: radius.pill,
+    paddingHorizontal: space.sm,
+    paddingVertical: 2,
+  },
+  flameText: {
+    ...type.caption,
     color: color.accent,
+    fontVariant: ['tabular-nums'],
+  },
+  chevron: {
+    alignSelf: 'center',
   },
   strip: {
     justifyContent: 'center',
@@ -190,8 +252,12 @@ const styles = StyleSheet.create({
     paddingVertical: space.xs,
   },
   sideRow: {
+    alignSelf: 'stretch',
     justifyContent: 'center',
-    gap: space.md,
+    gap: space.sm,
+  },
+  sideStat: {
+    flex: 1,
   },
   divider: {
     width: StyleSheet.hairlineWidth,
@@ -209,6 +275,7 @@ const styles = StyleSheet.create({
   },
   splitInner: {
     justifyContent: 'space-between',
+    alignItems: 'baseline',
     alignSelf: 'stretch',
     gap: space.sm,
   },
