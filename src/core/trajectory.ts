@@ -300,6 +300,55 @@ export function apexPoint(fit: ArcFit): Point | null {
 }
 
 /**
+ * Retro-fill a detection gap using BOTH sides of it ("前後幀" smoothing).
+ *
+ * During a dropout the tracker coasts on constant-velocity Kalman predictions
+ * — a straight line that visibly kinks away from the real flight and degrades
+ * the crossing geometry. Once real detections exist on BOTH sides of the gap,
+ * physics says the truth in between: re-fit the parabola over the REAL
+ * samples only, then rewrite every predicted sample's position to lie on that
+ * two-sided arc. Call after appending a real sample to a live trajectory.
+ *
+ * Mutates `samples` in place (positions of predicted samples only; flags and
+ * timestamps untouched). No-ops unless there are ≥ MIN_FIT_SAMPLES real
+ * samples, at least one predicted sample sandwiched between reals, and the
+ * two-sided fit is parabolic (ya > 0) with decent quality (r²y ≥ 0.5).
+ * Returns true when a back-fill happened (for tests/diagnostics).
+ */
+export function backfillPredictedGap(samples: BallSample[]): boolean {
+  const n = samples.length;
+  if (n < 3 || samples[n - 1]!.predicted) return false;
+  // Most recent predicted run with REAL samples on both sides. (The FSM calls
+  // this on every real push, so normally the run sits right before the newest
+  // sample — but any interior run qualifies.)
+  let hi = -1; // last predicted index of the run
+  for (let i = n - 2; i >= 1; i--) {
+    if (samples[i]!.predicted) {
+      hi = i;
+      break;
+    }
+  }
+  if (hi < 0) return false;
+  let lo = hi;
+  while (lo - 1 >= 1 && samples[lo - 1]!.predicted) lo--;
+  if (samples[lo - 1]!.predicted) return false; // run touches the buffer start
+
+  const reals = samples.filter((s) => !s.predicted);
+  if (reals.length < MIN_FIT_SAMPLES) return false;
+  const fit = fitArc(reals);
+  if (!fit || fit.ya <= 0 || fit.r2y < 0.5) return false;
+
+  for (let i = lo; i <= hi; i++) {
+    const s = samples[i]!;
+    const p = evalArc(fit, s.t);
+    if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) return false;
+    s.cx = p.x;
+    s.cy = p.y;
+  }
+  return true;
+}
+
+/**
  * PREDICTED landing: where the fitted arc will descend through `planeY`,
  * extrapolated into the FUTURE — the "where is this ball coming down" marker,
  * available mid-flight long before the ball actually gets there.

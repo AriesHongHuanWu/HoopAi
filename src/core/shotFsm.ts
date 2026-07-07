@@ -28,6 +28,7 @@ import { DETECTION, SHOT_FSM } from './config';
 import { depthRatioGate, type BallSizeSetting, type ViewBandName } from './depthRatioGate';
 import { boxesIntersect, elevationAngleDeg, interpolateXAtY } from './geometry';
 import { selectDepthSamples } from './sampleQuality';
+import { backfillPredictedGap } from './trajectory';
 import type {
   BallSample,
   Box,
@@ -212,6 +213,11 @@ export class ShotFsm {
       // could otherwise draw a very long, messy comet. Keep only the most recent
       // samples (the visible arc); the oldest drops off the tail.
       if (this.trajectory.length > MAX_TRAJ_SAMPLES) this.trajectory.shift();
+      // "前後幀" gap smoothing: the ball just REAPPEARED after a dropout —
+      // rewrite the straight-line Kalman coast between the two real sides with
+      // the physics-true two-sided parabola. Improves the drawn comet AND the
+      // crossing geometry the make/miss call is built on.
+      if (!ball.predicted) backfillPredictedGap(this.trajectory);
       this.lastBallT = t;
       if (!this.touchedRim && this.touchesRimRegion(ball)) {
         this.touchedRim = true;

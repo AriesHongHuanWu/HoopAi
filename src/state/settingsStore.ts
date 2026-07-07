@@ -188,6 +188,13 @@ export interface SettingsState {
    */
   depthVeto: boolean;
   /**
+   * Metric 2/3 estimation (experimental): pinhole geometry off the rim's real
+   * size (0.45m) + height (3.05m) computes the shooter's TRUE distance in
+   * meters instead of the perspective-fudged rim-widths heuristic. Falls back
+   * to the heuristic whenever the scene can't support a confident answer.
+   */
+  metric23: boolean;
+  /**
    * Run the pose model for shooting-form analysis + coaching. Default off — it
    * runs a second model per frame, best on recent phones. See formAnalysis.ts.
    */
@@ -243,6 +250,7 @@ export const useSettings = create<SettingsState>()(
       debugMode: false,
       roiZoom: true,
       depthVeto: false,
+      metric23: false,
       formAnalysis: false,
       tutorialSeen: TUTORIAL_SEEN_DEFAULT,
       dailyGoalMakes: 0,

@@ -14,7 +14,8 @@ import { BallTracker } from '../core/ballTracker';
 import { estimateShotValue } from '../core/court';
 import { FormAnalyzer, coachingTips } from '../core/formAnalysis';
 import { RimLock } from '../core/rimLock';
-import { fitArc, predictLanding } from '../core/trajectory';
+import { estimateShotValueMetric } from '../core/courtGeometric';
+import { evalArc, fitArc, predictLanding } from '../core/trajectory';
 import { ShotFsm } from '../core/shotFsm';
 import { classifyViewBand } from '../core/viewBand';
 import type {
@@ -73,6 +74,13 @@ export interface PipelineFrameState {
    * Null outside SHOT_LIVE or before the fit is trustworthy.
    */
   predictedLanding: { x: number; y: number; inSpan: boolean } | null;
+  /**
+   * Sampled FUTURE arc from the ball's latest sample to the predicted landing
+   * (flattened x,y pairs, analysis px) — what the HUD draws as the dashed
+   * "where it's going" path while the ball itself may be undetected. Empty
+   * when no trustworthy prediction exists.
+   */
+  predictedPath: number[];
 }
 
 export class ShotPipeline {
@@ -91,6 +99,10 @@ export class ShotPipeline {
   /** Depth-ratio parallax veto flag (Settings, experimental). Applied when
    *  the FSM is created at rim lock — i.e. per session. */
   private depthVeto = false;
+  /** Metric 2/3 estimation flag (Settings, experimental). */
+  private metric23 = false;
+  /** Camera pitch at/around rim lock from the IMU, degrees +up; null = no IMU. */
+  private viewPitchDeg: number | null = null;
   private sawPoseThisShot = false;
   /** Latest pose ankle-midpoint (analysis px) — the pose-based shooter foot for
    *  2/3 estimation. Null until a pose with a visible ankle arrives. */
@@ -118,6 +130,17 @@ export class ShotPipeline {
   /** Depth-ratio parallax veto (from Settings). Takes effect at rim lock. */
   setDepthVeto(enabled: boolean): void {
     this.depthVeto = enabled;
+  }
+
+  /** Metric 2/3 estimation (from Settings). */
+  setMetric23(enabled: boolean): void {
+    this.metric23 = enabled;
+  }
+
+  /** IMU camera pitch, degrees +up (EMA'd by the engine). Feeds the view-band
+   *  classifier at rim lock and the metric 2/3 estimator per shot. */
+  setViewPitch(pitchDeg: number | null): void {
+    this.viewPitchDeg = pitchDeg;
   }
 
   /** Manual rim override from the live tap-to-set-rim. */
@@ -199,6 +222,7 @@ export class ShotPipeline {
     // Cheap (O(n) over ≤48 samples, only while a shot is live) and it's what
     // powers the on-screen "this is where it's coming down" ghost target.
     let predictedLanding: PipelineFrameState['predictedLanding'] = null;
+    const predictedPath: number[] = [];
     if (phase === 'SHOT_LIVE' && this.lastRim && liveTrajectory.length >= 6) {
       const fit = fitArc(liveTrajectory);
       if (fit && fit.ya > 0 && fit.r2y >= 0.35) {
@@ -210,6 +234,16 @@ export class ShotPipeline {
             inSpan:
               p.x >= this.lastRim.spanLeft && p.x <= this.lastRim.spanRight,
           };
+          // Dashed forward path: latest sample → landing, sampled on the fit.
+          const tLast = liveTrajectory[liveTrajectory.length - 1]!.t;
+          if (p.t > tLast) {
+            const K = 10;
+            for (let i = 0; i <= K; i++) {
+              const pt = evalArc(fit, tLast + ((p.t - tLast) * i) / K);
+              if (!Number.isFinite(pt.x) || !Number.isFinite(pt.y)) break;
+              predictedPath.push(pt.x, pt.y);
+            }
+          }
         }
       }
     }
@@ -226,6 +260,7 @@ export class ShotPipeline {
       // Pre-lock countdown (null once locked) so the HUD can show 3-2-1.
       rimCountdown: this.lastRim ? null : this.rimLock.lockCountdown,
       predictedLanding,
+      predictedPath,
     };
     this.events.onFrame?.(state);
     if (resolved) {
@@ -244,14 +279,28 @@ export class ShotPipeline {
           resolved.originX = originX;
           resolved.originY = originY;
         }
+        // METRIC estimator first (flagged): pinhole geometry off the rim's
+        // real size + height gives the distance in METERS; the rim-widths
+        // heuristic stays as the always-available fallback.
+        let metric: ReturnType<typeof estimateShotValueMetric> = null;
+        if (this.metric23 && originX != null && originY != null) {
+          metric = estimateShotValueMetric({
+            rimBox: this.lastRim.box,
+            footX: originX * frame.frameWidth,
+            footY: originY * frame.frameHeight,
+            frameSize: frame.frameWidth,
+            pitchDeg: this.viewPitchDeg,
+          });
+        }
         const est = estimateShotValue(
           this.lastRim,
           originX,
           originY,
           { width: frame.frameWidth, height: frame.frameHeight },
         );
-        resolved.shotValue = est.value;
+        resolved.shotValue = metric ? metric.value : est.value;
         resolved.distanceRimWidths = est.distanceRimWidths;
+        if (metric) resolved.distanceM = metric.distanceM;
       }
       // Finalize the pose-based form report (only if a pose was seen this shot).
       if (this.form && this.sawPoseThisShot) {
@@ -303,7 +352,7 @@ export class ShotPipeline {
     // depth gate consumes the band today, so with the veto flag off this is
     // pure telemetry.
     const aspect = rim.box.height > 0 ? rim.box.width / rim.box.height : 1;
-    this.fsm.setViewBand(classifyViewBand(aspect, null).band);
+    this.fsm.setViewBand(classifyViewBand(aspect, this.viewPitchDeg).band);
     if (first) this.events.onRimLocked?.(rim);
   }
 }

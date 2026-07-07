@@ -28,6 +28,7 @@ import {
   BlurMask,
   Canvas,
   Circle,
+  DashPathEffect,
   Group,
   Path,
   Skia,
@@ -216,6 +217,25 @@ export function TrajectoryOverlay({
       : 0,
   );
 
+  // --- predicted FUTURE path (dashed) ---------------------------------------
+  // The fitted arc from the ball's latest sample to the predicted landing —
+  // visible even while the ball itself goes UNDETECTED, so the flight never
+  // "disappears": the dashes carry the story until detection picks back up.
+  const predTrajPath = useDerivedValue(() => {
+    const path = Skia.Path.Make();
+    const o = overlay.value;
+    const m = mapping.value;
+    if (!m.ok || o.phase !== 'SHOT_LIVE') return path;
+    const pts = o.predTraj;
+    const n = pts.length >> 1;
+    if (n < 2) return path;
+    path.moveTo(pts[0]! * m.scale + m.ox, pts[1]! * m.scale + m.oy);
+    for (let i = 1; i < n; i++) {
+      path.lineTo(pts[i * 2]! * m.scale + m.ox, pts[i * 2 + 1]! * m.scale + m.oy);
+    }
+    return path;
+  });
+
   // --- predicted landing ghost ---------------------------------------------
   // Where the fitted arc says the ball is COMING DOWN through the rim plane —
   // drawn as a pulsing crosshair target mid-flight, green when the prediction
@@ -372,6 +392,18 @@ export function TrajectoryOverlay({
         color={glow.cometHalo}
         opacity={trailOpacity}
       />
+
+      {/* Predicted future path: dashed arc to the landing point */}
+      <Path
+        path={predTrajPath}
+        style="stroke"
+        strokeWidth={2.5}
+        strokeCap="round"
+        color={predColor}
+        opacity={predOpacity}
+      >
+        <DashPathEffect intervals={[9, 8]} />
+      </Path>
 
       {/* Predicted landing ghost: soft glow pass + crisp crosshair */}
       <Path

@@ -202,6 +202,11 @@ export interface ResolvedShot {
    */
   distanceRimWidths?: number;
   /**
+   * METRIC shooter→hoop ground distance in meters, from the pinhole estimator
+   * (courtGeometric, flagged) when it ran confidently. Undefined otherwise.
+   */
+  distanceM?: number;
+  /**
    * Pose-based shooting-form report, attached by the pipeline when form
    * analysis is enabled (Settings) and a pose was tracked through the shot.
    * Undefined when form analysis was off or the pose was never seen.

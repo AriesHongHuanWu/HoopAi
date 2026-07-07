@@ -3,6 +3,7 @@ import {
   apexPoint,
   entryAngleDegAtPlane,
   evalArc,
+  backfillPredictedGap,
   fitArc,
   predictLanding,
   releaseAngleDeg,
@@ -348,5 +349,71 @@ describe('predictLanding', () => {
       ya: -10, yb: 0, yc: 500, xm: 100, xq: 0, r2y: 0.9, tMin: 0, tMax: 1,
     };
     expect(predictLanding(flat, 400)).toBeNull();
+  });
+});
+
+describe('backfillPredictedGap', () => {
+  /** True parabola point at frame i. */
+  const truthAt = (i: number) => {
+    const t = i / FPS;
+    return { x: X0 + VX * t, y: Y0 - VY0 * t + 0.5 * G * t * t, t };
+  };
+
+  /** Build [reals 0..9] + [WRONG straight-line coasts 10..15] + [reals 16..19]. */
+  function gappedFlight(): BallSample[] {
+    const out: BallSample[] = [];
+    for (let i = 0; i < 10; i++) {
+      const p = truthAt(i);
+      out.push({ cx: p.x, cy: p.y, r: 12, t: p.t, score: 0.8, predicted: false });
+    }
+    // Constant-velocity coast from frame 9 (what the Kalman does in a gap):
+    const p9 = truthAt(9);
+    const vy9 = -VY0 + G * (9 / FPS); // dy/dt at frame 9 (+y down)
+    for (let i = 10; i <= 15; i++) {
+      const dt = (i - 9) / FPS;
+      out.push({
+        cx: p9.x + VX * dt,
+        cy: p9.y + vy9 * dt, // straight line — drifts off the true arc
+        r: 12,
+        t: i / FPS,
+        score: 0,
+        predicted: true,
+      });
+    }
+    for (let i = 16; i < 20; i++) {
+      const p = truthAt(i);
+      out.push({ cx: p.x, cy: p.y, r: 12, t: p.t, score: 0.8, predicted: false });
+    }
+    return out;
+  }
+
+  test('rewrites the straight-line coast onto the two-sided parabola', () => {
+    const traj = gappedFlight();
+    // Sanity: the coast is genuinely wrong before the fix (curvature error).
+    const worstBefore = Math.max(
+      ...traj.filter((s) => s.predicted).map((s) => Math.abs(s.cy - truthAt(Math.round(s.t * FPS)).y)),
+    );
+    expect(worstBefore).toBeGreaterThan(5);
+
+    expect(backfillPredictedGap(traj)).toBe(true);
+
+    for (const s of traj) {
+      const truth = truthAt(Math.round(s.t * FPS));
+      expect(Math.abs(s.cy - truth.y)).toBeLessThan(1);
+      expect(Math.abs(s.cx - truth.x)).toBeLessThan(1);
+    }
+    // Flags untouched: the samples stay marked predicted.
+    expect(traj.filter((s) => s.predicted)).toHaveLength(6);
+  });
+
+  test('no-op while the gap is still open (trailing predicted sample)', () => {
+    const traj = gappedFlight().slice(0, 14); // ends mid-coast
+    expect(traj[traj.length - 1]!.predicted).toBe(true);
+    expect(backfillPredictedGap(traj)).toBe(false);
+  });
+
+  test('no-op without enough real samples for a fit', () => {
+    const traj = gappedFlight().slice(7); // only 3 reals on the left
+    expect(backfillPredictedGap(traj.slice(0, 3 + 6 + 1))).toBe(false);
   });
 });

@@ -10,6 +10,7 @@
  * fails to load (e.g. the placeholder asset hasn't been replaced by a trained
  * model yet — see docs/MODELS.md).
  */
+import { DeviceMotion } from 'expo-sensors';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Platform } from 'react-native';
 import { useSharedValue, type SharedValue } from 'react-native-reanimated';
@@ -118,6 +119,9 @@ export interface OverlayState {
   /** Predicted landing point of the live shot (analysis px) + on-target flag.
    *  Null outside SHOT_LIVE / before the arc fit is trustworthy. */
   pred: { x: number; y: number; inSpan: boolean } | null;
+  /** Flattened x,y pairs of the FUTURE arc (ball → predicted landing) — the
+   *  dashed "where it's going" path drawn while the ball may be undetected. */
+  predTraj: number[];
   /** Seconds left on the pre-lock "hold steady" countdown (HUD shows ceil() as a
    *  3-2-1 reticle), or null when not counting / already locked. */
   rimCountdown: number | null;
@@ -135,6 +139,7 @@ export const EMPTY_OVERLAY: OverlayState = {
   dets: [],
   rimCountdown: null,
   pred: null,
+  predTraj: [],
 };
 
 /** Live diagnostics for the on-screen debug panel (helps fix on-device ML). */
@@ -538,6 +543,7 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
           })),
           rimCountdown: state.rimCountdown,
           pred: state.predictedLanding,
+          predTraj: state.predictedPath,
         };
       },
     });
@@ -604,6 +610,35 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
   useEffect(() => {
     pipeline.setDepthVeto(depthVeto);
   }, [pipeline, depthVeto]);
+  const metric23 = useSettings((s) => s.metric23);
+  useEffect(() => {
+    pipeline.setMetric23(metric23);
+  }, [pipeline, metric23]);
+
+  // IMU camera pitch (degrees, +up): from the gravity vector at ~4Hz, EMA'd.
+  // Feeds the view-band classifier (under-hoop vs overhead disambiguation)
+  // and the metric 2/3 estimator. The phone is static on a tripod/ground, so
+  // a slow, smoothed sample is exactly right. Sign convention: back camera
+  // axis elevation = asin(g_z/|g|) in device coords — surfaced in the debug
+  // panel so a device check can confirm/flip it before the bands ship on.
+  useEffect(() => {
+    if (activeMode !== 'camera') return;
+    let ema: number | null = null;
+    DeviceMotion.setUpdateInterval(250);
+    const sub = DeviceMotion.addListener((m) => {
+      const g = m.accelerationIncludingGravity;
+      if (!g) return;
+      const norm = Math.hypot(g.x ?? 0, g.y ?? 0, g.z ?? 0);
+      if (!(norm > 4)) return; // free-fall/garbage guard
+      const pitch = (Math.asin(Math.max(-1, Math.min(1, (g.z ?? 0) / norm))) * 180) / Math.PI;
+      ema = ema == null ? pitch : ema * 0.8 + pitch * 0.2;
+      pipeline.setViewPitch(ema);
+    });
+    return () => {
+      sub.remove();
+      pipeline.setViewPitch(null);
+    };
+  }, [activeMode, pipeline]);
   useEffect(() => {
     let alive = true;
     if (!formAnalysis) {

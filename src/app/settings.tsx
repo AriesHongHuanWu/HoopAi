@@ -399,6 +399,7 @@ export default function SettingsScreen() {
   const debugMode = useSettings((s) => s.debugMode);
   const roiZoom = useSettings((s) => s.roiZoom);
   const depthVeto = useSettings((s) => s.depthVeto);
+  const metric23 = useSettings((s) => s.metric23);
   const formAnalysis = useSettings((s) => s.formAnalysis);
   const dailyGoalMakes = useSettings((s) => s.dailyGoalMakes);
   const set = useSettings((s) => s.set);
@@ -744,6 +745,16 @@ export default function SettingsScreen() {
               />
             </View>
           ))}
+          <View style={styles.divider} />
+          <ToggleRow
+            label="Metric 2/3 distance (experimental)"
+            description="Uses the rim's real size (0.45m) and height (3.05m) as a ruler to compute your TRUE shooting distance in meters for the 2/3-point call, instead of the rough on-screen estimate. Falls back automatically when the camera angle can't support it."
+            value={metric23}
+            onValueChange={(v) => {
+              tick();
+              set('metric23', v);
+            }}
+          />
           <View style={styles.divider} />
           <ToggleRow
             label="Parallax guard (experimental)"
