@@ -51,6 +51,7 @@ import {
 import { ShotFlash } from '../../components/hud/ShotFlash';
 import { DebugPanel } from '../../components/hud/DebugPanel';
 import { DetectionBoxes } from '../../components/hud/DetectionBoxes';
+import { ShotToast } from '../../components/hud/ShotToast';
 import { StatStrip } from '../../components/hud/StatStrip';
 import { TrajectoryOverlay } from '../../components/hud/TrajectoryOverlay';
 import { ModeBanner } from '../../components/modes/ModeBanner';
@@ -133,6 +134,7 @@ function LiveSessionScreen() {
 
   const rimLocked = useSession((s) => s.rimLocked);
   const isRecording = useSession((s) => s.isRecording);
+  const streak = useSession((s) => s.stats.currentStreak);
 
   const activeMode = useMode((s) => s.activeMode);
   const modeDone = activeMode?.done ?? false;
@@ -143,6 +145,8 @@ function LiveSessionScreen() {
   const [ending, setEnding] = useState(false);
   const [backgrounded, setBackgrounded] = useState(false);
   const [pausedChip, setPausedChip] = useState(false);
+  // Last resolved shot for the micro-replay toast (ShotToast times itself).
+  const [toastShot, setToastShot] = useState<ResolvedShot | null>(null);
 
   // First-run HUD intro — teaches setup before the rim locks. Independent of
   // the camera permission flow (it renders in the same tree either way, and
@@ -193,6 +197,7 @@ function LiveSessionScreen() {
 
   const onShot = useCallback((shot: ResolvedShot) => {
     useSession.getState().addShot(shot);
+    setToastShot(shot); // feeds the last-shot micro-replay toast
     // Fold the same resolved shot into the active game mode (no-op when none).
     // Use the wall clock (seconds) so the timed-mode countdown shares one clock
     // with the tick loop below — shot.tResolved is camera-frame time, a
@@ -522,7 +527,10 @@ function LiveSessionScreen() {
             maxWidth: isLandscape ? width - insets.left - insets.right - space.lg * 2 : undefined,
           },
         ]}
-        pointerEvents="none"
+        // box-none (not none): touches fall through to the camera everywhere
+        // except on children that actually claim them — the ShotToast dismiss
+        // tap and the StatStrip expand/collapse Pressable.
+        pointerEvents="box-none"
       >
         {engine.activeMode === 'camera' && <DetectionHeartbeat debug={engine.debug} />}
         {rimLocked && <StatStrip compact={isLandscape} />}
@@ -531,6 +539,7 @@ function LiveSessionScreen() {
             <ModeBanner mode={activeMode} />
           </View>
         )}
+        <ShotToast shot={toastShot} streak={streak} />
         {engine.activeMode === 'demo' && (
           <View style={styles.topCenter}>
             <Chip label="DEMO MODE — scripted scene" tone="accent" />
