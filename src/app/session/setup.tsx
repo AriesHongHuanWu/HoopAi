@@ -79,6 +79,8 @@ export default function SessionSetupScreen() {
       await mic.requestPermission();
     }
     beginSetup();
+    // Remember the choice so Home's quick-start can skip this screen next time.
+    useSettings.getState().set('lastOrient', orient);
     router.push(`/session/live?orient=${orient}`);
   };
 

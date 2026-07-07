@@ -13,6 +13,7 @@ import {
   type TextStyle,
   type ViewStyle,
 } from 'react-native';
+import Animated from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { color, radius, space, touch, type } from '../constants/tokens';
@@ -59,19 +60,34 @@ export function Card({
   children,
   style,
   onPress,
+  entering,
 }: {
   children: React.ReactNode;
   style?: StyleProp<ViewStyle>;
   onPress?: () => void;
+  /**
+   * Optional reanimated entering animation (e.g. FadeInDown.delay(i * 60)).
+   * Screens stagger their cards on mount so navigation feels alive; leave
+   * undefined for cards inside frequently-updating lists.
+   */
+  entering?: React.ComponentProps<typeof Animated.View>['entering'];
 }) {
   if (onPress) {
-    return (
+    const pressable = (
       <Pressable
         onPress={onPress}
         style={({ pressed }) => [styles.card, pressed && styles.cardPressed, style]}
       >
         {children}
       </Pressable>
+    );
+    return entering ? <Animated.View entering={entering}>{pressable}</Animated.View> : pressable;
+  }
+  if (entering) {
+    return (
+      <Animated.View entering={entering} style={[styles.card, style]}>
+        {children}
+      </Animated.View>
     );
   }
   return <View style={[styles.card, style]}>{children}</View>;

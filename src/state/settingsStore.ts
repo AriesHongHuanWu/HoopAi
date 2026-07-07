@@ -194,6 +194,8 @@ export interface SettingsState {
    * to the heuristic whenever the scene can't support a confident answer.
    */
   metric23: boolean;
+  /** Last session orientation — powers the Home quick-start (skip setup). */
+  lastOrient: 'portrait' | 'landscape';
   /**
    * Run the pose model for shooting-form analysis + coaching. Default off — it
    * runs a second model per frame, best on recent phones. See formAnalysis.ts.
@@ -251,6 +253,7 @@ export const useSettings = create<SettingsState>()(
       roiZoom: true,
       depthVeto: false,
       metric23: false,
+      lastOrient: 'portrait',
       formAnalysis: false,
       tutorialSeen: TUTORIAL_SEEN_DEFAULT,
       dailyGoalMakes: 0,

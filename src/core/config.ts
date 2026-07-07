@@ -36,6 +36,21 @@ export const DETECTION = {
    */
   ballScoreMinTracking: 0.12,
   /**
+   * Frame-difference motion assist (src/ml/motionCandidate.ts): when the
+   * detector misses the ball entirely, the strongest local mover on a coarse
+   * luma grid is injected as a synthetic 'ball' candidate. score sits BETWEEN
+   * the tracking gate (0.12) and cold acquisition (0.2) BY DESIGN: motion can
+   * only continue a fresh track (jump-gate-vetted), never start one.
+   */
+  motionCandidate: {
+    grid: 48,
+    minCellDiff: 0.07,
+    maxActiveFrac: 0.08,
+    score: 0.13,
+    /** Synthetic candidate radius as a fraction of the analysis side. */
+    radiusFrac: 0.02,
+  },
+  /**
    * Rim confidence gate. The rim is a small, static, net-occluded object a nano
    * detector scores in the 0.3-0.5 band from a 15-30 ft side view — gating at
    * 0.5 discarded most of those frames and made the lock finicky. 0.35 lets that

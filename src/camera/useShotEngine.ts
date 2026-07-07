@@ -35,6 +35,7 @@ import type { Box, ResolvedShot, RimGeometry } from '../core/types';
 import { createMockDetector } from '../ml/mockDetector';
 import { parseYoloOutput, nmsPerClass } from '../ml/yoloParser';
 import { parseMoveNet } from '../ml/poseParser';
+import { findMotionCandidate } from '../ml/motionCandidate';
 import { squareCropRect, remapRoiBox } from '../ml/roiTransform';
 import { ShotPipeline, type FramePayload } from '../pipeline/shotPipeline';
 import { useSettings } from '../state/settingsStore';
@@ -483,6 +484,8 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
   // compute the net-motion make/miss signal; previous samples live worklet-side.
   const netRoiSv = useSharedValue<Box | null>(null);
   const prevNetSamples = useSharedValue<number[]>([]);
+  // Previous frame's coarse luma grid for the frame-diff motion assist.
+  const prevMotionGrid = useSharedValue<number[]>([]);
   // Locked-rim hoop ROI + FSM phase, published to the worklet so the ROI
   // ("digital zoom") second pass can decide when it's worth re-running the
   // detector on a magnified crop of the rim region (see the ROI block).
@@ -1082,6 +1085,72 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
               roiHitsSv.value = roiHitsSv.value + 1;
             }
           }
+        }
+
+        // --- frame-diff motion assist ---------------------------------------
+        // Coarse luma grid over the whole frame (~2.3k reads). When the
+        // detector produced NO usable ball this frame, the strongest local
+        // mover (outside people + the net) is injected as a synthetic 'ball'
+        // candidate at score 0.13 — continuation-only by construction (the
+        // tracker's cold gate is 0.2). inArr must be read HERE, before the
+        // finally frees its buffer.
+        {
+          const MG = DETECTION.motionCandidate.grid;
+          const S = detInputSize;
+          const gPlane = S * S;
+          const grid: number[] = new Array(MG * MG);
+          let gi = 0;
+          for (let gy = 0; gy < MG; gy++) {
+            const py = Math.min(S - 1, Math.round(((gy + 0.5) / MG) * S));
+            for (let gx = 0; gx < MG; gx++) {
+              const px = Math.min(S - 1, Math.round(((gx + 0.5) / MG) * S));
+              grid[gi++] = useYolox
+                ? inArr[(py * S + px) * 3 + 1]!
+                : inArr[gPlane + py * S + px]!;
+            }
+          }
+          const prev = prevMotionGrid.value;
+          const hasBall = parsed.detections.some(
+            (d) => d.cls === 'ball' && d.score >= DETECTION.ballScoreMinTracking,
+          );
+          if (!hasBall && prev.length === grid.length) {
+            const exclude: Box[] = [];
+            const net = netRoiSv.value;
+            if (net != null) exclude.push(net);
+            for (let i = 0; i < parsed.detections.length; i++) {
+              const d = parsed.detections[i]!;
+              if (d.cls === 'person' && d.score >= DETECTION.personScoreMin) {
+                exclude.push({
+                  x: d.box.x - d.box.width * 0.15,
+                  y: d.box.y - d.box.height * 0.15,
+                  width: d.box.width * 1.3,
+                  height: d.box.height * 1.3,
+                });
+              }
+            }
+            const mc = findMotionCandidate(prev, grid, {
+              grid: MG,
+              size: S,
+              minCellDiff: DETECTION.motionCandidate.minCellDiff,
+              maxActiveFrac: DETECTION.motionCandidate.maxActiveFrac,
+              exclude,
+            });
+            if (mc != null) {
+              const r = S * DETECTION.motionCandidate.radiusFrac;
+              parsed = {
+                ...parsed,
+                detections: [
+                  ...parsed.detections,
+                  {
+                    cls: 'ball',
+                    score: DETECTION.motionCandidate.score,
+                    box: { x: mc.cx - r, y: mc.cy - r, width: 2 * r, height: 2 * r },
+                  },
+                ],
+              };
+            }
+          }
+          prevMotionGrid.value = grid;
         }
         } catch (e) {
           detErr = `detect: ${String(e).slice(0, 130)}`;

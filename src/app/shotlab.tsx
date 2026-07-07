@@ -9,6 +9,7 @@
  * how to enable it, and small samples render means without statistical claims.
  */
 import { router, useLocalSearchParams } from 'expo-router';
+import { FadeInDown } from 'react-native-reanimated';
 import React, { useEffect, useMemo, useState } from 'react';
 import { ScrollView, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 
@@ -30,6 +31,9 @@ import {
 import type { ResolvedShot } from '@/core/types';
 import { useSession } from '@/state/sessionStore';
 import { useSettings } from '@/state/settingsStore';
+
+/** Staggered card entrance (i = card index top-to-bottom). */
+const cardEnter = (i: number) => FadeInDown.delay(i * 70).duration(380);
 
 export default function ShotLabScreen() {
   const { sid } = useLocalSearchParams<{ sid?: string }>();
@@ -96,7 +100,7 @@ export default function ShotLabScreen() {
           ) : (
             <>
               {/* Verdict hero */}
-              <Card>
+              <Card entering={cardEnter(0)}>
                 <Eyebrow>The verdict</Eyebrow>
                 <Row gap={space.md} style={{ marginTop: space.sm }}>
                   <Chip label={`${report.makes} makes`} tone="make" />
@@ -112,7 +116,7 @@ export default function ShotLabScreen() {
 
               {/* Arc overlay */}
               {arcs.length >= 2 && (
-                <Card>
+                <Card entering={cardEnter(1)}>
                   <Eyebrow>Ball flight — makes vs misses</Eyebrow>
                   <View style={{ marginTop: space.sm }}>
                     <ArcCompare
@@ -130,7 +134,7 @@ export default function ShotLabScreen() {
               )}
 
               {/* Make vs miss metric table */}
-              <Card>
+              <Card entering={cardEnter(2)}>
                 <Eyebrow>What separates your makes</Eyebrow>
                 {report.splits.map((split) => (
                   <MetricDiffRow key={split.def.key} split={split} />
@@ -144,7 +148,7 @@ export default function ShotLabScreen() {
               </Card>
 
               {/* Radar vs NBA */}
-              <Card>
+              <Card entering={cardEnter(3)}>
                 <Eyebrow>You vs the NBA</Eyebrow>
                 <View style={{ alignItems: 'center', marginTop: space.sm }}>
                   <RadarChart
@@ -175,7 +179,7 @@ export default function ShotLabScreen() {
 
               {/* Archetype */}
               {best && best.similarity > 40 && (
-                <Card>
+                <Card entering={cardEnter(4)}>
                   <Eyebrow>Your NBA twin</Eyebrow>
                   <Row gap={space.md} style={{ marginTop: space.sm, alignItems: 'baseline' }}>
                     <Text style={styles.archetypeName}>{best.player.name}</Text>
@@ -230,7 +234,7 @@ export default function ShotLabScreen() {
               )}
 
               {/* Coach plan */}
-              <Card>
+              <Card entering={cardEnter(5)}>
                 <Eyebrow>Coach's plan</Eyebrow>
                 {plan.length === 0 ? (
                   <Text style={styles.body}>
@@ -255,7 +259,7 @@ export default function ShotLabScreen() {
 
               {/* Release snapshot */}
               {releaseShot?.form?.releasePose && (
-                <Card>
+                <Card entering={cardEnter(6)}>
                   <Eyebrow>Release snapshot</Eyebrow>
                   <View style={{ alignItems: 'center', marginTop: space.sm }}>
                     <ReleaseSkeleton

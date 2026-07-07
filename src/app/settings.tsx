@@ -5,6 +5,7 @@
  * Help (restart tutorial / replay onboarding), About (version + model licenses).
  */
 import { createAudioPlayer, type AudioPlayer } from 'expo-audio';
+import { FadeInDown } from 'react-native-reanimated';
 import Constants from 'expo-constants';
 import * as Haptics from 'expo-haptics';
 import { router } from 'expo-router';
@@ -21,6 +22,9 @@ import { BackPill } from '@/components/ShotList';
 import { Card, Eyebrow, Row, Screen } from '@/components/ui';
 import { color, radius, space, touch, type } from '@/constants/tokens';
 import type { ShootingHand } from '@/core/types';
+
+/** Staggered card entrance (i = card index top-to-bottom). */
+const cardEnter = (i: number) => FadeInDown.delay(i * 70).duration(380);
 import {
   CLIP_POST_ROLL_MAX,
   CLIP_POST_ROLL_MIN,
@@ -413,12 +417,8 @@ export default function SettingsScreen() {
     perfMode,
     detectionRate,
   });
-  // Advanced detector knobs are collapsed by default; auto-expanded on mount
-  // only when the current knobs don't match any preset (so a returning "custom"
-  // user sees what they changed).
-  const [advancedOpen, setAdvancedOpen] = useState(
-    () => presetFromKnobs(useSettings.getState()) === 'custom',
-  );
+  // Advanced detector knobs live behind Debug mode (two-tier settings): the
+  // page stays a 30-second read; flipping Debug reveals everything.
 
   // Transient caption shown after "Restart tutorial" is tapped.
   const [tutorialNotice, setTutorialNotice] = useState(false);
@@ -470,7 +470,7 @@ export default function SettingsScreen() {
         </Text>
 
         {/* Feedback */}
-        <Card>
+        <Card entering={cardEnter(0)}>
           <Eyebrow>Feedback</Eyebrow>
           <ToggleRow
             label="Sounds"
@@ -534,7 +534,7 @@ export default function SettingsScreen() {
         </Card>
 
         {/* Detection */}
-        <Card>
+        <Card entering={cardEnter(1)}>
           <Eyebrow>Detection</Eyebrow>
           <View style={styles.settingText}>
             <Text style={styles.settingLabel}>Tracking mode</Text>
@@ -564,29 +564,18 @@ export default function SettingsScreen() {
             </Text>
           )}
           <View style={styles.divider} />
-          <Pressable
-            accessibilityRole="button"
-            accessibilityState={{ expanded: advancedOpen }}
-            accessibilityLabel="Advanced detection controls"
-            accessibilityHint="Engine, accelerator, resolution, frame rate and debug"
-            onPress={() => {
+          {/* Debug mode is the ONE switch that reveals every advanced knob —
+              the settings stay a 30-second read for everyone else. */}
+          <ToggleRow
+            label="Debug mode"
+            description="Show live detector diagnostics and unlock the advanced detection controls below."
+            value={debugMode}
+            onValueChange={(v) => {
               tick();
-              setAdvancedOpen((v) => !v);
+              set('debugMode', v);
             }}
-            style={({ pressed }) => [
-              styles.optionRow,
-              pressed && { backgroundColor: color.surfaceRaised },
-            ]}
-          >
-            <View style={styles.settingText}>
-              <Text style={styles.settingLabel}>Advanced controls</Text>
-              <Text style={styles.settingDesc}>
-                Engine, accelerator, resolution, frame rate and debug.
-              </Text>
-            </View>
-            <Text style={styles.chevron}>{advancedOpen ? '▲' : '▼'}</Text>
-          </Pressable>
-          {advancedOpen && (
+          />
+          {debugMode && (
           <>
           <View style={styles.divider} />
           <View style={styles.settingText}>
@@ -775,22 +764,12 @@ export default function SettingsScreen() {
               set('roiZoom', v);
             }}
           />
-          <View style={styles.divider} />
-          <ToggleRow
-            label="Debug mode"
-            description="Show live detector diagnostics over the camera."
-            value={debugMode}
-            onValueChange={(v) => {
-              tick();
-              set('debugMode', v);
-            }}
-          />
           </>
           )}
         </Card>
 
         {/* Coaching */}
-        <Card>
+        <Card entering={cardEnter(2)}>
           <Eyebrow>Coaching</Eyebrow>
           <ToggleRow
             label="Shooting form analysis"
@@ -804,7 +783,7 @@ export default function SettingsScreen() {
         </Card>
 
         {/* Goals */}
-        <Card>
+        <Card entering={cardEnter(3)}>
           <Eyebrow>Goals</Eyebrow>
           <StepperRow
             label="Daily goal"
@@ -820,7 +799,7 @@ export default function SettingsScreen() {
         </Card>
 
         {/* Video */}
-        <Card>
+        <Card entering={cardEnter(4)}>
           <Eyebrow>Video</Eyebrow>
           <ToggleRow
             label="Record sessions"
@@ -858,6 +837,8 @@ export default function SettingsScreen() {
               />
             </View>
           ))}
+          {debugMode && (
+          <>
           <View style={styles.divider} />
           <StepperRow
             label="Seconds before a make"
@@ -880,10 +861,12 @@ export default function SettingsScreen() {
             disabled={!recordVideo || keepMode === 'none'}
             onChange={(v) => set('clipPostRollSec', v)}
           />
+          </>
+          )}
         </Card>
 
         {/* Player */}
-        <Card>
+        <Card entering={cardEnter(5)}>
           <Eyebrow>Player</Eyebrow>
           <View style={styles.settingText}>
             <Text style={styles.settingLabel}>Shooting hand</Text>
@@ -954,7 +937,7 @@ export default function SettingsScreen() {
         </Card>
 
         {/* Help */}
-        <Card>
+        <Card entering={cardEnter(6)}>
           <Eyebrow>Help</Eyebrow>
           <ActionRow
             label="Restart tutorial"
@@ -973,7 +956,7 @@ export default function SettingsScreen() {
         </Card>
 
         {/* About */}
-        <Card>
+        <Card entering={cardEnter(7)}>
           <Eyebrow>About</Eyebrow>
           <Row style={styles.settingRow} gap={space.lg}>
             <Text style={styles.settingLabel}>Version</Text>

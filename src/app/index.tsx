@@ -35,7 +35,10 @@ import { Card, EmptyState, ErrorCard, Eyebrow, Row, Screen, StatNumber } from '@
 import { color, radius, space, touch, type } from '@/constants/tokens';
 import { todayMakes } from '@/core/goals';
 import { listSessions, type SessionSummaryRow } from '@/data/db';
+import { useCameraPermission } from 'react-native-vision-camera';
+
 import { useMode } from '@/state/modeStore';
+import { useSession } from '@/state/sessionStore';
 import { useSettings } from '@/state/settingsStore';
 
 const HERO_HEIGHT = 176;
@@ -130,6 +133,7 @@ function QuickLink({
 export default function HomeScreen() {
   const onboardingDone = useSettings((s) => s.onboardingDone);
   const hapticsEnabled = useSettings((s) => s.hapticsEnabled);
+  const cameraPermission = useCameraPermission();
   const dailyGoalMakes = useSettings((s) => s.dailyGoalMakes);
   const { width } = useWindowDimensions();
   const contentWidth = width - space.lg * 2;
@@ -230,7 +234,15 @@ export default function HomeScreen() {
     // Quick-start is an open run — clear any mode picked in a past session so a
     // stale game HUD never leaks in. The mode picker is the path to a game.
     useMode.getState().reset();
-    router.push('/session/setup');
+    // ONE TAP TO BALL: permissions already granted ⇒ skip the setup checklist
+    // and reuse the last session's orientation. First run (or a revoked
+    // permission) still gets the full pre-flight.
+    if (cameraPermission.hasPermission) {
+      useSession.getState().beginSetup();
+      router.push(`/session/live?orient=${useSettings.getState().lastOrient}`);
+    } else {
+      router.push('/session/setup');
+    }
   };
 
   return (
