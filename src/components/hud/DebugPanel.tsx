@@ -36,7 +36,9 @@ function debugChanged(a: EngineDebug, b: EngineDebug): boolean {
     a.outputLen !== b.outputLen ||
     a.layout !== b.layout ||
     a.inputMin !== b.inputMin ||
-    a.inputMax !== b.inputMax
+    a.inputMax !== b.inputMax ||
+    a.roiFrames !== b.roiFrames ||
+    a.roiHits !== b.roiHits
   );
 }
 
@@ -102,6 +104,11 @@ export function DebugPanel({
         k="speed"
         v={`${d.fps} fps · ${d.avgMs}ms`}
         vc={d.fps >= 25 ? color.make : d.fps >= 12 ? color.unsure : color.miss}
+      />
+      <Row
+        k="roi zoom"
+        v={d.roiFrames > 0 ? `${d.roiHits}/${d.roiFrames} · ${d.roiAvgMs}ms` : 'idle'}
+        vc={d.roiHits > 0 ? color.make : d.roiFrames > 0 ? color.unsure : color.textFaint}
       />
     </View>
   );

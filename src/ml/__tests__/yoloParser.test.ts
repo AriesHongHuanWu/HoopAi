@@ -194,6 +194,50 @@ describe('nmsPerClass', () => {
     const out = nmsPerClass([a, b], 0.45);
     expect(out).toHaveLength(2);
   });
+
+  // The ROI-zoom second pass merges its (remapped) detections with the full-
+  // frame pass by concatenating and re-running nmsPerClass — these lock in that
+  // merge behavior (see the ROI block in useShotEngine.ts).
+  describe('ROI second-pass merge', () => {
+    test('an ROI ball the full frame MISSED survives the merge', () => {
+      // Full frame found only a rim; the ROI pass recovered the near-rim ball.
+      const fullFrame = [det('rim', 0.7, 380, 280, 60, 40)];
+      const roiBall = det('ball', 0.35, 400, 300, 30, 30);
+      const out = nmsPerClass([...fullFrame, roiBall], 0.45);
+      expect(out).toContain(roiBall); // nothing to suppress it
+      expect(out.some((d) => d.cls === 'ball')).toBe(true);
+    });
+
+    test('when both passes see the ball, the higher-scoring one wins', () => {
+      const fullFrameBall = det('ball', 0.4, 400, 300, 30, 30);
+      const roiBall = det('ball', 0.75, 401, 301, 31, 31); // overlaps, better score
+      const out = nmsPerClass([fullFrameBall, roiBall], 0.45);
+      const balls = out.filter((d) => d.cls === 'ball');
+      expect(balls).toHaveLength(1);
+      expect(balls[0]!.score).toBe(0.75);
+    });
+
+    test('the ROI ball never cross-suppresses a full-frame rim/person', () => {
+      const rim = det('rim', 0.8, 400, 300, 60, 40);
+      const person = det('person', 0.6, 405, 305, 50, 120);
+      const roiBall = det('ball', 0.5, 402, 302, 30, 30); // overlaps both, other class
+      const out = nmsPerClass([rim, person, roiBall], 0.45);
+      expect(out).toContain(rim);
+      expect(out).toContain(person);
+      expect(out).toContain(roiBall);
+    });
+
+    test('a full 8+8 union under the 16-cap keeps every survivor', () => {
+      const full: Detection[] = [];
+      const roi: Detection[] = [];
+      for (let i = 0; i < 8; i++) {
+        full.push(det('ball', 0.9 - i * 0.01, i * 60, 0, 20, 20));
+        roi.push(det('ball', 0.5 - i * 0.01, i * 60, 400, 20, 20));
+      }
+      const out = nmsPerClass([...full, ...roi], 0.45).slice(0, 16);
+      expect(out).toHaveLength(16); // all well-separated, none dropped
+    });
+  });
 });
 
 describe('parseYoloOutput — YOLOX (objectness) decode', () => {

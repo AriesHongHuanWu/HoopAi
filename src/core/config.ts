@@ -42,6 +42,31 @@ export const DETECTION = {
    * screen-covering.
    */
   ballMaxSizeFraction: 0.22,
+  /**
+   * Rim-anchored ROI ("digital zoom") SECOND detection pass. When the cheap
+   * full-frame pass misses the small, net-occluded ball at the make/miss
+   * instant, we crop the locked-rim region out of the tensor already computed,
+   * upscale it to a full detector input, and run the SAME model again — turning
+   * a ~15px ball into a ~50px one, the size band the detector reliably hits.
+   * See the ROI block in useShotEngine.ts + src/ml/roiTransform.ts. Tune here
+   * against a labeled-clip benchmark; the master on/off is the `roiZoom` setting.
+   */
+  roi: {
+    /** Arm the pass on net motion even before the FSM has marked the shot live
+     *  (covers the one-frame-late phase publish + the chicken-and-egg where a
+     *  poor near-rim full frame never arms the FSM). */
+    netMotionArm: 0.15,
+    /**
+     * Skip the pass whenever the PRIMARY inference EMA is above this (ms). The
+     * second pass costs a full inference (same fixed-size model), so on a slow /
+     * throttled phone (e.g. iPhone XR at 640 ≈ 77ms) it self-disables and the
+     * app reverts exactly to single-pass behavior — no regression — while faster
+     * phones (≲50ms/inference) get the recall boost.
+     */
+    skipIfAvgMsAbove: 50,
+    /** Run at most one ROI pass per this multiple of the primary frame gate. */
+    cadenceFactor: 2,
+  },
 } as const;
 
 export const TRACKER = {

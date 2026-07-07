@@ -390,6 +390,7 @@ export default function SettingsScreen() {
   const detectorAccel = useSettings((s) => s.detectorAccel);
   const lastBenchmark = useSettings((s) => s.lastBenchmark);
   const debugMode = useSettings((s) => s.debugMode);
+  const roiZoom = useSettings((s) => s.roiZoom);
   const formAnalysis = useSettings((s) => s.formAnalysis);
   const dailyGoalMakes = useSettings((s) => s.dailyGoalMakes);
   const set = useSettings((s) => s.set);
@@ -735,6 +736,16 @@ export default function SettingsScreen() {
               />
             </View>
           ))}
+          <View style={styles.divider} />
+          <ToggleRow
+            label="Rim zoom (experimental)"
+            description="When the ball is missed near the basket, re-run the detector on a magnified crop of the rim to recover it at the make/miss moment. Self-limiting — only fires during a shot, only when needed, and only on phones fast enough. Turn on Debug mode to see it working (the 'roi zoom' row)."
+            value={roiZoom}
+            onValueChange={(v) => {
+              tick();
+              set('roiZoom', v);
+            }}
+          />
           <View style={styles.divider} />
           <ToggleRow
             label="Debug mode"

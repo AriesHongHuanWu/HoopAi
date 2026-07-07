@@ -32,8 +32,9 @@ import { NitroModules } from 'react-native-nitro-modules';
 import { DETECTION } from '../core/config';
 import type { Box, ResolvedShot, RimGeometry } from '../core/types';
 import { createMockDetector } from '../ml/mockDetector';
-import { parseYoloOutput } from '../ml/yoloParser';
+import { parseYoloOutput, nmsPerClass } from '../ml/yoloParser';
 import { parseMoveNet } from '../ml/poseParser';
+import { squareCropRect, remapRoiBox } from '../ml/roiTransform';
 import { ShotPipeline, type FramePayload } from '../pipeline/shotPipeline';
 import { useSettings } from '../state/settingsStore';
 
@@ -167,6 +168,14 @@ export interface EngineDebug {
    * (processing too slow / worklet failing); frames climbing ⇒ we're live.
    */
   dropped: number;
+  /** ROI ("digital zoom") second passes actually run this session. 0 = the
+   *  feature never fired (off, phone too slow via the thermal gate, or no
+   *  qualifying live-shot miss). */
+  roiFrames: number;
+  /** ROI passes that recovered a ball the full frame missed (the payoff). */
+  roiHits: number;
+  /** Live EMA of the ROI pass's own inference time (ms), separate from avgMs. */
+  roiAvgMs: number;
 }
 
 export const EMPTY_DEBUG: EngineDebug = {
@@ -186,6 +195,9 @@ export const EMPTY_DEBUG: EngineDebug = {
   avgMs: 0,
   fps: 0,
   dropped: 0,
+  roiFrames: 0,
+  roiHits: 0,
+  roiAvgMs: 0,
 };
 
 export interface ShotEngineEvents {
@@ -462,6 +474,11 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
   // compute the net-motion make/miss signal; previous samples live worklet-side.
   const netRoiSv = useSharedValue<Box | null>(null);
   const prevNetSamples = useSharedValue<number[]>([]);
+  // Locked-rim hoop ROI + FSM phase, published to the worklet so the ROI
+  // ("digital zoom") second pass can decide when it's worth re-running the
+  // detector on a magnified crop of the rim region (see the ROI block).
+  const hoopRoiSv = useSharedValue<Box | null>(null);
+  const phaseSv = useSharedValue<number>(0); // 0 IDLE, 1 SHOT_LIVE, 2 COOLDOWN
   // Sticky YOLO output layout — read fresh in the worklet, updated each frame.
   // Stops the parser's dual-layout tie-break from flipping on noise (which
   // scrambles class labels/coords on degraded input).
@@ -477,11 +494,16 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
       onRimLocked: (r) => eventsRef.current.onRimLocked?.(r),
       onRimDrift: () => eventsRef.current.onRimDrift?.(),
       onFrame: (state) => {
-        // Keep the worklet's net ROI in sync with the locked rim (rare writes).
+        // Keep the worklet's net + hoop ROIs in sync with the locked rim (rare
+        // writes — only when the rim reference changes: lock / re-lock / drift).
         if (state.rim !== lastRimRef) {
           lastRimRef = state.rim;
           netRoiSv.value = state.rim ? { ...state.rim.netRoi } : null;
+          hoopRoiSv.value = state.rim ? { ...state.rim.hoopRoi } : null;
         }
+        // FSM phase for the ROI trigger (published every frame; the worklet
+        // reads it one analysed frame late, which the net-motion arm covers).
+        phaseSv.value = state.phase === 'SHOT_LIVE' ? 1 : state.phase === 'COOLDOWN' ? 2 : 0;
         overlay.value = {
           ball: state.ball
             ? {
@@ -602,6 +624,16 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
   const detectionRate = useSettings((s) => s.detectionRate);
   const gateMs = detectionRate === 'battery' ? 66 : detectionRate === 'max' ? 0 : 33;
   const lastRunMs = useSharedValue(0);
+  // Rim-anchored ROI ("digital zoom") second pass. Captured as a plain const —
+  // toggling the setting re-renders and re-registers the frame worklet. Its
+  // per-frame trigger is self-limiting (see the ROI block below). The hoopRoi +
+  // phase it needs are published from JS via hoopRoiSv/phaseSv (declared beside
+  // netRoiSv above); cadence/timing/diagnostic counters live worklet-side.
+  const roiZoom = useSettings((s) => s.roiZoom);
+  const lastRoiRunMs = useSharedValue(0);
+  const avgRoiMs = useSharedValue(0);
+  const roiFramesSv = useSharedValue(0); // ROI passes actually run
+  const roiHitsSv = useSharedValue(0); // ROI passes that recovered a ball
   // Rolling avg of measured inference time. Doubles as a THERMAL PROXY: a hot
   // chip clocks down, so inference slows — when it does, the adaptive gate
   // below backs the detection rate off to shed sustained load and let the phone
@@ -862,6 +894,147 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
         ) {
           prevLayoutSv.value = parsed.debug.layout;
         }
+
+        // --- Rim-anchored ROI ("digital zoom") second pass -----------------
+        // Recover a small, net-occluded ball at the make/miss instant that the
+        // cheap full-frame pass missed: crop the locked-rim region out of the
+        // tensor we ALREADY have (inArr), upscale it to a full detector input,
+        // and run the SAME model again — a ~15px ball becomes ~50px, the size
+        // band the detector reliably hits. inArr MUST be read HERE, before the
+        // `finally` frees the GPU buffer it views. The whole block is inside the
+        // inner try, so any ROI failure leaves the primary `parsed` untouched.
+        //
+        // CEILING (honest): we upscale the already-downsampled analysis tensor,
+        // not raw sensor pixels (VisionCamera exposes no frame-crop primitive),
+        // so this recovers no NEW detail — only magnification + centering into
+        // the model's reliable size band. A ball too small to survive the first
+        // resize cannot be resurrected. Self-limiting: it only fires during a
+        // live shot, only when the cheap pass missed a near-rim ball, throttled,
+        // and only on phones whose inference is fast enough (thermal gate).
+        const hoop = hoopRoiSv.value;
+        if (
+          roiZoom &&
+          hoop != null &&
+          avgInferMs.value < DETECTION.roi.skipIfAvgMsAbove &&
+          (phaseSv.value === 1 || netMotionScore > DETECTION.roi.netMotionArm)
+        ) {
+          // Recall gate: only pay for the 2nd inference when the full-frame pass
+          // had NO confident ball inside the hoop ROI (the exact miss zoom helps).
+          let ballInHoop = false;
+          for (let i = 0; i < parsed.detections.length; i++) {
+            const dd = parsed.detections[i]!;
+            if (dd.cls !== 'ball' || dd.score < DETECTION.ballScoreMin) continue;
+            const bcx = dd.box.x + dd.box.width / 2;
+            const bcy = dd.box.y + dd.box.height / 2;
+            if (
+              bcx >= hoop.x &&
+              bcx <= hoop.x + hoop.width &&
+              bcy >= hoop.y &&
+              bcy <= hoop.y + hoop.height
+            ) {
+              ballInHoop = true;
+              break;
+            }
+          }
+          const nowRoiMs = Date.now();
+          const roiGate = Math.max(
+            gateMs * DETECTION.roi.cadenceFactor,
+            avgInferMs.value * 2.8,
+          );
+          if (!ballInHoop && nowRoiMs - lastRoiRunMs.value >= roiGate) {
+            lastRoiRunMs.value = nowRoiMs;
+            roiFramesSv.value = roiFramesSv.value + 1;
+            // Sroi === S: the loaded TFLite model has a FIXED input side, so the
+            // ROI pass must feed the same square the model was compiled for.
+            const S = detInputSize;
+            const crop = squareCropRect(hoop, S);
+            const rx = crop.rx;
+            const ry = crop.ry;
+            const rs = crop.rs;
+            // Bilinear-upscale the rs×rs crop of inArr into a fresh S×S buffer,
+            // in the SAME pixel layout the model expects (interleaved YOLOX /
+            // planar YOLO11 — mirrors the net-motion green-channel indexing).
+            const roiBuf = new Float32Array(S * S * 3);
+            const gPlane = S * S;
+            for (let oy = 0; oy < S; oy++) {
+              const fy = ry + ((oy + 0.5) * rs) / S - 0.5;
+              const yf = Math.floor(fy);
+              const wy = fy - yf;
+              const y0 = yf < 0 ? 0 : yf > S - 1 ? S - 1 : yf;
+              const y1r = yf + 1;
+              const y1 = y1r < 0 ? 0 : y1r > S - 1 ? S - 1 : y1r;
+              for (let ox = 0; ox < S; ox++) {
+                const fx = rx + ((ox + 0.5) * rs) / S - 0.5;
+                const xf = Math.floor(fx);
+                const wx = fx - xf;
+                const x0 = xf < 0 ? 0 : xf > S - 1 ? S - 1 : xf;
+                const x1r = xf + 1;
+                const x1 = x1r < 0 ? 0 : x1r > S - 1 ? S - 1 : x1r;
+                if (useYolox) {
+                  const i00 = (y0 * S + x0) * 3;
+                  const i01 = (y0 * S + x1) * 3;
+                  const i10 = (y1 * S + x0) * 3;
+                  const i11 = (y1 * S + x1) * 3;
+                  const di = (oy * S + ox) * 3;
+                  for (let c = 0; c < 3; c++) {
+                    const top = inArr[i00 + c]! * (1 - wx) + inArr[i01 + c]! * wx;
+                    const bot = inArr[i10 + c]! * (1 - wx) + inArr[i11 + c]! * wx;
+                    roiBuf[di + c] = top * (1 - wy) + bot * wy;
+                  }
+                } else {
+                  const di = oy * S + ox;
+                  for (let c = 0; c < 3; c++) {
+                    const base = c * gPlane;
+                    const top =
+                      inArr[base + y0 * S + x0]! * (1 - wx) +
+                      inArr[base + y0 * S + x1]! * wx;
+                    const bot =
+                      inArr[base + y1 * S + x0]! * (1 - wx) +
+                      inArr[base + y1 * S + x1]! * wx;
+                    roiBuf[base + di] = top * (1 - wy) + bot * wy;
+                  }
+                }
+              }
+            }
+            const rt0 = performance.now();
+            const roiOut = tflite.runSync([roiBuf.buffer]);
+            const rMs = performance.now() - rt0;
+            // Separate EMA — the ROI time must NOT feed avgInferMs (that gate
+            // governs primary detection; inflating it would throttle the app).
+            avgRoiMs.value = avgRoiMs.value === 0 ? rMs : avgRoiMs.value * 0.85 + rMs * 0.15;
+            const roiParsed = parseYoloOutput(new Float32Array(roiOut[0]!), frameTsSec, {
+              inputSize: S,
+              prevLayout: prevLayoutSv.value,
+              hasObjectness: useYolox,
+              scoreMin: DETECTION.ballScoreMinHoopRoi,
+            });
+            // Keep ONLY the 'ball' class from the ROI pass — deliberately DROP
+            // any ROI 'ball_in_basket'. That class drives a make through the
+            // FSM's `cls && occludedAtRim` branch WITHOUT geometric confirmation,
+            // and a magnified crop of the net/rim is exactly where the detector
+            // could hallucinate one — flipping a genuine MISS into a false MAKE.
+            // The ROI's real value is recovering the small BALL so its trajectory
+            // (and the geo make/miss crossing) is complete; the tracker's
+            // jump/aspect/score gates still vet every ROI ball. The occluded-make
+            // signal keeps coming from the full-frame pass only, unchanged.
+            //
+            // Merge the FULL primary list (already capped at maxDetections) with
+            // the ROI balls, then NMS + cap — no pre-slice that could drop a real
+            // off-court ball before the union.
+            const merged = parsed.detections.slice();
+            let added = 0;
+            for (let i = 0; i < roiParsed.detections.length; i++) {
+              const rd = roiParsed.detections[i]!;
+              if (rd.cls !== 'ball') continue;
+              merged.push({ cls: rd.cls, score: rd.score, box: remapRoiBox(rd.box, rx, ry, rs, S) });
+              added++;
+            }
+            if (added > 0) {
+              parsed = { ...parsed, detections: nmsPerClass(merged, 0.45).slice(0, 16) };
+              roiHitsSv.value = roiHitsSv.value + 1;
+            }
+          }
+        }
         } catch (e) {
           detErr = `detect: ${String(e).slice(0, 130)}`;
         } finally {
@@ -886,6 +1059,9 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
           avgMs: Math.round(avgInferMs.value),
           fps: Math.round(1000 / Math.max(gateMs, avgInferMs.value * 1.4, 1)),
           dropped: droppedFrames.value,
+          roiFrames: roiFramesSv.value,
+          roiHits: roiHitsSv.value,
+          roiAvgMs: Math.round(avgRoiMs.value),
         };
         if (!parsed) {
           // Detection threw this frame — still disposed via finally; skip the

@@ -166,6 +166,15 @@ export interface SettingsState {
   /** Show the on-screen detection diagnostics panel. Default off. */
   debugMode: boolean;
   /**
+   * Rim-anchored ROI ("digital zoom") second detection pass — re-runs the
+   * detector on a magnified crop of the locked-rim region when the full-frame
+   * pass missed the near-rim ball, to recover it at the make/miss instant.
+   * Self-limiting (only fires during a live shot, when the cheap pass missed,
+   * and only on phones fast enough — see DETECTION.roi). Default on; experimental
+   * because its on-device recall gain is unverified. See useShotEngine.ts.
+   */
+  roiZoom: boolean;
+  /**
    * Run the pose model for shooting-form analysis + coaching. Default off — it
    * runs a second model per frame, best on recent phones. See formAnalysis.ts.
    */
@@ -218,6 +227,7 @@ export const useSettings = create<SettingsState>()(
       detectorAccel: 'cpu',
       lastBenchmark: null,
       debugMode: false,
+      roiZoom: true,
       formAnalysis: false,
       tutorialSeen: TUTORIAL_SEEN_DEFAULT,
       dailyGoalMakes: 0,
