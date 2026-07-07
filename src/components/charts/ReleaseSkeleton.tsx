@@ -1,13 +1,16 @@
 /**
  * ReleaseSkeleton — stick-figure of the shooter's pose AT THE RELEASE
  * INSTANT, drawn from the FormReport's pose snapshot. The shooting arm is
- * highlighted in accent; the elbow and knee joints are annotated with their
- * measured angles, colored by whether they sit in the ideal band.
+ * the hero: accent stroke with a soft glow and ringed accent joints; the
+ * rest of the body reads in quieter chalk with dark joint backings so
+ * overlapping limbs stay separable. The measured elbow and knee wear a
+ * status ring plus a glass tag chip (status dot + angle — color AND shape),
+ * colored by whether the angle sits in the ideal band.
  *
  * Keypoints below the form keypoint-score gate are treated as missing; limbs
  * with a missing endpoint simply aren't drawn (never guessed).
  */
-import { Canvas, Circle, Line, vec } from '@shopify/react-native-skia';
+import { BlurMask, Canvas, Circle, Line, vec } from '@shopify/react-native-skia';
 import React, { useMemo } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
@@ -17,6 +20,10 @@ import type { PoseFrame, PoseKeypointName, ShootingHand } from '@/core/types';
 
 const PAD = 26;
 const MIN_SCORE = FORM.keypointScoreMin;
+/** Accent hue (palette.leather) at glow alpha for the shooting arm. */
+const ARM_GLOW = 'rgba(240, 90, 36, 0.5)';
+/** Approximate rendered tag width, for edge clamping. */
+const TAG_W = 84;
 
 /** Torso + limb segments (drawn chalk unless on the shooting arm). */
 const BONES: [PoseKeypointName, PoseKeypointName][] = [
@@ -83,15 +90,19 @@ export function ReleaseSkeleton({ pose, hand, elbowDeg, kneeDeg, width, height }
       hand === 'right'
         ? ['right_shoulder', 'right_elbow', 'right_wrist']
         : ['left_shoulder', 'left_elbow', 'left_wrist'];
+    const armSet = new Set<PoseKeypointName>(armNames);
     const bones = BONES.filter(([a, b]) => mapped.has(a) && mapped.has(b)).map(([a, b]) => ({
       a: mapped.get(a)!,
       b: mapped.get(b)!,
-      arm: armNames.includes(a) && armNames.includes(b),
+      arm: armSet.has(a) && armSet.has(b),
     }));
+    const armJoints: Pt[] = [];
+    const bodyJoints: Pt[] = [];
+    for (const [k, p] of mapped) (armSet.has(k) ? armJoints : bodyJoints).push(p);
     const elbowPt = mapped.get(hand === 'right' ? 'right_elbow' : 'left_elbow') ?? null;
     const kneePt = mapped.get(hand === 'right' ? 'right_knee' : 'left_knee') ?? null;
     const headPt = mapped.get('nose') ?? null;
-    return { bones, joints: [...mapped.values()], elbowPt, kneePt, headPt };
+    return { bones, armJoints, bodyJoints, elbowPt, kneePt, headPt };
   }, [pose, hand, width, height]);
 
   if (!geom) {
@@ -109,38 +120,135 @@ export function ReleaseSkeleton({ pose, hand, elbowDeg, kneeDeg, width, height }
   const kneeOk =
     kneeDeg != null && kneeDeg >= FORM.kneeFlexion.min && kneeDeg <= FORM.kneeFlexion.max;
 
+  // Glass tag chips, clamped inside the canvas so joints near an edge never
+  // push their annotation off-screen.
+  const tagPos = (p: Pt) => ({
+    left: Math.max(2, Math.min(p.x + 10, width - TAG_W)),
+    top: Math.max(2, Math.min(p.y - 11, height - 22)),
+  });
+
   return (
     <View style={{ width, height }}>
       <Canvas style={{ width, height }}>
+        {/* Dark underlay separates overlapping limbs on the card surface. */}
         {geom.bones.map((b, i) => (
           <Line
-            key={i}
+            key={`u-${i}`}
             p1={vec(b.a.x, b.a.y)}
             p2={vec(b.b.x, b.b.y)}
-            strokeWidth={b.arm ? 4 : 2.5}
+            strokeWidth={b.arm ? 7 : 5.5}
             strokeCap="round"
-            color={b.arm ? color.accent : color.textFaint}
+            color={color.bg}
+            opacity={0.85}
           />
         ))}
-        {geom.joints.map((p, i) => (
-          <Circle key={`j-${i}`} cx={p.x} cy={p.y} r={3} color={color.text} />
+        {/* Body: quiet chalk. */}
+        {geom.bones
+          .filter((b) => !b.arm)
+          .map((b, i) => (
+            <Line
+              key={`b-${i}`}
+              p1={vec(b.a.x, b.a.y)}
+              p2={vec(b.b.x, b.b.y)}
+              strokeWidth={3}
+              strokeCap="round"
+              color={color.textDim}
+              opacity={0.9}
+            />
+          ))}
+        {/* Shooting arm: glow underlay + solid accent stroke. */}
+        {geom.bones
+          .filter((b) => b.arm)
+          .map((b, i) => (
+            <Line
+              key={`ag-${i}`}
+              p1={vec(b.a.x, b.a.y)}
+              p2={vec(b.b.x, b.b.y)}
+              strokeWidth={8}
+              strokeCap="round"
+              color={ARM_GLOW}
+            >
+              <BlurMask blur={6} style="normal" />
+            </Line>
+          ))}
+        {geom.bones
+          .filter((b) => b.arm)
+          .map((b, i) => (
+            <Line
+              key={`a-${i}`}
+              p1={vec(b.a.x, b.a.y)}
+              p2={vec(b.b.x, b.b.y)}
+              strokeWidth={4.5}
+              strokeCap="round"
+              color={color.accent}
+            />
+          ))}
+        {/* Body joints: chalk on a dark backing ring. */}
+        {geom.bodyJoints.map((p, i) => (
+          <React.Fragment key={`j-${i}`}>
+            <Circle cx={p.x} cy={p.y} r={4.5} color={color.bg} />
+            <Circle cx={p.x} cy={p.y} r={2.8} color={color.text} />
+          </React.Fragment>
         ))}
+        {/* Shooting-arm joints: bigger accent donuts — the joints that matter. */}
+        {geom.armJoints.map((p, i) => (
+          <React.Fragment key={`aj-${i}`}>
+            <Circle cx={p.x} cy={p.y} r={5.5} color={color.bg} />
+            <Circle cx={p.x} cy={p.y} r={4} color={color.accent} />
+            <Circle cx={p.x} cy={p.y} r={1.6} color={color.bg} />
+          </React.Fragment>
+        ))}
+        {/* Measured joints wear a status ring in the tag's verdict color. */}
+        {geom.elbowPt && elbowDeg != null && (
+          <Circle
+            cx={geom.elbowPt.x}
+            cy={geom.elbowPt.y}
+            r={9}
+            style="stroke"
+            strokeWidth={2}
+            color={elbowOk ? color.make : color.unsure}
+            opacity={0.9}
+          />
+        )}
+        {geom.kneePt && kneeDeg != null && (
+          <Circle
+            cx={geom.kneePt.x}
+            cy={geom.kneePt.y}
+            r={9}
+            style="stroke"
+            strokeWidth={2}
+            color={kneeOk ? color.make : color.unsure}
+            opacity={0.9}
+          />
+        )}
         {geom.headPt && (
-          <Circle cx={geom.headPt.x} cy={geom.headPt.y - 6} r={8} style="stroke" strokeWidth={2.5} color={color.textFaint} />
+          <>
+            <Circle cx={geom.headPt.x} cy={geom.headPt.y - 6} r={8} color="rgba(245, 241, 236, 0.05)" />
+            <Circle
+              cx={geom.headPt.x}
+              cy={geom.headPt.y - 6}
+              r={8}
+              style="stroke"
+              strokeWidth={3}
+              color={color.textDim}
+            />
+          </>
         )}
       </Canvas>
       {geom.elbowPt && elbowDeg != null && (
-        <View style={[styles.tag, { left: geom.elbowPt.x + 8, top: geom.elbowPt.y - 10 }]}>
-          <Text style={[styles.tagText, { color: elbowOk ? color.make : color.unsure }]}>
-            elbow {Math.round(elbowDeg)}°
-          </Text>
+        <View style={[styles.tag, tagPos(geom.elbowPt)]}>
+          <View
+            style={[styles.statusDot, { backgroundColor: elbowOk ? color.make : color.unsure }]}
+          />
+          <Text style={styles.tagText}>ELBOW {Math.round(elbowDeg)}°</Text>
         </View>
       )}
       {geom.kneePt && kneeDeg != null && (
-        <View style={[styles.tag, { left: geom.kneePt.x + 8, top: geom.kneePt.y - 10 }]}>
-          <Text style={[styles.tagText, { color: kneeOk ? color.make : color.unsure }]}>
-            knee {Math.round(kneeDeg)}°
-          </Text>
+        <View style={[styles.tag, tagPos(geom.kneePt)]}>
+          <View
+            style={[styles.statusDot, { backgroundColor: kneeOk ? color.make : color.unsure }]}
+          />
+          <Text style={styles.tagText}>KNEE {Math.round(kneeDeg)}°</Text>
         </View>
       )}
     </View>
@@ -150,13 +258,24 @@ export function ReleaseSkeleton({ pose, hand, elbowDeg, kneeDeg, width, height }
 const styles = StyleSheet.create({
   tag: {
     position: 'absolute',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
     backgroundColor: color.surfaceRaised,
-    borderRadius: radius.sm,
-    paddingHorizontal: space.xs,
-    paddingVertical: 1,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: color.border,
+    borderRadius: radius.pill,
+    paddingHorizontal: space.sm,
+    paddingVertical: 2,
+  },
+  statusDot: {
+    width: 5,
+    height: 5,
+    borderRadius: 2.5,
   },
   tagText: {
     ...type.micro,
+    color: color.text,
     fontVariant: ['tabular-nums'],
   },
   noData: {

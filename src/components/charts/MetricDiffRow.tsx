@@ -1,12 +1,17 @@
 /**
  * MetricDiffRow — one make-vs-miss comparison row for a Shot Lab metric:
- * label + make/miss means up top, then a shared horizontal axis with the
- * ideal band shaded, every shot as a dot (makes lane above, misses lane
- * below) and each group's mean as a tick. A "key difference" chip appears
- * when the effect size clears the differentiator floor.
+ * label up top with the two group means right-aligned in fixed tabular
+ * columns (make = green dot marker, miss = red ✕ — color + shape, never
+ * color alone), then a shared horizontal axis with the ideal band shaded
+ * and edge-lined, every shot as a dot (makes lane above, misses lane below,
+ * split by a hairline) and each group's mean as a tick. A footer line
+ * carries the delta as a caret arrow in make-green ("what your makes do
+ * differently") and, when the effect size clears the differentiator floor,
+ * a "key difference" chip.
  *
  * Pure RN views (no canvas): the dots are few and the layout is 1-D.
  */
+import { Ionicons } from '@expo/vector-icons';
 import React from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
@@ -15,11 +20,13 @@ import { color, radius, space, type } from '@/constants/tokens';
 import type { MetricSplit } from '@/core/shotLab';
 
 /** Track height including both lanes, px. */
-const TRACK_H = 34;
+const TRACK_H = 40;
 const DOT = 7;
+/** Accent hue (palette.leather) at edge-line alpha. */
+const BAND_EDGE = 'rgba(240, 90, 36, 0.4)';
 
 export function MetricDiffRow({ split }: { split: MetricSplit }) {
-  const { def, make, miss, points, effect } = split;
+  const { def, make, miss, points, delta, effect } = split;
   const fmt = (v: number | null) =>
     v == null ? '—' : `${v.toFixed(def.digits)}${def.unit}`;
 
@@ -39,9 +46,20 @@ export function MetricDiffRow({ split }: { split: MetricSplit }) {
   const pad = usable ? (hi - lo) * 0.08 : 0;
   const min = lo - pad;
   const span = usable ? hi - lo + pad * 2 : 1;
-  const pct = (v: number) => `${Math.max(0, Math.min(100, ((v - min) / span) * 100))}%` as const;
+  const pctNum = (v: number) => Math.max(0, Math.min(100, ((v - min) / span) * 100));
+  const pct = (v: number) => `${pctNum(v)}%` as const;
+
+  // Ideal band geometry (numeric, so the in-band label can gate on width).
+  const bandLo = def.ideal ? Math.max(def.ideal[0], min) : 0;
+  const bandHi = def.ideal ? Math.min(def.ideal[1], min + span) : 0;
+  const bandLeftPct = def.ideal ? pctNum(bandLo) : 0;
+  const bandWidthPct = def.ideal ? Math.max(2, ((bandHi - bandLo) / span) * 100) : 0;
 
   const isKey = effect != null && Math.abs(effect) >= 0.35;
+  const deltaText =
+    delta == null
+      ? null
+      : `${delta >= 0 ? '+' : '−'}${Math.abs(delta).toFixed(def.digits)}${def.unit}`;
 
   return (
     <View style={styles.wrap}>
@@ -49,14 +67,20 @@ export function MetricDiffRow({ split }: { split: MetricSplit }) {
         <Text style={styles.label} numberOfLines={1}>
           {def.label}
         </Text>
-        {isKey && (
-          <View style={styles.keyChip}>
-            <Text style={styles.keyChipText}>key difference</Text>
-          </View>
-        )}
-        <View style={styles.values}>
+        <View
+          style={styles.valueGroup}
+          accessible
+          accessibilityLabel={`makes average ${fmt(make.mean)}`}
+        >
+          <View style={styles.makeMarker} />
           <Text style={[styles.value, { color: color.make }]}>{fmt(make.mean)}</Text>
-          <Text style={styles.vs}> vs </Text>
+        </View>
+        <View
+          style={styles.valueGroup}
+          accessible
+          accessibilityLabel={`misses average ${fmt(miss.mean)}`}
+        >
+          <Text style={styles.missMarker}>✕</Text>
           <Text style={[styles.value, { color: color.miss }]}>{fmt(miss.mean)}</Text>
         </View>
       </Row>
@@ -64,22 +88,23 @@ export function MetricDiffRow({ split }: { split: MetricSplit }) {
         <View
           style={styles.track}
           accessible
-          accessibilityLabel={`${def.label}: makes average ${fmt(make.mean)}, misses average ${fmt(miss.mean)}`}
+          accessibilityLabel={`${def.label}: makes average ${fmt(make.mean)}, misses average ${fmt(miss.mean)}${
+            deltaText ? `, makes ${deltaText} versus misses` : ''
+          }`}
         >
           {def.ideal && (
-            <View
-              style={[
-                styles.band,
-                {
-                  left: pct(Math.max(def.ideal[0], min)),
-                  width: `${Math.max(
-                    2,
-                    ((Math.min(def.ideal[1], min + span) - Math.max(def.ideal[0], min)) / span) * 100,
-                  )}%`,
-                },
-              ]}
-            />
+            <>
+              <View
+                style={[styles.band, { left: `${bandLeftPct}%`, width: `${bandWidthPct}%` }]}
+              >
+                {bandWidthPct >= 22 && <Text style={styles.bandLabel}>IDEAL</Text>}
+              </View>
+              <View style={[styles.bandEdge, { left: `${bandLeftPct}%` }]} />
+              <View style={[styles.bandEdge, { left: `${bandLeftPct + bandWidthPct}%` }]} />
+            </>
           )}
+          {/* Lane divider: makes above, misses below. */}
+          <View style={styles.laneDivider} />
           {points.map(([v, isMake], i) => (
             <View
               key={i}
@@ -87,18 +112,21 @@ export function MetricDiffRow({ split }: { split: MetricSplit }) {
                 styles.dot,
                 {
                   left: pct(v),
-                  top: isMake ? 5 : TRACK_H - 5 - DOT,
+                  top: isMake ? 6 : TRACK_H - 6 - DOT,
                   backgroundColor: isMake ? color.make : color.miss,
                 },
               ]}
             />
           ))}
           {make.mean != null && (
-            <View style={[styles.meanTick, { left: pct(make.mean), backgroundColor: color.make, top: 2 }]} />
+            <View style={[styles.meanTick, { left: pct(make.mean), backgroundColor: color.make, top: 3 }]} />
           )}
           {miss.mean != null && (
             <View
-              style={[styles.meanTick, { left: pct(miss.mean), backgroundColor: color.miss, top: TRACK_H / 2 }]}
+              style={[
+                styles.meanTick,
+                { left: pct(miss.mean), backgroundColor: color.miss, top: TRACK_H / 2 + 2 },
+              ]}
             />
           )}
         </View>
@@ -106,6 +134,26 @@ export function MetricDiffRow({ split }: { split: MetricSplit }) {
         <Text style={styles.noData}>
           {def.needsPose ? 'Needs form analysis on (Settings › Coaching).' : 'Not enough data yet.'}
         </Text>
+      )}
+      {(deltaText != null || isKey) && (
+        <Row gap={space.xs} style={styles.footer}>
+          {deltaText != null && (
+            <>
+              <Ionicons
+                name={delta != null && delta >= 0 ? 'caret-up' : 'caret-down'}
+                size={11}
+                color={color.make}
+              />
+              <Text style={styles.deltaValue}>{deltaText}</Text>
+              <Text style={styles.deltaText}>makes vs misses</Text>
+            </>
+          )}
+          {isKey && (
+            <View style={styles.keyChip}>
+              <Text style={styles.keyChipText}>key difference</Text>
+            </View>
+          )}
+        </Row>
       )}
     </View>
   );
@@ -122,30 +170,30 @@ const styles = StyleSheet.create({
   label: {
     ...type.bodyMedium,
     color: color.text,
-    flexShrink: 1,
+    flex: 1,
   },
-  keyChip: {
-    backgroundColor: color.accentTint,
-    borderRadius: radius.pill,
-    paddingHorizontal: space.sm,
-    paddingVertical: 2,
-  },
-  keyChipText: {
-    ...type.micro,
-    color: color.accent,
-  },
-  values: {
+  valueGroup: {
     flexDirection: 'row',
     alignItems: 'baseline',
-    marginLeft: 'auto',
+    gap: space.xs,
   },
   value: {
     ...type.bodyMedium,
     fontVariant: ['tabular-nums'],
+    minWidth: 56,
+    textAlign: 'right',
   },
-  vs: {
-    ...type.caption,
-    color: color.textFaint,
+  makeMarker: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: color.make,
+  },
+  missMarker: {
+    ...type.micro,
+    color: color.miss,
+    fontSize: 9,
+    lineHeight: 11,
   },
   track: {
     height: TRACK_H,
@@ -159,6 +207,32 @@ const styles = StyleSheet.create({
     bottom: 0,
     backgroundColor: color.accentTint,
     opacity: 0.55,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  bandEdge: {
+    position: 'absolute',
+    top: 0,
+    bottom: 0,
+    width: 1,
+    marginLeft: -0.5,
+    backgroundColor: BAND_EDGE,
+  },
+  bandLabel: {
+    ...type.micro,
+    fontSize: 8,
+    lineHeight: 10,
+    letterSpacing: 1.2,
+    color: color.accent,
+    opacity: 0.9,
+  },
+  laneDivider: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    top: TRACK_H / 2,
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: color.border,
   },
   dot: {
     position: 'absolute',
@@ -170,10 +244,33 @@ const styles = StyleSheet.create({
   },
   meanTick: {
     position: 'absolute',
-    width: 2.5,
-    height: TRACK_H / 2 - 2,
-    marginLeft: -1.25,
-    borderRadius: 1,
+    width: 3,
+    height: TRACK_H / 2 - 5,
+    marginLeft: -1.5,
+    borderRadius: 1.5,
+  },
+  footer: {
+    alignItems: 'center',
+  },
+  deltaValue: {
+    ...type.caption,
+    color: color.make,
+    fontVariant: ['tabular-nums'],
+  },
+  deltaText: {
+    ...type.caption,
+    color: color.textFaint,
+  },
+  keyChip: {
+    backgroundColor: color.accentTint,
+    borderRadius: radius.pill,
+    paddingHorizontal: space.sm,
+    paddingVertical: 2,
+    marginLeft: 'auto',
+  },
+  keyChipText: {
+    ...type.micro,
+    color: color.accent,
   },
   noData: {
     ...type.caption,
