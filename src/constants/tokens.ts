@@ -44,6 +44,10 @@ export const palette = {
   downtown: '#F2C14E',
   downtownTint: 'rgba(242, 193, 78, 0.16)',
 
+  /** Ghost Challenge — spectral violet, distinct from paint blue & leather. */
+  spectral: '#9C7BF0',
+  spectralTint: 'rgba(156, 123, 240, 0.14)',
+
   /** Text. Chalk white, then dimmed steps. */
   chalk: '#F5F1EC',
   chalkDim: '#B3ACA5',
@@ -76,6 +80,9 @@ export const color = {
   /** 3-point shots / stat pill accent. */
   threePt: palette.downtown,
   threePtTint: palette.downtownTint,
+  /** Ghost Challenge accent (mode identity, race HUD). */
+  ghost: palette.spectral,
+  ghostTint: palette.spectralTint,
   /** Live HUD chip background over camera (glass). */
   hudGlass: 'rgba(18, 16, 16, 0.62)',
   hudGlassBorder: 'rgba(245, 241, 236, 0.14)',

@@ -14,7 +14,7 @@
  * score nor advance nor cost a letter) so the AI's low-confidence calls don't
  * corrupt a game.
  */
-import type { GameModeId, ResolvedShot, ShotValue } from './types';
+import type { GameModeId, ResolvedShot, ShotOutcome, ShotValue } from './types';
 
 // ---------------------------------------------------------------------------
 // Mode catalog
@@ -114,6 +114,19 @@ export const GAME_MODES: readonly GameModeDef[] = [
     needsTimer: false,
     needsSpots: false,
   },
+  {
+    id: 'ghost',
+    name: 'Ghost Challenge',
+    emoji: '👻',
+    tagline: 'Race your past self, make for make.',
+    rules:
+      'Pick a past session and race its make timeline in real time. Your first shot starts the clock; finish ahead of the ghost when its clock expires to win.',
+    // The race clock is inherited from the ghost session (not the setup-screen
+    // duration picker) and the live tick loop keys on the mode id, so this
+    // stays false even though tickMode drives completion.
+    needsTimer: false,
+    needsSpots: false,
+  },
 ];
 
 /** Lookup a mode definition by id. Throws on an unknown id (programmer error). */
@@ -122,6 +135,53 @@ export function getModeDef(id: GameModeId): GameModeDef {
   if (def === undefined) throw new Error(`Unknown game mode: ${id}`);
   return def;
 }
+
+// ---------------------------------------------------------------------------
+// Ghost Challenge — race a previous session's make timeline
+// ---------------------------------------------------------------------------
+
+/** Minimum makes a past session needs to be raceable as a ghost. */
+export const GHOST_MIN_MAKES = 3;
+
+/** One point on the ghost's make timeline: the ghost's cumulative make count
+ * as of `tOffsetSec` seconds after ITS first decided shot. */
+export interface GhostTimelinePoint {
+  tOffsetSec: number;
+  /** Cumulative makes at that instant (1 for the first make, 2 for the second…). */
+  makes: number;
+}
+
+/** Immutable per-race config: the ghost session's make timeline + duration. */
+export interface GhostConfig {
+  /** Make timeline, ascending by tOffsetSec (see {@link deriveGhostConfig}). */
+  timeline: GhostTimelinePoint[];
+  /** Ghost session length in seconds (first → last decided shot). */
+  durationSec: number;
+  /** Source session row id, for labels/replay bookkeeping. */
+  sourceSessionId?: number;
+  /** Short player-facing label for the ghost (session tag or date). */
+  sourceLabel?: string;
+}
+
+/** Live race scoreboard for the Ghost Challenge (modeId 'ghost' only). */
+export interface GhostRaceState {
+  /** Your cumulative makes this run. */
+  yourMakes: number;
+  /** The ghost's cumulative makes at the current elapsed time. */
+  ghostMakesNow: number;
+  /** yourMakes − ghostMakesNow. Positive ⇒ you're ahead. */
+  lead: number;
+  /** The ghost's final make total — the target to beat. */
+  finalGhostMakes: number;
+  /** Race outcome vs the ghost's final total; set when the mode completes. */
+  result?: 'win' | 'tie' | 'loss';
+  /** Final margin (yourMakes − finalGhostMakes); set when the mode completes. */
+  finalMargin?: number;
+}
+
+/** Tint for the banner status line (`ModeState.message`). Modes that never set
+ * it render neutral, exactly as before this field existed. */
+export type ModeMessageTone = 'positive' | 'negative' | 'neutral';
 
 // ---------------------------------------------------------------------------
 // Mode state
@@ -157,15 +217,20 @@ export interface ModeState {
   /**
    * Immutable per-game config captured at {@link initMode} time. Kept on the
    * state (rather than reconstructed) so step/tick stay pure and exact:
-   * durationSec for timed, makesPerSpot for spot shooting, bestStreak for
-   * ftStreak's running best.
+   * durationSec for timed, makesPerSpot for spot shooting, the ghost timeline
+   * for the Ghost Challenge, bestStreak for ftStreak's running best.
    */
   config?: {
     durationSec?: number;
     makesPerSpot?: number;
+    ghost?: GhostConfig;
   };
   /** ftStreak: best consecutive-make run so far. */
   bestStreak?: number;
+  /** Ghost Challenge: the live race scoreboard (modeId 'ghost' only). */
+  ghost?: GhostRaceState;
+  /** Optional tint for `message` (ghost lead coloring). Absent ⇒ neutral. */
+  messageTone?: ModeMessageTone;
 }
 
 /** Options accepted by {@link initMode}. All optional with sane defaults. */
@@ -174,6 +239,9 @@ export interface InitModeOpts {
   durationSec?: number;
   /** Spot Shooting: makes required per spot (default 5). */
   makesPerSpot?: number;
+  /** Ghost Challenge: the ghost session's timeline. Required for a live race —
+   * without it the mode initializes already-done (empty-ghost guard). */
+  ghost?: GhostConfig;
 }
 
 // ---------------------------------------------------------------------------
@@ -303,6 +371,29 @@ export function initMode(modeId: GameModeId, opts: InitModeOpts = {}): ModeState
         letters: '',
         message: 'Land a shot to call it.',
       };
+
+    case 'ghost': {
+      const ghostCfg = opts.ghost;
+      const timeline = ghostCfg?.timeline ?? [];
+      const durationSec = ghostCfg?.durationSec ?? 0;
+      const finalGhostMakes = timeline.reduce((a, p) => Math.max(a, p.makes), 0);
+      // Empty-ghost guard: a race needs at least one ghost make and a real
+      // clock. Anything else starts (and stays) done so no phantom race runs.
+      const valid = timeline.length > 0 && durationSec > 0 && finalGhostMakes > 0;
+      return {
+        modeId,
+        started: null,
+        done: !valid,
+        score: 0,
+        progress: 0,
+        timeLeftSec: valid ? durationSec : 0,
+        ...(ghostCfg != null ? { config: { ghost: ghostCfg } } : {}),
+        ghost: { yourMakes: 0, ghostMakesNow: 0, lead: 0, finalGhostMakes },
+        message: valid
+          ? `Beat ${finalGhostMakes} makes in ${Math.ceil(durationSec)}s — your first shot starts the race.`
+          : 'No ghost run loaded — pick a past session to race.',
+      };
+    }
   }
 }
 
@@ -341,6 +432,8 @@ export function stepMode(
       return stepFtStreak(state, shot, nowSec);
     case 'horse':
       return stepHorse(state, shot, nowSec);
+    case 'ghost':
+      return stepGhost(state, shot, nowSec);
   }
 }
 
@@ -642,20 +735,187 @@ function stepHorse(state: ModeState, shot: ResolvedShot, nowSec: number): ModeSt
   };
 }
 
+// --- ghost ------------------------------------------------------------------
+
+/**
+ * The ghost's cumulative makes at `tSec` seconds into the race — a
+ * piecewise-constant (step) interpolation of the make timeline: the ghost is
+ * credited with each make exactly at its recorded offset, never earlier.
+ * Robust to unsorted timelines; returns 0 before the first make.
+ */
+export function ghostMakesAt(
+  timeline: readonly GhostTimelinePoint[],
+  tSec: number,
+): number {
+  let makes = 0;
+  for (const p of timeline) {
+    if (p.tOffsetSec <= tSec && p.makes > makes) makes = p.makes;
+  }
+  return makes;
+}
+
+/** The minimal shot shape {@link deriveGhostConfig} needs (ShotRow-compatible). */
+export interface GhostSourceShot {
+  /** Resolve time, seconds (any consistent clock — only offsets are used). */
+  tResolved: number;
+  outcome: ShotOutcome;
+}
+
+/**
+ * Derive a {@link GhostConfig} from a past session's resolved shots: the make
+ * timeline is timed from the session's FIRST decided shot (make or miss), and
+ * the race duration runs to its last decided shot. `unsure` shots are ignored,
+ * matching every mode's treatment of them.
+ *
+ * Returns null when the session can't be raced: no decided shots, no makes,
+ * or a degenerate (zero-length) clock.
+ */
+export function deriveGhostConfig(
+  shots: readonly GhostSourceShot[],
+  meta: { sourceSessionId?: number; sourceLabel?: string } = {},
+): GhostConfig | null {
+  const decided = shots
+    .filter((s) => s.outcome === 'make' || s.outcome === 'miss')
+    .slice()
+    .sort((a, b) => a.tResolved - b.tResolved);
+  if (decided.length === 0) return null;
+  const t0 = decided[0].tResolved;
+  const timeline: GhostTimelinePoint[] = [];
+  let makes = 0;
+  for (const s of decided) {
+    if (s.outcome !== 'make') continue;
+    makes += 1;
+    timeline.push({ tOffsetSec: s.tResolved - t0, makes });
+  }
+  if (timeline.length === 0) return null;
+  const durationSec = decided[decided.length - 1].tResolved - t0;
+  if (durationSec <= 0) return null;
+  return { timeline, durationSec, ...meta };
+}
+
+/** Status line: "YOU 7 · GHOST 6 · +1" (EVEN when tied). */
+function ghostRaceMessage(yourMakes: number, ghostMakesNow: number): string {
+  const lead = yourMakes - ghostMakesNow;
+  const tail = lead > 0 ? `+${lead}` : lead < 0 ? `${lead}` : 'EVEN';
+  return `YOU ${yourMakes} · GHOST ${ghostMakesNow} · ${tail}`;
+}
+
+function ghostTone(lead: number): ModeMessageTone {
+  return lead > 0 ? 'positive' : lead < 0 ? 'negative' : 'neutral';
+}
+
+/** Finalize the race at the ghost clock's expiry: win/tie/loss + margin. */
+function finishGhost(
+  state: ModeState,
+  started: number,
+  race: GhostRaceState,
+): ModeState {
+  const finalMargin = race.yourMakes - race.finalGhostMakes;
+  const result: 'win' | 'tie' | 'loss' =
+    finalMargin > 0 ? 'win' : finalMargin < 0 ? 'loss' : 'tie';
+  return {
+    ...state,
+    started,
+    done: true,
+    score: race.yourMakes,
+    progress: 1,
+    timeLeftSec: 0,
+    ghost: {
+      ...race,
+      ghostMakesNow: race.finalGhostMakes,
+      lead: finalMargin,
+      result,
+      finalMargin,
+    },
+    message:
+      result === 'win'
+        ? `Ghost beaten by ${finalMargin} — ${race.yourMakes} to ${race.finalGhostMakes}! 👻`
+        : result === 'tie'
+          ? `Dead heat — ${race.yourMakes} apiece.`
+          : `Ghost wins by ${-finalMargin} — ${race.finalGhostMakes} to ${race.yourMakes}.`,
+    messageTone: ghostTone(finalMargin),
+  };
+}
+
+/**
+ * Ghost Challenge: race your cumulative makes against the ghost's recorded
+ * pace on one shared elapsed clock. The clock arms on YOUR first decided shot
+ * (not on a tick — no time burns while you set up). A shot landing at or after
+ * the ghost clock's expiry doesn't count and finalizes the race, mirroring the
+ * timed mode's buzzer rule.
+ */
+function stepGhost(state: ModeState, shot: ResolvedShot, nowSec: number): ModeState {
+  if (!isDecided(shot)) return state;
+  const cfg = state.config?.ghost;
+  const race = state.ghost;
+  if (cfg == null || race == null || cfg.timeline.length === 0 || cfg.durationSec <= 0) {
+    // Defensive — initMode's empty-ghost guard already marks these done.
+    return { ...state, done: true };
+  }
+  const started = state.started ?? nowSec;
+  const elapsed = nowSec - started;
+  if (elapsed >= cfg.durationSec) return finishGhost(state, started, race);
+
+  const yourMakes = race.yourMakes + (isMake(shot) ? 1 : 0);
+  const ghostMakesNow = ghostMakesAt(cfg.timeline, elapsed);
+  const lead = yourMakes - ghostMakesNow;
+  return {
+    ...state,
+    started,
+    score: yourMakes,
+    progress: clamp01(elapsed / cfg.durationSec),
+    timeLeftSec: Math.max(0, cfg.durationSec - elapsed),
+    ghost: { ...race, yourMakes, ghostMakesNow, lead },
+    message: ghostRaceMessage(yourMakes, ghostMakesNow),
+    messageTone: ghostTone(lead),
+  };
+}
+
+/**
+ * Ghost clock tick. Unlike the timed mode, ticking never arms the clock — the
+ * race waits for your first shot. Once armed, ticks advance the ghost's pace
+ * (it can pull ahead between your shots) and finalize at the clock's expiry.
+ */
+function tickGhost(state: ModeState, nowSec: number): ModeState {
+  const cfg = state.config?.ghost;
+  const race = state.ghost;
+  if (cfg == null || race == null || cfg.timeline.length === 0 || cfg.durationSec <= 0) {
+    return state;
+  }
+  if (state.started === null) return state;
+  const elapsed = nowSec - state.started;
+  if (elapsed >= cfg.durationSec) return finishGhost(state, state.started, race);
+
+  const ghostMakesNow = ghostMakesAt(cfg.timeline, elapsed);
+  const lead = race.yourMakes - ghostMakesNow;
+  return {
+    ...state,
+    progress: clamp01(elapsed / cfg.durationSec),
+    timeLeftSec: Math.max(0, cfg.durationSec - elapsed),
+    ghost: { ...race, ghostMakesNow, lead },
+    message: ghostRaceMessage(race.yourMakes, ghostMakesNow),
+    messageTone: ghostTone(lead),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // tickMode
 // ---------------------------------------------------------------------------
 
 /**
- * Advance wall-clock for timed modes. Pure; returns NEW state (or the same
- * object when nothing changes). For non-timed modes this is a no-op.
+ * Advance wall-clock for tick-driven modes (timed countdown, ghost race).
+ * Pure; returns NEW state (or the same object when nothing changes). For all
+ * other modes this is a no-op.
  *
- * The clock arms on the first tick (started := nowSec) so a mode picked but not
- * yet begun doesn't silently burn time. When the countdown reaches 0 the mode
- * is marked done.
+ * Timed: the clock arms on the first tick (started := nowSec) so a mode picked
+ * but not yet begun doesn't silently burn time. Ghost: the clock only arms on
+ * the first shot (see {@link tickGhost}). Either way, when the clock expires
+ * the mode is marked done.
  */
 export function tickMode(state: ModeState, nowSec: number): ModeState {
-  if (state.modeId !== 'timed' || state.done) return state;
+  if (state.done) return state;
+  if (state.modeId === 'ghost') return tickGhost(state, nowSec);
+  if (state.modeId !== 'timed') return state;
 
   if (state.started === null) {
     // Arm the clock; keep the full duration on the board.

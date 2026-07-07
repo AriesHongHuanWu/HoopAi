@@ -143,6 +143,25 @@ function ModeBreakdownCard({ modeId, resultJson }: { modeId: string; resultJson:
             {mode.bestStreak != null && (
               <Chip label={`Best streak ${mode.bestStreak}`} />
             )}
+            {mode.ghost != null && <Chip label={`Ghost ${mode.ghost.finalGhostMakes}`} />}
+            {mode.ghost?.result != null && (
+              <Chip
+                label={
+                  mode.ghost.result === 'win'
+                    ? `Won by ${mode.ghost.finalMargin ?? 0}`
+                    : mode.ghost.result === 'loss'
+                      ? `Lost by ${-(mode.ghost.finalMargin ?? 0)}`
+                      : 'Tied'
+                }
+                tone={
+                  mode.ghost.result === 'win'
+                    ? 'make'
+                    : mode.ghost.result === 'loss'
+                      ? 'miss'
+                      : 'unsure'
+                }
+              />
+            )}
             {mode.done && <Chip label="Complete" tone="make" />}
           </Row>
           {mode.spots != null && mode.spots.length > 0 && (

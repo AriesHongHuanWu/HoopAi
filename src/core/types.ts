@@ -395,7 +395,7 @@ export interface SessionStats {
 // Game modes
 // ---------------------------------------------------------------------------
 
-/** The seven playable modes layered on top of the make/miss stream. */
+/** The eight playable modes layered on top of the make/miss stream. */
 export type GameModeId =
   | 'free'
   | 'aroundTheWorld'
@@ -403,7 +403,8 @@ export type GameModeId =
   | 'timed'
   | 'threePoint'
   | 'ftStreak'
-  | 'horse';
+  | 'horse'
+  | 'ghost';
 
 // ---------------------------------------------------------------------------
 // Clips

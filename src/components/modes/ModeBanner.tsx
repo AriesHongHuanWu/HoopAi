@@ -32,6 +32,7 @@ function scoreLabel(mode: ModeState): string {
     case 'timed':
     case 'spotShooting':
     case 'aroundTheWorld':
+    case 'ghost':
       return 'Makes';
     case 'ftStreak':
       return 'Streak';
@@ -54,6 +55,18 @@ function bannerA11yLabel(mode: ModeState, def: ReturnType<typeof getModeDef>): s
   }
   if (mode.modeId === 'horse' && mode.letters) {
     parts.push(`Letters: ${mode.letters.split('').join(' ')}.`);
+  }
+  if (mode.modeId === 'ghost' && mode.ghost != null) {
+    // Spoken race status replaces the visual "YOU 7 · GHOST 6 · +1" line.
+    parts.push(`Ghost: ${mode.ghost.ghostMakesNow}.`);
+    parts.push(
+      mode.ghost.lead > 0
+        ? `Ahead by ${mode.ghost.lead}.`
+        : mode.ghost.lead < 0
+          ? `Behind by ${-mode.ghost.lead}.`
+          : 'Tied.',
+    );
+    return parts.join(' ');
   }
   if (mode.message) parts.push(mode.message);
   return parts.join(' ');
@@ -142,8 +155,16 @@ export function ModeBanner({ mode }: { mode: ModeState }) {
         </View>
       )}
 
-      {/* Status line */}
-      <Text style={styles.message} numberOfLines={1}>
+      {/* Status line — messageTone tints it when the mode sets one (ghost lead:
+          ahead = make green, behind = miss red, tied = neutral). */}
+      <Text
+        style={[
+          styles.message,
+          mode.messageTone === 'positive' && { color: color.make },
+          mode.messageTone === 'negative' && { color: color.miss },
+        ]}
+        numberOfLines={1}
+      >
         {mode.message}
       </Text>
     </Animated.View>

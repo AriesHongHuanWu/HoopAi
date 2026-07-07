@@ -69,4 +69,10 @@ export const MODE_IDENTITY: Record<GameModeId, ModeIdentity> = {
     tint: 'rgba(179, 172, 165, 0.14)',
     glance: ['Call it', '5 letters'],
   },
+  ghost: {
+    icon: 'walk',
+    accent: color.ghost,
+    tint: color.ghostTint,
+    glance: ['Your past run', 'Same clock'],
+  },
 } as const;
