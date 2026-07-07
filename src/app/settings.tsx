@@ -4,12 +4,13 @@
  * Video (record + clip retention), Player (hand, height),
  * Help (restart tutorial / replay onboarding), About (version + model licenses).
  */
+import { Ionicons } from '@expo/vector-icons';
 import { createAudioPlayer, type AudioPlayer } from 'expo-audio';
-import { FadeInDown } from 'react-native-reanimated';
+import { FadeInDown, useReducedMotion } from 'react-native-reanimated';
 import Constants from 'expo-constants';
 import * as Haptics from 'expo-haptics';
 import { router } from 'expo-router';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ComponentProps } from 'react';
 import { Linking, Pressable, StyleSheet, Switch, Text, View } from 'react-native';
 
 import {
@@ -153,27 +154,58 @@ function releasePreview() {
   previewPlayer = null;
 }
 
+/** Ionicons glyph name — section bubbles, chip checks, chevrons. */
+type IconName = ComponentProps<typeof Ionicons>['name'];
+
+/**
+ * Card section header — a small accent-tinted icon bubble beside the Eyebrow
+ * so each section is scannable by glyph before its label is read.
+ * The bubble mirrors the Eyebrow's built-in bottom margin so the pair stays
+ * optically centered on one line.
+ */
+function SectionHeader({ icon, children }: { icon: IconName; children: string }) {
+  return (
+    <Row gap={space.sm}>
+      <View style={styles.sectionIcon}>
+        <Ionicons name={icon} size={14} color={color.accent} />
+      </View>
+      <Eyebrow>{children}</Eyebrow>
+    </Row>
+  );
+}
+
 function ToggleRow({
   label,
   description,
   value,
   disabled,
+  experimental,
   onValueChange,
 }: {
   label: string;
   description?: string;
   value: boolean;
   disabled?: boolean;
+  /** Renders a flask badge so pre-release features read as a class. */
+  experimental?: boolean;
   onValueChange: (v: boolean) => void;
 }) {
   return (
     <Row style={[styles.settingRow, disabled === true && styles.disabled]} gap={space.lg}>
       <View style={styles.settingText}>
-        <Text style={styles.settingLabel}>{label}</Text>
+        <View style={styles.labelRow}>
+          <Text style={styles.settingLabel}>{label}</Text>
+          {experimental === true && (
+            <View style={styles.flaskBadge}>
+              <Ionicons name="flask" size={10} color={color.unsure} />
+              <Text style={styles.flaskBadgeLabel}>Experimental</Text>
+            </View>
+          )}
+        </View>
         {description != null && <Text style={styles.settingDesc}>{description}</Text>}
       </View>
       <Switch
-        accessibilityLabel={label}
+        accessibilityLabel={experimental === true ? `${label} (experimental)` : label}
         accessibilityState={{ disabled: disabled === true }}
         disabled={disabled === true}
         value={value}
@@ -212,10 +244,56 @@ function SelectChip({
       style={({ pressed }) => [
         styles.selectChip,
         selected && styles.selectChipSelected,
+        pressed && !selected && styles.selectChipPressed,
+        pressed && selected && { opacity: 0.82 },
+      ]}
+    >
+      {selected && <Ionicons name="checkmark" size={13} color={color.accent} />}
+      <Text style={[styles.selectChipLabel, selected && styles.selectChipLabelSelected]}>
+        {label}
+      </Text>
+    </Pressable>
+  );
+}
+
+/**
+ * Tracking preset row — the one selector where the active choice must be
+ * unmistakable: accent border, tinted fill and a check, while inactive
+ * presets stay quiet outlined cards.
+ */
+function PresetRow({
+  label,
+  blurb,
+  selected,
+  onPress,
+}: {
+  label: string;
+  blurb: string;
+  selected: boolean;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="radio"
+      accessibilityLabel={label}
+      accessibilityHint={blurb}
+      accessibilityState={{ selected }}
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.presetRow,
+        selected && styles.presetRowSelected,
         pressed && !selected && { backgroundColor: color.surfaceRaised },
       ]}
     >
-      <Text style={[styles.selectChipLabel, selected && { color: color.accent }]}>{label}</Text>
+      <View style={styles.settingText}>
+        <Text style={styles.settingLabel}>{label}</Text>
+        <Text style={styles.settingDesc}>{blurb}</Text>
+      </View>
+      {selected ? (
+        <Ionicons name="checkmark-circle" size={22} color={color.accent} />
+      ) : (
+        <View style={styles.presetRadioIdle} />
+      )}
     </Pressable>
   );
 }
@@ -283,7 +361,7 @@ function ActionRow({
         <Text style={styles.settingLabel}>{label}</Text>
         <Text style={styles.settingDesc}>{description}</Text>
       </View>
-      <Text style={styles.chevron}>{'›'}</Text>
+      <Ionicons name="chevron-forward" size={18} color={color.textFaint} />
     </Pressable>
   );
 }
@@ -307,7 +385,7 @@ function StepperButton({
       onPress={onPress}
       style={({ pressed }) => [
         styles.stepper,
-        pressed && { backgroundColor: color.surfaceRaised },
+        pressed && styles.stepperPressed,
         disabled === true && styles.disabled,
       ]}
     >
@@ -412,6 +490,10 @@ export default function SettingsScreen() {
   const applyTrackingPreset = useSettings((s) => s.applyTrackingPreset);
   const resetTutorial = useSettings((s) => s.resetTutorial);
 
+  // Respect the system Reduce Motion setting: cards appear in place.
+  const reducedMotion = useReducedMotion();
+  const enter = (i: number) => (reducedMotion ? undefined : cardEnter(i));
+
   // Derived tracking preset (never persisted — always reflects the live knobs).
   const activePreset = presetFromKnobs({
     detectorEngine,
@@ -472,8 +554,8 @@ export default function SettingsScreen() {
         </Text>
 
         {/* Feedback */}
-        <Card entering={cardEnter(0)}>
-          <Eyebrow>Feedback</Eyebrow>
+        <Card entering={enter(0)}>
+          <SectionHeader icon="volume-high">Feedback</SectionHeader>
           <ToggleRow
             label="Sounds"
             description="Swish and rim sounds after every shot."
@@ -536,8 +618,8 @@ export default function SettingsScreen() {
         </Card>
 
         {/* Detection */}
-        <Card entering={cardEnter(1)}>
-          <Eyebrow>Detection</Eyebrow>
+        <Card entering={enter(1)}>
+          <SectionHeader icon="scan">Detection</SectionHeader>
           <View style={styles.settingText}>
             <Text style={styles.settingLabel}>Tracking mode</Text>
             <Text style={styles.settingDesc}>
@@ -545,10 +627,10 @@ export default function SettingsScreen() {
               people never need the advanced controls.
             </Text>
           </View>
-          {PRESET_OPTIONS.map((opt, i) => (
-            <View key={opt.value}>
-              {i > 0 && <View style={styles.divider} />}
-              <OptionRow
+          <View style={styles.presetList}>
+            {PRESET_OPTIONS.map((opt) => (
+              <PresetRow
+                key={opt.value}
                 label={opt.label}
                 blurb={opt.blurb}
                 selected={activePreset === opt.value}
@@ -557,8 +639,8 @@ export default function SettingsScreen() {
                   applyTrackingPreset(opt.value);
                 }}
               />
-            </View>
-          ))}
+            ))}
+          </View>
           {activePreset === 'custom' && (
             <Text style={styles.tierCaption}>
               Custom — your advanced controls below don&apos;t match a preset.
@@ -738,7 +820,8 @@ export default function SettingsScreen() {
           ))}
           <View style={styles.divider} />
           <ToggleRow
-            label="Metric 2/3 distance (experimental)"
+            label="Metric 2/3 distance"
+            experimental
             description="Uses the rim's real size (0.45m) and height (3.05m) as a ruler to compute your TRUE shooting distance in meters for the 2/3-point call, instead of the rough on-screen estimate. Falls back automatically when the camera angle can't support it."
             value={metric23}
             onValueChange={(v) => {
@@ -748,7 +831,8 @@ export default function SettingsScreen() {
           />
           <View style={styles.divider} />
           <ToggleRow
-            label="Parallax guard (experimental)"
+            label="Parallax guard"
+            experimental
             description="Uses your ball's real size vs the rim's to catch airballs flying IN FRONT of the hoop that would otherwise count as makes. Veto-only: it can cancel a fake make, never invent one, and stays silent beyond its verified range (~1m separation up to ~6m; needs the right Ball size set in Player). Takes effect at the next rim lock."
             value={depthVeto}
             onValueChange={(v) => {
@@ -758,7 +842,8 @@ export default function SettingsScreen() {
           />
           <View style={styles.divider} />
           <ToggleRow
-            label="Ghost-swish rescue (experimental)"
+            label="Ghost-swish rescue"
+            experimental
             description="When the ball disappears into the net and reappears below the rim on the same flight path, count the make it implies — only when the net or the in-basket detector agrees. Hardened against rim-bounces and putback fakes."
             value={reappearance}
             onValueChange={(v) => {
@@ -768,7 +853,8 @@ export default function SettingsScreen() {
           />
           <View style={styles.divider} />
           <ToggleRow
-            label="Rim zoom (experimental)"
+            label="Rim zoom"
+            experimental
             description="When the ball is missed near the basket, re-run the detector on a magnified crop of the rim to recover it at the make/miss moment. Self-limiting — only fires during a shot, only when needed, and only on phones fast enough. Turn on Debug mode to see it working (the 'roi zoom' row)."
             value={roiZoom}
             onValueChange={(v) => {
@@ -778,7 +864,8 @@ export default function SettingsScreen() {
           />
           <View style={styles.divider} />
           <ToggleRow
-            label="Motion assist (experimental)"
+            label="Motion assist"
+            experimental
             description="When the detector loses the ball mid-flight, use frame-to-frame motion to keep following the strongest mover. Can mistake other movement for the ball — leave off unless testing."
             value={motionAssist}
             onValueChange={(v) => {
@@ -791,8 +878,8 @@ export default function SettingsScreen() {
         </Card>
 
         {/* Coaching */}
-        <Card entering={cardEnter(2)}>
-          <Eyebrow>Coaching</Eyebrow>
+        <Card entering={enter(2)}>
+          <SectionHeader icon="school">Coaching</SectionHeader>
           <ToggleRow
             label="Shooting form analysis"
             description="Analyzes your elbow, knee, release and follow-through with a pose model and gives one cue per shot. Runs a second model — best on recent phones (iPhone 12 and newer)."
@@ -805,8 +892,8 @@ export default function SettingsScreen() {
         </Card>
 
         {/* Goals */}
-        <Card entering={cardEnter(3)}>
-          <Eyebrow>Goals</Eyebrow>
+        <Card entering={enter(3)}>
+          <SectionHeader icon="flag">Goals</SectionHeader>
           <StepperRow
             label="Daily goal"
             description="Shows a progress ring on Home for makes logged today. Off hides the ring."
@@ -821,8 +908,8 @@ export default function SettingsScreen() {
         </Card>
 
         {/* Video */}
-        <Card entering={cardEnter(4)}>
-          <Eyebrow>Video</Eyebrow>
+        <Card entering={enter(4)}>
+          <SectionHeader icon="videocam">Video</SectionHeader>
           <ToggleRow
             label="Record sessions"
             description="Capture video while you shoot so clips can be saved."
@@ -888,8 +975,8 @@ export default function SettingsScreen() {
         </Card>
 
         {/* Player */}
-        <Card entering={cardEnter(5)}>
-          <Eyebrow>Player</Eyebrow>
+        <Card entering={enter(5)}>
+          <SectionHeader icon="person">Player</SectionHeader>
           <View style={styles.settingText}>
             <Text style={styles.settingLabel}>Shooting hand</Text>
             <Text style={styles.settingDesc}>Used by form analysis to read your release arm.</Text>
@@ -959,8 +1046,8 @@ export default function SettingsScreen() {
         </Card>
 
         {/* Help */}
-        <Card entering={cardEnter(6)}>
-          <Eyebrow>Help</Eyebrow>
+        <Card entering={enter(6)}>
+          <SectionHeader icon="help-buoy">Help</SectionHeader>
           <ActionRow
             label="Restart tutorial"
             description="Replay the coach marks on Home, Live and Summary."
@@ -978,11 +1065,11 @@ export default function SettingsScreen() {
         </Card>
 
         {/* About */}
-        <Card entering={cardEnter(7)}>
-          <Eyebrow>About</Eyebrow>
+        <Card entering={enter(7)}>
+          <SectionHeader icon="information-circle">About</SectionHeader>
           <Row style={styles.settingRow} gap={space.lg}>
             <Text style={styles.settingLabel}>Version</Text>
-            <Text style={styles.settingDesc}>{version}</Text>
+            <Text style={styles.rowValue}>{version}</Text>
           </Row>
           <View style={styles.divider} />
           <View style={styles.settingText}>
@@ -1051,9 +1138,68 @@ const styles = StyleSheet.create({
     color: color.textFaint,
     marginTop: space.md,
   },
-  chevron: {
-    ...type.statMedium,
-    color: color.textFaint,
+  /** Right-aligned literal values (e.g. version) — brighter than a blurb. */
+  rowValue: {
+    ...type.bodyMedium,
+    color: color.text,
+    fontVariant: ['tabular-nums'],
+  },
+  sectionIcon: {
+    width: 26,
+    height: 26,
+    borderRadius: radius.pill,
+    backgroundColor: color.accentTint,
+    alignItems: 'center',
+    justifyContent: 'center',
+    // Mirrors the Eyebrow's built-in bottom margin so the pair stays level.
+    marginBottom: space.sm,
+  },
+  labelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: space.sm,
+  },
+  flaskBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: space.xs,
+    paddingHorizontal: space.sm,
+    paddingVertical: 2,
+    borderRadius: radius.pill,
+    // color.unsure at chip-tint strength (matches the ui.tsx unsure Chip).
+    backgroundColor: 'rgba(232, 184, 79, 0.14)',
+  },
+  flaskBadgeLabel: {
+    ...type.micro,
+    color: color.unsure,
+    textTransform: 'uppercase',
+  },
+  presetList: {
+    gap: space.sm,
+    marginTop: space.md,
+  },
+  presetRow: {
+    minHeight: touch.minTarget,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: space.lg,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: color.border,
+    paddingHorizontal: space.md,
+    paddingVertical: space.xs,
+  },
+  presetRowSelected: {
+    borderColor: color.accent,
+    backgroundColor: color.accentTint,
+  },
+  presetRadioIdle: {
+    width: 22,
+    height: 22,
+    borderRadius: radius.pill,
+    borderWidth: 2,
+    borderColor: color.border,
   },
   tutorialNotice: {
     ...type.caption,
@@ -1077,16 +1223,25 @@ const styles = StyleSheet.create({
     borderRadius: radius.pill,
     borderWidth: 1,
     borderColor: color.border,
+    flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
+    gap: space.xs,
   },
   selectChipSelected: {
     backgroundColor: color.accentTint,
     borderColor: color.accent,
   },
+  selectChipPressed: {
+    backgroundColor: color.surfaceRaised,
+    borderColor: color.textFaint,
+  },
   selectChipLabel: {
     ...type.bodyMedium,
     color: color.textDim,
+  },
+  selectChipLabelSelected: {
+    color: color.accent,
   },
   optionRow: {
     minHeight: touch.minTarget,
@@ -1094,6 +1249,9 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: space.lg,
     borderRadius: radius.sm,
+    // Inset the pressed wash so it clears the card edge without moving text.
+    paddingHorizontal: space.sm,
+    marginHorizontal: -space.sm,
   },
   radioOuter: {
     width: 22,
@@ -1121,6 +1279,10 @@ const styles = StyleSheet.create({
     borderColor: color.border,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  stepperPressed: {
+    backgroundColor: color.accentTint,
+    borderColor: color.accent,
   },
   stepperGlyph: {
     ...type.heading,
