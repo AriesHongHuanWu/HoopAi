@@ -1,14 +1,41 @@
 /**
- * One team's panel on the two-team scoreboard: editable name, a huge
- * tappable score numeral (tap = +1), a minus correction and +2/+3 quick
- * buttons. Self-contained — talks to the caller only via callbacks.
+ * One team's half of the broadcast scorebug: a surface panel with a
+ * team-tinted top rule and HOME/AWAY side tag, an editable name, a giant
+ * tabular score numeral (tap = +1) that springs under the finger and pops
+ * when the score lands, plus −1/+2/+3 quick corrections. Self-contained —
+ * talks to the caller only via callbacks. All motion respects the system
+ * reduce-motion setting (pressed fills still flip instantly for feedback).
  */
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import Animated, {
+  interpolateColor,
+  useAnimatedStyle,
+  useReducedMotion,
+  useSharedValue,
+  withSequence,
+  withSpring,
+  withTiming,
+} from 'react-native-reanimated';
 
-import { color, font, radius, space, touch, type } from '@/constants/tokens';
+import { color, font, motion, radius, space, touch, type } from '@/constants/tokens';
 
 const NAME_MAX_LENGTH = 24;
+
+const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
+
+/** Spring configs: crisp catch on press-in, soft settle on release. */
+const SPRING_IN = { damping: 22, stiffness: 460 } as const;
+const SPRING_OUT = { damping: 13, stiffness: 300 } as const;
+
+/** '#RRGGBB' → rgba() at the given alpha; neutral raised-surface fallback. */
+function withAlpha(hex: string, alpha: number): string {
+  if (!/^#[0-9a-fA-F]{6}$/.test(hex)) return `rgba(38, 34, 32, ${alpha})`;
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
 
 function QuickButton({
   label,
@@ -21,21 +48,49 @@ function QuickButton({
   onPress: () => void;
   tone?: 'default' | 'accent';
 }) {
+  const reducedMotion = useReducedMotion();
+  const scale = useSharedValue(1);
+  const press = useSharedValue(0);
+  const restBg =
+    tone === 'accent'
+      ? withAlpha(color.accent, 0.12)
+      : withAlpha(color.surfaceRaised, 0);
+  const pressedBg =
+    tone === 'accent'
+      ? withAlpha(color.accent, 0.26)
+      : withAlpha(color.surfaceRaised, 1);
+  const anim = useAnimatedStyle(() => ({
+    transform: [{ scale: scale.value }],
+    backgroundColor: interpolateColor(press.value, [0, 1], [restBg, pressedBg]),
+  }));
   return (
-    <Pressable
+    <AnimatedPressable
       accessibilityRole="button"
       accessibilityLabel={accessibilityLabel}
       onPress={onPress}
-      style={({ pressed }) => [
+      onPressIn={() => {
+        press.value = reducedMotion ? 1 : withTiming(1, { duration: motion.instant });
+        if (!reducedMotion) scale.value = withSpring(0.92, SPRING_IN);
+      }}
+      onPressOut={() => {
+        press.value = reducedMotion ? 0 : withTiming(0, { duration: motion.quick });
+        if (!reducedMotion) scale.value = withSpring(1, SPRING_OUT);
+      }}
+      style={[
         styles.quickButton,
         tone === 'accent' && styles.quickButtonAccent,
-        pressed && styles.quickButtonPressed,
+        anim,
       ]}
     >
-      <Text style={[styles.quickButtonLabel, tone === 'accent' && styles.quickButtonLabelAccent]}>
+      <Text
+        style={[
+          styles.quickButtonLabel,
+          tone === 'accent' && styles.quickButtonLabelAccent,
+        ]}
+      >
         {label}
       </Text>
-    </Pressable>
+    </AnimatedPressable>
   );
 }
 
@@ -47,7 +102,7 @@ export function TeamPanel({
   onRename,
   onAdd,
 }: {
-  /** "Home" / "Away" — used in a11y copy, never shown when a custom name is set. */
+  /** "Home" / "Away" — side tag + a11y copy; never replaces a custom name. */
   teamLabel: string;
   name: string;
   score: number;
@@ -58,6 +113,38 @@ export function TeamPanel({
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(name);
+  const reducedMotion = useReducedMotion();
+
+  // Score tap: spring scale on the whole target + team-tinted pressed fill.
+  const pressScale = useSharedValue(1);
+  const pressBg = useSharedValue(0);
+  const tapAnim = useAnimatedStyle(() => ({
+    transform: [{ scale: pressScale.value }],
+    backgroundColor: interpolateColor(
+      pressBg.value,
+      [0, 1],
+      [withAlpha(tint, 0), withAlpha(tint, 0.14)],
+    ),
+  }));
+
+  // The numeral itself pops when the score lands — skipped on first render
+  // so restoring a persisted game doesn't bounce.
+  const popScale = useSharedValue(1);
+  const numeralAnim = useAnimatedStyle(() => ({
+    transform: [{ scale: popScale.value }],
+  }));
+  const firstScoreRender = useRef(true);
+  useEffect(() => {
+    if (firstScoreRender.current) {
+      firstScoreRender.current = false;
+      return;
+    }
+    if (reducedMotion) return;
+    popScale.value = withSequence(
+      withSpring(1.08, { damping: 18, stiffness: 520 }),
+      withSpring(1, { damping: 14, stiffness: 240 }),
+    );
+  }, [score, reducedMotion, popScale]);
 
   const commitName = () => {
     setEditing(false);
@@ -69,6 +156,9 @@ export function TeamPanel({
 
   return (
     <View style={styles.panel}>
+      <View style={[styles.tintRule, { backgroundColor: tint }]} />
+      <Text style={styles.sideTag}>{teamLabel.toUpperCase()}</Text>
+
       {editing ? (
         <TextInput
           value={draft}
@@ -103,15 +193,25 @@ export function TeamPanel({
         </Pressable>
       )}
 
-      <Pressable
+      <AnimatedPressable
         accessibilityRole="button"
         accessibilityLabel={`${displayName} score: ${score}. Tap to add one point`}
         accessibilityHint="Adds one point"
         onPress={() => onAdd(1)}
-        style={({ pressed }) => [styles.scoreTap, pressed && styles.scoreTapPressed]}
+        onPressIn={() => {
+          pressBg.value = reducedMotion ? 1 : withTiming(1, { duration: motion.instant });
+          if (!reducedMotion) pressScale.value = withSpring(0.95, SPRING_IN);
+        }}
+        onPressOut={() => {
+          pressBg.value = reducedMotion ? 0 : withTiming(0, { duration: motion.quick });
+          if (!reducedMotion) pressScale.value = withSpring(1, SPRING_OUT);
+        }}
+        style={[styles.scoreTap, tapAnim]}
       >
-        <Text style={styles.scoreNumeral}>{score}</Text>
-      </Pressable>
+        <Animated.View style={numeralAnim}>
+          <Text style={styles.scoreNumeral}>{score}</Text>
+        </Animated.View>
+      </AnimatedPressable>
 
       <View style={styles.controls}>
         <QuickButton
@@ -139,8 +239,30 @@ export function TeamPanel({
 const styles = StyleSheet.create({
   panel: {
     flex: 1,
+    alignSelf: 'stretch',
     alignItems: 'center',
-    gap: space.md,
+    justifyContent: 'center',
+    gap: space.sm,
+    backgroundColor: color.surface,
+    borderRadius: radius.lg,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: color.border,
+    paddingVertical: space.md,
+    paddingHorizontal: space.sm,
+    overflow: 'hidden',
+  },
+  /** Team-tinted broadcast rule pinned to the panel's top edge. */
+  tintRule: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 3,
+  },
+  sideTag: {
+    ...type.micro,
+    color: color.textFaint,
+    letterSpacing: 1.5,
   },
   nameText: {
     ...type.heading,
@@ -166,9 +288,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     borderRadius: radius.lg,
-  },
-  scoreTapPressed: {
-    backgroundColor: color.surfaceRaised,
+    paddingHorizontal: space.lg,
   },
   scoreNumeral: {
     fontFamily: font.display,
@@ -193,10 +313,6 @@ const styles = StyleSheet.create({
   },
   quickButtonAccent: {
     borderColor: color.accent,
-    backgroundColor: color.accentTint,
-  },
-  quickButtonPressed: {
-    backgroundColor: color.surfaceRaised,
   },
   quickButtonLabel: {
     ...type.heading,
