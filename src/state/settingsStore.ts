@@ -260,7 +260,9 @@ export const useSettings = create<SettingsState>()(
       onboardingDone: false,
       detectorModel: 'auto',
       detectionRate: 'auto',
-      perfMode: 'quality',
+      // 'speed' (416): measured BETTER detection than 640 with the small-ball
+      // Tiny model on real footage, at ~half the compute — see v3 migration.
+      perfMode: 'speed',
       detectorEngine: 'yolox',
       detectorAccel: 'cpu',
       lastBenchmark: null,
@@ -290,7 +292,7 @@ export const useSettings = create<SettingsState>()(
       // "from version N" to branch on instead of relying on zustand's default
       // shallow-merge rehydration, which silently keeps stale/renamed keys
       // around forever.
-      version: 2,
+      version: 3,
       migrate: (persisted, version) => {
         const s = persisted as SettingsState;
         // v2: YOLOX (Apache-2.0, GPU-correct) becomes the default detector. Move
@@ -298,6 +300,13 @@ export const useSettings = create<SettingsState>()(
         // shipped only hours earlier, so there are no meaningful explicit 'yolo'
         // choices worth preserving. Anyone can re-select YOLO11 in Settings.
         if (version < 2) s.detectorEngine = 'yolox';
+        // v3: Speed (416) becomes the default performance mode. The small-ball
+        // Tiny model landed measurably BETTER at 416 than 640 on real footage
+        // (ball cold-gate 61.5% vs 38.6%) while costing ~half the compute —
+        // "Quality" was inverted on both axes. One-time flip for existing
+        // installs too (the old default was ours, not a meaningful choice);
+        // anyone can re-pick Quality in Settings.
+        if (version < 3) s.perfMode = 'speed';
         return s;
       },
     },

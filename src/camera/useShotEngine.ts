@@ -59,6 +59,14 @@ const MODEL_ASSETS = {
   // at ~1.8x the inference cost). Selected by Settings > Performance.
   yolox: require('../../assets/models/hoopai-yolox.tflite'),
   yolox640: require('../../assets/models/hoopai-yolox-640.tflite'),
+  // Nano fallbacks (same IO contract, ~5x lighter). The primary yolox assets
+  // are the small-ball TINY finetune — far better recall, but ~5x the compute:
+  // an iPhone XR-class CPU runs Tiny@640 at ~2fps, which STARVES the tracker
+  // (3-4 samples per arc → no fit, no arm) and makes detection WORSE overall.
+  // The loader speed-budgets the Tiny rungs and steps down to Nano on slow
+  // devices: fast phones get Tiny's recall, old phones keep a usable fps.
+  yoloxNano: require('../../assets/models/hoopai-yolox-nano.tflite'),
+  yoloxNano640: require('../../assets/models/hoopai-yolox-nano-640.tflite'),
 } as const;
 // MoveNet SinglePose Lightning (Apache-2.0) for opt-in form analysis.
 const POSE_ASSET = require('../../assets/models/movenet-pose.tflite');
@@ -79,6 +87,15 @@ const YOLOX_INPUT_HQ = 640; // Quality — bigger ball, better detection, slower
  * the standard model (iPhone XR/11-class or delegates that fell back to CPU).
  */
 const AUTO_PRECISE_MAX_MS = 55;
+
+/**
+ * YOLOX-Tiny speed budget: keep the small-ball Tiny model only when a smoke
+ * inference beats this, else step down to Nano. 120ms ≈ 8fps detection — the
+ * floor where the Kalman tracker + FSM still get enough arc samples to fit
+ * and arm reliably. Below that (XR-class CPUs run Tiny@640 at ~500ms) the
+ * per-frame recall win is erased by trajectory starvation.
+ */
+const YOLOX_TINY_MAX_MS = 120;
 
 export type EngineMode = 'auto' | 'demo' | 'camera';
 
@@ -369,14 +386,35 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
       // 'cpu' is the accurate default. 'gpu' is offered for speed on phones where
       // CPU can't keep up; the other delegate is always the fallback rung.
       // Quality = 640 model (bigger ball), Speed = 416. Must match detInputSize.
-      const yoloxAsset = perfMode === 'speed' ? MODEL_ASSETS.yolox : MODEL_ASSETS.yolox640;
-      const yoloxTag = perfMode === 'speed' ? 'yolox416' : 'yolox640';
-      const yoloxGpu = { asset: yoloxAsset, label: `${yoloxTag}/${fast.label}`, delegates: fast.delegates };
-      const yoloxCpu = { asset: yoloxAsset, label: `${yoloxTag}/cpu`, delegates: none };
+      // Two capability tiers per size: TINY (small-ball finetune, ~5x compute,
+      // speed-budgeted) with NANO as the always-fast fallback — see the
+      // MODEL_ASSETS comment. The nano rung has no budget: it is the floor.
+      const speed416 = perfMode === 'speed';
+      const tinyAsset = speed416 ? MODEL_ASSETS.yolox : MODEL_ASSETS.yolox640;
+      const nanoAsset = speed416 ? MODEL_ASSETS.yoloxNano : MODEL_ASSETS.yoloxNano640;
+      const sizeTag = speed416 ? '416' : '640';
+      const tinyGpu = {
+        asset: tinyAsset,
+        label: `tiny${sizeTag}/${fast.label}`,
+        delegates: fast.delegates,
+        maxMs: YOLOX_TINY_MAX_MS,
+      };
+      const tinyCpu = {
+        asset: tinyAsset,
+        label: `tiny${sizeTag}/cpu`,
+        delegates: none,
+        maxMs: YOLOX_TINY_MAX_MS,
+      };
+      const nanoCpu = { asset: nanoAsset, label: `nano${sizeTag}/cpu`, delegates: none };
+      const nanoGpu = {
+        asset: nanoAsset,
+        label: `nano${sizeTag}/${fast.label}`,
+        delegates: fast.delegates,
+      };
       const attempts: Attempt[] = useYolox
         ? detectorAccel === 'gpu'
-          ? [yoloxGpu, yoloxCpu]
-          : [yoloxCpu, yoloxGpu]
+          ? [tinyGpu, tinyCpu, nanoGpu, nanoCpu]
+          : [tinyCpu, nanoCpu]
         : perfMode === 'speed' || forceCpu
           ? [
               { asset: MODEL_ASSETS.fast, label: `fast/${fast.label}`, delegates: fast.delegates },
