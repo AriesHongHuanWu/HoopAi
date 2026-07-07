@@ -20,6 +20,7 @@ import { Card, Chip, Eyebrow, PillButton, Row, Screen, StatNumber } from '@/comp
 import { color, motion, radius, space, type } from '@/constants/tokens';
 import { ACHIEVEMENTS, evaluate, type LifetimeTotals } from '@/core/achievements';
 import { lifetimeTotals } from '@/data/db';
+import { useAchievementsSeen } from '@/state/achievementsSeenStore';
 
 /** Cascade step between badge rows (ms), capped so long boards stay snappy. */
 const STAGGER_MS = 40;
@@ -62,17 +63,26 @@ function BadgeList({
   defs,
   totals,
   unlocked,
+  newIds,
 }: {
   defs: readonly (typeof ACHIEVEMENTS)[number][];
   totals: LifetimeTotals;
   unlocked: boolean;
+  /** Badge ids unlocked since the last visit — these rows get a "NEW" pip. */
+  newIds?: readonly string[];
 }) {
   const reducedMotion = useReducedMotion();
   return (
     <View style={styles.badgeList}>
       {defs.map((def, i) =>
         reducedMotion ? (
-          <AchievementRow key={def.id} def={def} totals={totals} unlocked={unlocked} />
+          <AchievementRow
+            key={def.id}
+            def={def}
+            totals={totals}
+            unlocked={unlocked}
+            isNew={newIds?.includes(def.id) ?? false}
+          />
         ) : (
           <Animated.View
             key={def.id}
@@ -80,7 +90,12 @@ function BadgeList({
               Math.min(i, STAGGER_CAP) * STAGGER_MS,
             )}
           >
-            <AchievementRow def={def} totals={totals} unlocked={unlocked} />
+            <AchievementRow
+              def={def}
+              totals={totals}
+              unlocked={unlocked}
+              isNew={newIds?.includes(def.id) ?? false}
+            />
           </Animated.View>
         ),
       )}
@@ -90,12 +105,23 @@ function BadgeList({
 
 export default function RecordsScreen() {
   const [totals, setTotals] = useState<LifetimeTotals | null>(null);
+  // Snapshot of "unlocked since last visit" ids, fixed for this visit so the
+  // NEW pips don't vanish mid-view when the seen-store updates underneath.
+  const [newIds, setNewIds] = useState<readonly string[]>([]);
 
   useFocusEffect(
     useCallback(() => {
       let alive = true;
       void lifetimeTotals().then((t) => {
-        if (alive) setTotals(t);
+        if (!alive) return;
+        setTotals(t);
+        const unlockedIds = evaluate(t).unlocked.map((d) => d.id);
+        const { hasVisited, seenBadgeIds, markSeen } = useAchievementsSeen.getState();
+        // First visit ever: record everything silently, no pip shower.
+        setNewIds(
+          hasVisited ? unlockedIds.filter((id) => !seenBadgeIds.includes(id)) : [],
+        );
+        markSeen(unlockedIds);
       });
       return () => {
         alive = false;
@@ -205,7 +231,7 @@ export default function RecordsScreen() {
                 ]}
               />
             </View>
-            <BadgeList defs={unlocked} totals={totals} unlocked />
+            <BadgeList defs={unlocked} totals={totals} unlocked newIds={newIds} />
           </View>
         )}
 

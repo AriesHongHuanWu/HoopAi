@@ -14,7 +14,14 @@
  */
 import * as SQLite from 'expo-sqlite';
 
-import { emptyTotals, type LifetimeTotals } from '../core/achievements';
+import {
+  emptyTotals,
+  isEarlyBirdHour,
+  isNightOwlHour,
+  maxSessionsInWeek,
+  type CareerBests,
+  type LifetimeTotals,
+} from '../core/achievements';
 import { historyRetentionLimit } from '../core/premium';
 import type { FormReport, GameModeId, ResolvedShot, SessionStats, ShotOutcome, ShotSignals } from '../core/types';
 import { recomputeStats } from '../core/stats';
@@ -507,6 +514,12 @@ const LIFETIME_STREAK_SESSION_CAP = 200;
  * - `bestStreak` walks each session's shots in order (misses reset, unsure
  *   shots are skipped — same semantics as src/core/stats.ts), scanning only
  *   the {@link LIFETIME_STREAK_SESSION_CAP} most recent sessions.
+ * - `correctedCalls` counts shots the user hand-corrected (corrected = 1).
+ * - `nightSessions` / `dawnSessions` / `bestWeekSessions` classify session
+ *   start times (local clock) via the pure helpers in achievements.ts.
+ * - `atwWins` / `horseGames` parse the persisted modeResultJson snapshot
+ *   (see SessionRow) for finished games; `modesPlayed` counts distinct
+ *   non-Free-Play modes with at least one tracked shot.
  *
  * Never throws: any failure returns all-zero totals.
  */
@@ -519,11 +532,13 @@ export async function lifetimeTotals(): Promise<LifetimeTotals> {
       attempts: number;
       makes: number;
       threes: number;
+      correctedCalls: number;
     }>(
       `SELECT COUNT(DISTINCT sessionId) AS sessions,
               COUNT(*) AS attempts,
               COALESCE(SUM(CASE WHEN outcome = 'make' THEN 1 ELSE 0 END), 0) AS makes,
-              COALESCE(SUM(CASE WHEN outcome = 'make' AND shotValue = 3 THEN 1 ELSE 0 END), 0) AS threes
+              COALESCE(SUM(CASE WHEN outcome = 'make' AND shotValue = 3 THEN 1 ELSE 0 END), 0) AS threes,
+              COALESCE(SUM(CASE WHEN corrected = 1 THEN 1 ELSE 0 END), 0) AS correctedCalls
        FROM shots`,
     );
 
@@ -566,6 +581,42 @@ export async function lifetimeTotals(): Promise<LifetimeTotals> {
       // 'unsure' leaves the streak untouched (see src/core/stats.ts).
     }
 
+    // Session-level facts: tip-off time (night owl / early bird / weekly
+    // cadence) and game-mode outcomes. One pass over sessions with shots.
+    const sessionRows = await db.getAllAsync<{
+      startedAt: number;
+      modeId: string | null;
+      modeResultJson: string | null;
+    }>(
+      `SELECT s.startedAt, s.modeId, s.modeResultJson
+       FROM sessions s
+       WHERE EXISTS (SELECT 1 FROM shots sh WHERE sh.sessionId = s.id)`,
+    );
+    let nightSessions = 0;
+    let dawnSessions = 0;
+    let atwWins = 0;
+    let horseGames = 0;
+    const startTimes: number[] = [];
+    const modesSeen = new Set<string>();
+    for (const s of sessionRows) {
+      startTimes.push(s.startedAt);
+      const hour = new Date(s.startedAt).getHours();
+      if (isNightOwlHour(hour)) nightSessions += 1;
+      else if (isEarlyBirdHour(hour)) dawnSessions += 1;
+      if (s.modeId != null && s.modeId !== 'free') {
+        modesSeen.add(s.modeId);
+        const result = s.modeResultJson
+          ? parseJson<{ done?: boolean; progress?: number }>(s.modeResultJson, {})
+          : {};
+        if (s.modeId === 'aroundTheWorld' && result.done === true && (result.progress ?? 0) >= 1) {
+          atwWins += 1;
+        }
+        if (s.modeId === 'horse' && result.done === true) {
+          horseGames += 1;
+        }
+      }
+    }
+
     return {
       sessions: agg?.sessions ?? 0,
       attempts: agg?.attempts ?? 0,
@@ -573,6 +624,84 @@ export async function lifetimeTotals(): Promise<LifetimeTotals> {
       bestStreak,
       bestSessionFgPct: best?.best ?? 0,
       threes: agg?.threes ?? 0,
+      correctedCalls: agg?.correctedCalls ?? 0,
+      nightSessions,
+      dawnSessions,
+      bestWeekSessions: maxSessionsInWeek(startTimes),
+      atwWins,
+      horseGames,
+      modesPlayed: modesSeen.size,
+    };
+  });
+}
+
+/**
+ * Career maxima for the "NEW PERSONAL BEST" check (src/core/achievements.ts
+ * detectNewBests), computed over every session EXCEPT `excludeSessionId` —
+ * pass the just-ended session's id so the baseline honestly reflects the
+ * career BEFORE it (its shots are already persisted by the time the summary
+ * renders). Omit the id to rank against everything.
+ *
+ * Returns null (not zeros) on any db failure so a broken read can never
+ * masquerade as "you beat a career of zero" and fire a false celebration.
+ */
+export async function careerBests(excludeSessionId?: number): Promise<CareerBests | null> {
+  return safe<CareerBests | null>('careerBests', null, async () => {
+    const db = await getDb();
+    // Session ids are positive; -1 excludes nothing.
+    const exclude = excludeSessionId ?? -1;
+
+    const agg = await db.getFirstAsync<{
+      mostMakes: number | null;
+      bestFg: number | null;
+    }>(
+      `SELECT MAX(makes) AS mostMakes,
+              MAX(CASE WHEN attempts >= 10 AND decided > 0
+                       THEN CAST(makes AS REAL) / decided END) AS bestFg
+       FROM (
+         SELECT COUNT(*) AS attempts,
+                SUM(CASE WHEN outcome = 'make' THEN 1 ELSE 0 END) AS makes,
+                SUM(CASE WHEN outcome IN ('make','miss') THEN 1 ELSE 0 END) AS decided
+         FROM shots
+         WHERE sessionId <> ?
+         GROUP BY sessionId
+       )`,
+      exclude,
+    );
+
+    // Same per-session streak walk as lifetimeTotals, minus the excluded
+    // session (streaks never span sessions).
+    const rows = await db.getAllAsync<{ sessionId: number; outcome: ShotOutcome }>(
+      `SELECT sh.sessionId, sh.outcome
+       FROM shots sh
+       WHERE sh.sessionId <> ?
+         AND sh.sessionId IN (
+           SELECT id FROM sessions ORDER BY startedAt DESC LIMIT ?
+         )
+       ORDER BY sh.sessionId ASC, sh.shotIndex ASC`,
+      exclude,
+      LIFETIME_STREAK_SESSION_CAP,
+    );
+    let bestStreak = 0;
+    let streak = 0;
+    let currentSession: number | null = null;
+    for (const row of rows) {
+      if (row.sessionId !== currentSession) {
+        currentSession = row.sessionId;
+        streak = 0;
+      }
+      if (row.outcome === 'make') {
+        streak += 1;
+        if (streak > bestStreak) bestStreak = streak;
+      } else if (row.outcome === 'miss') {
+        streak = 0;
+      }
+    }
+
+    return {
+      bestStreak,
+      bestFgPct: agg?.bestFg ?? 0,
+      mostMakes: agg?.mostMakes ?? 0,
     };
   });
 }

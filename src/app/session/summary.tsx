@@ -25,10 +25,13 @@ import {
   useUndoableCorrection,
 } from '@/components/ShotList';
 import { CoachMarks, useCoachMarks, type CoachStep } from '@/components/coach/CoachMarks';
+import { PersonalBestBanner } from '@/components/PersonalBestBanner';
 import { SummaryHero } from '@/components/SummaryHero';
 import { Card, Chip, Eyebrow, PillButton, Row, Screen } from '@/components/ui';
 import { color, space, type } from '@/constants/tokens';
+import { detectNewBests, type CareerBests } from '@/core/achievements';
 import type { ResolvedShot, ShotOutcome, ShotValue } from '@/core/types';
+import { careerBests } from '@/data/db';
 import { saveSessionVideo } from '@/data/videoLibrary';
 import { useSession } from '@/state/sessionStore';
 import { useSettings } from '@/state/settingsStore';
@@ -85,6 +88,26 @@ export default function SessionSummaryScreen() {
     setLabelOverride(next);
     if (sessionId != null) persistSessionLabel(sessionId, next);
   };
+
+  // NEW PERSONAL BEST — only for a just-ended session (storeMode), ranked
+  // against career maxima with this session's persisted rows excluded so the
+  // baseline is honestly "before tonight". Fetched once; careerBests returns
+  // null on any db failure, which simply keeps the banner away. Corrections
+  // made on this screen re-run the pure detect against the same baseline.
+  const [pbBaseline, setPbBaseline] = useState<CareerBests | null>(null);
+  const pbFetched = useRef(false);
+  useEffect(() => {
+    if (!storeMode || pbFetched.current) return;
+    pbFetched.current = true;
+    void careerBests(liveSessionId ?? undefined).then((bests) => {
+      setPbBaseline(bests);
+    });
+  }, [storeMode, liveSessionId]);
+  const newBests = useMemo(
+    () =>
+      storeMode && pbBaseline != null ? detectNewBests(stats, pbBaseline) : [],
+    [storeMode, pbBaseline, stats],
+  );
 
   // Corrections route through the mode-appropriate pathway (live store vs.
   // persisted record), wrapped with the shared undo window. `corrected` is
@@ -217,6 +240,9 @@ export default function SessionSummaryScreen() {
             </View>
           )}
           <SummaryHero stats={stats} style={styles.hero} />
+          {newBests.length > 0 && (
+            <PersonalBestBanner bests={newBests} style={styles.pbBanner} />
+          )}
           {videoPath != null && sessionId != null && (
             <View style={styles.mediaSection}>
               <Eyebrow>Watch it back</Eyebrow>
@@ -323,6 +349,14 @@ const styles = StyleSheet.create({
   /** Box-score strip: breathing room off the title, section gap below. */
   hero: {
     marginTop: space.md,
+    marginBottom: space.xl,
+  },
+  /**
+   * PB banner tucks up toward the hero it celebrates (hero already carries a
+   * full section gap below), then restores the section gap before media.
+   */
+  pbBanner: {
+    marginTop: -space.md,
     marginBottom: space.xl,
   },
   mediaSection: {
