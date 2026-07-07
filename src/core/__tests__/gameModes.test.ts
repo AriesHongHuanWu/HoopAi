@@ -1,9 +1,12 @@
 import {
   GAME_MODES,
+  deriveGhostConfig,
   getModeDef,
+  ghostMakesAt,
   initMode,
   stepMode,
   tickMode,
+  type GhostConfig,
   type ModeState,
 } from '../gameModes';
 import type { GameModeId, ResolvedShot, ShotOutcome, ShotValue } from '../types';
@@ -51,12 +54,26 @@ const make = (v?: ShotValue) => shot('make', { shotValue: v });
 const miss = () => shot('miss');
 const unsure = () => shot('unsure');
 
+/** Ghost fixture: makes at +2s, +5s, +9s; the ghost session ran 10s. */
+const GHOST_CFG: GhostConfig = {
+  timeline: [
+    { tOffsetSec: 2, makes: 1 },
+    { tOffsetSec: 5, makes: 2 },
+    { tOffsetSec: 9, makes: 3 },
+  ],
+  durationSec: 10,
+};
+
+/** initMode opts per mode — ghost needs a source timeline to race. */
+const initOptsFor = (id: GameModeId) =>
+  id === 'ghost' ? { ghost: GHOST_CFG } : undefined;
+
 // ---------------------------------------------------------------------------
 // Catalog
 // ---------------------------------------------------------------------------
 
 describe('gameModes / catalog', () => {
-  test('exactly the seven modes, each fully described', () => {
+  test('exactly the eight modes, each fully described', () => {
     const ids = GAME_MODES.map((m) => m.id);
     expect(ids).toEqual([
       'free',
@@ -66,6 +83,7 @@ describe('gameModes / catalog', () => {
       'threePoint',
       'ftStreak',
       'horse',
+      'ghost',
     ]);
     for (const m of GAME_MODES) {
       expect(m.name.length).toBeGreaterThan(0);
@@ -83,7 +101,7 @@ describe('gameModes / catalog', () => {
 
   test('initMode produces a not-done, unstarted state for every mode', () => {
     for (const m of GAME_MODES) {
-      const s = initMode(m.id);
+      const s = initMode(m.id, initOptsFor(m.id));
       expect(s.modeId).toBe(m.id);
       expect(s.done).toBe(false);
       expect(s.started).toBeNull();
@@ -99,7 +117,7 @@ describe('gameModes / catalog', () => {
 describe('gameModes / shared invariants', () => {
   test('unsure shots are non-events across all modes', () => {
     for (const m of GAME_MODES) {
-      const before = initMode(m.id);
+      const before = initMode(m.id, initOptsFor(m.id));
       const after = stepMode(before, unsure(), 0);
       expect(after.score).toBe(before.score);
       expect(after.done).toBe(before.done);
@@ -334,5 +352,152 @@ describe('gameModes / horse', () => {
     expect(s.letters).toBe('HORSE');
     expect(s.done).toBe(true);
     expect(s.progress).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Ghost Challenge
+// ---------------------------------------------------------------------------
+
+describe('gameModes / ghost', () => {
+  const ghostInit = () => initMode('ghost', { ghost: GHOST_CFG });
+
+  test('ghostMakesAt steps the pace: each make lands exactly at its offset', () => {
+    const tl = GHOST_CFG.timeline;
+    expect(ghostMakesAt(tl, 0)).toBe(0);
+    expect(ghostMakesAt(tl, 1.999)).toBe(0);
+    expect(ghostMakesAt(tl, 2)).toBe(1); // credited AT the offset, not before
+    expect(ghostMakesAt(tl, 4.9)).toBe(1);
+    expect(ghostMakesAt(tl, 5)).toBe(2);
+    expect(ghostMakesAt(tl, 8.99)).toBe(2);
+    expect(ghostMakesAt(tl, 9)).toBe(3);
+    expect(ghostMakesAt(tl, 100)).toBe(3);
+    expect(ghostMakesAt([], 100)).toBe(0);
+  });
+
+  test('deriveGhostConfig times the make timeline from the first decided shot', () => {
+    const cfg = deriveGhostConfig([
+      shot('miss', { tResolved: 10 }), // first decided shot ⇒ t0 = 10
+      shot('make', { tResolved: 12 }),
+      shot('unsure', { tResolved: 15 }), // ignored entirely
+      shot('make', { tResolved: 20 }),
+      shot('make', { tResolved: 30 }),
+      shot('miss', { tResolved: 35 }), // last decided shot ⇒ duration 25
+    ]);
+    expect(cfg).not.toBeNull();
+    expect(cfg?.timeline).toEqual([
+      { tOffsetSec: 2, makes: 1 },
+      { tOffsetSec: 10, makes: 2 },
+      { tOffsetSec: 20, makes: 3 },
+    ]);
+    expect(cfg?.durationSec).toBe(25);
+  });
+
+  test('deriveGhostConfig guards: no shots / no makes / flat clock ⇒ null', () => {
+    expect(deriveGhostConfig([])).toBeNull();
+    expect(deriveGhostConfig([shot('unsure', { tResolved: 3 })])).toBeNull();
+    expect(
+      deriveGhostConfig([shot('miss', { tResolved: 1 }), shot('miss', { tResolved: 9 })]),
+    ).toBeNull();
+    // A single make is a zero-length session — nothing to race.
+    expect(deriveGhostConfig([shot('make', { tResolved: 5 })])).toBeNull();
+  });
+
+  test('empty-ghost guard: no config or empty timeline starts done and stays done', () => {
+    const bare = initMode('ghost');
+    expect(bare.done).toBe(true);
+    expect(stepMode(bare, make(), 0)).toBe(bare); // done ⇒ untouched
+    expect(tickMode(bare, 5)).toBe(bare);
+
+    const empty = initMode('ghost', { ghost: { timeline: [], durationSec: 10 } });
+    expect(empty.done).toBe(true);
+  });
+
+  test('the race clock arms on YOUR first shot, never on a tick', () => {
+    let s = ghostInit();
+    expect(tickMode(s, 50)).toBe(s); // unarmed ⇒ tick is a strict no-op
+    s = stepMode(s, make(), 100); // arms at t=100
+    expect(s.started).toBe(100);
+    expect(s.ghost?.yourMakes).toBe(1);
+    expect(s.ghost?.ghostMakesNow).toBe(0); // ghost's first make is at +2s
+    expect(s.ghost?.lead).toBe(1);
+    expect(s.message).toBe('YOU 1 · GHOST 0 · +1');
+    expect(s.messageTone).toBe('positive');
+  });
+
+  test('ticks advance the ghost pace between your shots; the lead can flip', () => {
+    let s = ghostInit();
+    s = stepMode(s, make(), 100); // you 1, ghost 0
+    s = tickMode(s, 105); // elapsed 5 ⇒ ghost 2
+    expect(s.ghost?.ghostMakesNow).toBe(2);
+    expect(s.ghost?.lead).toBe(-1);
+    expect(s.message).toBe('YOU 1 · GHOST 2 · -1');
+    expect(s.messageTone).toBe('negative');
+    s = stepMode(s, make(), 106); // you 2 ⇒ even
+    expect(s.ghost?.lead).toBe(0);
+    expect(s.message).toBe('YOU 2 · GHOST 2 · EVEN');
+    expect(s.messageTone).toBe('neutral');
+    expect(s.done).toBe(false);
+  });
+
+  test('a miss arms the clock but scores nothing', () => {
+    let s = ghostInit();
+    s = stepMode(s, miss(), 7);
+    expect(s.started).toBe(7);
+    expect(s.ghost?.yourMakes).toBe(0);
+    expect(s.message).toBe('YOU 0 · GHOST 0 · EVEN');
+  });
+
+  test('win: ahead of the ghost total when its clock expires', () => {
+    let s = ghostInit();
+    s = stepMode(s, make(), 0);
+    s = stepMode(s, make(), 1);
+    s = stepMode(s, make(), 3);
+    s = stepMode(s, make(), 4); // you 4 vs ghost final 3
+    s = tickMode(s, 10); // elapsed 10 ⇒ clock expired
+    expect(s.done).toBe(true);
+    expect(s.progress).toBe(1);
+    expect(s.timeLeftSec).toBe(0);
+    expect(s.score).toBe(4);
+    expect(s.ghost?.result).toBe('win');
+    expect(s.ghost?.finalMargin).toBe(1);
+    expect(s.ghost?.ghostMakesNow).toBe(3);
+    expect(s.messageTone).toBe('positive');
+  });
+
+  test('loss: behind the ghost total at the buzzer', () => {
+    let s = ghostInit();
+    s = stepMode(s, make(), 0); // you 1 vs ghost final 3
+    s = tickMode(s, 12);
+    expect(s.done).toBe(true);
+    expect(s.ghost?.result).toBe('loss');
+    expect(s.ghost?.finalMargin).toBe(-2);
+    expect(s.messageTone).toBe('negative');
+  });
+
+  test('tie: level with the ghost total at the buzzer', () => {
+    let s = ghostInit();
+    s = stepMode(s, make(), 0);
+    s = stepMode(s, make(), 2);
+    s = stepMode(s, make(), 4); // you 3 vs ghost final 3
+    s = tickMode(s, 10);
+    expect(s.done).toBe(true);
+    expect(s.ghost?.result).toBe('tie');
+    expect(s.ghost?.finalMargin).toBe(0);
+    expect(s.messageTone).toBe('neutral');
+  });
+
+  test('a shot at/after the ghost clock does not count (buzzer rule)', () => {
+    let s = ghostInit();
+    s = stepMode(s, make(), 0); // you 1
+    s = stepMode(s, make(), 10); // elapsed 10 ≥ 10 ⇒ finalize, shot ignored
+    expect(s.done).toBe(true);
+    expect(s.ghost?.yourMakes).toBe(1);
+    expect(s.ghost?.result).toBe('loss');
+  });
+
+  test('config carries the timeline so replay re-inits an identical race', () => {
+    const s = ghostInit();
+    expect(initMode('ghost', s.config)).toEqual(ghostInit());
   });
 });

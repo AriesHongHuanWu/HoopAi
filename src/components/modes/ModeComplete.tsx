@@ -110,6 +110,27 @@ function headlineFor(mode: ModeState): Headline {
         sub: 'Spelled the whole word. Run it back?',
         share: '🐴 Played myself in H-O-R-S-E on Hoopilot.',
       };
+    case 'ghost': {
+      const you = mode.ghost?.yourMakes ?? mode.score;
+      const ghostFinal = mode.ghost?.finalGhostMakes ?? 0;
+      const margin = mode.ghost?.finalMargin ?? you - ghostFinal;
+      const result =
+        mode.ghost?.result ?? (margin > 0 ? 'win' : margin < 0 ? 'loss' : 'tie');
+      return {
+        banner: result === 'win' ? 'GHOST DOWN' : result === 'loss' ? 'GHOST WINS' : 'DEAD HEAT',
+        value: `${you}`,
+        unit: you === 1 ? 'make' : 'makes',
+        sub:
+          result === 'win'
+            ? `You outran your past self ${you}–${ghostFinal}.`
+            : result === 'loss'
+              ? `Your past self held you off ${ghostFinal}–${you}.`
+              : `Level with your past self at ${you} apiece.`,
+        share: `👻 Ghost Challenge: ${
+          result === 'win' ? 'beat' : result === 'loss' ? 'lost to' : 'tied'
+        } my past self ${you}–${ghostFinal} on Hoopilot.`,
+      };
+    }
     case 'free':
     default:
       return {
@@ -154,6 +175,17 @@ function statLinesFor(mode: ModeState): { label: string; value: string }[] {
         { label: 'Possible', value: '30' },
         { label: 'Racks', value: '5' },
       ];
+    case 'ghost': {
+      const ghostFinal = mode.ghost?.finalGhostMakes ?? 0;
+      const margin =
+        mode.ghost?.finalMargin ?? (mode.ghost?.yourMakes ?? mode.score) - ghostFinal;
+      const clock = mode.config?.ghost?.durationSec;
+      return [
+        { label: 'Ghost', value: `${ghostFinal}` },
+        { label: 'Margin', value: margin > 0 ? `+${margin}` : `${margin}` },
+        ...(clock != null ? [{ label: 'Clock', value: `${Math.round(clock)}s` }] : []),
+      ];
+    }
     case 'ftStreak':
     case 'horse':
     case 'free':

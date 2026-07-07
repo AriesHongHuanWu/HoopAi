@@ -143,7 +143,9 @@ function LiveSessionScreen() {
 
   const activeMode = useMode((s) => s.activeMode);
   const modeDone = activeMode?.done ?? false;
-  const isTimedMode = activeMode?.modeId === 'timed';
+  /** Tick-driven modes: Timed's countdown and Ghost's race clock. */
+  const isTickDrivenMode =
+    activeMode?.modeId === 'timed' || activeMode?.modeId === 'ghost';
 
   const [drift, setDrift] = useState(false);
   const [confirmEnd, setConfirmEnd] = useState(false);
@@ -387,17 +389,19 @@ function LiveSessionScreen() {
   }, []);
   useAppStateGuard({ onBackground, onForeground });
 
-  // Timed-mode countdown. Arms + drains the clock on the same wall-clock source
-  // as applyShot (see onShot). Only runs while the timed game is live and not
-  // yet finished; tickMode is a no-op for every other mode. Paused while the
-  // app is backgrounded so the clock can't expire mid-phone-call unseen.
+  // Mode clock tick (Timed countdown / Ghost race pace). Arms + drains the
+  // clock on the same wall-clock source as applyShot (see onShot). Only runs
+  // while a tick-driven game is live and not yet finished; tickMode is a no-op
+  // for every other mode (and the ghost clock additionally waits for the first
+  // shot). Paused while the app is backgrounded so the clock can't expire
+  // mid-phone-call unseen.
   useEffect(() => {
-    if (!isTimedMode || !rimLocked || modeDone || ending || backgrounded) return;
+    if (!isTickDrivenMode || !rimLocked || modeDone || ending || backgrounded) return;
     const id = setInterval(() => {
       useMode.getState().tick(Date.now() / 1000);
     }, 250);
     return () => clearInterval(id);
-  }, [isTimedMode, rimLocked, modeDone, ending, backgrounded]);
+  }, [isTickDrivenMode, rimLocked, modeDone, ending, backgrounded]);
 
   const endSession = useCallback(async () => {
     setEnding(true);

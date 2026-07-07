@@ -7,11 +7,17 @@
  * button). Cards rise in with a reduced-motion-aware stagger. Picking one arms
  * the mode store and routes to /session/setup; the previously picked mode wears
  * a solid PICKED tag + accent border so it is unmistakable.
+ *
+ * Ghost Challenge is the one cartridge that needs a source: tapping it expands
+ * an inline picker of the last five sessions with enough makes to race
+ * (GHOST_MIN_MAKES); choosing one derives the ghost timeline from that
+ * session's persisted shots and starts the mode. With no eligible session the
+ * card is disabled with the reason inked where the rules normally sit.
  */
 import { router } from 'expo-router';
 import * as Haptics from 'expo-haptics';
 import { Ionicons } from '@expo/vector-icons';
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import Animated, {
   FadeIn,
@@ -25,10 +31,31 @@ import { BackPill } from '@/components/ShotList';
 import { MODE_IDENTITY, type ModeIdentity } from '@/components/modes/modeIdentity';
 import { Card, Eyebrow, Row, Screen } from '@/components/ui';
 import { color, motion, radius, space, touch, type } from '@/constants/tokens';
-import { GAME_MODES, type GameModeDef } from '@/core/gameModes';
+import {
+  GAME_MODES,
+  GHOST_MIN_MAKES,
+  deriveGhostConfig,
+  type GameModeDef,
+  type GhostConfig,
+} from '@/core/gameModes';
 import { PRO_FEATURES } from '@/core/premium';
+import { listSessions, sessionShots, type SessionSummaryRow } from '@/data/db';
 import { useMode } from '@/state/modeStore';
 import { useSettings } from '@/state/settingsStore';
+
+/** How many recent raceable sessions the ghost card offers. */
+const GHOST_SOURCE_LIMIT = 5;
+
+/** Player-facing name for a ghost source session: its tag, else its date. */
+function ghostSourceTitle(row: SessionSummaryRow): string {
+  const label = row.label.trim();
+  if (label.length > 0) return label;
+  const d = new Date(row.startedAt);
+  return `${d.toLocaleDateString(undefined, {
+    month: 'short',
+    day: 'numeric',
+  })} · ${d.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}`;
+}
 
 export default function ModePickerScreen() {
   const selectMode = useMode((s) => s.selectMode);
@@ -37,6 +64,28 @@ export default function ModePickerScreen() {
   const reducedMotion = useReducedMotion();
   const [proOpen, setProOpen] = useState(false);
   const hasProModes = GAME_MODES.some((m) => m.id !== 'free');
+
+  // Ghost Challenge sources: the last few sessions with enough makes to race.
+  // null = still loading (the card stays tappable and shows a loading row).
+  const [ghostSources, setGhostSources] = useState<SessionSummaryRow[] | null>(null);
+  useEffect(() => {
+    let alive = true;
+    void listSessions(50).then((rows) => {
+      if (!alive) return;
+      setGhostSources(
+        rows.filter((r) => (r.makes ?? 0) >= GHOST_MIN_MAKES).slice(0, GHOST_SOURCE_LIMIT),
+      );
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const startGhost = (cfg: GhostConfig) => {
+    if (hapticsEnabled) void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    selectMode('ghost', { ghost: cfg });
+    router.push('/session/setup');
+  };
 
   // Entrance stagger: header first, then cards rise one by one. Under reduced
   // motion the delays collapse so nothing appears to lag.
@@ -70,12 +119,23 @@ export default function ModePickerScreen() {
       <View style={styles.list}>
         {GAME_MODES.map((mode, i) => (
           <Animated.View key={mode.id} entering={enter(i)}>
-            <ModeCard
-              mode={mode}
-              identity={MODE_IDENTITY[mode.id]}
-              selected={activeMode?.modeId === mode.id}
-              onPress={() => pick(mode.id)}
-            />
+            {mode.id === 'ghost' ? (
+              <GhostModeCard
+                mode={mode}
+                identity={MODE_IDENTITY[mode.id]}
+                selected={activeMode?.modeId === mode.id}
+                sources={ghostSources}
+                hapticsEnabled={hapticsEnabled}
+                onStart={startGhost}
+              />
+            ) : (
+              <ModeCard
+                mode={mode}
+                identity={MODE_IDENTITY[mode.id]}
+                selected={activeMode?.modeId === mode.id}
+                onPress={() => pick(mode.id)}
+              />
+            )}
           </Animated.View>
         ))}
       </View>
@@ -195,6 +255,173 @@ function ModeCard({
   );
 }
 
+/**
+ * Ghost Challenge cartridge. Same card anatomy as {@link ModeCard}, but the
+ * card press expands an inline picker of raceable past sessions instead of
+ * starting immediately — a ghost needs a source run. Disabled (with the reason
+ * inked in place of the rules) when no past session has enough makes.
+ */
+function GhostModeCard({
+  mode,
+  identity,
+  selected,
+  sources,
+  hapticsEnabled,
+  onStart,
+}: {
+  mode: GameModeDef;
+  identity: ModeIdentity;
+  selected: boolean;
+  /** Eligible source sessions; null while loading. */
+  sources: SessionSummaryRow[] | null;
+  hapticsEnabled: boolean;
+  onStart: (cfg: GhostConfig) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [busyId, setBusyId] = useState<number | null>(null);
+  const [rowError, setRowError] = useState<string | null>(null);
+  const disabled = sources != null && sources.length === 0;
+  const disabledReason = `Finish a session with ${GHOST_MIN_MAKES}+ tracked makes first — your recent runs will appear here to race.`;
+
+  const toggle = () => {
+    if (disabled) return;
+    if (hapticsEnabled) void Haptics.selectionAsync();
+    setOpen((v) => !v);
+  };
+
+  const start = async (row: SessionSummaryRow) => {
+    if (busyId != null) return;
+    setBusyId(row.id);
+    setRowError(null);
+    const shots = await sessionShots(row.id);
+    const cfg = deriveGhostConfig(shots, {
+      sourceSessionId: row.id,
+      sourceLabel: ghostSourceTitle(row),
+    });
+    setBusyId(null);
+    if (cfg == null) {
+      setRowError('That session has no usable shot timeline — try another run.');
+      return;
+    }
+    onStart(cfg);
+  };
+
+  return (
+    <Pressable
+      onPress={toggle}
+      disabled={disabled}
+      accessibilityRole="button"
+      accessibilityLabel={`${mode.name}. ${mode.tagline}`}
+      accessibilityHint={disabled ? disabledReason : `${mode.rules} Opens a list of past sessions to race.`}
+      accessibilityState={{ selected, disabled, expanded: open }}
+      style={({ pressed }) => [
+        styles.card,
+        selected && [styles.cardSelected, { borderColor: identity.accent }],
+        pressed && !disabled && styles.cardPressed,
+        pressed && !disabled && { transform: [{ scale: 0.985 }] },
+        disabled && styles.cardDisabled,
+      ]}
+    >
+      <View
+        style={[
+          styles.iconBadge,
+          { borderColor: identity.accent, backgroundColor: identity.tint },
+        ]}
+      >
+        <Ionicons name={identity.icon} size={24} color={identity.accent} />
+      </View>
+
+      <View style={styles.cardBody}>
+        <Row style={styles.cardHead} gap={space.sm}>
+          <Text style={styles.name} numberOfLines={1}>
+            {mode.name}
+          </Text>
+          <Row gap={space.xs}>
+            <ProBadge />
+            {selected && (
+              <View style={[styles.selectedTag, { backgroundColor: identity.accent }]}>
+                <Text style={styles.selectedTagText}>✓ PICKED</Text>
+              </View>
+            )}
+          </Row>
+        </Row>
+        <Text style={[styles.tagline, { color: identity.accent }]}>{mode.tagline}</Text>
+        <Text style={styles.rules} numberOfLines={disabled ? 3 : 2}>
+          {disabled ? disabledReason : mode.rules}
+        </Text>
+
+        {/* Rules at a glance + the pick affordance (the card expands). */}
+        <Row gap={space.sm} style={styles.footRow}>
+          <Row gap={space.xs} style={styles.glanceRow}>
+            {identity.glance.map((g) => (
+              <View key={g} style={styles.glanceChip}>
+                <Text style={styles.glanceText}>{g.toUpperCase()}</Text>
+              </View>
+            ))}
+          </Row>
+          {!disabled && (
+            <View style={[styles.startPill, { backgroundColor: identity.accent }]}>
+              <Ionicons name={open ? 'chevron-up' : 'play'} size={11} color={color.onAccent} />
+              <Text style={styles.startText}>{open ? 'HIDE RUNS' : 'PICK A RUN'}</Text>
+            </View>
+          )}
+        </Row>
+
+        {/* Inline source picker: the last few raceable sessions. */}
+        {open && !disabled && (
+          <View style={styles.ghostList}>
+            {sources == null ? (
+              <Text style={styles.ghostLoading}>Loading recent sessions…</Text>
+            ) : (
+              sources.map((s) => {
+                const title = ghostSourceTitle(s);
+                const fgPct = Math.round(s.fgPct * 100);
+                return (
+                  <Pressable
+                    key={s.id}
+                    accessibilityRole="button"
+                    accessibilityLabel={`Race ${title}: ${s.makes} makes, ${fgPct} percent field goals`}
+                    accessibilityState={{ busy: busyId === s.id }}
+                    disabled={busyId != null}
+                    onPress={() => void start(s)}
+                    style={({ pressed }) => [
+                      styles.ghostRow,
+                      pressed && styles.ghostRowPressed,
+                      busyId === s.id && { borderColor: identity.accent },
+                    ]}
+                  >
+                    <View style={styles.ghostRowBody}>
+                      <Text style={styles.ghostRowTitle} numberOfLines={1}>
+                        {title}
+                      </Text>
+                      <Text style={styles.ghostRowSub} numberOfLines={1}>
+                        {s.makes} makes · {fgPct}% FG
+                      </Text>
+                    </View>
+                    {busyId === s.id ? (
+                      <Text style={[styles.ghostRowGo, { color: identity.accent }]}>LOADING…</Text>
+                    ) : (
+                      <Row gap={space.xs}>
+                        <Text style={[styles.ghostRowGo, { color: identity.accent }]}>RACE</Text>
+                        <Ionicons name="chevron-forward" size={13} color={identity.accent} />
+                      </Row>
+                    )}
+                  </Pressable>
+                );
+              })
+            )}
+            {rowError != null && (
+              <Text accessibilityLiveRegion="polite" style={styles.ghostError}>
+                {rowError}
+              </Text>
+            )}
+          </View>
+        )}
+      </View>
+    </Pressable>
+  );
+}
+
 const styles = StyleSheet.create({
   title: {
     ...type.title,
@@ -224,6 +451,9 @@ const styles = StyleSheet.create({
   },
   cardPressed: {
     backgroundColor: color.surfaceRaised,
+  },
+  cardDisabled: {
+    opacity: 0.55,
   },
   iconBadge: {
     width: 52,
@@ -293,6 +523,50 @@ const styles = StyleSheet.create({
   startText: {
     ...type.micro,
     color: color.onAccent,
+  },
+  // --- Ghost source picker (inline, inside the ghost cartridge) -----------
+  ghostList: {
+    marginTop: space.md,
+    gap: space.sm,
+  },
+  ghostLoading: {
+    ...type.caption,
+    color: color.textFaint,
+  },
+  ghostRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: space.sm,
+    minHeight: touch.minTarget,
+    borderRadius: radius.md,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: color.border,
+    backgroundColor: color.surfaceRaised,
+    paddingHorizontal: space.md,
+    paddingVertical: space.sm,
+  },
+  ghostRowPressed: {
+    backgroundColor: color.surface,
+  },
+  ghostRowBody: {
+    flex: 1,
+    minWidth: 0,
+  },
+  ghostRowTitle: {
+    ...type.bodyMedium,
+    color: color.text,
+  },
+  ghostRowSub: {
+    ...type.caption,
+    color: color.textDim,
+    marginTop: 1,
+  },
+  ghostRowGo: {
+    ...type.micro,
+  },
+  ghostError: {
+    ...type.caption,
+    color: color.miss,
   },
   proSection: {
     marginTop: space.xl,
