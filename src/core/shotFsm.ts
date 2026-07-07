@@ -27,6 +27,7 @@
 import { DETECTION, SHOT_FSM } from './config';
 import { depthRatioGate, type BallSizeSetting, type ViewBandName } from './depthRatioGate';
 import { boxesIntersect, elevationAngleDeg, interpolateXAtY } from './geometry';
+import { ReappearanceTest } from './reappearance';
 import { selectDepthSamples } from './sampleQuality';
 import { backfillPredictedGap } from './trajectory';
 import type {
@@ -99,8 +100,14 @@ export class ShotFsm {
   // --- depth-aware judgment (all inert unless the veto flag is on) ---------
   /** Kill-switch: run the depth-ratio parallax veto in resolve(). */
   private readonly useDepthVeto: boolean;
+  /** Kill-switch: gap-crossing reappearance corroborator. */
+  private readonly useReappearance: boolean;
   private ballSize: BallSizeSetting = 7;
   private viewBand: ViewBandName = 'side_wing';
+  private readonly reapp = new ReappearanceTest();
+  private reappCorroborated = false;
+  /** Slow EMA of the net-motion score (drives the net-hang TTL extension). */
+  private netScoreEma = 0;
 
   // --- live-shot state (valid only while phase === 'SHOT_LIVE') ------------
   private tStart = 0;
@@ -121,11 +128,12 @@ export class ShotFsm {
   constructor(
     rim: RimGeometry,
     frame: FrameSize,
-    opts: { useDepthRatioVeto?: boolean } = {},
+    opts: { useDepthRatioVeto?: boolean; useReappearance?: boolean } = {},
   ) {
     this.frameW = frame.width;
     this.frameH = frame.height;
     this.useDepthVeto = opts.useDepthRatioVeto ?? SHOT_FSM.useDepthRatioVeto;
+    this.useReappearance = opts.useReappearance ?? SHOT_FSM.useReappearance;
     this.setRim(rim);
   }
 
@@ -195,6 +203,7 @@ export class ShotFsm {
     }
     this.netSamples.push({ t, score: input.netMotionScore });
     if (input.netMotionScore > 0) this.anyNetPositive = true;
+    this.netScoreEma = this.netScoreEma * 0.8 + input.netMotionScore * 0.2;
 
     const ball = input.ball;
     let reason: ResolveReason | null = null;
@@ -218,6 +227,21 @@ export class ShotFsm {
       // the physics-true two-sided parabola. Improves the drawn comet AND the
       // crossing geometry the make/miss call is built on.
       if (!ball.predicted) backfillPredictedGap(this.trajectory);
+      // Reappearance corroborator (flagged): arm when the track goes
+      // predicted-only mid-shot; feed real samples while armed.
+      if (this.useReappearance) {
+        if (ball.predicted) {
+          this.reapp.armOnBallLost(this.trajectory, this.rim, t);
+        } else if (this.reapp.armed) {
+          const res = this.reapp.onSample(
+            { cx: ball.cx, cy: ball.cy, vy: ball.vy, diaPx: ball.r * 2 },
+            t,
+            this.netScoreEma,
+            this.ballSize,
+          );
+          if (res.fired && res.corroborates) this.reappCorroborated = true;
+        }
+      }
       this.lastBallT = t;
       if (!this.touchedRim && this.touchesRimRegion(ball)) {
         this.touchedRim = true;
@@ -229,6 +253,10 @@ export class ShotFsm {
       if (ball.cy > this.rim.belowY) reason = 'belowRim';
     } else if (t - this.lastBallT >= SHOT_FSM.lostBallResolveSec) {
       reason = 'ballLost';
+    } else if (this.useReappearance) {
+      // Tracker dropped the ball entirely: arm the reappearance trap off the
+      // buffered trajectory (internally refuses without a trustworthy arc).
+      this.reapp.armOnBallLost(this.trajectory, this.rim, t);
     }
 
     if (reason === null && t - this.tStart > SHOT_FSM.maxLiveSec) {
@@ -420,6 +448,16 @@ export class ShotFsm {
     // --- cls --------------------------------------------------------------
     const cls = this.maxClsScore >= DETECTION.ballInBasketScoreMin;
 
+    // --- reappearance corroborator (flagged) --------------------------------
+    // The ball vanished at the rim and reappeared BELOW it on the pre-gap arc,
+    // descending, in-span, depth-consistent. That upgrades an OCCLUDED (geo
+    // null) crossing to geo=true — but only with agreement from net motion or
+    // the ball_in_basket class. Never sole make evidence; never flips an
+    // explicit geo=false (a seen miss stays a miss).
+    if (this.useReappearance && this.reappCorroborated && geo == null) {
+      if (net === true || (net === null && cls)) geo = true;
+    }
+
     // --- occlusion at the rim ----------------------------------------------
     const last = traj.length > 0 ? traj[traj.length - 1] : null;
     const occluded =
@@ -483,6 +521,8 @@ export class ShotFsm {
     this.phase = 'COOLDOWN';
     this.lastResolveT = t;
     if (this.rimBounce) this.lastBounceResolveT = t;
+    this.reapp.clear();
+    this.reappCorroborated = false;
     this.trajectory = [];
     this.netSamples = [];
     this.anyNetPositive = false;

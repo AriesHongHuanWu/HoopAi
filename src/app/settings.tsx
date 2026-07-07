@@ -403,6 +403,7 @@ export default function SettingsScreen() {
   const debugMode = useSettings((s) => s.debugMode);
   const roiZoom = useSettings((s) => s.roiZoom);
   const depthVeto = useSettings((s) => s.depthVeto);
+  const reappearance = useSettings((s) => s.reappearance);
   const metric23 = useSettings((s) => s.metric23);
   const formAnalysis = useSettings((s) => s.formAnalysis);
   const dailyGoalMakes = useSettings((s) => s.dailyGoalMakes);
@@ -752,6 +753,16 @@ export default function SettingsScreen() {
             onValueChange={(v) => {
               tick();
               set('depthVeto', v);
+            }}
+          />
+          <View style={styles.divider} />
+          <ToggleRow
+            label="Ghost-swish rescue (experimental)"
+            description="When the ball disappears into the net and reappears below the rim on the same flight path, count the make it implies — only when the net or the in-basket detector agrees. Hardened against rim-bounces and putback fakes."
+            value={reappearance}
+            onValueChange={(v) => {
+              tick();
+              set('reappearance', v);
             }}
           />
           <View style={styles.divider} />

@@ -194,6 +194,14 @@ export interface SettingsState {
    * to the heuristic whenever the scene can't support a confident answer.
    */
   metric23: boolean;
+  /**
+   * Gap-crossing reappearance corroborator (experimental): when the ball
+   * vanishes at the rim and reappears BELOW it on the same flight arc,
+   * descending, in-span and depth-consistent, the occluded crossing may be
+   * upgraded — only with net/cls agreement. Hardened against rim-bounce,
+   * parallax and putback fakes; default off pending field validation.
+   */
+  reappearance: boolean;
   /** Last session orientation — powers the Home quick-start (skip setup). */
   lastOrient: 'portrait' | 'landscape';
   /**
@@ -253,6 +261,7 @@ export const useSettings = create<SettingsState>()(
       roiZoom: true,
       depthVeto: false,
       metric23: false,
+      reappearance: false,
       lastOrient: 'portrait',
       formAnalysis: false,
       tutorialSeen: TUTORIAL_SEEN_DEFAULT,

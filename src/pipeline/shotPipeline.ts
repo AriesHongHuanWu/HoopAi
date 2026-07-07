@@ -101,6 +101,8 @@ export class ShotPipeline {
   private depthVeto = false;
   /** Metric 2/3 estimation flag (Settings, experimental). */
   private metric23 = false;
+  /** Reappearance corroborator flag (Settings, experimental). */
+  private reappearance = false;
   /** Camera pitch at/around rim lock from the IMU, degrees +up; null = no IMU. */
   private viewPitchDeg: number | null = null;
   private sawPoseThisShot = false;
@@ -135,6 +137,11 @@ export class ShotPipeline {
   /** Metric 2/3 estimation (from Settings). */
   setMetric23(enabled: boolean): void {
     this.metric23 = enabled;
+  }
+
+  /** Reappearance corroborator (from Settings). Takes effect at rim lock. */
+  setReappearance(enabled: boolean): void {
+    this.reappearance = enabled;
   }
 
   /** IMU camera pitch, degrees +up (EMA'd by the engine). Feeds the view-band
@@ -344,7 +351,10 @@ export class ShotPipeline {
     if (this.fsm) {
       this.fsm.setRim(rim);
     } else {
-      this.fsm = new ShotFsm(rim, frame, { useDepthRatioVeto: this.depthVeto });
+      this.fsm = new ShotFsm(rim, frame, {
+        useDepthRatioVeto: this.depthVeto,
+        useReappearance: this.reappearance,
+      });
       this.fsm.setBallSize(this.ballSize);
     }
     // Placement classification from the locked rim's aspect (IMU pitch not

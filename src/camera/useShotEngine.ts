@@ -617,6 +617,10 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
   useEffect(() => {
     pipeline.setMetric23(metric23);
   }, [pipeline, metric23]);
+  const reappearance = useSettings((s) => s.reappearance);
+  useEffect(() => {
+    pipeline.setReappearance(reappearance);
+  }, [pipeline, reappearance]);
 
   // IMU camera pitch (degrees, +up): from the gravity vector at ~4Hz, EMA'd.
   // Feeds the view-band classifier (under-hoop vs overhead disambiguation)

@@ -87,6 +87,45 @@ const SILENT = (reason: string, ratio = NaN): DepthGateResult => ({
 /** Bands where the plane-crossing geometry (and thus the veto) is meaningful. */
 const GATE_BANDS: readonly ViewBandName[] = ['side_wing', 'behind_shooter'];
 
+/**
+ * Single-sample depth consistency for the reappearance corroborator: is THIS
+ * ball detection at the rim's depth? Same log-space math as the main gate but
+ * with N=1 noise (no averaging) and no view/context gating — the caller (the
+ * reappearance test) owns that. Returns 'unknown' below the pixel floors.
+ * NO upper size cap by design: the close-front airball renders BIGGEST, and
+ * skipping big balls was exactly the verified false-make hole.
+ */
+export function depthConsistencyAtSample(
+  ballDiaPx: number,
+  rimWidthPx: number,
+  ballSize: BallSizeSetting,
+  fPriorPx?: number,
+): 'ok' | 'front' | 'behind' | 'unknown' {
+  if (
+    !Number.isFinite(ballDiaPx) ||
+    ballDiaPx < DEPTH_GATE.minBallDiaPx ||
+    rimWidthPx < DEPTH_GATE.minRimWidthPx
+  ) {
+    return 'unknown';
+  }
+  const ratio =
+    (BALL_SIZES_M[ballSize] * rimWidthPx) / (COURT.rimDiameterM * ballDiaPx);
+  const sigmaLn = Math.sqrt(
+    (DEPTH_GATE.sigmaBallRadiusPx / (ballDiaPx / 2)) ** 2 +
+      (DEPTH_GATE.sigmaRimWidthPx / rimWidthPx) ** 2,
+  );
+  const f = fPriorPx ?? DEPTH_GATE.focalPxDefault;
+  const zEst = (f * COURT.rimDiameterM) / rimWidthPx;
+  const zoneHalf = Math.min(
+    DEPTH_GATE.makeZoneClampHi,
+    Math.max(DEPTH_GATE.makeZoneClampLo, DEPTH_GATE.makeZoneScaleM / zEst),
+  );
+  const threshold = DEPTH_GATE.blurAllowanceLn + DEPTH_GATE.k * sigmaLn;
+  if (Math.log((1 - zoneHalf) / ratio) > threshold) return 'front';
+  if (Math.log(ratio / (1 + zoneHalf)) > threshold) return 'behind';
+  return 'ok';
+}
+
 export function depthRatioGate(input: DepthGateInput): DepthGateResult {
   const {
     ballDiaPxAvg,
