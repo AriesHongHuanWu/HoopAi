@@ -19,6 +19,7 @@ import {
 } from 'react-native-vision-camera';
 
 import { BackPill } from '@/components/ShotList';
+import { ModeMark } from '@/components/modes/modeIdentity';
 import { Card, Chip, Eyebrow, PillButton, Row, Screen } from '@/components/ui';
 import { color, font, motion, radius, space, touch, type } from '@/constants/tokens';
 import { getModeDef } from '@/core/gameModes';
@@ -195,9 +196,10 @@ export default function SessionSetupScreen() {
       {/* Chosen game mode (or Free Play when none picked) */}
       <Card entering={enter(1)} style={styles.card}>
         <Row style={styles.modeRow} gap={space.md}>
-          <View style={styles.modeBadge}>
-            <Text style={styles.modeEmoji}>{modeDef?.emoji ?? '🏀'}</Text>
-          </View>
+          {/* The mode's Ionicons identity mark (shared ModeMark) — the picker,
+              banner and complete sheet all draw this same glyph-on-tint, so
+              the setup card must not fall back to the legacy catalog emoji. */}
+          <ModeMark modeId={activeMode?.modeId ?? 'free'} size={48} />
           <View style={styles.checkBody}>
             <Eyebrow>Game mode</Eyebrow>
             <Text style={styles.itemTitle}>{modeDef?.name ?? 'Free Play'}</Text>
@@ -484,17 +486,6 @@ const styles = StyleSheet.create({
   },
   configBlock: {
     marginTop: space.lg,
-  },
-  modeBadge: {
-    width: 48,
-    height: 48,
-    borderRadius: radius.md,
-    backgroundColor: color.accentTint,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  modeEmoji: {
-    fontSize: 24,
   },
   modeChange: {
     paddingHorizontal: space.lg,

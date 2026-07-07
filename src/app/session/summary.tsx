@@ -27,7 +27,7 @@ import {
 import { CoachMarks, useCoachMarks, type CoachStep } from '@/components/coach/CoachMarks';
 import { PersonalBestBanner } from '@/components/PersonalBestBanner';
 import { RecheckPanel } from '@/components/RecheckPanel';
-import { SummaryHero } from '@/components/SummaryHero';
+import { SummaryHero, isPerfectSession } from '@/components/SummaryHero';
 import { Card, Chip, Eyebrow, PillButton, Row, Screen } from '@/components/ui';
 import { color, space, type } from '@/constants/tokens';
 import { detectNewBests, type CareerBests } from '@/core/achievements';
@@ -104,11 +104,17 @@ export default function SessionSummaryScreen() {
       setPbBaseline(bests);
     });
   }, [storeMode, liveSessionId]);
-  const newBests = useMemo(
-    () =>
-      storeMode && pbBaseline != null ? detectNewBests(stats, pbBaseline) : [],
-    [storeMode, pbBaseline, stats],
-  );
+  const newBests = useMemo(() => {
+    if (!storeMode || pbBaseline == null) return [];
+    const bests = detectNewBests(stats, pbBaseline);
+    // A perfect session already earns SummaryHero's PERFECT NIGHT chip, and a
+    // perfect night IS the career-best FG% — the bestFgPct banner line would
+    // celebrate the identical fact directly under the chip. Keep the other
+    // record kinds (most makes / best streak); only the duplicate is dropped.
+    return isPerfectSession(stats)
+      ? bests.filter((pb) => pb.kind !== 'bestFgPct')
+      : bests;
+  }, [storeMode, pbBaseline, stats]);
 
   // Corrections route through the mode-appropriate pathway (live store vs.
   // persisted record), wrapped with the shared undo window. `corrected` is

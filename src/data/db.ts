@@ -209,12 +209,27 @@ async function migrate(db: SQLite.SQLiteDatabase): Promise<void> {
     `);
   }
   if (version < 6) {
-    // v6: offline re-check bookkeeping (src/core/recheck.ts). 1 once the
-    // machine has re-analysed this shot against the recording — whether or
-    // not the verdict changed — so a second "Re-check" tap never redoes the
-    // same expensive pass. DEFAULT 0 covers all pre-v6 rows.
+    // v6 (two features landed together):
+    //
+    // rechecked — offline re-check bookkeeping (src/core/recheck.ts). 1 once
+    // the machine has re-analysed this shot against the recording — whether
+    // or not the verdict changed — so a second "Re-check" tap never redoes
+    // the same expensive pass. DEFAULT 0 covers all pre-v6 rows.
+    //
+    // outcomeCorrected — splits "the user corrected the OUTCOME" out of the
+    // overloaded `corrected` flag. updateShotValue (the one-tap 2↔3 point
+    // fix) also stamps corrected=1, so the hard-example export — which needs
+    // shots whose MAKE/MISS call was wrong — was polluted by value-only
+    // fixes masquerading as outcome corrections. outcomeCorrected is set
+    // only by updateShotOutcome when the caller passes corrected=true (user
+    // edits; machine rechecks/undo pass false and never stamp it). Backfill
+    // from the legacy flag: pre-v6 rows can't distinguish the two kinds of
+    // correction, and copying keeps every previously-exported outcome
+    // correction in the export instead of silently dropping them.
     await db.execAsync(`
       ALTER TABLE shots ADD COLUMN rechecked INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE shots ADD COLUMN outcomeCorrected INTEGER NOT NULL DEFAULT 0;
+      UPDATE shots SET outcomeCorrected = corrected;
       PRAGMA user_version = 6;
     `);
   }
@@ -403,6 +418,12 @@ export async function insertShot(sessionId: number, shot: ResolvedShot): Promise
  * clears the user-edited flag — the default (true) is the one-tap/swipe
  * correction; pass false when restoring the original detection (undo) or
  * flushing an outcome that was never hand-edited (late insert sync).
+ *
+ * `outcomeCorrected` mirrors `corrected` HERE and only here: it marks "the
+ * user hand-flipped this shot's make/miss call", which is what the
+ * hard-example export filters on. Machine rechecks/undo (corrected=false)
+ * clear it, and updateShotValue (2↔3 fix) never touches it — see the v6
+ * migration note.
  */
 export async function updateShotOutcome(
   shotRowId: number,
@@ -412,8 +433,9 @@ export async function updateShotOutcome(
   return safe('updateShotOutcome', undefined, async () => {
     const db = await getDb();
     await db.runAsync(
-      'UPDATE shots SET outcome = ?, corrected = ? WHERE id = ?',
+      'UPDATE shots SET outcome = ?, corrected = ?, outcomeCorrected = ? WHERE id = ?',
       outcome,
+      corrected ? 1 : 0,
       corrected ? 1 : 0,
       shotRowId,
     );
@@ -432,7 +454,12 @@ export async function markShotRechecked(shotRowId: number): Promise<void> {
   });
 }
 
-/** One-tap 2↔3 correction: persist a shot's corrected point value. */
+/**
+ * One-tap 2↔3 correction: persist a shot's corrected point value. Stamps the
+ * general `corrected` flag (Records' corrected-calls total counts every hand
+ * edit) but deliberately NOT `outcomeCorrected` — the make/miss call was
+ * right, so this shot is not a hard example for the detector.
+ */
 export async function updateShotValue(shotRowId: number, value: 2 | 3): Promise<void> {
   return safe('updateShotValue', undefined, async () => {
     const db = await getDb();
@@ -459,6 +486,12 @@ export interface ShotRow {
   tResolved: number;
   outcome: ShotOutcome;
   corrected: number;
+  /**
+   * 1 when the USER hand-corrected the make/miss call (vs `corrected`, which
+   * any hand edit — including a 2↔3 value fix — stamps). Optional so
+   * hand-built pre-v6 rows still typecheck; SELECTed rows always carry it.
+   */
+  outcomeCorrected?: number;
   rimBounce: number;
   entryAngleDeg: number | null;
   releaseAngleDeg: number | null;
@@ -488,6 +521,29 @@ export async function sessionShots(sessionId: number): Promise<ShotRow[]> {
     const db = await getDb();
     return db.getAllAsync<ShotRow>(
       'SELECT * FROM shots WHERE sessionId = ? ORDER BY shotIndex ASC',
+      sessionId,
+    );
+  });
+}
+
+/** The narrow per-shot slice aggregate scans need (see sessionShotOutcomes). */
+export interface ShotOutcomeRow {
+  outcome: ShotOutcome;
+  shotValue: number | null;
+}
+
+/**
+ * Narrow per-session read for aggregate passes that only need the outcome
+ * stream (e.g. the Home daily-challenge rebuild): sessionShots() SELECT *s
+ * every row including the multi-KB trajectoryJson/formJson blobs, which an
+ * every-Home-focus scan over the whole day's sessions should never pay for.
+ * Ordered by shotIndex so streak walks stay correct. Never throws.
+ */
+export async function sessionShotOutcomes(sessionId: number): Promise<ShotOutcomeRow[]> {
+  return safe('sessionShotOutcomes', [], async () => {
+    const db = await getDb();
+    return db.getAllAsync<ShotOutcomeRow>(
+      'SELECT outcome, shotValue FROM shots WHERE sessionId = ? ORDER BY shotIndex ASC',
       sessionId,
     );
   });

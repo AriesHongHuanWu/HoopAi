@@ -190,32 +190,115 @@ describe('careerBests', () => {
 });
 
 describe('updateShotOutcome', () => {
-  it('stamps corrected=1 by default (one-tap/swipe correction)', async () => {
+  it('stamps corrected=1 AND outcomeCorrected=1 by default (one-tap/swipe correction)', async () => {
     const fake = fakeDatabase();
     sqlite.openDatabaseAsync.mockResolvedValue(fake);
 
     await db.updateShotOutcome(9, 'make');
 
     expect(fake.runAsync).toHaveBeenCalledWith(
-      'UPDATE shots SET outcome = ?, corrected = ? WHERE id = ?',
+      'UPDATE shots SET outcome = ?, corrected = ?, outcomeCorrected = ? WHERE id = ?',
       'make',
+      1,
       1,
       9,
     );
   });
 
-  it('clears the flag when restoring the original detection (undo)', async () => {
+  it('clears both flags when restoring the original detection (undo / machine recheck)', async () => {
     const fake = fakeDatabase();
     sqlite.openDatabaseAsync.mockResolvedValue(fake);
 
     await db.updateShotOutcome(9, 'miss', false);
 
+    // corrected=false is the machine/undo path — it must NOT stamp
+    // outcomeCorrected, or automated rechecks would masquerade as user
+    // ground truth in the hard-example export.
     expect(fake.runAsync).toHaveBeenCalledWith(
-      'UPDATE shots SET outcome = ?, corrected = ? WHERE id = ?',
+      'UPDATE shots SET outcome = ?, corrected = ?, outcomeCorrected = ? WHERE id = ?',
       'miss',
+      0,
       0,
       9,
     );
+  });
+});
+
+describe('updateShotValue', () => {
+  it('stamps corrected but NEVER outcomeCorrected — a 2↔3 fix is not an outcome error', async () => {
+    const fake = fakeDatabase();
+    sqlite.openDatabaseAsync.mockResolvedValue(fake);
+
+    await db.updateShotValue(9, 3);
+
+    const [sql] = fake.runAsync.mock.calls.at(-1) as [string, ...unknown[]];
+    expect(sql).toContain('corrected = 1');
+    expect(sql).not.toContain('outcomeCorrected');
+  });
+});
+
+describe('migrations', () => {
+  it('v6 adds outcomeCorrected and backfills it from the legacy corrected flag', async () => {
+    const fake = fakeDatabase();
+    fake.getFirstAsync.mockResolvedValue({ user_version: 5 });
+    sqlite.openDatabaseAsync.mockResolvedValue(fake);
+
+    await db.getDb();
+
+    const v6 = fake.execAsync.mock.calls
+      .map((c: unknown[]) => c[0] as string)
+      .find((s: string) => s.includes('outcomeCorrected'));
+    expect(v6).toContain(
+      'ALTER TABLE shots ADD COLUMN outcomeCorrected INTEGER NOT NULL DEFAULT 0',
+    );
+    // Pre-v6 rows can't tell outcome fixes from value fixes; copying keeps
+    // previously-exported outcome corrections instead of dropping them.
+    expect(v6).toContain('UPDATE shots SET outcomeCorrected = corrected');
+    expect(v6).toContain('PRAGMA user_version = 6');
+  });
+
+  it('skips v6 when the database is already current', async () => {
+    const fake = fakeDatabase();
+    fake.getFirstAsync.mockResolvedValue({ user_version: 6 });
+    sqlite.openDatabaseAsync.mockResolvedValue(fake);
+
+    await db.getDb();
+
+    const v6 = fake.execAsync.mock.calls
+      .map((c: unknown[]) => c[0] as string)
+      .find((s: string) => s.includes('outcomeCorrected'));
+    expect(v6).toBeUndefined();
+  });
+});
+
+describe('sessionShotOutcomes', () => {
+  it('selects ONLY outcome + shotValue, ordered by shotIndex', async () => {
+    const fake = fakeDatabase();
+    fake.getAllAsync.mockResolvedValue([
+      { outcome: 'make', shotValue: 3 },
+      { outcome: 'miss', shotValue: null },
+    ]);
+    sqlite.openDatabaseAsync.mockResolvedValue(fake);
+
+    const rows = await db.sessionShotOutcomes(7);
+
+    expect(rows).toEqual([
+      { outcome: 'make', shotValue: 3 },
+      { outcome: 'miss', shotValue: null },
+    ]);
+    const [sql, sessionId] = fake.getAllAsync.mock.calls.at(-1) as [string, number];
+    // Narrow on purpose: no SELECT * — the multi-KB trajectoryJson/formJson
+    // blobs must not ride along on the every-Home-focus challenge rebuild.
+    expect(sql).toContain('SELECT outcome, shotValue FROM shots');
+    expect(sql).not.toContain('*');
+    // Ordered so streak walks over the stream stay correct.
+    expect(sql).toContain('ORDER BY shotIndex ASC');
+    expect(sessionId).toBe(7);
+  });
+
+  it('returns an empty list when the database is unavailable, without throwing', async () => {
+    sqlite.openDatabaseAsync.mockRejectedValue(new Error('no disk'));
+    await expect(db.sessionShotOutcomes(1)).resolves.toEqual([]);
   });
 });
 

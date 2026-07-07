@@ -260,7 +260,8 @@ export interface DayAggregate {
   bestStreak: number;
   /** makes / decided (make+miss) today, 0..1; 0 when nothing is decided. */
   fgPct: number;
-  /** Distinct game modes played today (sessions with a non-null modeId). */
+  /** Distinct game modes played today (sessions with a non-null, non-'free'
+   *  modeId — Free Play is an open run, not a game mode). */
   modesPlayed: number;
 }
 
@@ -288,7 +289,10 @@ export function dayAggregate(sessions: readonly DaySessionFacts[]): DayAggregate
   const modes = new Set<string>();
 
   for (const session of sessions) {
-    if (session.modeId != null) modes.add(session.modeId);
+    // 'free' is Free Play, not a game MODE: the "Play a game mode" challenge
+    // must not auto-complete from an ordinary open run. Same exclusion
+    // lifetimeTotals (src/data/db.ts) applies to its modesPlayed count.
+    if (session.modeId != null && session.modeId !== 'free') modes.add(session.modeId);
     let streak = 0; // Streaks never span sessions.
     for (const shot of session.shots) {
       attempts += 1;

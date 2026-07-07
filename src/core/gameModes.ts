@@ -888,10 +888,25 @@ function tickGhost(state: ModeState, nowSec: number): ModeState {
 
   const ghostMakesNow = ghostMakesAt(cfg.timeline, elapsed);
   const lead = race.yourMakes - ghostMakesNow;
+  const timeLeftSec = Math.max(0, cfg.durationSec - elapsed);
+  // Identity stability: the live screen ticks at 4 Hz for the WHOLE race
+  // (potentially 30-60 min for a long ghost session), and a fresh object per
+  // tick re-renders the entire live screen 4×/sec. Nothing displayed changes
+  // that fast — the banner shows the race score (ghostMakesNow / lead) and a
+  // progress bar rounded to whole percents, which whole-second quantization
+  // covers. Return the SAME object unless a displayed value actually moved;
+  // the store's `next !== active` check then skips the setState entirely.
+  if (
+    ghostMakesNow === race.ghostMakesNow &&
+    lead === race.lead &&
+    Math.floor(timeLeftSec) === Math.floor(state.timeLeftSec ?? cfg.durationSec)
+  ) {
+    return state;
+  }
   return {
     ...state,
     progress: clamp01(elapsed / cfg.durationSec),
-    timeLeftSec: Math.max(0, cfg.durationSec - elapsed),
+    timeLeftSec,
     ghost: { ...race, ghostMakesNow, lead },
     message: ghostRaceMessage(race.yourMakes, ghostMakesNow),
     messageTone: ghostTone(lead),
@@ -936,10 +951,44 @@ export function tickMode(state: ModeState, nowSec: number): ModeState {
     };
   }
 
+  // Identity stability (same rationale as tickGhost): everything the timed
+  // HUD displays is quantized to whole seconds — the status line and the
+  // TimerRing numeral both go through Math.ceil — so ticks landing inside
+  // the same displayed second return the SAME object and cost zero renders.
+  if (Math.ceil(timeLeftSec) === Math.ceil(state.timeLeftSec ?? dur)) {
+    return state;
+  }
+
   return {
     ...state,
     timeLeftSec,
     progress: clamp01(elapsed / dur),
     message: `${Math.ceil(timeLeftSec)}s · ${state.score} makes`,
   };
+}
+
+// ---------------------------------------------------------------------------
+// shiftModeClock
+// ---------------------------------------------------------------------------
+
+/**
+ * Shift an armed mode clock forward by `deltaSec` seconds — the "pause"
+ * primitive for the tick-driven modes (timed countdown, ghost race).
+ *
+ * WHY: this module never reads the clock; `started` is a wall-clock instant
+ * and elapsed = nowSec − started. A caller that merely stops ticking (e.g.
+ * the live screen while the app is backgrounded) has NOT paused the game —
+ * time keeps accruing unseen, and the first tick after resume drains the
+ * whole gap at once (a phone call could silently end the race). Moving
+ * `started` forward by the gap makes the pause real: on resume the clock
+ * holds exactly where it left off, and the ghost's pace pauses with it.
+ *
+ * No-op (same object) for unarmed, finished, or non-clock modes and for a
+ * non-positive delta.
+ */
+export function shiftModeClock(state: ModeState, deltaSec: number): ModeState {
+  if (state.done || state.started === null) return state;
+  if (state.modeId !== 'timed' && state.modeId !== 'ghost') return state;
+  if (!(deltaSec > 0)) return state;
+  return { ...state, started: state.started + deltaSec };
 }

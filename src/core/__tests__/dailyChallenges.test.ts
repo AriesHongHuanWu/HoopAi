@@ -210,6 +210,24 @@ describe('dayAggregate', () => {
     ]);
     expect(day.modesPlayed).toBe(2);
   });
+
+  it("excludes Free Play — 'free' must not auto-complete the game-mode challenge", () => {
+    // A day of ordinary open runs is NOT "played a game mode" (matching the
+    // lifetimeTotals modesPlayed exclusion in src/data/db.ts).
+    const freeOnly = dayAggregate([
+      { modeId: 'free', shots: [{ outcome: 'make' }] },
+      { modeId: 'free', shots: [] },
+      { modeId: null, shots: [] },
+    ]);
+    expect(freeOnly.modesPlayed).toBe(0);
+
+    // Real modes still count alongside free sessions.
+    const mixed = dayAggregate([
+      { modeId: 'free', shots: [] },
+      { modeId: 'timed', shots: [] },
+    ]);
+    expect(mixed.modesPlayed).toBe(1);
+  });
 });
 
 // ---------------------------------------------------------------------------

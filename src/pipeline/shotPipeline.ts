@@ -166,8 +166,11 @@ export class ShotPipeline {
   private lastHolderBox: Box | null = null;
   private lastHolderT = -Infinity;
   /** Optional FT-line calibration for the metric 2/3 estimator. Per-session
-   *  only (never persisted — the camera moves between sessions); refinement
-   *  only, never a gate. */
+   *  only (never persisted — the camera moves between sessions). It never
+   *  gates shots, but a successfully DERIVED calibration does switch the
+   *  metric estimator path on for this session even with the experimental
+   *  metric23 flag off — the user performed the calibration ritual precisely
+   *  to sharpen 2/3 calls, so it must not be a silent no-op (see step()). */
   private ftCalibration: FtDistanceCalibration | null = null;
   /** In-flight FT anchor capture, fed by step() frames until it resolves. */
   private ftCapture: {
@@ -300,6 +303,14 @@ export class ShotPipeline {
 
     if (this.rimLock.driftDetected && !this.wasDrifted) {
       this.wasDrifted = true;
+      // A detected drift means the camera physically moved (bump/knock): the
+      // FT anchor was captured against the OLD framing, so its distance
+      // correction is stale — the same reasoning reAim() applies when the
+      // user re-points on purpose. Quietly fail any in-flight capture and
+      // drop the calibration; the default rim ruler takes over untouched.
+      this.ftCapture?.resolve({ ok: false, reason: 'no-rim' });
+      this.ftCapture = null;
+      this.ftCalibration = null;
       this.events.onRimDrift?.();
     } else if (!this.rimLock.driftDetected && this.wasDrifted) {
       // Re-locked after a camera bump — announce so the UI clears its banner.
@@ -441,11 +452,21 @@ export class ShotPipeline {
           resolved.originX = originX;
           resolved.originY = originY;
         }
-        // METRIC estimator first (flagged): pinhole geometry off the rim's
-        // real size + height gives the distance in METERS; the rim-widths
-        // heuristic stays as the always-available fallback.
+        // METRIC estimator first: pinhole geometry off the rim's real size +
+        // height gives the distance in METERS; the rim-widths heuristic stays
+        // as the always-available fallback. Runs when the experimental
+        // metric23 flag is on, and ALSO whenever an FT-line calibration was
+        // derived this session — the calibration only exists because the user
+        // performed the stand-at-the-line ritual, and feeding it into a path
+        // that's off by default would make that ritual a no-op for everyone
+        // running stock settings. Safe either way: the estimator keeps its
+        // own confidence gates and returns null → heuristic fallback.
         let metric: ReturnType<typeof estimateShotValueMetric> = null;
-        if (this.metric23 && originX != null && originY != null) {
+        if (
+          (this.metric23 || this.ftCalibration != null) &&
+          originX != null &&
+          originY != null
+        ) {
           metric = estimateShotValueMetric({
             rimBox: this.lastRim.box,
             footX: originX * frame.frameWidth,
