@@ -3,7 +3,7 @@
  *
  * Giant Start CTA (the one daily action) with a slow-breathing shot arc,
  * last-session recap from SQLite with a mini FG% sparkline across recent
- * sessions, quiet glyph links to history and trends. Redirects to /onboarding
+ * sessions, quiet icon tiles to history and trends. Redirects to /onboarding
  * on first launch; the root layout guarantees the settings store is hydrated
  * before this screen renders, so the check is flash-free.
  */
@@ -99,7 +99,10 @@ function HeroArc({ width }: { width: number }) {
   return (
     <View pointerEvents="none" style={StyleSheet.absoluteFill}>
       <Canvas style={{ width, height: HERO_HEIGHT }}>
-        <Path path={path} style="stroke" strokeWidth={3} color={color.onAccent} opacity={0.24} />
+        {/* Soft wide echo under the crisp stroke — same geometry, quieter
+            opacity, so the arc reads as light rather than a line. */}
+        <Path path={path} style="stroke" strokeWidth={7} color={color.onAccent} opacity={0.08} />
+        <Path path={path} style="stroke" strokeWidth={3} color={color.onAccent} opacity={0.22} />
         <Circle cx={rimX} cy={rimY} r={haloR} color={color.onAccent} opacity={haloOpacity} />
         <Circle cx={rimX} cy={rimY} r={7} color={color.onAccent} opacity={dotOpacity} />
       </Canvas>
@@ -107,14 +110,14 @@ function HeroArc({ width }: { width: number }) {
   );
 }
 
-/** Quiet glyph link card — History / Trends. */
+/** Quiet icon link tile — History / Trends / Records / Scoreboard / Test AI. */
 function QuickLink({
-  glyph,
+  icon,
   label,
   hint,
   onPress,
 }: {
-  glyph: string;
+  icon: React.ComponentProps<typeof Ionicons>['name'];
   label: string;
   hint: string;
   onPress: () => void;
@@ -127,8 +130,12 @@ function QuickLink({
       onPress={onPress}
       style={({ pressed }) => [styles.quickLink, pressed && styles.quickLinkPressed]}
     >
-      <Text style={styles.quickGlyph}>{glyph}</Text>
-      <Text style={styles.quickLabel}>{label}</Text>
+      <View style={styles.quickIconChip}>
+        <Ionicons name={icon} size={15} color={color.accent} />
+      </View>
+      <Text style={styles.quickLabel} numberOfLines={1}>
+        {label}
+      </Text>
     </Pressable>
   );
 }
@@ -346,21 +353,31 @@ export default function HomeScreen() {
               Around the World · Timed · 3-Point Contest · HORSE and more
             </Text>
           </View>
-          <Text style={styles.modeChevron}>{'›'}</Text>
+          <Ionicons name="chevron-forward" size={20} color={color.accent} />
         </Pressable>
         </View>
         </Animated.View>
 
         {/* Daily goal */}
         {dailyGoalMakes > 0 && (
-          <Card entering={enter(3)} style={styles.goalCard}>
+          <Card
+            entering={enter(3)}
+            style={[styles.goalCard, goalMakes >= dailyGoalMakes && styles.goalCardDone]}
+          >
             <View style={styles.goalText}>
               <Eyebrow>Daily goal</Eyebrow>
-              <Text style={styles.goalHeadline}>
-                {goalMakes >= dailyGoalMakes
-                  ? 'Goal reached — nice shooting today.'
-                  : `${dailyGoalMakes - goalMakes} makes to go today.`}
-              </Text>
+              {goalMakes >= dailyGoalMakes ? (
+                <Row gap={space.sm} style={styles.goalDoneRow}>
+                  <Ionicons name="checkmark-circle" size={18} color={color.make} />
+                  <Text style={[styles.goalHeadline, styles.goalHeadlineDone]}>
+                    Goal reached — nice shooting today.
+                  </Text>
+                </Row>
+              ) : (
+                <Text style={styles.goalHeadline}>
+                  {`${dailyGoalMakes - goalMakes} makes to go today.`}
+                </Text>
+              )}
             </View>
             <GoalRing made={goalMakes} goal={dailyGoalMakes} />
           </Card>
@@ -391,8 +408,16 @@ export default function HomeScreen() {
           >
             {({ pressed }) => (
               <Card style={pressed ? styles.cardPressed : undefined}>
-                <Eyebrow>Last session</Eyebrow>
-                <Row style={styles.sessionRow} gap={space.lg}>
+                <Row style={styles.sessionEyebrowRow}>
+                  <Eyebrow>Last session</Eyebrow>
+                  <Ionicons
+                    name="chevron-forward"
+                    size={14}
+                    color={color.textFaint}
+                    style={styles.sessionEyebrowChevron}
+                  />
+                </Row>
+                <Row style={styles.sessionRow} gap={space.md}>
                   <View style={styles.sessionInfo}>
                     <Text style={styles.sessionDate}>
                       {formatSessionDate(lastSession.startedAt)}
@@ -413,14 +438,20 @@ export default function HomeScreen() {
                           width={MINI_SPARK_W}
                           height={MINI_SPARK_H}
                         />
+                        <Text style={styles.miniSparkLabel}>
+                          {`LAST ${recentTrend.length} SESSIONS`}
+                        </Text>
                       </View>
                     )}
                   </View>
-                  <StatNumber
-                    size="medium"
-                    value={`${Math.round(lastSession.fgPct * 100)}%`}
-                    label="FG"
-                  />
+                  {/* Broadcast stat block: FG% set off behind its own hairline. */}
+                  <View style={styles.sessionStat}>
+                    <StatNumber
+                      size="medium"
+                      value={`${Math.round(lastSession.fgPct * 100)}%`}
+                      label="FG"
+                    />
+                  </View>
                 </Row>
               </Card>
             )}
@@ -443,21 +474,22 @@ export default function HomeScreen() {
           onLayout={() => measure(quickLinksRef, setQuickLinksRect)}
           style={styles.quickLinksStack}
         >
+          <Text style={styles.sectionEyebrow}>YOUR DATA</Text>
           <Row gap={space.md}>
             <QuickLink
-              glyph="≣"
+              icon="time-outline"
               label="History"
               hint="Browse your past sessions"
               onPress={() => router.push('/history')}
             />
             <QuickLink
-              glyph="↗"
+              icon="trending-up"
               label="Trends"
               hint="See your FG% over time"
               onPress={() => router.push('/trends')}
             />
             <QuickLink
-              glyph="★"
+              icon="trophy-outline"
               label="Records"
               hint="See your lifetime records and badges"
               onPress={() => router.push('/records')}
@@ -465,13 +497,13 @@ export default function HomeScreen() {
           </Row>
           <Row gap={space.md}>
             <QuickLink
-              glyph="🏀"
+              icon="basketball-outline"
               label="Scoreboard"
               hint="Track a live head-to-head score"
               onPress={() => router.push('/scoreboard')}
             />
             <QuickLink
-              glyph="◎"
+              icon="scan-outline"
               label="Test AI"
               hint="Run the shot detector on a video from your library"
               onPress={() => router.push('/session/analyze')}
@@ -517,13 +549,10 @@ const styles = StyleSheet.create({
   gearPressed: {
     backgroundColor: color.surfaceRaised,
   },
-  gearGlyph: {
-    fontSize: type.title.fontSize,
-    color: color.textDim,
-  },
   betaNote: {
     ...type.caption,
     color: color.textFaint,
+    marginTop: 2,
   },
   hero: {
     minHeight: HERO_HEIGHT,
@@ -537,6 +566,9 @@ const styles = StyleSheet.create({
     ...type.caption,
     color: color.onAccent,
     opacity: 0.7,
+    // Wider tracking than the base caption — broadcast eyebrow voice.
+    letterSpacing: 1.2,
+    marginBottom: 2,
   },
   heroLabel: {
     ...type.statLarge,
@@ -594,10 +626,6 @@ const styles = StyleSheet.create({
     ...type.body,
     color: color.textDim,
   },
-  modeChevron: {
-    ...type.title,
-    color: color.accent,
-  },
   cardPressed: {
     backgroundColor: color.surfaceRaised,
   },
@@ -606,6 +634,11 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     gap: space.lg,
+  },
+  goalCardDone: {
+    // Quiet make-green edge — the completed state reads at a glance without
+    // shouting over the ring's own green flip.
+    borderColor: 'rgba(47, 214, 163, 0.3)',
   },
   goalText: {
     flex: 1,
@@ -616,12 +649,27 @@ const styles = StyleSheet.create({
     ...type.heading,
     color: color.text,
   },
+  goalDoneRow: {
+    alignItems: 'flex-start',
+  },
+  goalHeadlineDone: {
+    flex: 1,
+    minWidth: 0,
+  },
+  sessionEyebrowRow: {
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+  },
+  sessionEyebrowChevron: {
+    marginTop: 1,
+  },
   sessionRow: {
     justifyContent: 'space-between',
+    alignItems: 'stretch',
   },
   sessionInfo: {
     flex: 1,
-    gap: space.xs,
+    gap: 2,
   },
   sessionDate: {
     ...type.heading,
@@ -632,18 +680,28 @@ const styles = StyleSheet.create({
     color: color.textDim,
   },
   miniSpark: {
-    marginTop: space.xs,
-    width: MINI_SPARK_W,
-    height: MINI_SPARK_H,
+    marginTop: space.sm,
+    gap: space.xs,
+    alignSelf: 'flex-start',
   },
-  emptyTitle: {
-    ...type.heading,
-    color: color.text,
-    marginBottom: space.xs,
+  miniSparkLabel: {
+    ...type.micro,
+    color: color.textFaint,
+  },
+  sessionStat: {
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderLeftWidth: StyleSheet.hairlineWidth,
+    borderLeftColor: color.border,
+    paddingLeft: space.lg,
   },
   emptyBody: {
     ...type.body,
     color: color.textDim,
+  },
+  sectionEyebrow: {
+    ...type.caption,
+    color: color.textFaint,
   },
   quickLinksStack: {
     gap: space.md,
@@ -655,20 +713,27 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: space.sm,
-    borderRadius: radius.pill,
-    borderWidth: 1,
+    borderRadius: radius.md,
+    backgroundColor: color.surface,
+    borderWidth: StyleSheet.hairlineWidth,
     borderColor: color.border,
-    paddingHorizontal: space.lg,
+    paddingHorizontal: space.sm,
+    paddingVertical: space.md,
   },
   quickLinkPressed: {
     backgroundColor: color.surfaceRaised,
   },
-  quickGlyph: {
-    ...type.heading,
-    color: color.accent,
+  quickIconChip: {
+    width: 26,
+    height: 26,
+    borderRadius: radius.pill,
+    backgroundColor: color.accentTint,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   quickLabel: {
-    ...type.heading,
+    ...type.bodyMedium,
     color: color.text,
+    flexShrink: 1,
   },
 });
