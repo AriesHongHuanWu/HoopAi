@@ -126,7 +126,20 @@ describe('addShot', () => {
     resolveInsert(42);
     await flush();
     expect(useSession.getState().shots[0]!.rowId).toBe(42);
-    expect(mockUpdateShotOutcome).toHaveBeenCalledWith(42, 'miss');
+    expect(mockUpdateShotOutcome).toHaveBeenCalledWith(42, 'miss', true);
+  });
+
+  it('late outcome sync of an uncorrected shot does not stamp the edited flag', async () => {
+    mockCreateSession.mockResolvedValue(7);
+    let resolveInsert: (rowId: number) => void = () => {};
+    mockInsertShot.mockImplementation(
+      () => new Promise<number>((resolve) => (resolveInsert = resolve)),
+    );
+    await useSession.getState().goLive({ keepMode: 'makes', nowMs: 1000 });
+    useSession.getState().addShot(makeShot(1, 'make'));
+    resolveInsert(42);
+    await flush();
+    expect(mockUpdateShotOutcome).toHaveBeenCalledWith(42, 'make', false);
   });
 });
 
@@ -153,7 +166,28 @@ describe('correctShot / correctShotValue', () => {
     const s = useSession.getState();
     expect(s.stats.makes).toBe(0);
     expect(s.stats.misses).toBe(1);
-    expect(mockUpdateShotOutcome).toHaveBeenCalledWith(42, 'miss');
+    expect(s.shots[0]!.shot.corrected).toBe(true);
+    expect(mockUpdateShotOutcome).toHaveBeenCalledWith(42, 'miss', true);
+  });
+
+  it('correctShot with corrected=false (undo) restores outcome, flag and aggregates', async () => {
+    mockCreateSession.mockResolvedValue(7);
+    mockInsertShot.mockResolvedValue(42);
+    await useSession.getState().goLive({ keepMode: 'makes', nowMs: 1000 });
+    useSession.getState().addShot(makeShot(1, 'make'));
+    await flush();
+    const statsBefore = useSession.getState().stats;
+
+    // Correct, then undo through the same pathway with the pre-correction flag.
+    useSession.getState().correctShot(1, 'miss');
+    useSession.getState().correctShot(1, 'make', false);
+    await flush();
+
+    const s = useSession.getState();
+    expect(s.shots[0]!.shot.outcome).toBe('make');
+    expect(s.shots[0]!.shot.corrected).toBe(false);
+    expect(s.stats).toEqual(statsBefore);
+    expect(mockUpdateShotOutcome).toHaveBeenCalledWith(42, 'make', false);
   });
 
   it('correctShot survives a rejected updateShotOutcome', async () => {

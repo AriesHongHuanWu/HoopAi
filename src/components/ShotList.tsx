@@ -5,17 +5,22 @@
  * screen (src/app/history/[id].tsx) render the exact same composition, so the
  * shared pieces live here rather than in a duplicate route:
  *
- * - ShotList     — FlatList of shots with one-tap outcome correction.
+ * - ShotList     — FlatList of shots with one-tap outcome correction,
+ *                  per-shot evidence receipts and swipe-to-correct rows
+ *                  (swipe right = make, left = miss).
  * - PipRow       — wrapping W/L pip row of make/miss/unsure markers.
  * - SessionRecap — hero FG% under the arc, stat cards, shot chart,
  *                  highlights plan and the shot list.
  * - useSessionRecord — loads a persisted session + shots from the db and
  *                  exposes an optimistic outcome-correction callback.
+ * - useUndoableCorrection / UndoSnackbar — wraps a correction callback with
+ *                  a ~4 s undo window; screens render the snackbar OUTSIDE
+ *                  their scroll view so it stays pinned to the bottom.
  * - BackPill / date + clock formatters — small shared screen chrome.
  */
 import * as Haptics from 'expo-haptics';
 import { router } from 'expo-router';
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   FlatList,
   Pressable,
@@ -26,7 +31,12 @@ import {
   type StyleProp,
   type ViewStyle,
 } from 'react-native';
-import Animated, { FadeInDown } from 'react-native-reanimated';
+import ReanimatedSwipeable, {
+  SwipeDirection,
+  type SwipeableMethods,
+} from 'react-native-gesture-handler/ReanimatedSwipeable';
+import Animated, { FadeInDown, FadeOutDown, ReduceMotion } from 'react-native-reanimated';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { HeroArcStat, ShotChart } from '@/components/charts/ShotChart';
 import { FormReportCard } from '@/components/FormReport';
@@ -42,6 +52,14 @@ import {
 import { color, motion, radius, space, touch, type } from '@/constants/tokens';
 import { planClips } from '@/core/clipPlanner';
 import { FORM } from '@/core/config';
+import {
+  correctionMessage,
+  correctionRevert,
+  EVIDENCE_CHANNELS,
+  evidenceGlyph,
+  evidenceSummary,
+  evidenceTone,
+} from '@/core/evidence';
 import { recomputeStats } from '@/core/stats';
 import type { ResolvedShot, SessionStats, ShotOutcome, ShotValue } from '@/core/types';
 import * as db from '@/data/db';
@@ -298,6 +316,63 @@ function ValuePill({
   );
 }
 
+/**
+ * SignalReceipts — the per-shot evidence row ("shows its work"). One tiny
+ * chip per fusion channel (geo/net/cls): green check when the signal said
+ * make, red x when it said miss, dim "—" when the channel had no data that
+ * shot; plus a rim-bounce chip. The verdict dot above is never shown without
+ * this receipt, so a user can always see WHY the app called it.
+ */
+function SignalReceipts({ shot }: { shot: ResolvedShot }) {
+  return (
+    <View
+      accessible
+      accessibilityLabel={evidenceSummary(shot.signals, shot.rimBounce)}
+      style={styles.receiptRow}
+    >
+      {EVIDENCE_CHANNELS.map((c) => {
+        const value = shot.signals[c.key];
+        return (
+          <Chip
+            key={c.key}
+            compact
+            tone={evidenceTone(value)}
+            label={`${evidenceGlyph(value)} ${c.label}`}
+          />
+        );
+      })}
+      {shot.rimBounce && <Chip compact tone="unsure" label="RIM BOUNCE" />}
+    </View>
+  );
+}
+
+/**
+ * SwipeUnderlay — the outcome revealed behind a row mid-swipe. Width fixes
+ * the Swipeable open distance; color + shape (dot/X) match MakeMissDot so the
+ * gesture target is readable without color vision.
+ */
+function SwipeUnderlay({ outcome }: { outcome: 'make' | 'miss' }) {
+  const isMake = outcome === 'make';
+  return (
+    <View
+      style={[
+        styles.swipeUnderlay,
+        isMake ? styles.swipeUnderlayMake : styles.swipeUnderlayMiss,
+      ]}
+    >
+      <MakeMissDot outcome={outcome} size={12} />
+      <Text
+        style={[
+          styles.swipeUnderlayLabel,
+          { color: isMake ? color.make : color.miss },
+        ]}
+      >
+        {isMake ? 'MAKE' : 'MISS'}
+      </Text>
+    </View>
+  );
+}
+
 const ShotListItem = React.memo(function ShotListItem({
   shot,
   onCorrect,
@@ -308,6 +383,7 @@ const ShotListItem = React.memo(function ShotListItem({
   onCorrectValue?: (shot: ResolvedShot, value: ShotValue) => void;
 }) {
   const [formOpen, setFormOpen] = useState(false);
+  const swipeRef = useRef<SwipeableMethods>(null);
   const correct = (outcome: ShotOutcome) => {
     void Haptics.selectionAsync();
     onCorrect?.(shot, outcome);
@@ -316,7 +392,7 @@ const ShotListItem = React.memo(function ShotListItem({
     shot.outcome === 'make' ? 'miss' : shot.outcome === 'miss' ? 'make' : null;
   const value: ShotValue = shot.shotValue === 3 ? 3 : 2;
   const hasForm = shot.form != null;
-  return (
+  const rowContent = (
     <View>
       <View style={styles.row}>
         <View style={styles.rowDot}>
@@ -337,6 +413,7 @@ const ShotListItem = React.memo(function ShotListItem({
               <Chip label="Review" tone="unsure" />
             )}
           </Row>
+          <SignalReceipts shot={shot} />
           {(shot.entryAngleDeg != null || shot.releaseAngleDeg != null || hasForm) && (
             <Row gap={space.xs} style={{ flexWrap: 'wrap' }}>
               {shot.entryAngleDeg != null && (
@@ -394,6 +471,37 @@ const ShotListItem = React.memo(function ShotListItem({
         </View>
       )}
     </View>
+  );
+
+  // Read-only lists (no correction callback) skip the gesture wrapper.
+  if (onCorrect == null) return rowContent;
+
+  return (
+    <ReanimatedSwipeable
+      ref={swipeRef}
+      friction={2}
+      overshootLeft={false}
+      overshootRight={false}
+      renderLeftActions={() => <SwipeUnderlay outcome="make" />}
+      renderRightActions={() => <SwipeUnderlay outcome="miss" />}
+      onSwipeableWillOpen={(direction) => {
+        // ReanimatedSwipeable reports the SWIPE direction (not the legacy
+        // "panel side"): swipe right reveals the make underlay, left = miss.
+        const next: ShotOutcome =
+          direction === SwipeDirection.RIGHT ? 'make' : 'miss';
+        // Snap shut immediately — the row never rests open; the correction
+        // (and its undo snackbar) is the feedback.
+        swipeRef.current?.close();
+        if (shot.outcome !== next) correct(next);
+      }}
+      // The open/close springs honor the OS reduce-motion setting; the drag
+      // itself is direct manipulation and stays.
+      animationOptions={{ reduceMotion: ReduceMotion.System }}
+      // Opaque row background so the underlay only shows in the revealed gap.
+      childrenContainerStyle={styles.swipeChildren}
+    >
+      {rowContent}
+    </ReanimatedSwipeable>
   );
 });
 
@@ -692,8 +800,12 @@ export interface SessionRecord {
   stats: SessionStats;
   /** True once the initial load settled (even if the session was missing). */
   loaded: boolean;
-  /** Optimistic correction: flips locally, persists via updateShotOutcome. */
-  correct: (shot: ResolvedShot, outcome: ShotOutcome) => void;
+  /**
+   * Optimistic correction: flips locally, persists via updateShotOutcome.
+   * `corrected` (default true) stamps the user-edited flag; the undo path
+   * passes the shot's pre-correction flag back to restore it exactly.
+   */
+  correct: (shot: ResolvedShot, outcome: ShotOutcome, corrected?: boolean) => void;
   /**
    * 2↔3 correction for a persisted shot. Applied optimistically (points +
    * splits recompute immediately) and persisted via updateShotValue, mirroring
@@ -751,16 +863,19 @@ export function useSessionRecord(sessionId: number | null): SessionRecord {
   // functional setState updater, so their identity stays stable across row
   // updates instead of being recreated on every correction (which would force
   // every ShotListItem's memo to bust, not just the corrected one).
-  const correct = useCallback((shot: ResolvedShot, outcome: ShotOutcome) => {
-    setRows((prev) => {
-      const row = prev.find((r) => r.shotIndex === shot.id);
-      if (!row) return prev;
-      void updateShotOutcome(row.id, outcome);
-      return prev.map((r) =>
-        r.id === row.id ? { ...r, outcome, corrected: 1 } : r,
-      );
-    });
-  }, []);
+  const correct = useCallback(
+    (shot: ResolvedShot, outcome: ShotOutcome, corrected: boolean = true) => {
+      setRows((prev) => {
+        const row = prev.find((r) => r.shotIndex === shot.id);
+        if (!row) return prev;
+        void updateShotOutcome(row.id, outcome, corrected);
+        return prev.map((r) =>
+          r.id === row.id ? { ...r, outcome, corrected: corrected ? 1 : 0 } : r,
+        );
+      });
+    },
+    [],
+  );
 
   const correctValue = useCallback((shot: ResolvedShot, value: ShotValue) => {
     setRows((prev) => {
@@ -772,6 +887,128 @@ export function useSessionRecord(sessionId: number | null): SessionRecord {
   }, []);
 
   return { session, shots, stats, loaded, correct, correctValue };
+}
+
+// ---------------------------------------------------------------------------
+// useUndoableCorrection + UndoSnackbar — a ~4 s undo window on corrections
+// ---------------------------------------------------------------------------
+
+/** How long the undo snackbar stays up after a correction. */
+const UNDO_WINDOW_MS = 4000;
+
+export interface PendingCorrection {
+  /** PRE-correction snapshot — undo restores its outcome + corrected flag. */
+  shot: ResolvedShot;
+  /** The outcome the user just applied. */
+  outcome: ShotOutcome;
+}
+
+export interface UndoableCorrection {
+  /** Wrapped correction callback for SessionRecap/ShotList `onCorrect`. */
+  correct: (shot: ResolvedShot, outcome: ShotOutcome) => void;
+  /** The correction currently offered for undo (drives UndoSnackbar). */
+  pending: PendingCorrection | null;
+  /** Revert the pending correction through the same pathway it was applied. */
+  undo: () => void;
+}
+
+/**
+ * Wraps a correction-apply callback (store or db pathway — both take an
+ * optional `corrected` flag) with undo bookkeeping: every applied correction
+ * arms a {@link UNDO_WINDOW_MS} window during which `undo` re-applies the
+ * shot's pre-correction outcome AND corrected flag, so an undone first edit
+ * leaves no stale "Edited" badge. A second correction replaces the pending
+ * one (only the latest is undoable).
+ */
+export function useUndoableCorrection(
+  apply: (shot: ResolvedShot, outcome: ShotOutcome, corrected?: boolean) => void,
+): UndoableCorrection {
+  const [pending, setPending] = useState<PendingCorrection | null>(null);
+  // Ref mirror so `undo` reads the latest pending without re-running effects
+  // (and without side effects inside a setState updater).
+  const pendingRef = useRef<PendingCorrection | null>(null);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const disarm = useCallback(() => {
+    if (timer.current != null) {
+      clearTimeout(timer.current);
+      timer.current = null;
+    }
+  }, []);
+  // Clear the timer on unmount so a late fire never touches unmounted state.
+  useEffect(() => disarm, [disarm]);
+
+  const correct = useCallback(
+    (shot: ResolvedShot, outcome: ShotOutcome) => {
+      // Swiping in the already-recorded direction changes nothing — don't
+      // stamp `corrected` or flash an undo bar for a no-op.
+      if (shot.outcome === outcome) return;
+      apply(shot, outcome);
+      disarm();
+      pendingRef.current = { shot, outcome };
+      setPending(pendingRef.current);
+      timer.current = setTimeout(() => {
+        timer.current = null;
+        pendingRef.current = null;
+        setPending(null);
+      }, UNDO_WINDOW_MS);
+    },
+    [apply, disarm],
+  );
+
+  const undo = useCallback(() => {
+    const p = pendingRef.current;
+    disarm();
+    pendingRef.current = null;
+    setPending(null);
+    if (p != null) {
+      const revert = correctionRevert(p.shot);
+      apply(p.shot, revert.outcome, revert.corrected);
+    }
+  }, [apply, disarm]);
+
+  return { correct, pending, undo };
+}
+
+/**
+ * UndoSnackbar — bottom-pinned "Shot N marked a make · UNDO" bar. Render it
+ * OUTSIDE the screen's ScrollView (absolute positioning inside scroll content
+ * would scroll away with it). Auto-dismisses via useUndoableCorrection's
+ * timer; entering/exiting honor the OS reduce-motion setting.
+ */
+export function UndoSnackbar({
+  pending,
+  onUndo,
+}: {
+  pending: PendingCorrection | null;
+  onUndo: () => void;
+}) {
+  const insets = useSafeAreaInsets();
+  if (pending == null) return null;
+  return (
+    <Animated.View
+      entering={FadeInDown.duration(motion.quick).reduceMotion(ReduceMotion.System)}
+      exiting={FadeOutDown.duration(motion.quick).reduceMotion(ReduceMotion.System)}
+      accessibilityLiveRegion="polite"
+      style={[styles.snackbar, { bottom: insets.bottom + space.lg }]}
+    >
+      {pending.outcome !== 'unsure' && (
+        <MakeMissDot outcome={pending.outcome} size={12} />
+      )}
+      <Text style={styles.snackbarText} numberOfLines={1}>
+        {correctionMessage(pending.shot.id, pending.outcome)}
+      </Text>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel="Undo correction"
+        hitSlop={8}
+        onPress={onUndo}
+        style={({ pressed }) => [styles.snackbarUndo, pressed && { opacity: 0.7 }]}
+      >
+        <Text style={styles.snackbarUndoText}>UNDO</Text>
+      </Pressable>
+    </Animated.View>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -848,6 +1085,67 @@ const styles = StyleSheet.create({
   },
   correctBtn: {
     paddingHorizontal: space.lg,
+  },
+  receiptRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    gap: space.xs,
+  },
+
+  // Swipe-to-correct (underlay revealed behind the translating row)
+  swipeChildren: {
+    backgroundColor: color.bg,
+  },
+  swipeUnderlay: {
+    width: 110,
+    height: '100%',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: space.sm,
+  },
+  swipeUnderlayMake: {
+    backgroundColor: color.makeTint,
+  },
+  swipeUnderlayMiss: {
+    backgroundColor: color.missTint,
+  },
+  swipeUnderlayLabel: {
+    ...type.caption,
+    letterSpacing: 1,
+  },
+
+  // Undo snackbar (absolutely positioned by the host screen's safe area)
+  snackbar: {
+    position: 'absolute',
+    left: space.lg,
+    right: space.lg,
+    minHeight: touch.minTarget,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: space.md,
+    paddingHorizontal: space.lg,
+    paddingVertical: space.sm,
+    borderRadius: radius.md,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: color.border,
+    backgroundColor: color.surfaceRaised,
+  },
+  snackbarText: {
+    ...type.bodyMedium,
+    color: color.text,
+    flex: 1,
+  },
+  snackbarUndo: {
+    minHeight: touch.minTarget,
+    justifyContent: 'center',
+    paddingHorizontal: space.sm,
+  },
+  snackbarUndoText: {
+    ...type.caption,
+    color: color.accent,
+    letterSpacing: 1,
   },
   formChipTouch: {
     minHeight: touch.minTarget,

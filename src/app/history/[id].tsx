@@ -17,9 +17,11 @@ import { sessionMomentSec } from '@/core/shareFrame';
 import {
   BackPill,
   SessionRecap,
+  UndoSnackbar,
   formatSessionDate,
   formatSessionTime,
   useSessionRecord,
+  useUndoableCorrection,
 } from '@/components/ShotList';
 import {
   AngleHistogram,
@@ -165,6 +167,9 @@ export default function SessionDetailScreen() {
   const sessionId = Number.isInteger(parsed) ? parsed : null;
   const record = useSessionRecord(sessionId);
   const session = record.session;
+  // Corrections (tap or swipe) run through the persisted-record pathway with
+  // the shared ~4 s undo window; the snackbar renders outside the ScrollView.
+  const undoable = useUndoableCorrection(record.correct);
 
   // Tag: optimistic local override on top of the persisted label so the
   // pill updates immediately; persists via updateSessionLabel (never throws).
@@ -323,7 +328,7 @@ export default function SessionDetailScreen() {
             <SessionRecap
               shots={record.shots}
               stats={record.stats}
-              onCorrect={record.correct}
+              onCorrect={undoable.correct}
               onCorrectValue={record.correctValue}
               videoPath={session.videoPath}
               keepMode={session.keepMode}
@@ -347,6 +352,7 @@ export default function SessionDetailScreen() {
         </View>
       )}
     </Screen>
+    <UndoSnackbar pending={undoable.pending} onUndo={undoable.undo} />
     {pickingFrame && session?.videoPath != null && (
       <FramePickerModal
         videoPath={session.videoPath}

@@ -67,8 +67,12 @@ export interface SessionState {
   /** Creates the DB session row and flips to live. */
   goLive: (opts: { keepMode: string; nowMs: number; modeId?: GameModeId | null }) => Promise<void>;
   addShot: (shot: ResolvedShot) => void;
-  /** One-tap make↔miss correction by shot id (in-session index). */
-  correctShot: (shotId: number, outcome: ShotOutcome) => void;
+  /**
+   * One-tap/swipe make↔miss correction by shot id (in-session index).
+   * `corrected` (default true) stamps the user-edited flag; the undo path
+   * passes the shot's pre-correction flag back to restore it exactly.
+   */
+  correctShot: (shotId: number, outcome: ShotOutcome, corrected?: boolean) => void;
   /**
    * One-tap 2↔3 correction by shot id. Updates the in-memory shot value and
    * rebuilds stats (points + 2/3 splits fold shotValue automatically). Live
@@ -196,7 +200,9 @@ export const useSession = create<SessionState>((set, get) => ({
           // rather than racing a diff against a stale snapshot.
           const current = get().shots.find((e) => e.shot.id === shot.id);
           if (current) {
-            updateShotOutcome(rowId, current.shot.outcome)
+            // Preserve the shot's actual corrected flag: an outcome that was
+            // never hand-edited must not be stamped as a user correction.
+            updateShotOutcome(rowId, current.shot.outcome, current.shot.corrected === true)
               .then(() => {
                 if (sessionGeneration !== generation) return;
                 set((s) => ({
@@ -218,14 +224,14 @@ export const useSession = create<SessionState>((set, get) => ({
     }
   },
 
-  correctShot: (shotId, outcome) => {
+  correctShot: (shotId, outcome, corrected = true) => {
     const generation = sessionGeneration;
     set((s) => {
       // Unknown shot id (stale UI, double correction race): leave state alone.
       if (!s.shots.some((e) => e.shot.id === shotId)) return s;
       const shots = s.shots.map((e) =>
         e.shot.id === shotId
-          ? { ...e, shot: { ...e.shot, outcome, corrected: true } }
+          ? { ...e, shot: { ...e.shot, outcome, corrected } }
           : e,
       );
       // Rebuild the module accumulator from the corrected list so any later
@@ -234,7 +240,7 @@ export const useSession = create<SessionState>((set, get) => ({
       const target = shots.find((e) => e.shot.id === shotId);
       if (target?.rowId != null && target.rowId >= 0) {
         const rowId = target.rowId;
-        updateShotOutcome(rowId, outcome)
+        updateShotOutcome(rowId, outcome, corrected)
           .then(() => {
             if (sessionGeneration !== generation) return;
             set((s2) => ({
