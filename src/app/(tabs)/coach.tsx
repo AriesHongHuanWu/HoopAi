@@ -23,7 +23,7 @@ import { Card, Chip, EmptyState, PillButton, Row, Screen, StatNumber } from '@/c
 import { color, font, radius, space, type } from '@/constants/tokens';
 import {
   runCoach,
-  weeklyAssignment,
+  weeklyPlan,
   type CoachFinding,
   type CoachSession,
   type Severity,
@@ -402,29 +402,48 @@ function NbaTwinCard({
 }
 
 /**
- * "This week's assignment" — turns the diagnosis into a plan: the top finding
- * that maps to a drill, its one-line fix, and a jump to Train to practice it.
+ * "This week's plan" — the coach as a training partner: the top few drillable
+ * findings, each with its fix and the exact drill to groove it, numbered as a
+ * checklist. Turns diagnosis into a week of work.
  */
-function AssignmentCard({
-  assignment,
+function WeeklyPlanCard({
+  plan,
   entering,
 }: {
-  assignment: WeeklyAssignment;
+  plan: readonly WeeklyAssignment[];
   entering?: React.ComponentProps<typeof Animated.View>['entering'];
 }) {
-  const drill = getDrill(assignment.drillId);
   return (
     <Card entering={entering}>
-      <SectionEyebrow icon="barbell-outline">This week&apos;s assignment</SectionEyebrow>
-      <Text style={styles.assignTitle}>{assignment.finding.title}</Text>
-      <Text style={styles.body}>{assignment.finding.prescription}</Text>
-      <PillButton
-        label={`Practice: ${drill.title}`}
-        icon="basketball"
-        variant="ghost"
-        onPress={() => router.push('/modes')}
-        style={styles.assignBtn}
-      />
+      <SectionEyebrow icon="barbell-outline">This week&apos;s plan</SectionEyebrow>
+      <Text style={styles.planLede}>
+        {`Your top ${plan.length} ${plan.length === 1 ? 'fix' : 'fixes'}, each with a drill to groove it.`}
+      </Text>
+      <View style={styles.planList}>
+        {plan.map((item, i) => {
+          const drill = getDrill(item.drillId);
+          return (
+            <View key={item.finding.id} style={styles.planItem}>
+              <View style={styles.planNum}>
+                <Text style={styles.planNumText}>{i + 1}</Text>
+              </View>
+              <View style={styles.planBody}>
+                <Text style={styles.assignTitle}>{item.finding.title}</Text>
+                <Text style={styles.body}>{item.finding.prescription}</Text>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={`Practice ${drill.title} in Train`}
+                  onPress={() => router.push('/modes')}
+                  style={({ pressed }) => [styles.planDrill, pressed && { opacity: 0.6 }]}
+                >
+                  <Ionicons name="basketball" size={14} color={color.accent} />
+                  <Text style={styles.planDrillText}>{`Practice: ${drill.title}`}</Text>
+                </Pressable>
+              </View>
+            </View>
+          );
+        })}
+      </View>
     </Card>
   );
 }
@@ -464,8 +483,8 @@ export default function CoachScreen() {
   }, [sessions, activeWeek]);
 
   // The ONE thing to work on this week: top finding that maps to a drill.
-  const assignment = useMemo<WeeklyAssignment | null>(
-    () => weeklyAssignment(findings),
+  const plan = useMemo<WeeklyAssignment[]>(
+    () => weeklyPlan(findings),
     [findings],
   );
 
@@ -510,10 +529,8 @@ export default function CoachScreen() {
             {/* NBA twin — who you shoot like this week + what to steal */}
             {twin != null && <NbaTwinCard match={twin} entering={cardEnter(1)} />}
 
-            {/* This week's assignment — the ONE fix + a drill to train it */}
-            {assignment != null && (
-              <AssignmentCard assignment={assignment} entering={cardEnter(2)} />
-            )}
+            {/* This week's plan — the top fixes + drills to groove them */}
+            {plan.length > 0 && <WeeklyPlanCard plan={plan} entering={cardEnter(2)} />}
 
             {/* Findings */}
             <View>
@@ -597,9 +614,47 @@ const styles = StyleSheet.create({
     color: color.text,
     marginBottom: space.xs,
   },
-  assignBtn: {
-    marginTop: space.md,
-    alignSelf: 'flex-start',
+  planLede: {
+    ...type.body,
+    color: color.textDim,
+    marginTop: space.xs,
+    marginBottom: space.md,
+  },
+  planList: {
+    gap: space.md,
+  },
+  planItem: {
+    flexDirection: 'row',
+    gap: space.sm,
+  },
+  planNum: {
+    width: 26,
+    height: 26,
+    borderRadius: radius.pill,
+    backgroundColor: color.accentTint,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 2,
+  },
+  planNumText: {
+    ...type.bodyMedium,
+    color: color.accent,
+    fontVariant: ['tabular-nums'],
+  },
+  planBody: {
+    flex: 1,
+    minWidth: 0,
+  },
+  planDrill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: space.sm,
+  },
+  planDrillText: {
+    ...type.caption,
+    color: color.accent,
+    fontFamily: font.bodyMedium,
   },
   twinName: {
     ...type.heading,
