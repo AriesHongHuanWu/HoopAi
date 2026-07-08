@@ -26,6 +26,7 @@ import { Sparkline } from '@/components/charts/Sparkline';
 import { Card, EmptyState, Eyebrow, Row, Screen, StatNumber } from '@/components/ui';
 import { color, font, motion, radius, space, type } from '@/constants/tokens';
 import { fgTrend, listSessions, sessionShots } from '@/data/db';
+import { monthlyProgress, type MonthlyProgress } from '@/core/progression';
 
 type TrendPoint = Awaited<ReturnType<typeof fgTrend>>[number];
 
@@ -161,6 +162,7 @@ export default function TrendsScreen() {
     sessions: number;
     makes: number;
   } | null>(null);
+  const [monthly, setMonthly] = useState<MonthlyProgress | null>(null);
   const reducedMotion = useReducedMotion();
   const enter = (i: number) =>
     reducedMotion
@@ -189,6 +191,7 @@ export default function TrendsScreen() {
           // SUM over a shot-less session can surface as null — guard it.
           makes: tracked.reduce((sum, r) => sum + (r.makes ?? 0), 0),
         });
+        setMonthly(monthlyProgress(tracked, Date.now()));
       });
       return () => {
         alive = false;
@@ -217,6 +220,25 @@ export default function TrendsScreen() {
       <Text style={styles.title} accessibilityRole="header">
         FG% over time
       </Text>
+
+      {/* This month vs last — the glanceable "am I improving?" signal. */}
+      {monthly != null && monthly.thisMonth.sessions > 0 && (
+        <Card entering={enter(0)} style={styles.monthCard}>
+          <Row style={styles.monthRow}>
+            <View style={styles.monthText}>
+              <Eyebrow>This month</Eyebrow>
+              <Text style={styles.monthMeta}>
+                {`${monthly.thisMonth.makes} makes · ${monthly.thisMonth.sessions} session${
+                  monthly.thisMonth.sessions === 1 ? '' : 's'
+                }`}
+              </Text>
+            </View>
+            {monthly.rateDelta != null && (
+              <TrendChip deltaPct={Math.round(monthly.rateDelta * 100)} />
+            )}
+          </Row>
+        </Card>
+      )}
 
       {trend === null ? (
         <Card>
@@ -360,6 +382,22 @@ const styles = StyleSheet.create({
   dim: {
     ...type.body,
     color: color.textDim,
+  },
+  monthCard: {
+    marginBottom: space.lg,
+  },
+  monthRow: {
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  monthText: {
+    flex: 1,
+    minWidth: 0,
+    gap: 2,
+  },
+  monthMeta: {
+    ...type.heading,
+    color: color.text,
   },
   caption: {
     ...type.caption,
