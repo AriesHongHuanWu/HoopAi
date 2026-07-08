@@ -17,9 +17,10 @@ import { Modal, Pressable, StyleSheet, Text, TextInput, View } from 'react-nativ
 import Animated, { FadeIn, FadeInDown, useReducedMotion } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { router } from 'expo-router';
+
 import { ChoiceCard, ChipSelect } from '@/components/profile/Choice';
 import { NumberSlider } from '@/components/profile/NumberSlider';
-import { BackPill } from '@/components/ShotList';
 import { Card, Chip, PillButton, Row, Screen, StatNumber } from '@/components/ui';
 import { color, radius, space, touch, type } from '@/constants/tokens';
 import type { ShootingHand } from '@/core/types';
@@ -213,7 +214,18 @@ export default function ProfileScreen() {
   return (
     <Screen scroll>
       <View style={styles.stack}>
-        <BackPill />
+        <Row style={styles.topBar}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Settings"
+            accessibilityHint="Open app settings, storage and legal"
+            hitSlop={space.sm}
+            onPress={() => router.push('/settings')}
+            style={({ pressed }) => [styles.settingsBtn, pressed && styles.settingsBtnPressed]}
+          >
+            <Ionicons name="settings-sharp" size={22} color={color.textDim} />
+          </Pressable>
+        </Row>
 
         {/* Broadcast header */}
         <Animated.View entering={enter(0)} style={styles.header}>
@@ -437,6 +449,19 @@ const styles = StyleSheet.create({
   stack: {
     gap: space.lg,
     paddingTop: space.md,
+  },
+  topBar: {
+    justifyContent: 'flex-end',
+  },
+  settingsBtn: {
+    width: touch.minTarget,
+    height: touch.minTarget,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: radius.pill,
+  },
+  settingsBtnPressed: {
+    backgroundColor: color.surfaceRaised,
   },
   header: {
     gap: space.sm,

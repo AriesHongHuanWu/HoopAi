@@ -13,12 +13,12 @@ import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-nati
 import Animated, { FadeInDown, useReducedMotion } from 'react-native-reanimated';
 
 import {
-  BackPill,
   PipRow,
   formatSessionDate,
   formatSessionTime,
 } from '@/components/ShotList';
 import { ModeMark } from '@/components/modes/modeIdentity';
+import { NavTileRow } from '@/components/NavTiles';
 import {
   Card,
   Chip,
@@ -188,11 +188,28 @@ export default function HistoryScreen() {
 
   return (
     <Screen scroll>
-      <Row style={{ marginBottom: space.lg }}>
-        <BackPill />
-      </Row>
       <Eyebrow>Your sessions</Eyebrow>
       <Text style={styles.title}>History</Text>
+
+      <View style={styles.subNav}>
+        <NavTileRow
+          eyebrow="EXPLORE"
+          tiles={[
+            {
+              icon: 'trending-up',
+              label: 'Trends',
+              hint: 'See your FG% and volume over time',
+              onPress: () => router.push('/trends'),
+            },
+            {
+              icon: 'trophy-outline',
+              label: 'Records',
+              hint: 'Your lifetime records and badges',
+              onPress: () => router.push('/records'),
+            },
+          ]}
+        />
+      </View>
 
       {items !== null && distinctTags.length > 0 && (
         <ScrollView
@@ -405,6 +422,9 @@ const styles = StyleSheet.create({
     ...type.title,
     color: color.text,
     marginBottom: space.lg,
+  },
+  subNav: {
+    marginBottom: space.xl,
   },
   heading: {
     ...type.heading,

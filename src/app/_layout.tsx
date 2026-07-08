@@ -94,6 +94,9 @@ export default function RootLayout() {
               contentStyle: { backgroundColor: color.bg },
             }}
           >
+            {/* The bottom-tab navigator is the app's home surface; every other
+                route in this Stack pushes full-bleed OVER its tab bar. */}
+            <Stack.Screen name="(tabs)" />
             {/* Onboarding fades in over the splash and can't be swiped away. */}
             <Stack.Screen name="onboarding" options={{ animation: 'fade', gestureEnabled: false }} />
             {/* Live session: swipe-back would silently drop an in-progress

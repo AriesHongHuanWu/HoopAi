@@ -141,36 +141,6 @@ function useChallengesHydrated(): boolean {
   return hydrated;
 }
 
-/** Quiet icon link tile — History / Trends / Records / Scoreboard / Test AI. */
-function QuickLink({
-  icon,
-  label,
-  hint,
-  onPress,
-}: {
-  icon: React.ComponentProps<typeof Ionicons>['name'];
-  label: string;
-  hint: string;
-  onPress: () => void;
-}) {
-  return (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityLabel={label}
-      accessibilityHint={hint}
-      onPress={onPress}
-      style={({ pressed }) => [styles.quickLink, pressed && styles.quickLinkPressed]}
-    >
-      <View style={styles.quickIconChip}>
-        <Ionicons name={icon} size={15} color={color.accent} />
-      </View>
-      <Text style={styles.quickLabel} numberOfLines={1}>
-        {label}
-      </Text>
-    </Pressable>
-  );
-}
-
 export default function HomeScreen() {
   const onboardingDone = useSettings((s) => s.onboardingDone);
   const hapticsEnabled = useSettings((s) => s.hapticsEnabled);
@@ -203,10 +173,8 @@ export default function HomeScreen() {
   // rect is known, then the card re-anchors near it.
   const heroRef = useRef<View>(null);
   const modeRowRef = useRef<View>(null);
-  const quickLinksRef = useRef<View>(null);
   const [heroRect, setHeroRect] = useState<LayoutRectangle | undefined>();
   const [modeRowRect, setModeRowRect] = useState<LayoutRectangle | undefined>();
-  const [quickLinksRect, setQuickLinksRect] = useState<LayoutRectangle | undefined>();
 
   const measure = (ref: React.RefObject<View | null>, set: (r: LayoutRectangle) => void) => {
     ref.current?.measureInWindow((x, y, w, h) => set({ x, y, width: w, height: h }));
@@ -224,9 +192,10 @@ export default function HomeScreen() {
       targetRect: modeRowRect,
     },
     {
-      title: 'Your data lives here',
-      text: 'History holds every past session, Trends charts your FG% over time, and Records keeps your best streaks and lifetime badges.',
-      targetRect: quickLinksRect,
+      title: 'Everything else is in the tabs',
+      text: 'The bar at the bottom is always there: Train for game modes and drills, Data for your history, trends and records, Coach for your weekly report, and You for your profile and settings.',
+      // No anchor — the tab bar lives outside this screen, so this step centers.
+      targetRect: undefined,
     },
   ];
   const coach = useCoachMarks('home', homeSteps);
@@ -630,77 +599,6 @@ export default function HomeScreen() {
           </View>
         )}
         </Animated.View>
-
-        {/* Quick links */}
-        <Animated.View entering={enter(6)}>
-        <View
-          ref={quickLinksRef}
-          onLayout={() => measure(quickLinksRef, setQuickLinksRect)}
-          style={styles.quickLinksStack}
-        >
-          <Text style={styles.sectionEyebrow}>YOUR DATA</Text>
-          <Row gap={space.md}>
-            <QuickLink
-              icon="time-outline"
-              label="History"
-              hint="Browse your past sessions"
-              onPress={() => router.push('/history')}
-            />
-            <QuickLink
-              icon="trending-up"
-              label="Trends"
-              hint="See your FG% over time"
-              onPress={() => router.push('/trends')}
-            />
-            <QuickLink
-              icon="trophy-outline"
-              label="Records"
-              hint="See your lifetime records and badges"
-              onPress={() => router.push('/records')}
-            />
-          </Row>
-          <Row gap={space.md}>
-            <QuickLink
-              icon="school"
-              label="Coach"
-              hint="Your weekly report and coaching advice"
-              onPress={() => router.push('/coach')}
-            />
-            <QuickLink
-              icon="basketball-outline"
-              label="Scoreboard"
-              hint="Track a live head-to-head score"
-              onPress={() => router.push('/scoreboard')}
-            />
-            <QuickLink
-              icon="scan-outline"
-              label="Test AI"
-              hint="Run the shot detector on a video from your library"
-              onPress={() => router.push('/session/analyze')}
-            />
-          </Row>
-          <Row gap={space.md}>
-            <QuickLink
-              icon="fitness"
-              label="Jump Lab"
-              hint="Measure your vertical jump and train it"
-              onPress={() => router.push('/jump')}
-            />
-            <QuickLink
-              icon="body"
-              label="Form Studio"
-              hint="Compare your shooting form against NBA archetypes"
-              onPress={() => router.push('/formstudio')}
-            />
-            <QuickLink
-              icon="person-circle-outline"
-              label="Profile"
-              hint="Your height, experience and player details"
-              onPress={() => router.push('/profile')}
-            />
-          </Row>
-        </View>
-        </Animated.View>
       </View>
     </Screen>
     {coach.visible && (
@@ -967,42 +865,5 @@ const styles = StyleSheet.create({
   emptyBody: {
     ...type.body,
     color: color.textDim,
-  },
-  sectionEyebrow: {
-    ...type.caption,
-    color: color.textFaint,
-  },
-  quickLinksStack: {
-    gap: space.md,
-  },
-  quickLink: {
-    flex: 1,
-    minHeight: touch.minTarget,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: space.sm,
-    borderRadius: radius.md,
-    backgroundColor: color.surface,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: color.border,
-    paddingHorizontal: space.sm,
-    paddingVertical: space.md,
-  },
-  quickLinkPressed: {
-    backgroundColor: color.surfaceRaised,
-  },
-  quickIconChip: {
-    width: 26,
-    height: 26,
-    borderRadius: radius.pill,
-    backgroundColor: color.accentTint,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  quickLabel: {
-    ...type.bodyMedium,
-    color: color.text,
-    flexShrink: 1,
   },
 });

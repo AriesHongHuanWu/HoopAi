@@ -18,7 +18,6 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import Animated, { FadeInDown, useReducedMotion } from 'react-native-reanimated';
 
-import { BackPill } from '@/components/ShotList';
 import { shareWeekCard } from '@/components/ShareCard';
 import { Card, Chip, EmptyState, PillButton, Row, Screen, StatNumber } from '@/components/ui';
 import { color, font, radius, space, type } from '@/constants/tokens';
@@ -289,10 +288,12 @@ type LoadState =
   | { status: 'error' }
   | { status: 'ready'; sessions: CoachSession[] };
 
-function useCoachSessions(): LoadState {
+function useCoachSessions(): { state: LoadState; reload: () => void } {
   const [state, setState] = useState<LoadState>({ status: 'loading' });
+  const [nonce, setNonce] = useState(0);
   useEffect(() => {
     let alive = true;
+    setState({ status: 'loading' });
     void (async () => {
       try {
         const rows = await listSessions(SCAN_LIMIT);
@@ -318,8 +319,8 @@ function useCoachSessions(): LoadState {
     return () => {
       alive = false;
     };
-  }, []);
-  return state;
+  }, [nonce]);
+  return { state, reload: () => setNonce((n) => n + 1) };
 }
 
 /** Distinct weeks (newest-first) present in the session window. */
@@ -348,7 +349,7 @@ function weeksOf(sessions: readonly CoachSession[]): { startMs: number; label: s
 
 export default function CoachScreen() {
   const reducedMotion = useReducedMotion();
-  const load = useCoachSessions();
+  const { state: load, reload } = useCoachSessions();
   const [weekIndex, setWeekIndex] = useState(0);
 
   const sessions = load.status === 'ready' ? load.sessions : [];
@@ -373,9 +374,6 @@ export default function CoachScreen() {
   return (
     <Screen scroll>
       <View style={styles.stack}>
-        <Row style={styles.header}>
-          <BackPill />
-        </Row>
         <View>
           <Text style={styles.kicker}>COACH'S CORNER</Text>
           <Text style={styles.title} accessibilityRole="header">
@@ -388,9 +386,9 @@ export default function CoachScreen() {
         ) : load.status === 'error' ? (
           <EmptyState
             title="Couldn't load your sessions"
-            body="Your stats are safe — try again after a restart."
-            actionLabel="Back"
-            onAction={() => router.back()}
+            body="Your stats are safe — this is usually temporary."
+            actionLabel="Try again"
+            onAction={reload}
           />
         ) : sessions.length === 0 || report == null ? (
           <EmptyState
@@ -456,9 +454,6 @@ const styles = StyleSheet.create({
     gap: space.lg,
     paddingTop: space.md,
     paddingBottom: space.xl,
-  },
-  header: {
-    marginBottom: space.sm,
   },
   kicker: {
     ...type.micro,

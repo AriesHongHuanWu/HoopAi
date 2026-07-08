@@ -26,8 +26,8 @@ import Animated, {
   useReducedMotion,
 } from 'react-native-reanimated';
 
+import { NavTileRow } from '@/components/NavTiles';
 import { ProBadge } from '@/components/ProBadge';
-import { BackPill } from '@/components/ShotList';
 import {
   DRILL_IDENTITY,
   MODE_IDENTITY,
@@ -117,9 +117,6 @@ export default function ModePickerScreen() {
 
   return (
     <Screen scroll>
-      <Row style={{ marginBottom: space.lg }}>
-        <BackPill />
-      </Row>
       <Animated.View
         entering={FadeIn.duration(motion.standard).reduceMotion(ReduceMotion.System)}
       >
@@ -130,6 +127,42 @@ export default function ModePickerScreen() {
           phone up.
         </Text>
       </Animated.View>
+
+      <View style={styles.tools}>
+        <NavTileRow
+          eyebrow="TRAINING TOOLS"
+          tiles={[
+            {
+              icon: 'basketball-outline',
+              label: 'Scoreboard',
+              hint: 'Track a live head-to-head score',
+              onPress: () => router.push('/scoreboard'),
+            },
+            {
+              icon: 'fitness',
+              label: 'Jump Lab',
+              hint: 'Measure and train your vertical',
+              onPress: () => router.push('/jump'),
+            },
+          ]}
+        />
+        <NavTileRow
+          tiles={[
+            {
+              icon: 'body',
+              label: 'Form Studio',
+              hint: 'Compare your shooting form to NBA archetypes',
+              onPress: () => router.push('/formstudio'),
+            },
+            {
+              icon: 'scan-outline',
+              label: 'Video Check',
+              hint: 'Run the detector on a video from your library',
+              onPress: () => router.push('/session/analyze'),
+            },
+          ]}
+        />
+      </View>
 
       <View style={styles.list}>
         {GAME_MODES.map((mode, i) => (
@@ -554,6 +587,11 @@ const styles = StyleSheet.create({
   },
   list: {
     gap: space.md,
+  },
+  tools: {
+    gap: space.md,
+    marginTop: space.lg,
+    marginBottom: space.xl,
   },
   card: {
     flexDirection: 'row',
