@@ -28,9 +28,11 @@ import {
 } from '@/components/ShotList';
 import { CoachMarks, useCoachMarks, type CoachStep } from '@/components/coach/CoachMarks';
 import { CourtHeatmap } from '@/components/charts/CourtHeatmap';
+import { CourtPlacementMap } from '@/components/charts/CourtPlacementMap';
 import { PersonalBestBanner } from '@/components/PersonalBestBanner';
 import { RecheckPanel } from '@/components/RecheckPanel';
 import { buildHeatmap } from '@/core/heatmap';
+import { FIBA_COURT } from '@/core/courtModel';
 import { SummaryHero, isPerfectSession } from '@/components/SummaryHero';
 import { Card, Chip, Eyebrow, PillButton, Row, Screen } from '@/components/ui';
 import { color, radius, space, type } from '@/constants/tokens';
@@ -167,6 +169,9 @@ export default function SessionSummaryScreen() {
   // Shot map: where you shot from this session (zone × distance). Live-session
   // shots carry the distance estimate, so the full 3-band court map lights up.
   const heatmap = useMemo(() => buildHeatmap(shots), [shots]);
+  // Court placement map: real positions, shown only when a calibration mapped
+  // shots this session (each carries courtPos). The payoff of "tap the court".
+  const courtPlaced = useMemo(() => shots.filter((s) => s.courtPos != null).length, [shots]);
   const onRecheckVerdict = useCallback(
     (shotIndex: number, outcome: 'make' | 'miss') => {
       const shot = shots.find((s) => s.id === shotIndex);
@@ -374,6 +379,14 @@ export default function SessionSummaryScreen() {
               <Eyebrow>Shot map</Eyebrow>
               <View style={styles.heatCard}>
                 <CourtHeatmap heatmap={heatmap} />
+              </View>
+            </View>
+          )}
+          {courtPlaced >= 3 && (
+            <View style={styles.heatSection}>
+              <Eyebrow>Court map · calibrated</Eyebrow>
+              <View style={styles.heatCard}>
+                <CourtPlacementMap shots={shots} spec={FIBA_COURT} />
               </View>
             </View>
           )}
