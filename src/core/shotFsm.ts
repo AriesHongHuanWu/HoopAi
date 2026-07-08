@@ -860,6 +860,21 @@ export class ShotFsm {
     // --- cls --------------------------------------------------------------
     const cls = this.maxClsScore >= DETECTION.ballInBasketScoreMin;
 
+    // --- geoExit: observed DEEP exit through the hoop bottom -----------------
+    // Recovers a rim-roll / rattle make whose clean rim-plane crossing was
+    // OCCLUDED (geo === null) by reading a REAL deep in-span exit straight from
+    // the trajectory (see geoExitObserved). Applied ONLY when the net channel
+    // is not actively reporting "no swish" (net !== false): with net === false
+    // we cannot tell a net-mistimed real drop from an airball crossing the 2D
+    // plane in front of the hoop, so the shot stays 'unsure' rather than being
+    // overridden into a make OR a miss. Upgrades geo (never a new cls-paired
+    // make term) so fuse()'s bread-ball guarantee is untouched; it never flips
+    // an explicit geo === false seen miss. On a net hoop this only reaches a
+    // make via (geo && net); netless behaves like the existing netless-geo path.
+    if (geo == null && net !== false && geoExitObserved(traj, rim)) {
+      geo = true;
+    }
+
     // --- reappearance corroborator (flagged) --------------------------------
     // The ball vanished at the rim and reappeared BELOW it on the pre-gap arc,
     // descending, in-span, depth-consistent. That upgrades an OCCLUDED (geo
@@ -1053,4 +1068,64 @@ export function fuse(
   if ((geo === true && net) || (net && cls)) return 'make';
   if (geo === true && !net) return 'miss';
   return 'unsure';
+}
+
+/**
+ * Whether the trajectory shows the ball physically EXITING through the BOTTOM
+ * of the hoop — a net-independent make observation that recovers rim-roll /
+ * rattle makes whose clean rim-plane crossing was OCCLUDED (so the crossing
+ * detector left geo === null).
+ *
+ * True iff a REAL (non-predicted) sample reaches BELOW `rim.belowY` — the rim
+ * BOTTOM + margin, NOT merely the rim TOP `planeY` — horizontally inside the
+ * crossing span, reached on a DESCENDING path, with NO real sample re-ascending
+ * above the rim plane afterward. Three independent guards make it bread-ball
+ * safe:
+ *   1. belowY (not planeY): a rim-roll-OUT grazing the front lip dips just below
+ *      the rim's TOP but never reaches the BOTTOM in-span before it exits
+ *      sideways/upward — so it never qualifies.
+ *   2. no re-ascent: a ball that bounces below then back up above the rim plane
+ *      is disqualified (the classic bounce-out).
+ *   3. real samples only: a Kalman-coasted (predicted) deep sample can never
+ *      fabricate an exit.
+ * The caller applies it only to upgrade geo null->true (never a new cls-paired
+ * make term) and only when net is not actively reporting "no swish", so it
+ * inherits fuse()'s guarantees. Exported for unit testing — this geometric
+ * discriminator is the crux of the rim-roll fix.
+ */
+export function geoExitObserved(
+  traj: readonly BallSample[],
+  rim: RimGeometry,
+): boolean {
+  // Deepest-in-TIME real sample that is below the rim bottom AND in-span.
+  let deepIdx = -1;
+  for (let i = 0; i < traj.length; i++) {
+    const s = traj[i]!;
+    if (
+      !s.predicted &&
+      s.cy > rim.belowY &&
+      s.cx >= rim.spanLeft &&
+      s.cx <= rim.spanRight
+    ) {
+      deepIdx = i;
+    }
+  }
+  if (deepIdx < 0) return false;
+
+  // Must have been DESCENDING into that point: the previous real sample sat
+  // higher up (smaller cy). Predicted samples are skipped, never trusted.
+  let descending = false;
+  for (let j = deepIdx - 1; j >= 0; j--) {
+    if (!traj[j]!.predicted) {
+      descending = traj[j]!.cy < traj[deepIdx]!.cy;
+      break;
+    }
+  }
+  if (!descending) return false;
+
+  // No REAL re-ascent above the rim plane after the deep exit (bounce-out).
+  for (let k = deepIdx + 1; k < traj.length; k++) {
+    if (!traj[k]!.predicted && traj[k]!.cy < rim.planeY) return false;
+  }
+  return true;
 }
