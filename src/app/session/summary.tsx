@@ -13,8 +13,9 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { StyleSheet, Text, View, type LayoutRectangle } from 'react-native';
 
 import { ReelEntryButton } from '@/components/ReelEntryButton';
-import { shareSessionCard } from '@/components/ShareCard';
+import { shareSessionCard, sessionCardData, type CardFormat } from '@/components/ShareCard';
 import { FramePickerModal } from '@/components/FramePickerModal';
+import { FormatPicker } from '@/components/share/FormatPicker';
 import { sessionMomentSec } from '@/core/shareFrame';
 import {
   persistSessionLabel,
@@ -160,6 +161,10 @@ export default function SessionSummaryScreen() {
   const [sharing, setSharing] = useState(false);
   const [shareFailed, setShareFailed] = useState(false);
   const [pickingFrame, setPickingFrame] = useState(false);
+  // Format sheet: after the frame is chosen (or skipped) the user picks a
+  // layout. `pendingBg` carries the chosen background into the format step.
+  const [pickingFormat, setPickingFormat] = useState(false);
+  const [pendingBg, setPendingBg] = useState<string | undefined>(undefined);
 
   const recordingStartSec = storeMode
     ? recordingStartSecStore
@@ -175,32 +180,50 @@ export default function SessionSummaryScreen() {
       : 0;
   const canPickFrame = videoPath != null && recordingStartSec != null;
 
-  // Actually render + share the card, optionally with a chosen shot-frame photo.
-  const doShare = (backgroundUri?: string) => {
+  const dateMs = storeMode
+    ? (startedAtMs ?? Date.now())
+    : (record.session?.startedAt ?? Date.now());
+
+  // Actually render + share the card, optionally with a chosen shot-frame photo
+  // and a chosen layout (defaults to the single-tap 'story').
+  const doShare = (backgroundUri?: string, format: CardFormat = 'story') => {
     setSharing(true);
     setShareFailed(false);
-    const dateMs = storeMode
-      ? (startedAtMs ?? Date.now())
-      : (record.session?.startedAt ?? Date.now());
     void shareSessionCard({
       stats,
       shots,
       label: label.trim() !== '' ? label : 'Shooting session',
       dateMs,
       backgroundUri,
+      format,
     }).then((ok) => {
       setSharing(false);
       if (!ok) setShareFailed(true);
     });
   };
 
+  // Primary tap: single-tap default. Recorded sessions get the frame picker
+  // (which then offers layouts); otherwise the format sheet opens straight away.
   const onShareCard = () => {
-    if (sharing || pickingFrame) return;
-    // If the session was recorded, let the user pick a shooting-moment frame to
-    // feature behind their stats; otherwise share the plain coal card.
+    if (sharing || pickingFrame || pickingFormat) return;
     if (canPickFrame) setPickingFrame(true);
-    else doShare();
+    else {
+      setPendingBg(undefined);
+      setPickingFormat(true);
+    }
   };
+
+  // Card data for the format sheet's live mini previews (mirrors shareSessionCard).
+  const shareData = useMemo(
+    () =>
+      sessionCardData({
+        stats,
+        shots,
+        label: label.trim() !== '' ? label : 'Shooting session',
+        dateMs,
+      }),
+    [stats, shots, label, dateMs],
+  );
 
   const initialMomentSec =
     recordingStartSec != null ? (sessionMomentSec(shots, recordingStartSec, durationSec) ?? 0) : 0;
@@ -354,11 +377,27 @@ export default function SessionSummaryScreen() {
         initialTimeSec={initialMomentSec}
         onPick={(uri) => {
           setPickingFrame(false);
-          doShare(uri);
+          setPendingBg(uri);
+          setPickingFormat(true);
         }}
         onCancel={() => {
           setPickingFrame(false);
-          doShare();
+          setPendingBg(undefined);
+          setPickingFormat(true);
+        }}
+      />
+    )}
+    {pickingFormat && (
+      <FormatPicker
+        data={{ ...shareData, backgroundUri: pendingBg }}
+        initial="story"
+        onPick={(format) => {
+          setPickingFormat(false);
+          doShare(pendingBg, format);
+        }}
+        onCancel={() => {
+          setPickingFormat(false);
+          setPendingBg(undefined);
         }}
       />
     )}

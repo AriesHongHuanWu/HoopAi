@@ -54,7 +54,13 @@ import React from 'react';
 import { Platform, Share, type StyleProp, type ViewStyle } from 'react-native';
 
 import { color } from '../constants/tokens';
-import type { ResolvedShot, SessionStats, ShotOutcome } from '../core/types';
+import { bestMakeTrajectory } from '../core/shareFrame';
+import type { BallSample, ResolvedShot, SessionStats, ShotOutcome } from '../core/types';
+import { GlassPanel } from './share/graphics';
+import { glassPanelRect } from './share/layoutMath';
+import { PosterCard, type PosterData } from './share/PosterCard';
+import { StatGridCard, type GridData } from './share/StatGridCard';
+import type { StatTileData } from './share/graphics';
 
 // ---------------------------------------------------------------------------
 // Geometry constants (all drawing happens in this fixed design space)
@@ -67,8 +73,23 @@ export const CARD_H = 1350;
  *  zone, and a brand hook at the bottom. Every share is an ad. */
 export const CARD_H_STORY = 1920;
 
-/** Card aspect: 'story' (IG-first default) or the classic 4:5 'feed'. */
-export type CardFormat = 'story' | 'feed';
+/**
+ * Card layout:
+ *  - 'story' — IG-first 9:16, the DEFAULT single-tap share (unchanged).
+ *  - 'feed'  — classic 4:5 (unchanged).
+ *  - 'poster'— full-bleed 9:16 built around one giant clipped-gradient numeral
+ *              plus the best make's real trajectory arc.
+ *  - 'grid'  — 4:5 2×2 broadcast stat tiles.
+ * The first two keep the original composition; the last two dispatch to the
+ * dedicated layout graphics in ./share.
+ */
+export type CardFormat = 'story' | 'feed' | 'poster' | 'grid';
+
+/** Canvas height for a format (width is always CARD_W). */
+export function cardHeight(format: CardFormat): number {
+  return format === 'story' || format === 'poster' ? CARD_H_STORY : CARD_H;
+}
+
 const PAD = 84;
 const CONTENT_W = CARD_W - PAD * 2;
 
@@ -208,6 +229,20 @@ export interface ShareCardData {
    * it falls back to the original coal + radial-glow background.
    */
   backgroundUri?: string;
+  // --- Additive fields for the v2 layouts (poster / grid). Older callers that
+  //     don't set these still render story/feed exactly as before. ---
+  /**
+   * The best made shot's stored trajectory (raw {@link BallSample}s, analysis-
+   * frame px). Powers the POSTER arc flourish. Sourced upstream via
+   * bestMakeTrajectory(shots); absent → the poster simply omits the arc.
+   */
+  trajectory?: readonly BallSample[] | null;
+  /** Best make-streak this session — drives the ember motif (>= 5). */
+  bestStreak?: number;
+  /** Four broadcast tiles for the STAT GRID layout (PTS / FG% / STREAK / 3PT). */
+  gridTiles?: [StatTileData, StatTileData, StatTileData, StatTileData];
+  /** Extra date-line context for the poster, e.g. a venue/mode tag. */
+  dateContext?: string;
 }
 
 const MONTHS = [
@@ -255,6 +290,33 @@ function buildChipRows(stats: SessionStats): ChipSpec[][] {
   return rows;
 }
 
+/**
+ * The four STAT GRID tiles from session stats: PTS / FG% / BEST STREAK / 3PT.
+ * The streak tile flags `ember` when it ran hot (>= 5) so the layout can glow
+ * it. A dash renders for stats with no attempts (e.g. no 3-point tries).
+ */
+function buildGridTiles(
+  stats: SessionStats,
+): [StatTileData, StatTileData, StatTileData, StatTileData] {
+  const decided = stats.makes + stats.misses;
+  const fg = decided > 0 ? `${Math.round(stats.fgPct * 100)}%` : '—';
+  const threePt =
+    stats.threePtAttempts > 0
+      ? `${stats.threePtMakes}/${stats.threePtAttempts}`
+      : '—';
+  return [
+    { value: String(stats.points), label: 'POINTS', accent: color.accent },
+    { value: fg, label: 'FIELD GOALS', accent: color.make },
+    {
+      value: String(stats.bestStreak),
+      label: 'BEST STREAK',
+      accent: color.threePt,
+      ember: stats.bestStreak >= 5,
+    },
+    { value: threePt, label: 'FROM THREE', accent: color.threePt },
+  ];
+}
+
 /** Card data for a finished shooting session (hero = FG%). */
 export function sessionCardData(opts: {
   stats: SessionStats;
@@ -274,6 +336,9 @@ export function sessionCardData(opts: {
     heroLabel: 'FIELD GOALS',
     pips: shots.map((s) => s.outcome),
     chips: buildChipRows(stats),
+    trajectory: bestMakeTrajectory(shots),
+    bestStreak: stats.bestStreak,
+    gridTiles: buildGridTiles(stats),
   };
 }
 
@@ -297,6 +362,9 @@ export function modeCardData(opts: {
     heroLabel: (opts.unit !== '' ? opts.unit : 'Final').toUpperCase(),
     pips: opts.shots.map((s) => s.outcome),
     chips: buildChipRows(opts.stats),
+    trajectory: bestMakeTrajectory(opts.shots),
+    bestStreak: opts.stats.bestStreak,
+    gridTiles: buildGridTiles(opts.stats),
   };
 }
 
@@ -392,6 +460,41 @@ function ChipRow({ chips, top }: { chips: readonly ChipSpec[]; top: number }) {
   return <>{nodes}</>;
 }
 
+/** Adapt the shared card data into the POSTER layout's inputs. */
+function posterDataFrom(data: ShareCardData): PosterData {
+  const dateLine =
+    data.dateContext != null && data.dateContext !== ''
+      ? `${data.dateLabel} · ${data.dateContext.toUpperCase()}`
+      : data.dateLabel;
+  return {
+    eyebrow: data.eyebrow,
+    hero: data.hero,
+    heroLabel: data.heroLabel,
+    dateLine,
+    trajectory: data.trajectory ?? null,
+    ember: (data.bestStreak ?? 0) >= 5,
+  };
+}
+
+/** Adapt the shared card data into the STAT GRID layout's inputs. Falls back to
+ *  a value-led tile set when a caller (e.g. the twin card) didn't precompute
+ *  gridTiles, so the grid format is always renderable. */
+function gridDataFrom(data: ShareCardData): GridData {
+  const tiles: [StatTileData, StatTileData, StatTileData, StatTileData] =
+    data.gridTiles ?? [
+      { value: data.hero, label: data.heroLabel, accent: color.accent },
+      { value: '—', label: 'POINTS', accent: color.make },
+      { value: '—', label: 'BEST STREAK', accent: color.threePt },
+      { value: '—', label: 'FROM THREE', accent: color.threePt },
+    ];
+  return {
+    eyebrow: data.eyebrow,
+    title: data.title,
+    dateLabel: data.dateLabel,
+    tiles,
+  };
+}
+
 /**
  * The card itself — a pure Skia element in CARD_W×CARD_H space. Renderable
  * inside any `<Canvas>` or offscreen via `drawAsImage`. No hooks, so it is
@@ -407,6 +510,14 @@ export function ShareCardGraphic({
   bgImage?: SkImage | null;
   format?: CardFormat;
 }) {
+  // v2 layouts dispatch to their own graphic (both full CARD_W-wide).
+  if (format === 'poster') {
+    return <PosterCard w={CARD_W} h={CARD_H_STORY} data={posterDataFrom(data)} bgImage={bgImage} />;
+  }
+  if (format === 'grid') {
+    return <StatGridCard w={CARD_W} h={CARD_H} data={gridDataFrom(data)} bgImage={bgImage} />;
+  }
+
   const H = format === 'story' ? CARD_H_STORY : CARD_H;
   /** Story mode: the 4:5 composition drops by this much, clearing IG's
    *  top chrome and centering in the safe zone. */
@@ -439,6 +550,10 @@ export function ShareCardGraphic({
   const heroLabelW = trackedWidth(labelFont, data.heroLabel, 6);
   const dateW = textW(dateFont, data.dateLabel);
 
+  // Photo-background v2 glass panel: wraps the bottom stat block (in the
+  // pre-dy content space, so hero at ~870 → chips ~1300). Only drawn on photo.
+  const panel = glassPanelRect(CARD_W, H, 760, format === 'story' ? 1338 : 1322, PAD - 24);
+
   return (
     <Group>
       {/* Coal base (also the letterbox fill if the photo isn't a perfect fit). */}
@@ -470,6 +585,12 @@ export function ShareCardGraphic({
       )}
       {/* The classic 4:5 composition, dropped into the story-safe zone. */}
       <Group transform={[{ translateY: dy }]}>
+      {/* Photo-background v2: a glass panel groups the bottom stat block
+          (hero → pips → chips) so it reads as a broadcast lower-third rather
+          than text floating on the frame. Coal card keeps the open layout. */}
+      {bgImage != null && (
+        <GlassPanel x={panel.x} y={panel.y} width={panel.width} height={panel.height} radius={48} />
+      )}
       {/* Faint center-court circle grounding the hero numeral. */}
       <Circle
         cx={CARD_W / 2}
@@ -581,7 +702,7 @@ export function ShareCard({
   format?: CardFormat;
 }) {
   const scale = width / CARD_W;
-  const H = format === 'story' ? CARD_H_STORY : CARD_H;
+  const H = cardHeight(format);
   // Load the optional shot-frame background for the inline preview (async, safe
   // to call with null — returns null until/unless a uri decodes).
   const bgImage = useImage(data.backgroundUri ?? null);
@@ -634,6 +755,8 @@ async function saveToLibrary(uri: string): Promise<void> {
 export async function shareCardImage(
   data: ShareCardData,
   fallbackMessage: string,
+  /** Layout to render. Defaults to 'story' — the original single-tap format. */
+  format: CardFormat = 'story',
 ): Promise<boolean> {
   // Decode the optional shot-frame background off the file URI first (offscreen
   // drawAsImage can't run the useImage hook). Best-effort — a bad frame just
@@ -650,10 +773,10 @@ export async function shareCardImage(
   }
   try {
     const image = await drawAsImage(
-      <ShareCardGraphic data={data} bgImage={bgImage} format="story" />,
+      <ShareCardGraphic data={data} bgImage={bgImage} format={format} />,
       {
         width: CARD_W,
-        height: CARD_H_STORY,
+        height: cardHeight(format),
       },
     );
     const base64 = image?.encodeToBase64(ImageFormat.PNG);
@@ -731,13 +854,18 @@ export async function shareSessionCard(opts: {
   dateMs?: number;
   /** Optional shot-frame background (local image URI) grabbed from the video. */
   backgroundUri?: string;
+  /** Layout to render (defaults to 'story'). Story/poster/grid/feed all valid. */
+  format?: CardFormat;
+  /** Extra poster date-line context, e.g. a venue tag. */
+  dateContext?: string;
 }): Promise<boolean> {
   const { stats } = opts;
   const decided = stats.makes + stats.misses;
   const pct = decided > 0 ? Math.round(stats.fgPct * 100) : 0;
   const fallback = `🏀 ${stats.makes}/${stats.attempts} makes (${pct}% FG), best run ${stats.bestStreak} — tracked on Hoopilot.`;
   return shareCardImage(
-    { ...sessionCardData(opts), backgroundUri: opts.backgroundUri },
+    { ...sessionCardData(opts), backgroundUri: opts.backgroundUri, dateContext: opts.dateContext },
     fallback,
+    opts.format ?? 'story',
   );
 }
