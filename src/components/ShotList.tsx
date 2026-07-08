@@ -49,16 +49,21 @@ import {
   Row,
   StatNumber,
 } from '@/components/ui';
-import { color, motion, radius, space, touch, type } from '@/constants/tokens';
+import { Ionicons } from '@expo/vector-icons';
+
+import { color, confidenceColor, motion, radius, space, touch, type } from '@/constants/tokens';
 import { planClips } from '@/core/clipPlanner';
 import { FORM } from '@/core/config';
 import {
+  confidenceLabel,
+  confidenceLevel,
   correctionMessage,
   correctionRevert,
   EVIDENCE_CHANNELS,
   evidenceGlyph,
   evidenceSummary,
   evidenceTone,
+  valueSourceLabel,
 } from '@/core/evidence';
 import { recomputeStats } from '@/core/stats';
 import type { ResolvedShot, SessionStats, ShotOutcome, ShotValue } from '@/core/types';
@@ -322,26 +327,62 @@ function ValuePill({
  * make, red x when it said miss, dim "—" when the channel had no data that
  * shot; plus a rim-bounce chip. The verdict dot above is never shown without
  * this receipt, so a user can always see WHY the app called it.
+ *
+ * A second line surfaces the 2/3 PROVENANCE — which estimator decided the
+ * point value, its confidence (on the one shared scale), and the real distance
+ * when court-registered — so even the 2-vs-3 call is auditable, not a guess.
  */
 function SignalReceipts({ shot }: { shot: ResolvedShot }) {
+  const source = shot.valueSource;
+  const conf = shot.valueConfidence;
+  const level = conf != null ? confidenceLevel(conf) : null;
+
+  const provenanceA11y =
+    source != null
+      ? `. Two or three call by ${valueSourceLabel(source)}${
+          level != null ? `, ${confidenceLabel(level)} confidence` : ''
+        }`
+      : '';
+
   return (
-    <View
-      accessible
-      accessibilityLabel={evidenceSummary(shot.signals, shot.rimBounce)}
-      style={styles.receiptRow}
-    >
-      {EVIDENCE_CHANNELS.map((c) => {
-        const value = shot.signals[c.key];
-        return (
-          <Chip
-            key={c.key}
-            compact
-            tone={evidenceTone(value)}
-            label={`${evidenceGlyph(value)} ${c.label}`}
+    <View style={styles.receiptCol}>
+      <View
+        accessible
+        accessibilityLabel={evidenceSummary(shot.signals, shot.rimBounce) + provenanceA11y}
+        style={styles.receiptRow}
+      >
+        {EVIDENCE_CHANNELS.map((c) => {
+          const value = shot.signals[c.key];
+          return (
+            <Chip
+              key={c.key}
+              compact
+              tone={evidenceTone(value)}
+              label={`${evidenceGlyph(value)} ${c.label}`}
+            />
+          );
+        })}
+        {shot.rimBounce && <Chip compact tone="unsure" label="RIM BOUNCE" />}
+      </View>
+      {source != null && (
+        <View style={styles.provenanceRow} importantForAccessibility="no-hide-descendants">
+          <Ionicons
+            name={source === 'court' ? 'locate' : 'analytics-outline'}
+            size={11}
+            color={source === 'court' ? color.make : color.textFaint}
           />
-        );
-      })}
-      {shot.rimBounce && <Chip compact tone="unsure" label="RIM BOUNCE" />}
+          <Text style={styles.provenanceText} numberOfLines={1}>
+            {'2/3: '}
+            <Text style={styles.provenanceSource}>{valueSourceLabel(source)}</Text>
+            {level != null && (
+              <Text style={{ color: confidenceColor[level] }}>{` · ${confidenceLabel(level)}`}</Text>
+            )}
+            {source === 'court' && shot.distanceM != null && (
+              <Text style={styles.provenanceText}>{` · ${shot.distanceM.toFixed(1)} m`}</Text>
+            )}
+          </Text>
+        </View>
+      )}
     </View>
   );
 }
@@ -1086,11 +1127,27 @@ const styles = StyleSheet.create({
   correctBtn: {
     paddingHorizontal: space.lg,
   },
+  receiptCol: {
+    gap: 4,
+  },
   receiptRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     alignItems: 'center',
     gap: space.xs,
+  },
+  provenanceRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  provenanceText: {
+    ...type.micro,
+    color: color.textFaint,
+  },
+  provenanceSource: {
+    ...type.micro,
+    color: color.textDim,
   },
 
   // Swipe-to-correct (underlay revealed behind the translating row)
