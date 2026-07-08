@@ -360,3 +360,82 @@ describe('resetDatabase', () => {
     await expect(db.resetDatabase()).resolves.toBeUndefined();
   });
 });
+
+describe('jumps (v7)', () => {
+  it('inserts a jump and returns its row id', async () => {
+    const fake = fakeDatabase();
+    fake.runAsync.mockResolvedValue({ lastInsertRowId: 42, changes: 1 });
+    sqlite.openDatabaseAsync.mockResolvedValue(fake);
+
+    const id = await db.insertJump({
+      ts: 1000,
+      heightCm: 58.4,
+      method: 'hang-time',
+      confidence: 0.82,
+    });
+    expect(id).toBe(42);
+    expect(fake.runAsync).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO jumps'),
+      1000,
+      58.4,
+      'hang-time',
+      0.82,
+    );
+  });
+
+  it('lists jumps newest-first and reads the personal best', async () => {
+    const fake = fakeDatabase();
+    sqlite.openDatabaseAsync.mockResolvedValue(fake);
+    fake.getAllAsync.mockResolvedValue([
+      { id: 2, ts: 2000, heightCm: 60, method: 'hang-time', confidence: 0.9 },
+      { id: 1, ts: 1000, heightCm: 50, method: 'hang-time', confidence: 0.8 },
+    ]);
+    fake.getFirstAsync.mockImplementation(async (sql: string) => {
+      if (sql.includes('user_version')) return { user_version: 1 };
+      if (sql.includes('MAX(heightCm)')) return { best: 60 };
+      return null;
+    });
+
+    const rows = await db.listJumps();
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.id).toBe(2);
+    await expect(db.bestJumpCm()).resolves.toBe(60);
+  });
+
+  it('write/read/delete failures return safe fallbacks (never throw)', async () => {
+    const broken = fakeDatabase();
+    broken.runAsync.mockRejectedValue(new Error('SQLITE_FULL'));
+    broken.getAllAsync.mockRejectedValue(new Error('SQLITE_CORRUPT'));
+    broken.getFirstAsync.mockImplementation(async (sql: string) => {
+      if (sql.includes('user_version')) return { user_version: 1 };
+      throw new Error('SQLITE_CORRUPT');
+    });
+    sqlite.openDatabaseAsync.mockResolvedValue(broken);
+
+    await expect(
+      db.insertJump({ ts: 1, heightCm: 10, method: 'hang-time', confidence: 0.5 }),
+    ).resolves.toBe(-1);
+    await expect(db.listJumps()).resolves.toEqual([]);
+    await expect(db.bestJumpCm()).resolves.toBe(0);
+    await expect(db.deleteJump(1)).resolves.toBeUndefined();
+  });
+
+  it('creates the jumps table on the v7 migration', async () => {
+    const fresh = fakeDatabase();
+    // Report a pre-v7 database so migrate() runs the v7 block.
+    fresh.getFirstAsync.mockImplementation(async (sql: string) => {
+      if (sql.includes('user_version')) return { user_version: 6 };
+      return null;
+    });
+    sqlite.openDatabaseAsync.mockResolvedValue(fresh);
+
+    await db.getDb();
+    const ranV7 = fresh.execAsync.mock.calls.some(
+      (c: unknown[]) =>
+        typeof c[0] === 'string' &&
+        c[0].includes('CREATE TABLE IF NOT EXISTS jumps') &&
+        c[0].includes('PRAGMA user_version = 7'),
+    );
+    expect(ranV7).toBe(true);
+  });
+});
