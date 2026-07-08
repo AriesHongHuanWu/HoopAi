@@ -423,6 +423,14 @@ export const SHOT_FSM = {
     minYaRimWidthsPerSec2: 2,
     /** Sanity cap on downward speed at arming, rim WIDTHS/sec. */
     maxFallVyRimWidthsPerSec: 12,
+    /**
+     * Max ratio of largest/smallest ball radius across the pre-arm approach. A
+     * REAL ball's apparent size barely changes over a floater's short approach;
+     * a jumpy false track (limb/rebound junk snapping between sizes) swings
+     * wildly. Refuse to arm when the approach isn't a size-consistent object —
+     * arm-refusing, so it can never mint a make.
+     */
+    preArmMaxRadiusRatio: 2.5,
     /** Rolling pre-arm sample window seeding the trajectory, seconds. */
     seedWindowSec: 1.0,
   },

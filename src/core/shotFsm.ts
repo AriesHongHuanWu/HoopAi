@@ -31,6 +31,7 @@
  */
 import {
   DETECTION,
+  FLIGHT,
   NOMINAL_FPS,
   RELEASE,
   SHOT_FSM,
@@ -45,6 +46,7 @@ import {
   MIN_FIT_SAMPLES,
   backfillPredictedGap,
   fitArc,
+  plausibleArcCurvature,
   predictLanding,
 } from './trajectory';
 import type {
@@ -564,11 +566,26 @@ export class ShotFsm {
     if (buf.length < minReal) return false;
     const first = buf[0];
     if (pointInBox(this.layupZone, first.cx, first.cy)) return false;
+    // Size-sanity: the approach must be one consistently-sized object, not a
+    // track snapping between a limb and rebound junk of very different sizes.
+    let rMin = Infinity;
+    let rMax = 0;
+    for (const s of buf) {
+      if (s.r < rMin) rMin = s.r;
+      if (s.r > rMax) rMax = s.r;
+    }
+    if (rMin > 0 && rMax / rMin > cfg.preArmMaxRadiusRatio) return false;
     const fit = fitArc(buf, minReal);
     if (fit === null || fit.r2y < cfg.minR2y) return false;
     // Gravity floor on ya (≈ g/2): rejects linear drift, whose fit is
     // near-degenerate in the quadratic term.
     if (fit.ya < cfg.minYaRimWidthsPerSec2 * rim.box.width) return false;
+    // Curvature CEILING: a rim rattle fits a near-vertical degenerate parabola
+    // with a hugely inflated ya. Reject it here too (the FlightArc caps its own
+    // fit; this guards the LOCAL arm fit). Scale-free, never rejects a real arc.
+    if (!plausibleArcCurvature(fit.ya, rim.box.width, FLIGHT.maxArcYaRimWidths)) {
+      return false;
+    }
     return true;
   }
 
@@ -748,6 +765,11 @@ export class ShotFsm {
     }
     const fit = fitArc(tail, minReal);
     if (fit === null || fit.ya <= 0 || fit.r2y < cfg.minR2y) return null;
+    // Curvature CEILING: reject a rim-rattle's degenerate near-vertical fit
+    // before it projects a bogus crossing that could corroborate a make.
+    if (!plausibleArcCurvature(fit.ya, this.rim.box.width, FLIGHT.maxArcYaRimWidths)) {
+      return null;
+    }
     const p = predictLanding(fit, this.rim.planeY);
     if (p === null) return null;
     if (p.t < last.t || p.t > last.t + cfg.maxProjectSec) return null;
