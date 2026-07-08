@@ -23,11 +23,14 @@ import { Card, Chip, EmptyState, PillButton, Row, Screen, StatNumber } from '@/c
 import { color, font, radius, space, type } from '@/constants/tokens';
 import {
   runCoach,
+  weeklyAssignment,
   type CoachFinding,
   type CoachSession,
   type Severity,
   type Trend,
+  type WeeklyAssignment,
 } from '@/core/coachEngine';
+import { getDrill } from '@/core/drills';
 import {
   buildWeeklyReport,
   weekStart,
@@ -398,6 +401,34 @@ function NbaTwinCard({
   );
 }
 
+/**
+ * "This week's assignment" — turns the diagnosis into a plan: the top finding
+ * that maps to a drill, its one-line fix, and a jump to Train to practice it.
+ */
+function AssignmentCard({
+  assignment,
+  entering,
+}: {
+  assignment: WeeklyAssignment;
+  entering?: React.ComponentProps<typeof Animated.View>['entering'];
+}) {
+  const drill = getDrill(assignment.drillId);
+  return (
+    <Card entering={entering}>
+      <SectionEyebrow icon="barbell-outline">This week&apos;s assignment</SectionEyebrow>
+      <Text style={styles.assignTitle}>{assignment.finding.title}</Text>
+      <Text style={styles.body}>{assignment.finding.prescription}</Text>
+      <PillButton
+        label={`Practice: ${drill.title}`}
+        icon="basketball"
+        variant="ghost"
+        onPress={() => router.push('/modes')}
+        style={styles.assignBtn}
+      />
+    </Card>
+  );
+}
+
 export default function CoachScreen() {
   const reducedMotion = useReducedMotion();
   const { state: load, reload } = useCoachSessions();
@@ -431,6 +462,12 @@ export default function CoachScreen() {
     const matches = matchArchetype(weekShots);
     return matches.length > 0 ? matches[0]! : null;
   }, [sessions, activeWeek]);
+
+  // The ONE thing to work on this week: top finding that maps to a drill.
+  const assignment = useMemo<WeeklyAssignment | null>(
+    () => weeklyAssignment(findings),
+    [findings],
+  );
 
   const cardEnter = (i: number) => (reducedMotion ? undefined : FadeInDown.delay(i * 70).duration(380));
 
@@ -472,6 +509,11 @@ export default function CoachScreen() {
 
             {/* NBA twin — who you shoot like this week + what to steal */}
             {twin != null && <NbaTwinCard match={twin} entering={cardEnter(1)} />}
+
+            {/* This week's assignment — the ONE fix + a drill to train it */}
+            {assignment != null && (
+              <AssignmentCard assignment={assignment} entering={cardEnter(2)} />
+            )}
 
             {/* Findings */}
             <View>
@@ -549,6 +591,15 @@ const styles = StyleSheet.create({
     flex: 1,
     minWidth: 0,
     gap: 2,
+  },
+  assignTitle: {
+    ...type.heading,
+    color: color.text,
+    marginBottom: space.xs,
+  },
+  assignBtn: {
+    marginTop: space.md,
+    alignSelf: 'flex-start',
   },
   twinName: {
     ...type.heading,

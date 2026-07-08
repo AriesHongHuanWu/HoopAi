@@ -25,6 +25,7 @@
  * - Thresholds live in {@link COACH} so the benchmark clip pass can tune them.
  */
 import { FORM } from './config';
+import type { DrillId } from './drills';
 import { BENCHMARK_AXES, type BenchmarkAxis } from './nbaBenchmarks';
 import { metricOf, type LabMetricKey } from './shotLab';
 import { zoneOf } from './stats';
@@ -715,4 +716,43 @@ export function runCoach(sessions: readonly CoachSession[]): CoachFinding[] {
   }
   out.sort((a, b) => b.severity - a.severity || b.strength - a.strength);
   return out;
+}
+
+/**
+ * Maps a coachable finding to the drill that best trains its fix. Findings not
+ * present here (a positive 'improving', the detection-side 'unsureRate', or a
+ * pure 'volumeTrend' note) have no drill assignment.
+ */
+const FINDING_DRILL: Partial<Record<FindingKind, DrillId>> = {
+  entryAngleLow: 'catchShoot10',
+  entryAngleVolatile: 'catchShoot10',
+  releaseDrift: 'catchShoot10',
+  streaky: 'catchShoot10',
+  nbaBand: 'catchShoot10',
+  zoneImbalance: 'midClock',
+  sideBias: 'midClock',
+  twoVsThree: 'corners3',
+  fatigue: 'ftLadder',
+};
+
+export interface WeeklyAssignment {
+  finding: CoachFinding;
+  drillId: DrillId;
+}
+
+/**
+ * The ONE thing to work on this week: the top-ranked finding that maps to a
+ * practice drill, paired with that drill. Turns the diagnosis into a plan.
+ * Returns null when no ranked finding has a drill (nothing systematic to drill,
+ * or only detection/volume notes). `findings` is assumed already ranked
+ * (runCoach output), so it honours the same severity order.
+ */
+export function weeklyAssignment(
+  findings: readonly CoachFinding[],
+): WeeklyAssignment | null {
+  for (const f of findings) {
+    const drillId = FINDING_DRILL[f.id];
+    if (drillId) return { finding: f, drillId };
+  }
+  return null;
 }
