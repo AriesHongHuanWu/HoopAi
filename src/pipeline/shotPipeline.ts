@@ -33,6 +33,7 @@ import {
   fitArc,
   plausibleArcCurvature,
   predictLanding,
+  type ArcFit,
 } from '../core/trajectory';
 import { classifyLight, type LightProfile } from '../core/lightProfile';
 import { ShotFsm } from '../core/shotFsm';
@@ -583,7 +584,9 @@ export class ShotPipeline {
     // it from the first observed sample. STRICTLY visual: it never arms a shot
     // or feeds make/miss (drawing != judging). Confidence + plausible-curvature
     // gated, so a rattle (huge ya) or a shaky fit draws nothing, not a bad line.
-    const fullFlightPath: number[] = [];
+    // Confident, physically-plausible global arc (if any) — powers BOTH the
+    // drawn full-flight line and the occlusion snap below. Computed once.
+    let arcFit: ArcFit | null = null;
     if (this.useFlight && this.lastRim) {
       const floor = scaleFrameGate(
         MIN_FIT_SAMPLES,
@@ -591,29 +594,53 @@ export class ShotPipeline {
         ABS_MIN_FIT_SAMPLES,
       );
       const gfit = this.flightArc.fit(floor);
-      const span = gfit ? gfit.tMax - gfit.tMin : 0;
       if (
         gfit &&
         gfit.ya > 0 &&
-        span > 0 &&
+        gfit.tMax > gfit.tMin &&
         gfit.r2y >= FLIGHT.corridorMinR2yLoose &&
         plausibleArcCurvature(gfit.ya, this.lastRim.box.width, FLIGHT.maxArcYaRimWidths)
       ) {
-        const K = 16;
-        for (let i = 0; i <= K; i++) {
-          const pt = evalArc(gfit, gfit.tMin + (span * i) / K);
-          if (!Number.isFinite(pt.x) || !Number.isFinite(pt.y)) {
-            fullFlightPath.length = 0;
-            break;
-          }
-          fullFlightPath.push(pt.x, pt.y);
+        arcFit = gfit;
+      }
+    }
+
+    const fullFlightPath: number[] = [];
+    if (arcFit) {
+      const span = arcFit.tMax - arcFit.tMin;
+      const K = 16;
+      for (let i = 0; i <= K; i++) {
+        const pt = evalArc(arcFit, arcFit.tMin + (span * i) / K);
+        if (!Number.isFinite(pt.x) || !Number.isFinite(pt.y)) {
+          fullFlightPath.length = 0;
+          break;
         }
+        fullFlightPath.push(pt.x, pt.y);
+      }
+    }
+
+    // Occlusion snap (VISUAL ONLY): a coasted (predicted) ball drifts off on a
+    // stale Kalman velocity — the "失去偵測後一直亂飄". With a confident arc, draw
+    // it ON the parabola at its own time, with arc-consistent velocity so the
+    // HUD glide follows the real flight instead of flying off. The FSM already
+    // ran above on the RAW ball, so make/miss is completely untouched by this.
+    let displayBall = ball;
+    if (arcFit && ball && ball.predicted) {
+      const p = evalArc(arcFit, ball.t);
+      if (Number.isFinite(p.x) && Number.isFinite(p.y)) {
+        displayBall = {
+          ...ball,
+          cx: p.x,
+          cy: p.y,
+          vx: arcFit.xm,
+          vy: 2 * arcFit.ya * ball.t + arcFit.yb,
+        };
       }
     }
 
     const state: PipelineFrameState = {
       t: frame.t,
-      ball,
+      ball: displayBall,
       rim: this.lastRim,
       phase,
       liveTrajectory,
