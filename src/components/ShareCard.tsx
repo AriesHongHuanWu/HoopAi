@@ -720,6 +720,54 @@ export async function shareTwinCard(match: Parameters<typeof twinCardData>[0]): 
 }
 
 /**
+ * "My week" card data — the Coach's Corner weekly report as a story card.
+ * Reuses the session composition: the week's FG% is the hero, and the week
+ * totals (makes, best run, WSS, sessions) become the stat chips. Only the
+ * fields the graphic reads are required, so weeklyReport can hand it a subset.
+ */
+export function weekCardData(week: {
+  label: string;
+  fgPct: number | null;
+  makes: number;
+  attempts: number;
+  bestStreak: number;
+  wss: number;
+  sessions: number;
+}): ShareCardData {
+  const pct = week.fgPct != null ? Math.round(week.fgPct * 100) : 0;
+  const chips: ChipSpec[][] = [
+    [
+      { text: `${week.makes}/${week.attempts} MAKES`, bg: color.makeTint, fg: color.make },
+      { text: `BEST RUN ${week.bestStreak}`, bg: color.accentTint, fg: color.accent },
+    ],
+    [
+      { text: `WSS ${week.wss}`, bg: color.threePtTint, fg: color.threePt },
+      {
+        text: `${week.sessions} ${week.sessions === 1 ? 'SESSION' : 'SESSIONS'}`,
+        bg: color.surfaceRaised,
+        fg: color.textDim,
+      },
+    ],
+  ];
+  return {
+    eyebrow: 'MY WEEK',
+    title: week.label,
+    dateLabel: 'WEEKLY REPORT',
+    hero: `${pct}%`,
+    heroLabel: 'FIELD GOALS',
+    pips: [],
+    chips,
+  };
+}
+
+/** Share the weekly-report story card. Never throws. */
+export async function shareWeekCard(week: Parameters<typeof weekCardData>[0]): Promise<boolean> {
+  const pct = week.fgPct != null ? Math.round(week.fgPct * 100) : 0;
+  const fallback = `🏀 My week: ${week.makes}/${week.attempts} makes (${pct}% FG), WSS ${week.wss} — tracked on Hoopilot.`;
+  return shareCardImage(weekCardData(week), fallback);
+}
+
+/**
  * One-call session share: build the card from stats/shots and share it.
  * Never throws; resolves false when even the text fallback failed.
  */

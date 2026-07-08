@@ -106,6 +106,7 @@ export default function ShotLabScreen() {
       <View style={styles.stack}>
         <Row style={styles.header}>
           <BackPill />
+          <PillButton label="Coach's Corner" icon="school" variant="ghost" onPress={() => router.push('/coach')} style={styles.coachPill} />
         </Row>
         <View>
           <Text style={styles.kicker}>ANALYSIS ROOM</Text>
@@ -346,6 +347,11 @@ const styles = StyleSheet.create({
   },
   header: {
     marginBottom: space.sm,
+    justifyContent: 'space-between',
+  },
+  coachPill: {
+    minHeight: 40,
+    paddingHorizontal: space.lg,
   },
   kicker: {
     ...type.micro,
