@@ -171,7 +171,28 @@ export class BallTracker {
    *          occlusion (`predicted: true`, `score: 0`) — or null when there
    *          is no live track.
    */
-  step(frame: FrameDetections, hoopRoi: Box | null): TrackedBall | null {
+  /**
+   * The device's estimated inter-frame interval (seconds), an EMA of the step
+   * timestamps. Exposed so the flight-arc / occlusion modules scale their
+   * frame-count gates off ONE shared cadence estimate (see scaleFrameGate).
+   */
+  estimatedStepDt(): number {
+    return this.meanStepDt;
+  }
+
+  /**
+   * @param corridor Optional flight-corridor prior (FlightArc.corridorPoint from
+   *   the PREVIOUS frame, one-frame lag like the release seed): the predicted
+   *   parabola point + a tube radius. A candidate inside the tube gets the
+   *   relaxed flight-continuation score floor even with no live track, so a
+   *   faint mid-arc ball keeps being detected across the WHOLE flight, not only
+   *   inside the hoop ROI. Null / omitted = today's behavior exactly.
+   */
+  step(
+    frame: FrameDetections,
+    hoopRoi: Box | null,
+    corridor?: { p: { x: number; y: number }; tubeR: number } | null,
+  ): TrackedBall | null {
     const t = frame.t;
     this.frameIndex++;
     // Track the device cadence from consecutive step timestamps (forward gaps
@@ -185,7 +206,7 @@ export class BallTracker {
     this.lastStepT = t;
     this.pruneStale(t);
 
-    const candidate = this.pickCandidate(frame, hoopRoi);
+    const candidate = this.pickCandidate(frame, hoopRoi, corridor ?? null);
     if (candidate !== null) {
       return this.accept(candidate, t);
     }
@@ -350,6 +371,7 @@ export class BallTracker {
   private pickCandidate(
     frame: FrameDetections,
     hoopRoi: Box | null,
+    corridor: { p: { x: number; y: number }; tubeR: number } | null,
   ): Candidate | null {
     const t = frame.t;
     const pred = this.projectStateTo(t);
@@ -395,6 +417,14 @@ export class BallTracker {
       const nearWrist =
         seedRadius >= 0 &&
         Math.hypot(center.x - seedX, center.y - seedY) <= seedRadius;
+      // Flight-corridor relaxation (S2): a candidate sitting on the predicted
+      // full-flight parabola (within the tube) gets the relaxed floor even with
+      // no live track — the corridor is the locality that trackFresh's jump gate
+      // provides, so a faint mid-arc ball keeps the flight alive across the WHOLE
+      // frame. This is the standing relaxation the arc lacked away from the rim.
+      const inCorridor =
+        corridor !== null &&
+        Math.hypot(center.x - corridor.p.x, center.y - corridor.p.y) <= corridor.tubeR;
       // Cold-acquisition floor: relaxed to ballScoreMinDark in genuinely
       // DARK scenes only (see setLightProfile) — a real low-light ball
       // scores under the 0.2 open-court gate, so no track ever started.
@@ -404,7 +434,7 @@ export class BallTracker {
           : DETECTION.ballScoreMin;
       const scoreGate = inHoopRoi
         ? DETECTION.ballScoreMinHoopRoi
-        : trackFresh || nearWrist
+        : trackFresh || nearWrist || inCorridor
           ? DETECTION.ballScoreMinTracking
           : coldFloor;
       if (det.score < scoreGate) continue;

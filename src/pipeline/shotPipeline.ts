@@ -9,8 +9,9 @@
  * v2 upgrade path: move this whole class into the worklet runtime and swap
  * the scheduleOnRN hop for direct SharedValue writes (docs/ARCHITECTURE.md §2).
  */
-import { DETECTION, RIM, SHOT_FSM } from '../core/config';
+import { DETECTION, FLIGHT, RIM, SHOT_FSM, scaleFrameGate } from '../core/config';
 import { BallTracker } from '../core/ballTracker';
+import { FlightArc } from '../core/flightArc';
 import { estimateShotValue } from '../core/court';
 import { FormAnalyzer, coachingTips } from '../core/formAnalysis';
 import { FormSequenceBuffer } from '../core/formSequence';
@@ -25,7 +26,13 @@ import {
   type FtCalibrationResult,
   type FtDistanceCalibration,
 } from '../core/ftCalibration';
-import { evalArc, fitArc, predictLanding } from '../core/trajectory';
+import {
+  ABS_MIN_FIT_SAMPLES,
+  MIN_FIT_SAMPLES,
+  evalArc,
+  fitArc,
+  predictLanding,
+} from '../core/trajectory';
 import { classifyLight, type LightProfile } from '../core/lightProfile';
 import { ShotFsm } from '../core/shotFsm';
 import { classifyViewBand } from '../core/viewBand';
@@ -126,6 +133,15 @@ const FT_CAPTURE_MAX_FRAMES = 90;
 
 export class ShotPipeline {
   private readonly tracker = new BallTracker({});
+  /**
+   * Full-flight parabola accumulator (config.FLIGHT.useFlightArc). Off by
+   * default and only fed/consulted while the flag is on, so it is inert — and
+   * the tracker's third `step()` arg stays undefined — until validated. It
+   * gives the tracker a standing score-floor relaxation along the predicted
+   * flight path so a faint mid-arc ball keeps being detected between the
+   * release and the hoop ROI, not only near the rim.
+   */
+  private readonly flightArc = new FlightArc();
   private readonly rimLock = new RimLock({ lockHoldSec: RIM.lockHoldSec });
   private fsm: ShotFsm | null = null;
   private events: PipelineEvents;
@@ -339,7 +355,40 @@ export class ShotPipeline {
       if (this.lastRim) this.events.onRimLocked?.(this.lastRim);
     }
 
-    const ball = this.tracker.step(frame, this.lastRim?.hoopRoi ?? null);
+    // Flight corridor (config.FLIGHT.useFlightArc): the global arc fitted
+    // THROUGH LAST FRAME predicts where the ball is NOW, giving the tracker a
+    // one-frame-lagged path prior. A candidate sitting on that path earns the
+    // relaxed (tracking) score floor even far from the rim — the standing
+    // relaxation the near-rim ROI never provided across the whole flight. The
+    // lag is harmless: a mid-air ball moves << the rim-scaled tube per frame.
+    const corridor =
+      FLIGHT.useFlightArc && this.lastRim
+        ? this.flightArc.corridorPoint(
+            frame.t,
+            this.lastRim.box.width,
+            // fps-scaled fit floor: a slow XR needs the corridor sooner, so
+            // require fewer samples there (never below the parabola's floor).
+            scaleFrameGate(
+              MIN_FIT_SAMPLES,
+              this.tracker.estimatedStepDt(),
+              ABS_MIN_FIT_SAMPLES,
+            ),
+          )
+        : null;
+    const ball = this.tracker.step(
+      frame,
+      this.lastRim?.hoopRoi ?? null,
+      corridor,
+    );
+    // Feed the accepted ball into the global arc. A discontinuity (first ball,
+    // or the flight went dark past the freshness window) starts a fresh arc so
+    // one shot's samples never contaminate the next shot's fit.
+    if (FLIGHT.useFlightArc && ball) {
+      if (frame.t - this.flightArc.lastReal > FLIGHT.corridorFreshSec) {
+        this.flightArc.reset(frame.t);
+      }
+      this.flightArc.push(ball);
+    }
 
     // Form analysis (opt-in): feed each frame's pose to the analyzer so it can
     // track the shot phases (dip → release → follow-through). Entirely skipped
@@ -373,6 +422,9 @@ export class ShotPipeline {
       if (release) {
         this.tracker.setReleaseEvent(release.wristX, release.wristY, release.t);
         this.pendingReleaseT = release.t;
+        // A release is the cleanest "new flight starts here" signal: drop the
+        // prior shot's samples so the global arc fits only this attempt.
+        if (FLIGHT.useFlightArc) this.flightArc.reset(release.t);
       }
       this.sawPoseThisShot = true;
       // Pose (MoveNet) gives a far more reliable shooter foot than the YOLO
@@ -546,6 +598,7 @@ export class ShotPipeline {
 
   reset(): void {
     this.tracker.reset();
+    this.flightArc.reset(0);
     this.rimLock.reset();
     this.form = null;
     this.formSeq = null;

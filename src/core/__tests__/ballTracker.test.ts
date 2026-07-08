@@ -175,6 +175,49 @@ describe('BallTracker', () => {
     ).toBeNull();
   });
 
+  test('flight corridor relaxes the cold floor for a candidate on the predicted path', () => {
+    // Score BETWEEN the tracking floor (0.12) and the cold floor (0.2): the
+    // exact faint-mid-arc band the corridor exists to rescue.
+    const score = (DETECTION.ballScoreMinTracking + DETECTION.ballScoreMin) / 2;
+    const corridor = { p: { x: 200, y: 200 }, tubeR: 40 };
+
+    // No corridor (cold tracker, no ROI): rejected at the cold floor.
+    const bare = new BallTracker({});
+    expect(bare.step(frameAt(0, [ballDet(200, 200, { score })]), null)).toBeNull();
+
+    // Candidate ON the corridor path: relaxed to the tracking floor => accepted.
+    const onPath = new BallTracker({});
+    const out = onPath.step(
+      frameAt(0, [ballDet(200, 200, { score })]),
+      null,
+      corridor,
+    );
+    expect(out).not.toBeNull();
+    expect(out!.predicted).toBe(false);
+    expect(out!.cx).toBeCloseTo(200);
+
+    // Same score but OUTSIDE the tube: the corridor doesn't reach it => rejected.
+    const offPath = new BallTracker({});
+    expect(
+      offPath.step(
+        frameAt(0, [ballDet(400, 400, { score })]),
+        null,
+        corridor,
+      ),
+    ).toBeNull();
+  });
+
+  test('flight corridor never rescues a candidate below the tracking floor', () => {
+    // Below 0.12: even sitting on the predicted path it must stay rejected —
+    // the corridor relaxes the floor to tracking, not to zero.
+    const score = DETECTION.ballScoreMinTracking - 0.03;
+    const corridor = { p: { x: 200, y: 200 }, tubeR: 40 };
+    const tracker = new BallTracker({});
+    expect(
+      tracker.step(frameAt(0, [ballDet(200, 200, { score })]), null, corridor),
+    ).toBeNull();
+  });
+
   test('tracks a clean projectile arc (y down: rising ball has vy < 0)', () => {
     const g = 900;
     const tracker = new BallTracker({ gravityPxPerSec2: g });

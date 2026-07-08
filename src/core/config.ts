@@ -704,3 +704,27 @@ export const VIEW = {
   /** Pitch-up beyond this = under-hoop (vs overhead looking down). */
   underHoopPitchDeg: 25,
 } as const;
+
+/**
+ * Full-flight trajectory tracking (src/core/flightArc.ts + the tracker's
+ * corridor-relax branch). A persistent parabola fitted over the WHOLE shot
+ * arc (release -> rim across the entire frame) drives a standing score-floor
+ * relaxation along the predicted path, so a faint mid-arc ball keeps being
+ * tracked instead of dying between the release and the hoop ROI (the historic
+ * "flight tracking collapsed while near-rim rescue worked" failure). Ships OFF
+ * — flip only after the labeled-clip validation in the trajectory spec.
+ */
+export const FLIGHT = {
+  /** Master flag for the FlightArc accumulator + tracker corridor relaxation. */
+  useFlightArc: false,
+  /** Min vertical-fit R² to trust the corridor for score relaxation (loose). */
+  corridorMinR2yLoose: 0.6,
+  /** Min R² to trust the corridor for a crossing/landing (strict). */
+  corridorMinR2yStrict: 0.9,
+  /** The corridor is only used while the last real sample is this fresh (s). */
+  corridorFreshSec: 0.5,
+  /** Corridor tube radius as a multiple of rim width (locality for relaxation). */
+  corridorTubeRimWidths: 1.5,
+  /** Cap on real samples kept for the global fit (a long arc is ~30–40). */
+  maxFlightSamples: 64,
+} as const;
