@@ -169,24 +169,39 @@ public class VideoStitcherModule: Module {
   }
 
   private func export(composition: AVMutableComposition, options: StitchOptions, promise: Promise) {
-    // Passthrough is the fast path: no re-encode, seconds not minutes. Fall back
-    // to HighestQuality only if the composition can't be exported losslessly.
-    let preset = composition.canExportPassthrough
-      ? AVAssetExportPresetPassthrough
-      : AVAssetExportPresetHighestQuality
-
-    guard let session = AVAssetExportSession(asset: composition, presetName: preset) else {
-      finish { self.isStitching = false }
-      promise.reject(StitchError.exportSetup.rawValue, "Could not create an export session.")
-      return
-    }
-
     let outputURL: URL
     do {
       outputURL = try Self.makeOutputURL(fileName: options.outputFileName)
     } catch {
       finish { self.isStitching = false }
       promise.reject(StitchError.output.rawValue, "Could not prepare the output file.")
+      return
+    }
+
+    // Passthrough is the fast path (no re-encode, seconds not minutes). Ask
+    // AVFoundation whether this composition can be written to mp4 losslessly and
+    // fall back to a re-encoding preset when it can't. determineCompatibility is
+    // the iOS 16+ replacement for the old synchronous compatibility checks — the
+    // deployment target is 16.4, so it is always available.
+    AVAssetExportSession.determineCompatibility(
+      ofExportPreset: AVAssetExportPresetPassthrough,
+      with: composition,
+      outputFileType: .mp4
+    ) { [weak self] passthroughOK in
+      guard let self = self else { return }
+      let preset = passthroughOK
+        ? AVAssetExportPresetPassthrough
+        : AVAssetExportPresetHighestQuality
+      self.runExport(composition: composition, preset: preset, outputURL: outputURL, promise: promise)
+    }
+  }
+
+  private func runExport(
+    composition: AVMutableComposition, preset: String, outputURL: URL, promise: Promise
+  ) {
+    guard let session = AVAssetExportSession(asset: composition, presetName: preset) else {
+      finish { self.isStitching = false }
+      promise.reject(StitchError.exportSetup.rawValue, "Could not create an export session.")
       return
     }
 
