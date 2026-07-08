@@ -148,6 +148,14 @@ export const GATE_EPS_SEC = 0.5 / NOMINAL_FPS;
  * even when the budget rounds below it. At dtSec = 1/NOMINAL_FPS the result is
  * exactly `frames` (rounding is a no-op), keeping 30 fps identical.
  *
+ * This is a minimum-SAMPLES gate: it may only ever LOOSEN (require FEWER
+ * samples) on a slower device, never TIGHTEN. So the result is clamped to at
+ * most `frames` — a phone running ABOVE 30 fps (flagship on 'max' cadence)
+ * keeps the original nominal count instead of being asked for MORE samples
+ * than the 30 fps code ever required (which would silently lose marginal
+ * occluded makes on the fastest phones — exactly the "only slower devices see
+ * the fix" invariant).
+ *
  * `dtSec ≤ 0` (no interval measured yet) returns `frames` unchanged.
  */
 export function scaleFrameGate(
@@ -157,7 +165,7 @@ export function scaleFrameGate(
 ): number {
   if (!(dtSec > 0)) return frames;
   const budgetSec = frames / NOMINAL_FPS;
-  return Math.max(minFrames, Math.round(budgetSec / dtSec));
+  return Math.max(minFrames, Math.min(frames, Math.round(budgetSec / dtSec)));
 }
 
 export const TRACKER = {

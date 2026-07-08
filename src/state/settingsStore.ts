@@ -34,10 +34,13 @@ export type DetectorModel = 'auto' | 'standard' | 'precise';
 export type DetectionRate = 'auto' | 'battery' | 'max';
 
 /**
- * Detector input resolution — the biggest speed lever (cost ∝ pixels²).
- * - 'quality' (default): 640px — best accuracy, ~13fps detection on iPhone XR.
- * - 'speed': 320px — ~4× faster (30-60fps on XR), slightly weaker on a tiny/
- *   far ball. Uses a dedicated 320-exported nano model.
+/**
+ * Detector input resolution — a big speed lever (cost ∝ pixels²).
+ * - 'speed' (DEFAULT since v3): 416px — tested MORE accurate than 640 on the
+ *   small-ball model (ball cold-gate 61.5% vs 38.6%) at ~half the cost, so
+ *   it's now the default on every tier.
+ * - 'quality': 640px — a bigger ball in pixels but, on the current model,
+ *   lower real-footage recall AND slower; kept selectable, no longer default.
  */
 export type PerfMode = 'quality' | 'speed';
 
@@ -84,11 +87,21 @@ export type TrackingKnobs = Pick<
   'detectorEngine' | 'detectorAccel' | 'perfMode' | 'detectionRate'
 >;
 
-/** Concrete knob values each preset applies. */
+/**
+ * Concrete knob values each preset applies. Deliberately kept 1:1 with the
+ * DEVICE_TUNING tiers (src/core/deviceProfile.ts) so the "Your device" auto-tune
+ * always lands the knobs ON a real preset (never a phantom 'Custom' on a fresh
+ * install) and the two Detection selectors stay mutually consistent:
+ *   accuracy = entry tier   (CPU — numerically exact, no Metal YOLOX degrade)
+ *   balanced = mid tier      (GPU, standard cadence)
+ *   smooth   = high tier      (GPU, every-frame cadence = smoothest tracking)
+ * All three run at 416 ('speed') — it tested MORE accurate than 640 on the
+ * small-ball model at ~half the cost, so 640 is no longer a preset choice.
+ */
 export const TRACKING_PRESETS: Record<Exclude<TrackingPreset, 'custom'>, TrackingKnobs> = {
-  accuracy: { detectorEngine: 'yolox', detectorAccel: 'cpu', perfMode: 'quality', detectionRate: 'auto' },
-  balanced: { detectorEngine: 'yolox', detectorAccel: 'gpu', perfMode: 'quality', detectionRate: 'auto' },
-  smooth: { detectorEngine: 'yolox', detectorAccel: 'gpu', perfMode: 'speed', detectionRate: 'auto' },
+  accuracy: { detectorEngine: 'yolox', detectorAccel: 'cpu', perfMode: 'speed', detectionRate: 'auto' },
+  balanced: { detectorEngine: 'yolox', detectorAccel: 'gpu', perfMode: 'speed', detectionRate: 'auto' },
+  smooth: { detectorEngine: 'yolox', detectorAccel: 'gpu', perfMode: 'speed', detectionRate: 'max' },
 };
 
 /**
@@ -322,7 +335,11 @@ export const useSettings = create<SettingsState>()(
       tutorialSeen: TUTORIAL_SEEN_DEFAULT,
       dailyGoalMakes: 0,
       set: (key, value) => set({ [key]: value } as Pick<SettingsState, typeof key>),
-      applyTrackingPreset: (preset) => set({ ...TRACKING_PRESETS[preset] }),
+      // Picking a tracking preset is an explicit knob choice, so hand the tier
+      // control back to 'auto' — otherwise the "Your device" row would keep
+      // showing a manual tier whose knobs the preset just overrode.
+      applyTrackingPreset: (preset) =>
+        set({ ...TRACKING_PRESETS[preset], deviceTierOverride: 'auto' }),
       applyDeviceTuning: (tier) =>
         set((s) => {
           // Always record what we detected (cheap, drives the Settings label).
@@ -387,6 +404,17 @@ export const useSettings = create<SettingsState>()(
         // 2/3 estimator already assumed as a hardcoded constant, making this a
         // byte-identical no-op for every persisted user.
         if (version < 4 && s.rimHeightM == null) s.rimHeightM = 3.05;
+        // v4 also: device-tuning (shipped at v3 WITHOUT a bump) auto-applies a
+        // tier's detector defaults once, guarded by deviceTuned. But any install
+        // predating that key is a user who ALREADY set their own detector knobs
+        // under an older build — auto-tuning them would silently wipe those
+        // choices on first launch of the upgrade. If the key is missing, they
+        // own their knobs: mark them tuned so applyDeviceTuning leaves them be.
+        if (s.deviceTuned == null) {
+          s.deviceTuned = true;
+          s.deviceTierOverride = 'auto';
+          s.detectedTier = null;
+        }
         return s;
       },
     },

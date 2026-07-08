@@ -12,13 +12,53 @@
  * notch/Dynamic Island and of the stat strip, which owns the left column).
  */
 import React, { useEffect, useState } from 'react';
-import { StyleSheet, Text, View, useWindowDimensions } from 'react-native';
+import { Pressable, Share, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
+import * as Device from 'expo-device';
+import * as Haptics from 'expo-haptics';
 import type { SharedValue } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import type { EngineDebug, OverlayState } from '../../camera/useShotEngine';
+import { resolvedTuning } from '../../camera/deviceTuning';
 import { color, radius, space, type } from '../../constants/tokens';
 import { classifyLight } from '../../core/lightProfile';
+import { tierLabel } from '../../core/deviceProfile';
+import { useSettings } from '../../state/settingsStore';
+
+/**
+ * Build a compact, paste-able diagnostics dump so a tester can send back the
+ * exact on-device numbers (device tier, model rung, delegate, fps, ball
+ * detection health) — the ground truth that turns "I think the XR does X"
+ * into a real number to tune the device tiers against.
+ */
+function buildDiagnostics(d: EngineDebug, rimAsp: number): string {
+  const s = useSettings.getState();
+  const { tier, detected } = resolvedTuning(s.deviceTierOverride, s.lastBenchmark?.ms ?? null);
+  const dev = Device.modelName ?? Device.deviceName ?? 'unknown';
+  const model = Device.modelId ?? '?';
+  const tierLine =
+    s.deviceTierOverride === 'auto'
+      ? `auto -> ${tierLabel(tier)} (detected ${tierLabel(detected)})`
+      : `${tierLabel(tier)} (manual)`;
+  return [
+    'HOOPILOT DIAG',
+    `device: ${dev} (${model})`,
+    `tier: ${tierLine}`,
+    `engine: ${s.detectorEngine} ${s.perfMode} · accel ${s.detectorAccel} · rate ${s.detectionRate}`,
+    `delegate: ${d.delegate}`,
+    `speed: ${d.fps} fps · ${d.avgMs}ms avg`,
+    `model: ${d.modelLoaded ? 'loaded' : 'DEMO'} · output ${d.outputLen} · ${d.layout}`,
+    `ball: maxScore ${d.maxScore.toFixed(3)} · dets ${d.detCount}`,
+    `input: ${d.inputMin.toFixed(2)}..${d.inputMax.toFixed(2)} · ${d.nonZeroPct}% nz`,
+    `light: ${d.light > 0 ? `${d.light.toFixed(2)} ${classifyLight(d.light)}` : '--'}`,
+    `rim aspect: ${rimAsp > 0 ? rimAsp.toFixed(2) : '--'}`,
+    `roi: ${d.roiFrames > 0 ? `${d.roiHits}/${d.roiFrames} · ${d.roiAvgMs}ms` : 'idle'}`,
+    `frames ${d.frames} · dropped ${d.dropped}`,
+    d.modelError ? `error: ${d.modelError}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n');
+}
 
 /** Fields worth a re-render — a static frame between detections shouldn't
  * force React to redraw the panel 4x/second. */
@@ -80,8 +120,15 @@ export function DebugPanel({
     ? { top: insets.top + space.sm, right: insets.right + space.sm }
     : { top: Math.max(54, insets.top + space.sm), left: insets.left + space.sm };
 
+  const onCopyDiag = () => {
+    void Haptics.selectionAsync();
+    void Share.share({ message: buildDiagnostics(d, rimAsp) }).catch(() => {});
+  };
+
   return (
-    <View style={[styles.wrap, placement]} pointerEvents="none">
+    // box-none: the panel itself + its text rows never capture touches (camera
+    // taps pass through), but the copy-diagnostics button does.
+    <View style={[styles.wrap, placement]} pointerEvents="box-none">
       <Text style={styles.title}>DETECT DEBUG</Text>
       <Row k="mode" v={d.mode} vc={d.mode === 'camera' ? color.make : color.unsure} />
       <Row k="model" v={d.modelLoaded ? 'loaded' : 'NOT loaded (demo)'} vc={d.modelLoaded ? color.make : color.miss} />
@@ -125,6 +172,15 @@ export function DebugPanel({
         v={d.roiFrames > 0 ? `${d.roiHits}/${d.roiFrames} · ${d.roiAvgMs}ms` : 'idle'}
         vc={d.roiHits > 0 ? color.make : d.roiFrames > 0 ? color.unsure : color.textFaint}
       />
+      <Pressable
+        onPress={onCopyDiag}
+        accessibilityRole="button"
+        accessibilityLabel="Copy diagnostics"
+        accessibilityHint="Shares this phone's detector numbers so you can send them for tuning"
+        style={({ pressed }) => [styles.copyBtn, pressed && { backgroundColor: color.accentPressed }]}
+      >
+        <Text style={styles.copyText}>⧉ COPY DIAG</Text>
+      </Pressable>
     </View>
   );
 }
@@ -180,5 +236,18 @@ const styles = StyleSheet.create({
     color: color.miss,
     marginTop: 4,
     maxWidth: 220,
+  },
+  copyBtn: {
+    marginTop: 6,
+    alignSelf: 'stretch',
+    backgroundColor: color.accent,
+    borderRadius: radius.sm,
+    paddingVertical: 5,
+    alignItems: 'center',
+  },
+  copyText: {
+    ...type.micro,
+    color: color.onAccent,
+    fontVariant: ['tabular-nums'],
   },
 });

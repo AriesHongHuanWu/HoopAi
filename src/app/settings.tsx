@@ -137,17 +137,17 @@ const PRESET_OPTIONS: {
   {
     value: 'accuracy',
     label: 'Best accuracy · recommended',
-    blurb: 'YOLOX on CPU at 640px — the most precise ball tracking, the same path the Test AI screen uses. Runs in real time on most phones.',
+    blurb: 'YOLOX on CPU — numerically exact, the same path the Test AI screen uses. The most reliable ball tracking; runs in real time on most phones.',
   },
   {
     value: 'balanced',
     label: 'Balanced',
-    blurb: 'YOLOX on GPU at 640px — the large image still catches the small ball, and the GPU keeps it fast.',
+    blurb: 'YOLOX on the GPU — faster on phones where the CPU can’t keep up, at a small cost to precision on some devices.',
   },
   {
     value: 'smooth',
-    label: 'Smooth · older phones',
-    blurb: 'YOLOX on GPU at 416px — the lightest, fastest option, at some cost to a tiny or far ball.',
+    label: 'Smooth · newest phones',
+    blurb: 'YOLOX on the GPU, analysing every frame — the smoothest tracking, best on recent phones with power to spare.',
   },
 ];
 
@@ -1325,9 +1325,9 @@ export default function SettingsScreen() {
           </View>
           <View style={styles.divider} />
           <ActionRow
-            label="Privacy policy"
-            description="How your camera, video and session data are used and stored."
-            onPress={() => void Linking.openURL(PRIVACY_POLICY_URL)}
+            label="Legal & privacy"
+            description="Privacy policy, terms, and open-source licenses — all read on-device."
+            onPress={() => router.push('/legal')}
           />
           <View style={styles.divider} />
           <ActionRow

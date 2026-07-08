@@ -263,7 +263,13 @@ function ReelEndFrame({
     setExportState('working');
     void (async () => {
       try {
-        const plan = buildReelSegments(session, shots, { videoDurationSec });
+        const plan = buildReelSegments(session, shots, {
+          videoDurationSec,
+          // Match the windows the player just showed (the user's clip settings),
+          // so the exported MP4 isn't silently cut to different lengths.
+          preRollSec: useSettings.getState().clipPreRollSec,
+          postRollSec: useSettings.getState().clipPostRollSec,
+        });
         if (!plan.ok) {
           setExportState('failed');
           return;
