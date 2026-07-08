@@ -6,13 +6,17 @@
  */
 import {
   EVIDENCE_CHANNELS,
+  confidenceLabel,
+  confidenceLevel,
   correctionMessage,
   correctionRevert,
   evidenceGlyph,
   evidenceSummary,
   evidenceTone,
+  valueSourceLabel,
+  valueSourcePhrase,
 } from '../evidence';
-import type { ShotSignals } from '../types';
+import type { ShotSignals, ShotValueSource } from '../types';
 
 describe('EVIDENCE_CHANNELS', () => {
   test('covers exactly the three fusion channels, in receipt order', () => {
@@ -88,5 +92,38 @@ describe('correctionRevert', () => {
       outcome: 'make',
       corrected: true,
     });
+  });
+});
+
+describe('confidence language (one shared scale)', () => {
+  test('tiers at 0.8 (high) and 0.55 (medium)', () => {
+    expect(confidenceLevel(0.95)).toBe('high');
+    expect(confidenceLevel(0.8)).toBe('high');
+    expect(confidenceLevel(0.79)).toBe('medium');
+    expect(confidenceLevel(0.55)).toBe('medium');
+    expect(confidenceLevel(0.54)).toBe('low');
+    expect(confidenceLevel(0)).toBe('low');
+  });
+
+  test('labels are stable', () => {
+    expect(confidenceLabel('high')).toBe('High');
+    expect(confidenceLabel('medium')).toBe('Medium');
+    expect(confidenceLabel('low')).toBe('Low');
+  });
+});
+
+describe('2/3 value provenance labels', () => {
+  const sources: ShotValueSource[] = ['court', 'metric', 'heuristic', 'manual'];
+
+  test('every source has a non-empty label and phrase', () => {
+    for (const s of sources) {
+      expect(valueSourceLabel(s).length).toBeGreaterThan(0);
+      expect(valueSourcePhrase(s).length).toBeGreaterThan(0);
+    }
+  });
+
+  test('court reads as the corner-accurate registered source', () => {
+    expect(valueSourceLabel('court')).toBe('Court-registered');
+    expect(valueSourcePhrase('court')).toMatch(/corner-accurate/);
   });
 });

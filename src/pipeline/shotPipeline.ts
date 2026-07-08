@@ -743,12 +743,25 @@ export class ShotPipeline {
         resolved.distanceRimWidths = est.distanceRimWidths;
         if (reg) resolved.distanceM = reg.distanceM;
         else if (metric) resolved.distanceM = metric.distanceM;
+        // Record which estimator won + its confidence + the mapped court point,
+        // so the detection receipt can SHOW ITS WORK (auditable, not a guess).
+        if (reg) {
+          resolved.valueSource = 'court';
+          resolved.valueConfidence = reg.confidence;
+          resolved.courtPos = { x: reg.courtX, y: reg.courtY };
+        } else if (metric) {
+          resolved.valueSource = 'metric';
+        } else if (est.confidence > 0) {
+          resolved.valueSource = 'heuristic';
+          resolved.valueConfidence = est.confidence;
+        }
         // Manual court-range override (Settings > Court range): when the user
         // pins the range, every decided shot takes that value regardless of the
         // auto 2/3 estimate — the calibration-free way to score a 3-point (or
         // pure 2-point) session accurately. 'auto' leaves the estimate intact.
         if (this.courtRange === '2pt') resolved.shotValue = 2;
         else if (this.courtRange === '3pt') resolved.shotValue = 3;
+        if (this.courtRange !== 'auto') resolved.valueSource = 'manual';
       }
       // Finalize the pose-based form report (only if a pose was seen this shot).
       if (this.form && this.sawPoseThisShot) {

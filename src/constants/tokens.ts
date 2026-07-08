@@ -91,6 +91,18 @@ export const color = {
 } as const;
 
 /**
+ * ONE confidence palette — high = trust green, medium = caution gold, low =
+ * dim. Every detection surface (receipt, quality badge, court-zone tint) reads
+ * confidence through THIS map, so it registers as a single signal app-wide
+ * rather than three unrelated meters. Keyed by ConfidenceLevel (evidence.ts).
+ */
+export const confidenceColor = {
+  high: palette.swish,
+  medium: palette.chalkYellow,
+  low: palette.chalkFaint,
+} as const;
+
+/**
  * Skia overlay glow palette — raw rgba strings consumed directly by the live
  * tracking canvas (Skia color props, not RN styles). Kept here so the HUD's
  * bloom, comet trail and rim reticle all pull from one source of truth.

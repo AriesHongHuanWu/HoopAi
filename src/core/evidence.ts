@@ -8,7 +8,7 @@
  * helpers keep the chip content, the accessibility summary and the
  * correction-undo bookkeeping testable and consistent across screens.
  */
-import type { ResolvedShot, ShotOutcome, ShotSignals } from './types';
+import type { ResolvedShot, ShotOutcome, ShotSignals, ShotValueSource } from './types';
 
 /** Chip tone for one signal state (subset of ui.tsx Chip tones). */
 export type EvidenceTone = 'make' | 'miss' | 'default';
@@ -56,6 +56,54 @@ export function evidenceSummary(signals: ShotSignals, rimBounce: boolean): strin
   );
   if (rimBounce) parts.push('rim bounce');
   return `Evidence: ${parts.join(', ')}`;
+}
+
+// ---------------------------------------------------------------------------
+// 2/3 provenance + ONE confidence language (shared by every detection surface)
+// ---------------------------------------------------------------------------
+
+/** Coarse confidence tier — the single scale the receipt, badge + zone tint
+ *  all speak, so "confidence" reads as one signal app-wide (not three meters). */
+export type ConfidenceLevel = 'high' | 'medium' | 'low';
+
+/** Map a 0..1 confidence to its tier. Boundaries: ≥0.8 high, ≥0.55 medium. */
+export function confidenceLevel(c: number): ConfidenceLevel {
+  if (c >= 0.8) return 'high';
+  if (c >= 0.55) return 'medium';
+  return 'low';
+}
+
+/** Short human label for a confidence tier. */
+export function confidenceLabel(level: ConfidenceLevel): string {
+  return level === 'high' ? 'High' : level === 'medium' ? 'Medium' : 'Low';
+}
+
+/** Short label for which estimator decided the 2/3 value. */
+export function valueSourceLabel(source: ShotValueSource): string {
+  switch (source) {
+    case 'court':
+      return 'Court-registered';
+    case 'metric':
+      return 'Measured';
+    case 'heuristic':
+      return 'Estimated';
+    case 'manual':
+      return 'Manual';
+  }
+}
+
+/** One-line explanation of the 2/3 provenance for the receipt. */
+export function valueSourcePhrase(source: ShotValueSource): string {
+  switch (source) {
+    case 'court':
+      return 'mapped to your calibrated court — corner-accurate';
+    case 'metric':
+      return 'real-distance estimate from rim geometry';
+    case 'heuristic':
+      return 'image-distance estimate (uncalibrated)';
+    case 'manual':
+      return 'you set the court range by hand';
+  }
 }
 
 // ---------------------------------------------------------------------------

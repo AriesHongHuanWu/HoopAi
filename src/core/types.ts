@@ -150,6 +150,16 @@ export type ShotOutcome = 'make' | 'miss' | 'unsure';
  */
 export type ShotValue = 2 | 3;
 
+/**
+ * Which estimator decided a shot's 2/3 value — the provenance the detection
+ * receipt surfaces so the call is auditable, not a black box.
+ *   'court'     — court-registration homography (corner-accurate, any placement)
+ *   'metric'    — pinhole real-meters estimator (courtGeometric)
+ *   'heuristic' — rim-widths image-plane estimator (court.ts), the fallback
+ *   'manual'    — the user's Settings court-range override
+ */
+export type ShotValueSource = 'court' | 'metric' | 'heuristic' | 'manual';
+
 /** The three fused make/miss signals. null = signal unavailable that shot. */
 export interface ShotSignals {
   /** Geometric rim-plane crossing test. */
@@ -206,6 +216,22 @@ export interface ResolvedShot {
    * (courtGeometric, flagged) when it ran confidently. Undefined otherwise.
    */
   distanceM?: number;
+  /**
+   * Which estimator decided {@link shotValue} — the provenance the detection
+   * receipt shows. Undefined when 2/3 estimation didn't run.
+   */
+  valueSource?: ShotValueSource;
+  /**
+   * 0..1 confidence in the 2/3 call from whichever source won. Undefined when
+   * not computed. Rendered on one shared confidence scale (see evidence.ts).
+   */
+  valueConfidence?: number;
+  /**
+   * Shooter's mapped court-plane position (meters, basket origin), present ONLY
+   * when court registration placed the shot — powers the placement map and the
+   * corner/arc receipt line. Undefined for the metric/heuristic paths.
+   */
+  courtPos?: { x: number; y: number };
   /**
    * Pose-based shooting-form report, attached by the pipeline when form
    * analysis is enabled (Settings) and a pose was tracked through the shot.
