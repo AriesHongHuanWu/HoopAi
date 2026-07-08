@@ -233,6 +233,26 @@ async function migrate(db: SQLite.SQLiteDatabase): Promise<void> {
       PRAGMA user_version = 6;
     `);
   }
+  if (version < 7) {
+    // v7: Jump Lab — a standalone log of measured vertical jumps, independent
+    // of shooting sessions (a jump test is its own thing, not a shot). One row
+    // per measured jump: epoch-ms timestamp, height in centimetres, which
+    // estimator produced it ('hang-time' | 'displacement'), and a 0..1
+    // confidence. Its own table (not a shots column) because jumps have no
+    // session / rim / trajectory and are queried on their own timeline for the
+    // personal-best + sparkline.
+    await db.execAsync(`
+      CREATE TABLE IF NOT EXISTS jumps (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts INTEGER NOT NULL,
+        heightCm REAL NOT NULL,
+        method TEXT NOT NULL DEFAULT 'hang-time',
+        confidence REAL NOT NULL DEFAULT 0
+      );
+      CREATE INDEX IF NOT EXISTS idx_jumps_ts ON jumps(ts);
+      PRAGMA user_version = 7;
+    `);
+  }
 }
 
 /** Run a DB operation; on ANY failure log + return the fallback (never throw). */
@@ -786,6 +806,76 @@ export async function careerBests(excludeSessionId?: number): Promise<CareerBest
       bestFgPct: agg?.bestFg ?? 0,
       mostMakes: agg?.mostMakes ?? 0,
     };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Jump Lab (v7)
+// ---------------------------------------------------------------------------
+
+/** One persisted vertical-jump measurement (jumps table, v7). */
+export interface JumpRow {
+  id: number;
+  /** Epoch ms. */
+  ts: number;
+  /** Measured vertical jump, centimetres. */
+  heightCm: number;
+  /** Estimator that produced the height ('hang-time' | 'displacement'). */
+  method: string;
+  /** 0..1 confidence in the measurement. */
+  confidence: number;
+}
+
+/**
+ * Persist one measured jump. Returns -1 when persistence failed (the number
+ * still shows in the UI this session; it just won't survive a restart).
+ */
+export async function insertJump(opts: {
+  ts: number;
+  heightCm: number;
+  method: string;
+  confidence: number;
+}): Promise<number> {
+  return safe('insertJump', -1, async () => {
+    const db = await getDb();
+    const res = await db.runAsync(
+      'INSERT INTO jumps (ts, heightCm, method, confidence) VALUES (?, ?, ?, ?)',
+      opts.ts,
+      opts.heightCm,
+      opts.method,
+      opts.confidence,
+    );
+    return res.lastInsertRowId;
+  });
+}
+
+/** Jump history, newest first. Never throws (empty on failure). */
+export async function listJumps(limit = 60): Promise<JumpRow[]> {
+  return safe('listJumps', [], async () => {
+    const db = await getDb();
+    return db.getAllAsync<JumpRow>(
+      'SELECT * FROM jumps ORDER BY ts DESC LIMIT ?',
+      limit,
+    );
+  });
+}
+
+/** Personal-best jump height in centimetres (0 when no history). Never throws. */
+export async function bestJumpCm(): Promise<number> {
+  return safe('bestJumpCm', 0, async () => {
+    const db = await getDb();
+    const row = await db.getFirstAsync<{ best: number | null }>(
+      'SELECT MAX(heightCm) AS best FROM jumps',
+    );
+    return row?.best ?? 0;
+  });
+}
+
+/** Delete one jump measurement (mis-detected outlier cleanup). Never throws. */
+export async function deleteJump(id: number): Promise<void> {
+  return safe('deleteJump', undefined, async () => {
+    const db = await getDb();
+    await db.runAsync('DELETE FROM jumps WHERE id = ?', id);
   });
 }
 
