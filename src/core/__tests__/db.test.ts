@@ -338,6 +338,29 @@ describe('shotFromRow', () => {
     expect(shot.signals).toEqual({ geo: null, net: null, cls: null });
     expect(shot.trajectory).toEqual([]);
   });
+
+  it('hydrates v8 2/3 provenance so history matches the live receipt/map', () => {
+    const shot = db.shotFromRow({
+      ...baseRow,
+      valueSource: 'court',
+      valueConfidence: 0.85,
+      courtX: 6.65,
+      courtY: 0.5,
+    });
+    expect(shot.valueSource).toBe('court');
+    expect(shot.valueConfidence).toBeCloseTo(0.85, 6);
+    expect(shot.courtPos).toEqual({ x: 6.65, y: 0.5 });
+  });
+
+  it('omits provenance for pre-v8 rows (undefined, not null/partial courtPos)', () => {
+    const shot = db.shotFromRow(baseRow); // no v8 columns
+    expect(shot.valueSource).toBeUndefined();
+    expect(shot.valueConfidence).toBeUndefined();
+    expect(shot.courtPos).toBeUndefined();
+    // A half-present court position must NOT produce a partial courtPos.
+    const halfCourt = db.shotFromRow({ ...baseRow, courtX: 3 });
+    expect(halfCourt.courtPos).toBeUndefined();
+  });
 });
 
 describe('resetDatabase', () => {

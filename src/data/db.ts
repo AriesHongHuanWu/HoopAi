@@ -23,7 +23,7 @@ import {
   type LifetimeTotals,
 } from '../core/achievements';
 import { historyRetentionLimit } from '../core/premium';
-import type { FormReport, GameModeId, ResolvedShot, SessionStats, ShotOutcome, ShotSignals } from '../core/types';
+import type { FormReport, GameModeId, ResolvedShot, SessionStats, ShotOutcome, ShotSignals, ShotValueSource } from '../core/types';
 import { recomputeStats } from '../core/stats';
 
 export interface SessionRow {
@@ -253,6 +253,21 @@ async function migrate(db: SQLite.SQLiteDatabase): Promise<void> {
       PRAGMA user_version = 7;
     `);
   }
+  if (version < 8) {
+    // v8: 2/3 provenance — so the detection receipt + court placement map show
+    // the SAME "shows its work" data when a session is reopened from History,
+    // not just live. valueSource = which estimator decided the point value;
+    // valueConfidence = its 0..1 confidence; courtX/courtY = the homography-
+    // mapped court position (present only for court-registered shots). All
+    // additive + nullable — old rows read back as undefined (graceful).
+    await db.execAsync(`
+      ALTER TABLE shots ADD COLUMN valueSource TEXT;
+      ALTER TABLE shots ADD COLUMN valueConfidence REAL;
+      ALTER TABLE shots ADD COLUMN courtX REAL;
+      ALTER TABLE shots ADD COLUMN courtY REAL;
+      PRAGMA user_version = 8;
+    `);
+  }
 }
 
 /** Run a DB operation; on ANY failure log + return the fallback (never throw). */
@@ -464,8 +479,9 @@ export async function insertShot(sessionId: number, shot: ResolvedShot): Promise
       `INSERT INTO shots (
          sessionId, shotIndex, tStart, tResolved, outcome, corrected, rimBounce,
          entryAngleDeg, releaseAngleDeg, xCross, originX, originY,
-         signalsJson, trajectoryJson, shotValue, formJson
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         signalsJson, trajectoryJson, shotValue, formJson,
+         valueSource, valueConfidence, courtX, courtY
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       sessionId,
       shot.id,
       shot.tStart,
@@ -482,6 +498,10 @@ export async function insertShot(sessionId: number, shot: ResolvedShot): Promise
       JSON.stringify(shot.trajectory),
       shot.shotValue ?? null,
       shot.form ? JSON.stringify(shot.form) : null,
+      shot.valueSource ?? null,
+      shot.valueConfidence ?? null,
+      shot.courtPos?.x ?? null,
+      shot.courtPos?.y ?? null,
     );
     return res.lastInsertRowId;
   });
@@ -588,6 +608,15 @@ export interface ShotRow {
    * hand-built rows (tests, fixtures) predating v6 still typecheck.
    */
   rechecked?: number | null;
+  /**
+   * 2/3 provenance (v8): which estimator decided the value, its confidence,
+   * and the homography-mapped court position (courtX/courtY, court-registered
+   * shots only). Optional so pre-v8 / hand-built rows still typecheck.
+   */
+  valueSource?: string | null;
+  valueConfidence?: number | null;
+  courtX?: number | null;
+  courtY?: number | null;
 }
 
 export async function sessionShots(sessionId: number): Promise<ShotRow[]> {
@@ -645,6 +674,13 @@ export function shotFromRow(row: ShotRow): ResolvedShot {
     shotValue: row.shotValue === 3 ? 3 : row.shotValue === 2 ? 2 : undefined,
     ...(row.formJson
       ? { form: parseJson<FormReport | undefined>(row.formJson, undefined) }
+      : {}),
+    // 2/3 provenance (v8) — so the receipt + placement map render the same
+    // "shows its work" data on a reopened session as they did live.
+    ...(row.valueSource != null ? { valueSource: row.valueSource as ShotValueSource } : {}),
+    ...(row.valueConfidence != null ? { valueConfidence: row.valueConfidence } : {}),
+    ...(row.courtX != null && row.courtY != null
+      ? { courtPos: { x: row.courtX, y: row.courtY } }
       : {}),
   };
 }
