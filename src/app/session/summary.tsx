@@ -8,6 +8,7 @@
  * (phase === 'ended'); otherwise falls back to the database via the ?id=
  * search param so the screen also works after a reload / deep link.
  */
+import { Ionicons } from '@expo/vector-icons';
 import { router, useLocalSearchParams } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { StyleSheet, Text, View, type LayoutRectangle } from 'react-native';
@@ -32,8 +33,9 @@ import { SummaryHero, isPerfectSession } from '@/components/SummaryHero';
 import { Card, Chip, Eyebrow, PillButton, Row, Screen } from '@/components/ui';
 import { color, space, type } from '@/constants/tokens';
 import { detectNewBests, type CareerBests } from '@/core/achievements';
+import { detectMilestones, type Milestone } from '@/core/milestones';
 import type { ResolvedShot, ShotOutcome, ShotValue } from '@/core/types';
-import { careerBests } from '@/data/db';
+import { careerBests, lifetimeTotals } from '@/data/db';
 import { saveSessionVideo } from '@/data/videoLibrary';
 import { useSession } from '@/state/sessionStore';
 import { useSettings } from '@/state/settingsStore';
@@ -105,6 +107,28 @@ export default function SessionSummaryScreen() {
       setPbBaseline(bests);
     });
   }, [storeMode, liveSessionId]);
+  // Career milestones crossed by THIS session (100th make, 25th session, …).
+  // lifetimeTotals() includes the just-saved session, so makesAfter/sessionsAfter
+  // are the post-session totals; detectMilestones derives the "before" and only
+  // fires a genuine crossing. Fetched once (storeMode) like the PB baseline.
+  const [milestones, setMilestones] = useState<Milestone[]>([]);
+  const msFetched = useRef(false);
+  useEffect(() => {
+    if (!storeMode || msFetched.current) return;
+    msFetched.current = true;
+    void lifetimeTotals()
+      .then((tot) => {
+        setMilestones(
+          detectMilestones({
+            makesAfter: tot.makes,
+            makesGained: stats.makes,
+            sessionsAfter: tot.sessions,
+          }),
+        );
+      })
+      .catch(() => {});
+  }, [storeMode, stats.makes]);
+
   const newBests = useMemo(() => {
     if (!storeMode || pbBaseline == null) return [];
     const bests = detectNewBests(stats, pbBaseline);
@@ -287,6 +311,28 @@ export default function SessionSummaryScreen() {
             </View>
           )}
           <SummaryHero stats={stats} style={styles.hero} />
+          {milestones.length > 0 && (
+            <View style={styles.milestoneBanner}>
+              <View style={styles.milestoneIcon}>
+                <Ionicons
+                  name={milestones[0]!.icon as React.ComponentProps<typeof Ionicons>['name']}
+                  size={20}
+                  color={color.threePt}
+                />
+              </View>
+              <View style={styles.milestoneText}>
+                <Text style={styles.milestoneEyebrow}>MILESTONE UNLOCKED</Text>
+                <Text style={styles.milestoneBlurb}>{milestones[0]!.blurb}</Text>
+                {milestones.length > 1 && (
+                  <Text style={styles.milestoneMore}>
+                    {`+${milestones.length - 1} more milestone${
+                      milestones.length - 1 === 1 ? '' : 's'
+                    } this session`}
+                  </Text>
+                )}
+              </View>
+            </View>
+          )}
           {newBests.length > 0 && (
             <PersonalBestBanner bests={newBests} style={styles.pbBanner} />
           )}
@@ -429,6 +475,47 @@ const styles = StyleSheet.create({
   pbBanner: {
     marginTop: -space.md,
     marginBottom: space.xl,
+  },
+  // Career-milestone banner: a gold "moment" tucked under the hero, above PBs.
+  milestoneBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: space.md,
+    marginTop: -space.md,
+    marginBottom: space.xl,
+    paddingVertical: space.md,
+    paddingHorizontal: space.lg,
+    borderRadius: 14,
+    backgroundColor: color.threePtTint,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: color.threePt,
+  },
+  milestoneIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0,0,0,0.18)',
+  },
+  milestoneText: {
+    flex: 1,
+    minWidth: 0,
+    gap: 2,
+  },
+  milestoneEyebrow: {
+    ...type.micro,
+    color: color.threePt,
+    letterSpacing: 1.2,
+  },
+  milestoneBlurb: {
+    ...type.bodyMedium,
+    color: color.text,
+  },
+  milestoneMore: {
+    ...type.caption,
+    color: color.textDim,
+    marginTop: 1,
   },
   mediaSection: {
     marginBottom: space.xl,
