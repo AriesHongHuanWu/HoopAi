@@ -789,3 +789,24 @@ export function weeklyAssignment(
   }
   return null;
 }
+
+/**
+ * The full weekly PLAN: the top (up to `max`) drillable findings, each paired
+ * with its drill — the coach as a training partner, not just a diagnostician.
+ * A superset of {@link weeklyAssignment} (which is item 0). Honours the ranked
+ * severity order and never repeats a finding.
+ */
+export function weeklyPlan(
+  findings: readonly CoachFinding[],
+  max = 3,
+): WeeklyAssignment[] {
+  const out: WeeklyAssignment[] = [];
+  for (const f of findings) {
+    const drillId = FINDING_DRILL[f.id];
+    if (drillId) {
+      out.push({ finding: f, drillId });
+      if (out.length >= max) break;
+    }
+  }
+  return out;
+}

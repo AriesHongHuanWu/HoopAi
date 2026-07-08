@@ -1,4 +1,4 @@
-import { weeklyAssignment } from '../coachEngine';
+import { weeklyAssignment, weeklyPlan } from '../coachEngine';
 import type { CoachFinding, FindingKind } from '../coachEngine';
 
 function finding(id: FindingKind, severity: 1 | 2 | 3 = 2): CoachFinding {
@@ -50,5 +50,28 @@ describe('weeklyAssignment', () => {
 
   test('returns null for an empty list', () => {
     expect(weeklyAssignment([])).toBeNull();
+  });
+});
+
+describe('weeklyPlan', () => {
+  test('returns up to the top 3 drillable findings, in order', () => {
+    const plan = weeklyPlan([
+      finding('unsureRate', 3), // no drill -> skipped
+      finding('entryAngleLow', 3),
+      finding('twoVsThree', 2),
+      finding('fatigue', 2),
+      finding('sideBias', 1), // 4th drillable -> dropped by max=3
+    ]);
+    expect(plan.map((p) => p.finding.id)).toEqual(['entryAngleLow', 'twoVsThree', 'fatigue']);
+    expect(plan[0]!.drillId).toBe('catchShoot10');
+  });
+
+  test('respects a custom max', () => {
+    const plan = weeklyPlan([finding('entryAngleLow'), finding('twoVsThree')], 1);
+    expect(plan).toHaveLength(1);
+  });
+
+  test('empty when nothing is drillable', () => {
+    expect(weeklyPlan([finding('unsureRate'), finding('improving')])).toEqual([]);
   });
 });
