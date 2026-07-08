@@ -373,6 +373,26 @@ export function backfillPredictedGap(
 }
 
 /**
+ * Whether a fitted arc's curvature is physically plausible for the scene scale.
+ *
+ * The quadratic y-coefficient `ya` is gravity — ~g/2, the SAME for every shot
+ * regardless of distance or arc height — and `ya / rimWidthPx` is scale-free
+ * (both scale with pixels-per-metre), so it stays ~constant however far the
+ * hoop is. A ball rattling on the rim produces a tight up/down oscillation that
+ * the quadratic fits as a near-vertical parabola with a hugely inflated `ya`
+ * (the "90-degree arc"). Reject those. Returns true when the scale is unknown
+ * (rimWidthPx ≤ 0) so it never over-rejects a real arc it cannot judge.
+ */
+export function plausibleArcCurvature(
+  ya: number,
+  rimWidthPx: number,
+  maxYaRimWidths: number,
+): boolean {
+  if (!(rimWidthPx > 0)) return true;
+  return ya / rimWidthPx <= maxYaRimWidths;
+}
+
+/**
  * PREDICTED landing: where the fitted arc will descend through `planeY`,
  * extrapolated into the FUTURE — the "where is this ball coming down" marker,
  * available mid-flight long before the ball actually gets there.

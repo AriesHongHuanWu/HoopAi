@@ -5,6 +5,7 @@ import {
   evalArc,
   backfillPredictedGap,
   fitArc,
+  plausibleArcCurvature,
   predictLanding,
   releaseAngleDeg,
   sampleArc,
@@ -415,5 +416,35 @@ describe('backfillPredictedGap', () => {
   test('no-op without enough real samples for a fit', () => {
     const traj = gappedFlight().slice(7); // only 3 reals on the left
     expect(backfillPredictedGap(traj.slice(0, 3 + 6 + 1))).toBe(false);
+  });
+});
+
+describe('plausibleArcCurvature', () => {
+  const RIM_W = 40; // px
+  // Real gravity ~g/2 ≈ 11 rim-widths/s². Face-on ya ≈ 11 * 40 = ~440 px/s².
+  const realYa = 11 * RIM_W;
+
+  test('accepts a real ballistic curvature (~g/2)', () => {
+    expect(plausibleArcCurvature(realYa, RIM_W, 60)).toBe(true);
+  });
+
+  test('accepts a shallow (foreshortened) curvature', () => {
+    expect(plausibleArcCurvature(2 * RIM_W, RIM_W, 60)).toBe(true);
+  });
+
+  test('rejects a rim-rattle-scale curvature (huge ya = near-vertical arc)', () => {
+    // 100 rim-widths/s² is ~9x real gravity — the degenerate 90° rattle fit.
+    expect(plausibleArcCurvature(100 * RIM_W, RIM_W, 60)).toBe(false);
+  });
+
+  test('is scale-invariant: same verdict for a far (small) rim', () => {
+    const farRim = 12; // px, distant hoop
+    expect(plausibleArcCurvature(11 * farRim, farRim, 60)).toBe(true);
+    expect(plausibleArcCurvature(100 * farRim, farRim, 60)).toBe(false);
+  });
+
+  test('never rejects when the scene scale is unknown', () => {
+    expect(plausibleArcCurvature(99999, 0, 60)).toBe(true);
+    expect(plausibleArcCurvature(99999, -5, 60)).toBe(true);
   });
 });

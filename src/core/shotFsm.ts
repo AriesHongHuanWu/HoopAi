@@ -1009,14 +1009,25 @@ export class ShotFsm {
  * Three-signal fusion table.
  *
  * Net channel available:
- *   MAKE  if (geo && net) || (net && cls) || (cls && occludedAtRim)
+ *   MAKE  if (geo && net) || (net && cls)
  *   MISS  if (crossing exists && !geo) || (geo && !net)
  * Net channel unavailable (netless hoop):
- *   MAKE  if geo || cls
+ *   MAKE  if geo || (cls && occludedAtRim)
  *   MISS  if crossing exists && !geo
  * Everything else ⇒ 'unsure'.
+ *
+ * Bread-ball guarantee: when the net channel IS available, `cls` may only
+ * contribute to a make by AGREEING with net (`net && cls`) — it can never
+ * override a `net === false` (no swish, a likely miss/airball) into a make.
+ * The old `(cls && occludedAtRim)` make term did exactly that: a single
+ * `ball_in_basket` blip near the rim minted a phantom make against a net that
+ * said "no". Removed. The `(cls && occludedAtRim)` path survives ONLY on the
+ * netless branch, where there is no net to corroborate and it is the sole
+ * signal an occluded ball had that it dropped in. The safe failure mode is
+ * `unsure`, never a false make.
  */
-function fuse(
+// Exported for the fusion truth-table test (pins the bread-ball guarantee).
+export function fuse(
   geo: boolean | null,
   net: boolean | null,
   cls: boolean,
@@ -1037,7 +1048,9 @@ function fuse(
     if (cls && occludedAtRim) return 'make';
     return 'unsure';
   }
-  if ((geo === true && net) || (net && cls) || (cls && occludedAtRim)) return 'make';
+  // net available: cls must AGREE with net (net && cls); it may NOT override a
+  // net === false into a make (the removed `(cls && occludedAtRim)` bread-ball).
+  if ((geo === true && net) || (net && cls)) return 'make';
   if (geo === true && !net) return 'miss';
   return 'unsure';
 }

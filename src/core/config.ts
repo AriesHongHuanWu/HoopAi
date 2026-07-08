@@ -734,4 +734,14 @@ export const FLIGHT = {
   corridorTubeRimWidths: 1.5,
   /** Cap on real samples kept for the global fit (a long arc is ~30–40). */
   maxFlightSamples: 64,
+  /**
+   * Max plausible arc curvature, in rim-widths per second^2. A fitted arc's
+   * quadratic y-coefficient (ya) IS gravity (~g/2 ≈ 11 rim-widths/s^2 face-on),
+   * invariant across shot distance and arc height — only rim-rattle or noise
+   * inflates it into the near-vertical "90-degree arc" the HUD used to draw.
+   * ya/rimWidth is scale-invariant (both scale with px-per-metre), so this cap
+   * is robust to how far the hoop is. Set generously at ~5x real gravity so it
+   * can NEVER reject a legitimate shot, only a degenerate rattle fit.
+   */
+  maxArcYaRimWidths: 60,
 } as const;

@@ -31,6 +31,7 @@ import {
   MIN_FIT_SAMPLES,
   evalArc,
   fitArc,
+  plausibleArcCurvature,
   predictLanding,
 } from '../core/trajectory';
 import { classifyLight, type LightProfile } from '../core/lightProfile';
@@ -106,6 +107,15 @@ export interface PipelineFrameState {
    * when no trustworthy prediction exists.
    */
   predictedPath: number[];
+  /**
+   * Sampled OBSERVED full-flight arc (flattened x,y pairs, analysis px) from
+   * the global FlightArc parabola, drawn regardless of FSM phase so the line
+   * traces the WHOLE flight — including 3-pointers and high arcs that never arm
+   * the near-rim FSM. Strictly visual; never arms a shot or feeds make/miss.
+   * Empty unless full-flight tracking is on and the arc is confident + has a
+   * physically-plausible curvature.
+   */
+  fullFlightPath: number[];
 }
 
 /** Why a captureFtAnchor() attempt did not produce a calibration. */
@@ -490,7 +500,15 @@ export class ShotPipeline {
     const predictedPath: number[] = [];
     if (phase === 'SHOT_LIVE' && this.lastRim && liveTrajectory.length >= 6) {
       const fit = fitArc(liveTrajectory);
-      if (fit && fit.ya > 0 && fit.r2y >= 0.35) {
+      // Reject a physically-impossible curvature: a rim rattle fits as a
+      // near-vertical parabola (huge ya) — the "90-degree arc". ya is gravity,
+      // invariant across shots, so this never rejects a real arc.
+      if (
+        fit &&
+        fit.ya > 0 &&
+        fit.r2y >= 0.35 &&
+        plausibleArcCurvature(fit.ya, this.lastRim.box.width, FLIGHT.maxArcYaRimWidths)
+      ) {
         const p = predictLanding(fit, this.lastRim.planeY);
         if (p) {
           predictedLanding = {
@@ -534,7 +552,11 @@ export class ShotPipeline {
       );
       const p = this.flightArc.landing(this.lastRim.planeY, floor);
       const gfit = p ? this.flightArc.fit(floor) : null;
-      if (p && gfit) {
+      if (
+        p &&
+        gfit &&
+        plausibleArcCurvature(gfit.ya, this.lastRim.box.width, FLIGHT.maxArcYaRimWidths)
+      ) {
         predictedLanding = {
           x: p.x,
           y: p.y,
@@ -553,6 +575,42 @@ export class ShotPipeline {
       }
     }
 
+    // Full-flight arc line (full-flight tracking only): the global parabola
+    // sampled over its OBSERVED window, drawn REGARDLESS of FSM phase. This is
+    // the fix for "the line only appears near the rim" — the FSM only arms (and
+    // fills liveTrajectory) near the hoop, so a 3-pointer or high-arc ball was
+    // never drawn mid-flight. The FlightArc tracks the whole flight, so we trace
+    // it from the first observed sample. STRICTLY visual: it never arms a shot
+    // or feeds make/miss (drawing != judging). Confidence + plausible-curvature
+    // gated, so a rattle (huge ya) or a shaky fit draws nothing, not a bad line.
+    const fullFlightPath: number[] = [];
+    if (this.useFlight && this.lastRim) {
+      const floor = scaleFrameGate(
+        MIN_FIT_SAMPLES,
+        this.tracker.estimatedStepDt(),
+        ABS_MIN_FIT_SAMPLES,
+      );
+      const gfit = this.flightArc.fit(floor);
+      const span = gfit ? gfit.tMax - gfit.tMin : 0;
+      if (
+        gfit &&
+        gfit.ya > 0 &&
+        span > 0 &&
+        gfit.r2y >= FLIGHT.corridorMinR2yLoose &&
+        plausibleArcCurvature(gfit.ya, this.lastRim.box.width, FLIGHT.maxArcYaRimWidths)
+      ) {
+        const K = 16;
+        for (let i = 0; i <= K; i++) {
+          const pt = evalArc(gfit, gfit.tMin + (span * i) / K);
+          if (!Number.isFinite(pt.x) || !Number.isFinite(pt.y)) {
+            fullFlightPath.length = 0;
+            break;
+          }
+          fullFlightPath.push(pt.x, pt.y);
+        }
+      }
+    }
+
     const state: PipelineFrameState = {
       t: frame.t,
       ball,
@@ -566,6 +624,7 @@ export class ShotPipeline {
       rimCountdown: this.lastRim ? null : this.rimLock.lockCountdown,
       predictedLanding,
       predictedPath,
+      fullFlightPath,
     };
     this.events.onFrame?.(state);
     if (resolved) {

@@ -146,6 +146,11 @@ export interface OverlayState {
   /** Flattened x,y pairs of the FUTURE arc (ball → predicted landing) — the
    *  dashed "where it's going" path drawn while the ball may be undetected. */
   predTraj: number[];
+  /** Flattened x,y pairs of the OBSERVED full-flight arc (analysis px), drawn
+   *  regardless of phase so the line traces the whole flight (3-pointers / high
+   *  arcs), not only near the rim. Strictly visual; empty unless the global arc
+   *  is confident. */
+  fullArc: number[];
   /** Seconds left on the pre-lock "hold steady" countdown (HUD shows ceil() as a
    *  3-2-1 reticle), or null when not counting / already locked. */
   rimCountdown: number | null;
@@ -171,6 +176,7 @@ export const EMPTY_OVERLAY: OverlayState = {
   rimCountdown: null,
   pred: null,
   predTraj: [],
+  fullArc: [],
   light: 0,
 };
 
@@ -636,6 +642,7 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
           rimCountdown: state.rimCountdown,
           pred: state.predictedLanding,
           predTraj: state.predictedPath,
+          fullArc: state.fullFlightPath,
           light: lightSv.value,
         };
       },

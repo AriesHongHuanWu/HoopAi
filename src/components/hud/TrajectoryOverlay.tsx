@@ -129,6 +129,43 @@ export function TrajectoryOverlay({
   });
   const bloomOpacity = useDerivedValue(() => trailOpacity.value * 0.5);
 
+  // --- full-flight arc (phase-independent) ---------------------------------
+  // The whole OBSERVED parabola from the global FlightArc, drawn from the first
+  // sample across the entire flight — the fix for "the line only shows near the
+  // rim". The near-rim FSM comet (trajPath above) only exists once a shot arms;
+  // this quiet guide line traces a 3-pointer or high arc long before that. It is
+  // purely visual and already curvature-gated in the pipeline (a rim rattle
+  // yields an empty fullArc, never a 90° line).
+  const fullArcPath = useDerivedValue(() => {
+    const path = Skia.Path.Make();
+    const o = overlay.value;
+    const m = mapping.value;
+    if (!m.ok) return path;
+    const pts = o.fullArc;
+    const n = pts.length >> 1;
+    if (n < 2) return path;
+    const x0 = pts[0]! * m.scale + m.ox;
+    const y0 = pts[1]! * m.scale + m.oy;
+    path.moveTo(x0, y0);
+    let px = x0;
+    let py = y0;
+    for (let i = 1; i < n; i++) {
+      const x = pts[i * 2]! * m.scale + m.ox;
+      const y = pts[i * 2 + 1]! * m.scale + m.oy;
+      path.quadTo(px, py, (px + x) / 2, (py + y) / 2);
+      px = x;
+      py = y;
+    }
+    path.lineTo(px, py);
+    return path;
+  });
+  // Shown whenever a confident arc exists (≥2 points), dimmer while the bright
+  // comet is also live so it reads as a guide, not a competing line.
+  const fullArcOpacity = useDerivedValue(() => {
+    if (overlay.value.fullArc.length < 4) return 0;
+    return overlay.value.phase === 'SHOT_LIVE' ? 0.4 : 0.6;
+  });
+
   // --- ball glide clock ----------------------------------------------------
   // The ball's x,y,vx,vy arrive only on each PROCESSED detection frame
   // (~15-30fps). To track smoothly at display rate we extrapolate every UI
@@ -359,6 +396,20 @@ export function TrajectoryOverlay({
           opacity={bracketOpacity}
         />
       </Group>
+
+      {/* Full-flight arc: the whole observed parabola as a quiet dashed accent
+          guide, drawn under the bright comet so the flight reads end-to-end. */}
+      <Path
+        path={fullArcPath}
+        style="stroke"
+        strokeWidth={2}
+        strokeCap="round"
+        strokeJoin="round"
+        color={color.accent}
+        opacity={fullArcOpacity}
+      >
+        <DashPathEffect intervals={[7, 7]} />
+      </Path>
 
       {/* Trail: soft bloom pass */}
       <Path
