@@ -11,10 +11,52 @@
  * Pure + no I/O: returns seconds into the clip, clamped to [0, duration]. The
  * caller feeds this to expo-video-thumbnails.
  */
-import type { ResolvedShot } from './types';
+import type { BallSample, ResolvedShot } from './types';
 
 function clamp(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
+}
+
+/**
+ * The best made shot's stored trajectory — the samples the POSTER share layout
+ * draws as an elegant arc flourish. "Best" is the highest-arcing make (smallest
+ * min-cy among makes, mirroring {@link sessionMomentSec}'s pick), falling back
+ * to any shot with a usable arc when none were made.
+ *
+ * Returns the RAW {@link BallSample}s in analysis-frame pixel space (see
+ * types.ts: origin top-left, +y DOWN). The share layer normalizes these into
+ * card space — this stays a pure selector so it's cheap to unit-test and reuse.
+ *
+ * A "usable arc" needs at least 3 real (non-predicted) samples that actually
+ * rise (span some vertical range); a couple of jittery points make an ugly
+ * flourish, so those shots are skipped and null is returned. Pure + no I/O.
+ */
+export function bestMakeTrajectory(
+  shots: readonly ResolvedShot[],
+): readonly BallSample[] | null {
+  if (shots.length === 0) return null;
+  const makes = shots.filter((s) => s.outcome === 'make');
+  const pool = makes.length > 0 ? makes : shots;
+
+  let best: readonly BallSample[] | null = null;
+  let bestCy = Infinity;
+  for (const s of pool) {
+    const real = (s.trajectory ?? []).filter((p) => !p.predicted);
+    if (real.length < 3) continue;
+    let minCy = Infinity;
+    let maxCy = -Infinity;
+    for (const p of real) {
+      if (p.cy < minCy) minCy = p.cy;
+      if (p.cy > maxCy) maxCy = p.cy;
+    }
+    // Reject a flat/degenerate arc (no meaningful rise to draw).
+    if (maxCy - minCy < 1) continue;
+    if (minCy < bestCy) {
+      bestCy = minCy;
+      best = real;
+    }
+  }
+  return best;
 }
 
 /**
