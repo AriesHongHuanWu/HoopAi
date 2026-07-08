@@ -1,0 +1,8 @@
+{
+  "name": "video-stitcher",
+  "version": "0.1.0",
+  "description": "Local Expo module: fast on-device MP4 reel export (stitch make-clips into one shareable video).",
+  "main": "index.ts",
+  "author": "Hoopilot",
+  "license": "MIT"
+}
