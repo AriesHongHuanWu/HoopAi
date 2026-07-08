@@ -1,7 +1,6 @@
 /**
- * ProfileButton — the entry point to "My Profile" (src/app/profile.tsx),
- * exported for LATER wiring into the Home header (index.tsx is out of scope
- * for this change, so nothing imports this yet).
+ * ProfileButton — the entry point to the "You" profile tab, rendered in the
+ * Home header (src/app/(tabs)/index.tsx) beside the settings gear.
  *
  * It's a quiet circular avatar chip: the player's initials over a tinted
  * disc, ringed by a thin completeness arc so a half-finished profile reads

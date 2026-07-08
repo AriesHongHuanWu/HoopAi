@@ -34,6 +34,7 @@ import { BootIntro, bootIntroDelayMs } from '@/components/BootIntro';
 import { Sparkline } from '@/components/charts/Sparkline';
 import { CoachMarks, useCoachMarks, type CoachStep } from '@/components/coach/CoachMarks';
 import { GoalRing } from '@/components/GoalRing';
+import { ProfileButton } from '@/components/profile/ProfileButton';
 import { Card, Chip, EmptyState, ErrorCard, Eyebrow, Row, Screen, StatNumber } from '@/components/ui';
 import { color, radius, space, touch, type } from '@/constants/tokens';
 import {
@@ -337,16 +338,19 @@ export default function HomeScreen() {
             </Text>
             <Text style={styles.betaNote}>Beta — everything unlocked</Text>
           </View>
-          <Link href="/settings" asChild>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Settings"
-              hitSlop={space.sm}
-              style={({ pressed }) => [styles.gearButton, pressed && styles.gearPressed]}
-            >
-              <Ionicons name="settings-sharp" size={22} color={color.textDim} />
-            </Pressable>
-          </Link>
+          <Row gap={space.sm}>
+            <ProfileButton size={40} />
+            <Link href="/settings" asChild>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Settings"
+                hitSlop={space.sm}
+                style={({ pressed }) => [styles.gearButton, pressed && styles.gearPressed]}
+              >
+                <Ionicons name="settings-sharp" size={22} color={color.textDim} />
+              </Pressable>
+            </Link>
+          </Row>
         </Row>
 
         {/* Hero Start CTA */}
