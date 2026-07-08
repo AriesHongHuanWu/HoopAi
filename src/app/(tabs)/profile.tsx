@@ -21,6 +21,7 @@ import { router } from 'expo-router';
 
 import { ChoiceCard, ChipSelect } from '@/components/profile/Choice';
 import { NumberSlider } from '@/components/profile/NumberSlider';
+import { SeasonCard } from '@/components/SeasonCard';
 import { Card, Chip, PillButton, Row, Screen, StatNumber } from '@/components/ui';
 import { color, radius, space, touch, type } from '@/constants/tokens';
 import type { ShootingHand } from '@/core/types';
@@ -256,6 +257,9 @@ export default function ProfileScreen() {
             />
           </Row>
         </Animated.View>
+
+        {/* Living season scoreboard — the profile's heartbeat */}
+        <SeasonCard entering={enter(1)} />
 
         {/* Complete-your-profile progress chip (only while incomplete) */}
         {!complete && (
