@@ -6,6 +6,12 @@
  * - 'classic' — the original swish-chime voice (plucked sines).
  * - 'arcade'  — chippy 8-bit square-wave blips (coin make, arpeggio streaks).
  * - 'stadium' — deeper broadcast voice (air-horn triads, crowd, low thuds).
+ * - '2k'      — the viral NBA-2K "Skiddity Skat Skap" jumpshot MAKE sound
+ *   (make cue only; the other cues borrow the stadium voice). This make cue
+ *   is a recorded game sound, NOT synthesized by scripts/generate-sounds.mjs,
+ *   and its rights are unlicensed — it stays OPT-IN (never a default) and
+ *   must be REPLACED with an original/licensed cue before a paid App Store
+ *   release. See docs/APPSTORE-CHECKLIST.md.
  *
  * The active pack lives in settings (useSettings().soundPack). Playback code
  * (src/camera/useShotSounds.ts) should resolve sources via
@@ -13,18 +19,19 @@
  */
 import type { SoundEvent } from '../core/types';
 
-export type SoundPack = 'classic' | 'arcade' | 'stadium';
+export type SoundPack = 'classic' | 'arcade' | 'stadium' | '2k';
 
 /** Every playable cue: shot events plus the two session chrome sounds. */
 export type PackSoundEvent = SoundEvent | 'session_start' | 'rim_locked';
 
-export const SOUND_PACKS: readonly SoundPack[] = ['classic', 'arcade', 'stadium'];
+export const SOUND_PACKS: readonly SoundPack[] = ['classic', 'arcade', 'stadium', '2k'];
 
 /** Display copy for the settings chip row. */
 export const SOUND_PACK_LABELS: Record<SoundPack, string> = {
   classic: 'Classic',
   arcade: 'Arcade',
   stadium: 'Stadium',
+  '2k': '2K Swish',
 };
 
 /* eslint-disable @typescript-eslint/no-var-requires */
@@ -55,6 +62,17 @@ export const SOUND_PACK_FILES: Record<SoundPack, Record<PackSoundEvent, number>>
     streak10: require('../../assets/sounds/stadium/streak10.wav'),
     session_start: require('../../assets/sounds/stadium/session_start.wav'),
     rim_locked: require('../../assets/sounds/stadium/rim_locked.wav'),
+  },
+  // '2k' shares the stadium voice everywhere EXCEPT the make cue, which is the
+  // recorded "Skiddity" jumpshot sound. See the file header note on licensing.
+  '2k': {
+    make: require('../../assets/sounds/2k/make.wav'),
+    miss: require('../../assets/sounds/2k/miss.wav'),
+    streak3: require('../../assets/sounds/2k/streak3.wav'),
+    streak5: require('../../assets/sounds/2k/streak5.wav'),
+    streak10: require('../../assets/sounds/2k/streak10.wav'),
+    session_start: require('../../assets/sounds/2k/session_start.wav'),
+    rim_locked: require('../../assets/sounds/2k/rim_locked.wav'),
   },
 };
 /* eslint-enable @typescript-eslint/no-var-requires */
