@@ -18,6 +18,7 @@ import { FormSequenceBuffer } from '../core/formSequence';
 import { ReleaseDetector } from '../core/releaseDetector';
 import { RimLock } from '../core/rimLock';
 import { estimateShotValueMetric } from '../core/courtGeometric';
+import { classifyByRegistration, type CourtRegistration } from '../core/courtRegistration';
 import {
   deriveFtCalibration,
   medianFootPoint,
@@ -193,6 +194,14 @@ export class ShotPipeline {
   private metric23 = false;
   /** Manual court-range override (Settings). 'auto' = use the 2/3 estimate. */
   private courtRange: 'auto' | '2pt' | '3pt' = 'auto';
+  /**
+   * Court registration (calibration ritual / auto court-line detection): an
+   * image→court homography + rulebook. When present it is the TOP-priority 2/3
+   * source — corner-accurate and placement-agnostic — outranking the metric and
+   * heuristic estimators. Per-session (the camera moves between sessions), so
+   * never persisted across a camera move. Null = the existing fallbacks.
+   */
+  private courtRegistration: CourtRegistration | null = null;
   /** Reappearance corroborator flag (Settings, experimental). */
   private reappearance = false;
   /** Camera pitch at/around rim lock from the IMU, degrees +up; null = no IMU. */
@@ -265,6 +274,13 @@ export class ShotPipeline {
    *  force every decided shot's value. Applies from the next resolved shot. */
   setCourtRange(range: 'auto' | '2pt' | '3pt'): void {
     this.courtRange = range;
+  }
+
+  /** Court registration (calibration ritual / auto court-line detection). Pass
+   *  null to clear it (e.g. re-calibrating). Applies from the next resolved
+   *  shot; it's the top-priority 2/3 source when a shooter foot is known. */
+  setCourtRegistration(reg: CourtRegistration | null): void {
+    this.courtRegistration = reg;
   }
 
   /** Reappearance corroborator (from Settings). Takes effect at rim lock. */
@@ -710,9 +726,23 @@ export class ShotPipeline {
           originY,
           { width: frame.frameWidth, height: frame.frameHeight },
         );
-        resolved.shotValue = metric ? metric.value : est.value;
+        // COURT REGISTRATION first: a calibrated homography maps the foot to a
+        // true court position and classifies against the REAL 3-point line
+        // (corner-accurate, any camera placement). Only when a shooter foot is
+        // known and the mapping is plausible; otherwise fall through to the
+        // metric estimator, then the always-available rim-widths heuristic.
+        const reg =
+          this.courtRegistration != null && originX != null && originY != null
+            ? classifyByRegistration(
+                this.courtRegistration,
+                originX * frame.frameWidth,
+                originY * frame.frameHeight,
+              )
+            : null;
+        resolved.shotValue = reg ? reg.value : metric ? metric.value : est.value;
         resolved.distanceRimWidths = est.distanceRimWidths;
-        if (metric) resolved.distanceM = metric.distanceM;
+        if (reg) resolved.distanceM = reg.distanceM;
+        else if (metric) resolved.distanceM = metric.distanceM;
         // Manual court-range override (Settings > Court range): when the user
         // pins the range, every decided shot takes that value regardless of the
         // auto 2/3 estimate — the calibration-free way to score a 3-point (or
