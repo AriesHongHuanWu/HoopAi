@@ -225,6 +225,8 @@ Repo:`AriesHongHuanWu/HoopAi`,本機 `C:\Users\aries\claude\claudeCode\hoop-ai`�
 5. **時序訊號(D14)**:離線 AUC >0.9 才進 app;進 app 後 unsure 率目標 <5%。
 6. **每季準度頁更新**:數字沒進步的一季 = 檢討會(寫進本檔 §9)。
 
+**低 fps 硬化(iPhone XR 8–15fps)**:決策核心的所有「N 幀」門檻已改為以量測到的取樣間隔換算的時間視窗(30fps 逐位元不變),各裝置階層 × 場景的判定路徑與驗證狀態見 [docs/DEVICE-SCENARIO-MATRIX.md](DEVICE-SCENARIO-MATRIX.md)。
+
 **實驗紀律**:任何準度改動 → harness before/after → 貼數字進 commit message。沒有數字的準度 PR 不收。
 
 ---

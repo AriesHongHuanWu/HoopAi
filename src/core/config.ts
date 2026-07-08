@@ -114,15 +114,69 @@ export const DETECTION = {
   },
 } as const;
 
+/**
+ * Reference capture rate the frame-COUNT tunables were originally authored
+ * against. On a fast phone the pipeline hits this; an iPhone XR runs detection
+ * at only ~8–15 fps, so any gate expressed as "N frames" silently changes its
+ * WALL-CLOCK meaning as fps drops (5 frames = 167 ms at 30 fps but 625 ms at
+ * 8 fps). The decision core therefore converts frame-count gates to a TIME
+ * budget = frames / NOMINAL_FPS, then re-derives an effective frame count from
+ * each consumer's own measured sample interval. By construction, at exactly
+ * NOMINAL_FPS every such gate reproduces its original integer frame count, so
+ * 30 fps behaviour is byte-identical and only slower devices see the fix.
+ */
+export const NOMINAL_FPS = 30;
+
+/**
+ * Half a nominal frame, in seconds — the tolerance used when a former
+ * frame-COUNT gate is compared as a wall-clock window. A window derived as
+ * `N / NOMINAL_FPS` must still treat the Nth nominal frame (whose elapsed time
+ * is exactly `N / NOMINAL_FPS`, give or take floating-point accumulation) as
+ * INSIDE the window, matching the old integer `≤ N` comparison. Comparing
+ * against `window + GATE_EPS_SEC` puts the boundary at the unambiguous midpoint
+ * between frame N and frame N+1, so float dust never flips a gate a frame early
+ * or late. At NOMINAL_FPS this reproduces the original integer behaviour
+ * exactly; at lower fps the half-frame slack is negligible against the window.
+ */
+export const GATE_EPS_SEC = 0.5 / NOMINAL_FPS;
+
+/**
+ * Convert a NOMINAL_FPS-authored frame count into an effective frame count for
+ * a device whose measured mean sample interval is `dtSec`. Returns the time
+ * budget (`frames / NOMINAL_FPS`) re-expressed in the device's own frames,
+ * floored at `minFrames` so a statistically-meaningful sample count survives
+ * even when the budget rounds below it. At dtSec = 1/NOMINAL_FPS the result is
+ * exactly `frames` (rounding is a no-op), keeping 30 fps identical.
+ *
+ * `dtSec ≤ 0` (no interval measured yet) returns `frames` unchanged.
+ */
+export function scaleFrameGate(
+  frames: number,
+  dtSec: number,
+  minFrames = 0,
+): number {
+  if (!(dtSec > 0)) return frames;
+  const budgetSec = frames / NOMINAL_FPS;
+  return Math.max(minFrames, Math.round(budgetSec / dtSec));
+}
+
 export const TRACKER = {
   /** Ring-buffer length of accepted ball samples. */
   historyLen: 30,
   /**
    * Reject a detection that jumped more than `jumpDiameters` ball diameters
-   * within the last `jumpWindowFrames` frames (avishah3 cleaning gate).
+   * within the `jumpWindowSec` wall-clock window (avishah3 cleaning gate). The
+   * window is now TIME-based, not a fixed frame count: at low fps 5 raw frames
+   * would be 625 ms (vs 167 ms at 30 fps), holding the relaxed flight-
+   * continuation score floor and the jump-gate lock open far too long. It is
+   * derived from the historical 5-frame value so 30 fps is unchanged.
    */
   jumpDiameters: 4,
+  /** @deprecated Kept for the derivation + any external reader; the live gate
+   *  uses `jumpWindowSec`. 5 frames at NOMINAL_FPS. */
   jumpWindowFrames: 5,
+  /** Wall-clock jump / flight-continuation window (5 frames at 30 fps). */
+  jumpWindowSec: 5 / NOMINAL_FPS,
   /**
    * Max plausible ball speed in diameters/second (~9 m/s over a 0.24 m ball,
    * with margin). On slow devices detections arrive far apart, so the jump

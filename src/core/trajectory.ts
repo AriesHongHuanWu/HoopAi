@@ -48,8 +48,22 @@ const PREDICTED_WEIGHT = 0.25;
 /** Weight floor for detected samples so a zero-score row cannot vanish. */
 const MIN_DETECTED_WEIGHT = 1e-3;
 
-/** Minimum number of samples required for a meaningful arc fit. */
-const MIN_FIT_SAMPLES = 5;
+/**
+ * Default minimum samples for a meaningful arc fit (at NOMINAL_FPS). A
+ * quadratic y-fit has 3 unknowns, so 3 is the hard floor for a determined
+ * system; 5 adds noise robustness at 30 fps. Low-fps callers pass a smaller,
+ * fps-scaled floor (never below 3 — see ABS_MIN_FIT_SAMPLES) so a short arc
+ * sampled only a handful of times can still be judged.
+ */
+export const MIN_FIT_SAMPLES = 5;
+
+/**
+ * Absolute floor on fit samples regardless of fps: 3 uniquely determines the
+ * quadratic (below this the fit is under- or exactly-determined with zero
+ * residual, so R² is meaningless). No fps is slow enough to justify going
+ * under this.
+ */
+export const ABS_MIN_FIT_SAMPLES = 3;
 
 /** Relative threshold below which the normal-equation system is singular. */
 const SINGULAR_REL_EPS = 1e-9;
@@ -73,13 +87,18 @@ function sampleWeight(s: BallSample): number {
  * gap-filling cannot dominate real observations.
  *
  * Returns null when the fit is impossible or meaningless:
- * - fewer than 5 samples,
+ * - fewer than `minSamples` samples (default MIN_FIT_SAMPLES; never below the
+ *   hard ABS_MIN_FIT_SAMPLES floor of 3, which uniquely determines the
+ *   quadratic — low-fps callers pass a smaller, fps-scaled floor),
  * - degenerate time distribution (e.g. all timestamps equal), or
  * - no vertical extent (flat roll — R² undefined).
  */
-export function fitArc(samples: readonly BallSample[]): ArcFit | null {
+export function fitArc(
+  samples: readonly BallSample[],
+  minSamples: number = MIN_FIT_SAMPLES,
+): ArcFit | null {
   const n = samples.length;
-  if (n < MIN_FIT_SAMPLES) return null;
+  if (n < Math.max(ABS_MIN_FIT_SAMPLES, minSamples)) return null;
 
   // Time bounds; fit in τ = t - tMin for numerical conditioning.
   let tMin = samples[0].t;
@@ -310,12 +329,17 @@ export function apexPoint(fit: ArcFit): Point | null {
  * two-sided arc. Call after appending a real sample to a live trajectory.
  *
  * Mutates `samples` in place (positions of predicted samples only; flags and
- * timestamps untouched). No-ops unless there are ≥ MIN_FIT_SAMPLES real
- * samples, at least one predicted sample sandwiched between reals, and the
- * two-sided fit is parabolic (ya > 0) with decent quality (r²y ≥ 0.5).
- * Returns true when a back-fill happened (for tests/diagnostics).
+ * timestamps untouched). No-ops unless there are ≥ `minRealSamples` real
+ * samples (default MIN_FIT_SAMPLES; a low-fps caller passes an fps-scaled
+ * floor so a short arc still smooths), at least one predicted sample
+ * sandwiched between reals, and the two-sided fit is parabolic (ya > 0) with
+ * decent quality (r²y ≥ 0.5). Returns true when a back-fill happened (for
+ * tests/diagnostics).
  */
-export function backfillPredictedGap(samples: BallSample[]): boolean {
+export function backfillPredictedGap(
+  samples: BallSample[],
+  minRealSamples: number = MIN_FIT_SAMPLES,
+): boolean {
   const n = samples.length;
   if (n < 3 || samples[n - 1]!.predicted) return false;
   // Most recent predicted run with REAL samples on both sides. (The FSM calls
@@ -334,8 +358,8 @@ export function backfillPredictedGap(samples: BallSample[]): boolean {
   if (samples[lo - 1]!.predicted) return false; // run touches the buffer start
 
   const reals = samples.filter((s) => !s.predicted);
-  if (reals.length < MIN_FIT_SAMPLES) return false;
-  const fit = fitArc(reals);
+  if (reals.length < minRealSamples) return false;
+  const fit = fitArc(reals, minRealSamples);
   if (!fit || fit.ya <= 0 || fit.r2y < 0.5) return false;
 
   for (let i = lo; i <= hi; i++) {

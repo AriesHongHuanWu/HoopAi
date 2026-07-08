@@ -18,7 +18,7 @@
  * camera frame timestamps carried in `FrameDetections.t` (seconds).
  * Coordinates are analysis-frame pixels, +y down (ball rising ⇒ vy < 0).
  */
-import { DETECTION, RELEASE, TRACKER } from './config';
+import { DETECTION, GATE_EPS_SEC, RELEASE, TRACKER } from './config';
 import { boxCenter, boxContains, distance } from './geometry';
 import { BallKalman } from './kalman';
 import type { LightProfile } from './lightProfile';
@@ -51,6 +51,14 @@ const BLUR_STREAK_MIN_DIAMETERS_PER_FRAME = 2;
 
 /** Fallback inter-frame interval (seconds) before any sample exists. */
 const NOMINAL_FRAME_DT = 1 / 30;
+
+/**
+ * EMA weight of the newest inter-step interval when tracking the mean sample
+ * cadence. Low (0.1) so a single long gap (occlusion, a dropped frame) barely
+ * moves the estimate — the estimate must reflect the DEVICE'S steady fps, not
+ * transient stalls, since it scales the frame-count gates.
+ */
+const DT_EMA_ALPHA = 0.1;
 
 /** Constructor options for {@link BallTracker}. */
 export interface BallTrackerOptions {
@@ -112,6 +120,23 @@ export class BallTracker {
   private lastSampleT: number | null = null;
 
   /**
+   * Timestamp of the previous `step` call (ANY frame, detection or not), for
+   * the cadence EMA. Distinct from `lastSampleT`, which only tracks emitted
+   * samples — the device fps is what matters for gate scaling, so every step
+   * counts, including empty (occluded) frames.
+   */
+  private lastStepT: number | null = null;
+
+  /**
+   * EMA of the inter-step interval (seconds) — the tracker's own live estimate
+   * of the device sample cadence, used to convert NOMINAL_FPS frame-count
+   * gates into a wall-clock-correct number of THIS device's frames (see
+   * config.scaleFrameGate). Seeded to the nominal 30 fps interval so the very
+   * first gates behave exactly as before until real timing accrues.
+   */
+  private meanStepDt = NOMINAL_FRAME_DT;
+
+  /**
    * Pose-gated release event (wrist position + camera time), or null. While
    * fresh (RELEASE.seedWindowSec) it opens a wrist-local relaxed score gate
    * in pickCandidate. Survives resetTrack() on purpose — reacquiring after
@@ -149,6 +174,15 @@ export class BallTracker {
   step(frame: FrameDetections, hoopRoi: Box | null): TrackedBall | null {
     const t = frame.t;
     this.frameIndex++;
+    // Track the device cadence from consecutive step timestamps (forward gaps
+    // only — a non-monotonic or repeated timestamp is ignored rather than
+    // poisoning the EMA). Every frame counts, occluded ones included: fps, not
+    // detection density, is what the frame-count gates must scale by.
+    if (this.lastStepT !== null && t > this.lastStepT) {
+      const dt = t - this.lastStepT;
+      this.meanStepDt += DT_EMA_ALPHA * (dt - this.meanStepDt);
+    }
+    this.lastStepT = t;
     this.pruneStale(t);
 
     const candidate = this.pickCandidate(frame, hoopRoi);
@@ -262,6 +296,11 @@ export class BallTracker {
     this.history.length = 0;
     this.frameIndex = 0;
     this.releaseSeed = null;
+    // Cadence estimate survives a track drop (resetTrack) — the device fps
+    // doesn't change when a track dies — but a full reset() is a new session,
+    // so re-seed it to the nominal interval.
+    this.lastStepT = null;
+    this.meanStepDt = NOMINAL_FRAME_DT;
   }
 
   // -------------------------------------------------------------------------
@@ -323,9 +362,14 @@ export class BallTracker {
     // (a candidate must land near the prediction), so the score floor drops
     // to ballScoreMinTracking. See the config rationale — this is what keeps
     // the ball tracked THROUGH its flight instead of only near the rim.
+    // TIME-based window (jumpWindowSec) so "fresh" means the same ~167 ms of
+    // wall clock at 8 fps as at 30 fps — a frame count would have kept the
+    // relaxed floor open ~4× longer on a slow phone, letting noise continue a
+    // long-dead track.
     const trackFresh =
       this.lastAccept !== null &&
-      this.frameIndex - this.lastAcceptFrame <= TRACKER.jumpWindowFrames;
+      this.lastAcceptT !== null &&
+      t - this.lastAcceptT <= TRACKER.jumpWindowSec + GATE_EPS_SEC;
 
     // Wrist-seeded reacquisition (see setReleaseEvent): while the release
     // seed is fresh, candidates near the released wrist get the SAME relaxed
@@ -429,20 +473,26 @@ export class BallTracker {
 
   /**
    * Rejects detections that jumped implausibly far from the last ACCEPTED
-   * sample within `jumpWindowFrames` frames. Once the last acceptance is
-   * older than the window the gate releases so the track can re-acquire
-   * anywhere.
+   * sample within the `jumpWindowSec` wall-clock window. Once the last
+   * acceptance is older than the window the gate releases so the track can
+   * re-acquire anywhere.
    *
-   * TIME-AWARE for slow devices: when inference runs below 30fps (older
-   * phones on CPU), consecutive detections are far apart in time and a
-   * legitimately fast ball covers far more ground between them. The allowance
-   * is therefore the larger of the classic `jumpDiameters` floor and a
-   * max-plausible-speed budget (`maxSpeedDiametersPerSec × Δt`).
+   * TIME-AWARE for slow devices in BOTH dimensions:
+   *  - the WINDOW is wall-clock (jumpWindowSec) so it releases after the same
+   *    ~167 ms regardless of fps — a frame count would keep the gate armed
+   *    625 ms at 8 fps, blocking a legitimate re-acquire for far too long;
+   *  - the ALLOWANCE is the larger of the classic `jumpDiameters` floor and a
+   *    max-plausible-speed budget (`maxSpeedDiametersPerSec × Δt`), because at
+   *    low fps a legitimately fast ball covers far more ground between
+   *    detections.
    */
   private passesJumpGate(cx: number, cy: number, t: number): boolean {
     const last = this.lastAccept;
     if (last === null) return true;
-    if (this.frameIndex - this.lastAcceptFrame > TRACKER.jumpWindowFrames) {
+    if (
+      this.lastAcceptT !== null &&
+      t - this.lastAcceptT > TRACKER.jumpWindowSec + GATE_EPS_SEC
+    ) {
       return true;
     }
     const elapsedSec =
