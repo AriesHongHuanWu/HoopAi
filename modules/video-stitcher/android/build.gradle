@@ -1,0 +1,33 @@
+apply plugin: 'com.android.library'
+apply plugin: 'kotlin-android'
+
+group = 'expo.modules.videostitcher'
+version = '0.1.0'
+
+def expoModulesCorePlugin = new File(project(":expo-modules-core").projectDir.absolutePath, "ExpoModulesCorePlugin.gradle")
+apply from: expoModulesCorePlugin
+applyKotlinExpoModulesCorePlugin()
+useCoreDependencies()
+useExpoPublishing()
+
+// media3 lives in the MODULE's own build.gradle (NOT the app package.json) so
+// the stitcher owns its transcode/transmux stack. media3-transformer performs
+// the clip + concatenate + transmux; media3-common/effect are its transitive
+// building blocks. 1.4.x is compatible with AGP 8 / minSdk 26.
+def media3Version = "1.4.1"
+
+android {
+  namespace "expo.modules.videostitcher"
+  defaultConfig {
+    minSdkVersion 26
+  }
+  lintOptions {
+    abortOnError false
+  }
+}
+
+dependencies {
+  implementation "androidx.media3:media3-transformer:${media3Version}"
+  implementation "androidx.media3:media3-common:${media3Version}"
+  implementation "androidx.media3:media3-effect:${media3Version}"
+}
