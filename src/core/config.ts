@@ -310,6 +310,17 @@ export const SHOT_FSM = {
   netMotionRimBounceFactor: 1.5,
   /** Net burst must occur within this many seconds of the plane crossing. */
   netWindowSec: 0.35,
+  /**
+   * Extra FORWARD (post-crossing) grace on the net window when the ball bounced
+   * on the rim. A rim rattle re-ascends and drops LATE, so the genuine swish
+   * burst can land past the symmetric window around the (early) first crossing
+   * and be missed — reading net=false on a real make. Applied one-directional
+   * (never earlier) and only when rimBounce is set AND the crossing time is
+   * known; the raised rim-bounce threshold still vets every sample, so a graze
+   * on a bounce-OUT can't sneak through. Recovers rim-roll makes without any
+   * bread-ball surface (net can only flip false->true here).
+   */
+  rimBounceNetGraceSec: 0.25,
   /** Samples used for the release-angle fit right after release. */
   releaseAngleSamples: 5,
   /** Max seconds a shot may stay live before force-resolving as unsure. */

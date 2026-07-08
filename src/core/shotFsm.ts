@@ -841,20 +841,22 @@ export class ShotFsm {
     const virtual = crossIdx < 0 ? this.projectVirtualCross(traj) : null;
 
     // --- net: burst near the crossing (or resolve time) ------------------
+    // For a RIM BOUNCE with a known crossing, extend the window FORWARD only:
+    // the ball re-ascends and drops late, so its genuine swish burst can land
+    // past the symmetric window around the early crossing (netBurstInWindow).
     let net: boolean | null = null;
     if (this.anyNetPositive) {
       const threshold =
         SHOT_FSM.netMotionThreshold *
         (this.rimBounce ? SHOT_FSM.netMotionRimBounceFactor : 1);
       const ref = tCross !== null ? tCross : virtual !== null ? virtual.tCross : t;
-      net = false;
-      for (let i = 0; i < this.netSamples.length; i++) {
-        const ns = this.netSamples[i];
-        if (Math.abs(ns.t - ref) <= SHOT_FSM.netWindowSec && ns.score > threshold) {
-          net = true;
-          break;
-        }
-      }
+      net = netBurstInWindow(
+        this.netSamples,
+        ref,
+        threshold,
+        SHOT_FSM.netWindowSec,
+        this.rimBounce && tCross !== null ? SHOT_FSM.rimBounceNetGraceSec : 0,
+      );
     }
 
     // --- cls --------------------------------------------------------------
@@ -1041,6 +1043,35 @@ export class ShotFsm {
  * signal an occluded ball had that it dropped in. The safe failure mode is
  * `unsure`, never a false make.
  */
+/**
+ * Whether any net-motion sample above `threshold` falls inside the acceptance
+ * window around `ref`.
+ *
+ * `graceSec === 0` → SYMMETRIC window (|t − ref| ≤ windowSec): the normal shot.
+ * `graceSec > 0`   → FORWARD-ONLY window ([ref, ref + windowSec + graceSec]):
+ * a RIM BOUNCE, whose genuine swish burst arrives LATE (the ball re-ascends and
+ * drops after the first crossing) but never before it — so we extend forward,
+ * never earlier. `net` can still only be flipped false→true here and the caller
+ * keeps the raised rim-bounce threshold, so a graze on a bounce-OUT (below
+ * threshold) can't read as a swish. Exported for unit testing.
+ */
+export function netBurstInWindow(
+  netSamples: readonly { t: number; score: number }[],
+  ref: number,
+  threshold: number,
+  windowSec: number,
+  graceSec: number,
+): boolean {
+  const forwardOnly = graceSec > 0;
+  for (const ns of netSamples) {
+    const inWindow = forwardOnly
+      ? ns.t >= ref && ns.t <= ref + windowSec + graceSec
+      : Math.abs(ns.t - ref) <= windowSec;
+    if (inWindow && ns.score > threshold) return true;
+  }
+  return false;
+}
+
 // Exported for the fusion truth-table test (pins the bread-ball guarantee).
 export function fuse(
   geo: boolean | null,
