@@ -33,6 +33,7 @@ import {
   weekStart,
   type WeeklyReport,
 } from '@/core/weeklyReport';
+import { matchArchetype, type ArchetypeMatch } from '@/core/shotLab';
 import { listSessions, sessionShots, shotFromRow } from '@/data/db';
 import { recomputeStats } from '@/core/stats';
 import type { ChartZone } from '@/core/types';
@@ -347,6 +348,56 @@ function weeksOf(sessions: readonly CoachSession[]): { startMs: number; label: s
 // Screen
 // ---------------------------------------------------------------------------
 
+/**
+ * "Your NBA twin" — the closest shooting archetype for the week (matched on
+ * ball-flight metrics, so no pose needed) plus the coachable universals worth
+ * stealing from that player's form. The identity hook the user asked for
+ * ("who do I shoot like?") folded into the weekly report.
+ */
+function NbaTwinCard({
+  match,
+  entering,
+}: {
+  match: ArchetypeMatch;
+  entering?: React.ComponentProps<typeof Animated.View>['entering'];
+}) {
+  const p = match.player;
+  return (
+    <Card entering={entering}>
+      <SectionEyebrow icon="person-outline">Your NBA twin</SectionEyebrow>
+      <Row style={styles.twinHead} gap={space.md}>
+        <View style={styles.twinHeadText}>
+          <Text
+            style={styles.twinName}
+            numberOfLines={1}
+            adjustsFontSizeToFit
+            minimumFontScale={0.7}
+          >
+            {p.name}
+          </Text>
+          <Text style={styles.twinStyle}>{p.style}</Text>
+        </View>
+        <Chip label={`${match.similarity}% match`} tone="accent" />
+      </Row>
+      <Text style={styles.body}>{p.mechanics}</Text>
+      <Text style={styles.twinCopyLabel}>STEAL THIS FROM THEIR FORM</Text>
+      <View style={styles.twinCopyList}>
+        {p.whatToCopy.slice(0, 2).map((c, i) => (
+          <Row key={i} gap={space.sm} style={styles.twinCopyRow}>
+            <Ionicons
+              name="checkmark-circle"
+              size={16}
+              color={color.make}
+              style={styles.twinCopyIcon}
+            />
+            <Text style={styles.twinCopy}>{c}</Text>
+          </Row>
+        ))}
+      </View>
+    </Card>
+  );
+}
+
 export default function CoachScreen() {
   const reducedMotion = useReducedMotion();
   const { state: load, reload } = useCoachSessions();
@@ -367,6 +418,18 @@ export default function CoachScreen() {
     if (activeWeek == null) return [];
     const weekSessions = sessions.filter((s) => weekStart(s.startedAt) === activeWeek.startMs);
     return runCoach(weekSessions);
+  }, [sessions, activeWeek]);
+
+  // NBA twin for the week: matchArchetype runs on shot-flight metrics (release/
+  // entry angle, timing), so it works WITHOUT any pose data — every tracked
+  // session can have a twin. Null until there are enough measured shots.
+  const twin = useMemo<ArchetypeMatch | null>(() => {
+    if (activeWeek == null) return null;
+    const weekShots = sessions
+      .filter((s) => weekStart(s.startedAt) === activeWeek.startMs)
+      .flatMap((s) => s.shots);
+    const matches = matchArchetype(weekShots);
+    return matches.length > 0 ? matches[0]! : null;
   }, [sessions, activeWeek]);
 
   const cardEnter = (i: number) => (reducedMotion ? undefined : FadeInDown.delay(i * 70).duration(380));
@@ -407,6 +470,9 @@ export default function CoachScreen() {
 
             <WeeklyHero report={report} reducedMotion={reducedMotion} />
 
+            {/* NBA twin — who you shoot like this week + what to steal */}
+            {twin != null && <NbaTwinCard match={twin} entering={cardEnter(1)} />}
+
             {/* Findings */}
             <View>
               <SectionEyebrow icon="clipboard-outline">The read on your week</SectionEyebrow>
@@ -432,7 +498,7 @@ export default function CoachScreen() {
               <SectionEyebrow icon="flask-outline">Go deeper</SectionEyebrow>
               <Text style={styles.body}>
                 Coach's Corner reads across your whole week. For a single session — make-vs-miss
-                breakdowns, your NBA twin and a drill plan — open the Shot Lab.
+                breakdowns, shot-by-shot form and a drill plan — open the Shot Lab.
               </Text>
               <PillButton
                 label="Open Shot Lab"
@@ -473,6 +539,46 @@ const styles = StyleSheet.create({
     ...type.body,
     color: color.textDim,
     marginTop: space.xs,
+  },
+  twinHead: {
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginBottom: space.sm,
+  },
+  twinHeadText: {
+    flex: 1,
+    minWidth: 0,
+    gap: 2,
+  },
+  twinName: {
+    ...type.heading,
+    color: color.text,
+  },
+  twinStyle: {
+    ...type.body,
+    color: color.textDim,
+  },
+  twinCopyLabel: {
+    ...type.micro,
+    color: color.textFaint,
+    letterSpacing: 1,
+    marginTop: space.md,
+    marginBottom: space.sm,
+  },
+  twinCopyList: {
+    gap: space.sm,
+  },
+  twinCopyRow: {
+    alignItems: 'flex-start',
+  },
+  twinCopyIcon: {
+    marginTop: 1,
+  },
+  twinCopy: {
+    ...type.body,
+    color: color.text,
+    flex: 1,
+    minWidth: 0,
   },
   eyebrowRow: {
     marginBottom: space.sm,
