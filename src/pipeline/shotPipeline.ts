@@ -512,6 +512,46 @@ export class ShotPipeline {
         }
       }
     }
+    // Global-arc fallback (full-flight tracking only): when the FSM's live
+    // buffer is too short to fit — early flight, an under-basket view where the
+    // ball spends little time in the FSM's window, or a long occlusion — but
+    // the whole-flight arc IS confident, drive the "where it's coming down"
+    // ghost from it. This is exactly the "see the parabola from under the
+    // basket" ask. HUD-only (never feeds make/miss) and strict-R² gated, so a
+    // shaky arc shows nothing rather than a wrong marker. Off-path untouched:
+    // the branch is skipped entirely when full-flight tracking is off or the
+    // live fit already produced a prediction.
+    if (
+      predictedLanding === null &&
+      this.useFlight &&
+      phase === 'SHOT_LIVE' &&
+      this.lastRim
+    ) {
+      const floor = scaleFrameGate(
+        MIN_FIT_SAMPLES,
+        this.tracker.estimatedStepDt(),
+        ABS_MIN_FIT_SAMPLES,
+      );
+      const p = this.flightArc.landing(this.lastRim.planeY, floor);
+      const gfit = p ? this.flightArc.fit(floor) : null;
+      if (p && gfit) {
+        predictedLanding = {
+          x: p.x,
+          y: p.y,
+          inSpan: p.x >= this.lastRim.spanLeft && p.x <= this.lastRim.spanRight,
+        };
+        // Draw the future from NOW (frame.t) forward to the predicted landing —
+        // the arc's own extrapolation covers the occluded stretch.
+        if (p.t > frame.t) {
+          const K = 10;
+          for (let i = 0; i <= K; i++) {
+            const pt = evalArc(gfit, frame.t + ((p.t - frame.t) * i) / K);
+            if (!Number.isFinite(pt.x) || !Number.isFinite(pt.y)) break;
+            predictedPath.push(pt.x, pt.y);
+          }
+        }
+      }
+    }
 
     const state: PipelineFrameState = {
       t: frame.t,
