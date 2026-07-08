@@ -48,6 +48,7 @@ import {
   type DayAggregate,
 } from '@/core/dailyChallenges';
 import { todayMakes } from '@/core/goals';
+import { computeDayStreak, type StreakResult } from '@/core/streak';
 import { listSessions, type SessionSummaryRow } from '@/data/db';
 import { useCameraPermission } from 'react-native-vision-camera';
 
@@ -161,6 +162,12 @@ export default function HomeScreen() {
   const [dbFailed, setDbFailed] = useState(false);
   /** Makes so far today, for the goal ring (src/core/goals.ts todayMakes). */
   const [goalMakes, setGoalMakes] = useState(0);
+  /** Consecutive-day shooting streak (src/core/streak.ts) — the return loop. */
+  const [streak, setStreak] = useState<StreakResult>({
+    current: 0,
+    longest: 0,
+    shotToday: false,
+  });
   /** Local day key driving today's deterministic challenge picks. */
   const [challengeDay, setChallengeDay] = useState(() => dateKeyFor(Date.now()));
   /** Today's aggregate for challenge progress (src/state/challengeStore.ts). */
@@ -228,19 +235,22 @@ export default function HomeScreen() {
     }, []),
   );
 
-  // Goal ring only needs data when a goal is actually set.
+  // Session scan (100 sessions): drives the day streak always, and today's
+  // goal progress when a goal is set — one DB read for both.
   useFocusEffect(
     useCallback(() => {
-      if (dailyGoalMakes <= 0) return;
       let alive = true;
       listSessions(GOAL_SCAN_LIMIT)
         .then((rows) => {
           if (!alive) return;
-          setGoalMakes(todayMakes(rows, Date.now()));
+          const now = Date.now();
+          setStreak(computeDayStreak(rows.map((r) => r.startedAt), now));
+          if (dailyGoalMakes > 0) setGoalMakes(todayMakes(rows, now));
         })
         .catch(() => {
           if (!alive) return;
           setGoalMakes(0);
+          setStreak({ current: 0, longest: 0, shotToday: false });
         });
       return () => {
         alive = false;
@@ -407,6 +417,37 @@ export default function HomeScreen() {
         </Pressable>
         </View>
         </Animated.View>
+
+        {/* Day streak — the return loop. Shown once a streak exists; stays live
+            through today until a full day is missed. */}
+        {streak.current >= 1 && (
+          <Animated.View entering={enter(3)}>
+            <View
+              style={styles.streakRow}
+              accessible
+              accessibilityLabel={`${streak.current} day shooting streak.${
+                streak.shotToday ? '' : ' Shoot today to keep it going.'
+              }`}
+            >
+              <View style={styles.streakFlame}>
+                <Ionicons name="flame" size={18} color={color.accent} />
+              </View>
+              <View style={styles.streakText}>
+                <Text style={styles.streakTitle}>
+                  {`${streak.current}-day streak`}
+                </Text>
+                <Text style={styles.streakSub} numberOfLines={1}>
+                  {streak.shotToday
+                    ? streak.current >= streak.longest && streak.longest > 1
+                      ? 'Your best run yet — keep it alive.'
+                      : `Longest: ${streak.longest} ${streak.longest === 1 ? 'day' : 'days'}`
+                    : 'Shoot today to keep it going.'}
+                </Text>
+              </View>
+              {!streak.shotToday && <Text style={styles.streakNudge}>TODAY</Text>}
+            </View>
+          </Animated.View>
+        )}
 
         {/* Daily goal */}
         {dailyGoalMakes > 0 && (
@@ -713,6 +754,43 @@ const styles = StyleSheet.create({
   modeSub: {
     ...type.body,
     color: color.textDim,
+  },
+  streakRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: space.md,
+    backgroundColor: color.surface,
+    borderRadius: radius.lg,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: color.border,
+    paddingVertical: space.md,
+    paddingHorizontal: space.lg,
+  },
+  streakFlame: {
+    width: 34,
+    height: 34,
+    borderRadius: radius.pill,
+    backgroundColor: color.accentTint,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  streakText: {
+    flex: 1,
+    minWidth: 0,
+    gap: 1,
+  },
+  streakTitle: {
+    ...type.bodyMedium,
+    color: color.text,
+  },
+  streakSub: {
+    ...type.caption,
+    color: color.textDim,
+  },
+  streakNudge: {
+    ...type.micro,
+    color: color.accent,
+    letterSpacing: 1,
   },
   cardPressed: {
     backgroundColor: color.surfaceRaised,
