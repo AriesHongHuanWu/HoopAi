@@ -34,11 +34,11 @@ const SCAN_LIMIT = 120;
 /** A single sub-stat (best streak / best week) with an icon. */
 function MiniStat({ icon, value, label }: { icon: IconName; value: string; label: string }) {
   return (
-    <Row gap={space.xs} style={styles.mini}>
+    <View style={styles.mini} accessible accessibilityLabel={`${value} ${label}`}>
       <Ionicons name={icon} size={14} color={color.accent} />
       <Text style={styles.miniValue}>{value}</Text>
       <Text style={styles.miniLabel}>{label}</Text>
-    </Row>
+    </View>
   );
 }
 
@@ -196,7 +196,9 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
   },
   mini: {
+    flexDirection: 'row',
     alignItems: 'center',
+    gap: space.xs,
   },
   miniValue: {
     ...type.bodyMedium,
