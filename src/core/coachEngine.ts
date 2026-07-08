@@ -70,6 +70,7 @@ export type FindingKind =
   | 'streaky'
   | 'fatigue'
   | 'twoVsThree'
+  | 'threePtFlat'
   | 'unsureRate'
   | 'volumeTrend'
   | 'nbaBand'
@@ -105,6 +106,8 @@ export const COACH = {
   entryAngleVolatileStdDeg: 8,
   /** Release-angle mean drift (recent vs baseline) beyond this flags drift. */
   releaseDriftDeg: 5,
+  /** Release angle dropping this many degrees on 3s vs 2s = arc flattening. */
+  threePtFlatDeg: 4,
   /** Best-zone minus worst-zone FG% gap (points) above this = imbalance. */
   zoneGapPts: 25,
   /** Median make-vs-miss horizontal-cross offset (rim widths) for side bias. */
@@ -328,6 +331,34 @@ const ruleReleaseDrift: Rule = (w) => {
       'Film one set in the Shot Lab and compare it to last week\'s. If the change wasn\'t deliberate, reset to your baseline finish height before it grooves in.',
     trend: 'n/a',
     strength: Math.abs(delta) / COACH.releaseDriftDeg,
+  };
+};
+
+/**
+ * RULE 3b — Arc flattens from three. Reaching for range, most shooters push a
+ * flatter, harder shot instead of adding legs — the release angle drops on 3s
+ * vs 2s. Uses release angle (always available from the arc, no pose) split by
+ * the estimated shot value. Additive coaching only; never touches make/miss.
+ */
+const ruleThreePtFlat: Rule = (w) => {
+  const threes = w.decidedShots.filter((s) => s.shotValue === 3);
+  const twos = w.decidedShots.filter((s) => s.shotValue !== 3);
+  const threeAng = collect(threes, 'releaseAngleDeg');
+  const twoAng = collect(twos, 'releaseAngleDeg');
+  if (threeAng.length < 4 || twoAng.length < 4) return null;
+  const a3 = mean(threeAng)!;
+  const a2 = mean(twoAng)!;
+  const delta = a2 - a3; // positive = 3s are flatter than 2s
+  if (delta < COACH.threePtFlatDeg) return null;
+  return {
+    id: 'threePtFlat',
+    severity: 2,
+    title: 'Your arc flattens from three',
+    evidence: `Your release angle drops ${delta.toFixed(1)}° on 3-pointers (${a3.toFixed(1)}°) vs 2s (${a2.toFixed(1)}°) — you're reaching for range instead of using your legs.`,
+    prescription:
+      'Keep the SAME high release from three and add legs, not a flatter push. Groove it shooting over an imagined bar so the arc stays up as the distance grows.',
+    trend: 'n/a',
+    strength: delta / COACH.threePtFlatDeg,
   };
 };
 
@@ -685,6 +716,7 @@ export const RULES: readonly Rule[] = [
   ruleEntryAngleLow,
   ruleEntryAngleVolatile,
   ruleReleaseDrift,
+  ruleThreePtFlat,
   ruleZoneImbalance,
   ruleSideBias,
   ruleStreaky,
@@ -732,6 +764,7 @@ const FINDING_DRILL: Partial<Record<FindingKind, DrillId>> = {
   zoneImbalance: 'midClock',
   sideBias: 'midClock',
   twoVsThree: 'corners3',
+  threePtFlat: 'corners3',
   fatigue: 'ftLadder',
 };
 

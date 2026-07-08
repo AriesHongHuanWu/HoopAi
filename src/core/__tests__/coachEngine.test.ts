@@ -368,3 +368,31 @@ describe('coachEngine', () => {
     }
   });
 });
+
+describe('ruleThreePtFlat', () => {
+  function mixed(id: number, at: number, threeRel: number, twoRel: number): CoachSession {
+    const shots: ResolvedShot[] = [];
+    for (let i = 0; i < 5; i++) {
+      shots.push(shot({ outcome: 'make', release: threeRel, value: 3 }));
+      shots.push(shot({ outcome: 'make', release: twoRel, value: 2 }));
+    }
+    return session(id, at, shots);
+  }
+
+  test('flags a flatter arc on threes vs twos (8° drop)', () => {
+    const f = findingById(runCoach([mixed(1, T0, 42, 50)]), 'threePtFlat');
+    expect(f).toBeDefined();
+    expect(f!.title).toMatch(/flatten/i);
+  });
+
+  test('no finding when 3s and 2s share the same arc', () => {
+    expect(findingById(runCoach([mixed(1, T0, 48, 48)]), 'threePtFlat')).toBeUndefined();
+  });
+
+  test('no finding without enough 3-point samples', () => {
+    const shots: ResolvedShot[] = [];
+    for (let i = 0; i < 6; i++) shots.push(shot({ outcome: 'make', release: 50, value: 2 }));
+    shots.push(shot({ outcome: 'make', release: 40, value: 3 }));
+    expect(findingById(runCoach([session(1, T0, shots)]), 'threePtFlat')).toBeUndefined();
+  });
+});
