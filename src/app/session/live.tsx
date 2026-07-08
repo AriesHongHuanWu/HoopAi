@@ -35,7 +35,9 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useAppStateGuard } from '../../camera/useAppStateGuard';
 import { ErrorBoundary } from '../../components/ErrorBoundary';
 import { useShotEngine, type ShotEngine } from '../../camera/useShotEngine';
-import { mapAnalysisToView } from '../../components/hud/overlayMapping';
+import { mapAnalysisToView, type Mapping } from '../../components/hud/overlayMapping';
+import { CourtCalibrationOverlay } from '../../components/hud/CourtCalibrationOverlay';
+import { useCourtCalibration } from '../../state/courtCalibrationStore';
 import { playSound, useShotSounds } from '../../camera/useShotSounds';
 import { useVoiceAnnouncements } from '../../camera/useVoiceAnnouncements';
 import { CoachMarks, useCoachMarks, type CoachStep } from '../../components/coach/CoachMarks';
@@ -357,6 +359,23 @@ function LiveSessionScreen() {
     [width, height],
   );
 
+  // Court calibration ("tap the court") — the corner-accurate, any-placement
+  // 2/3 upgrade. Snapshot the analysis↔view mapping (the camera is static once
+  // locked) and start the ritual; the overlay drives it from here.
+  const calSession = useCourtCalibration((s) => s.session);
+  const calRegistration = useCourtCalibration((s) => s.registration);
+  const beginCal = useCourtCalibration((s) => s.begin);
+  const [calMapping, setCalMapping] = useState<Mapping | null>(null);
+  const startCalibrate = useCallback(() => {
+    const eng = engineRef.current;
+    if (eng == null) return;
+    const m = mapAnalysisToView(eng.overlay.value, { w: width, h: height });
+    if (!m.ok) return;
+    setCalMapping(m);
+    beginCal();
+    void Haptics.selectionAsync();
+  }, [width, height, beginCal]);
+
   // FT-line calibration capture — hands the chip a stable callback into the
   // engine (optional 2/3 refinement; a missing engine just reports a quiet no).
   const captureFt = useCallback((): Promise<FtCaptureOutcome> => {
@@ -371,6 +390,10 @@ function LiveSessionScreen() {
     // Release the 3A lock so aiming at a new spot re-meters continuously.
     cameraRef.current?.resetFocus().catch(() => {});
     useSession.getState().setRimLocked(false);
+    // A moved camera invalidates any court registration — the homography was
+    // solved for the OLD pose. Clear it so a stale court can't mis-score 2/3.
+    useCourtCalibration.getState().clear();
+    setCalMapping(null);
     void Haptics.selectionAsync();
   }, []);
   useEffect(() => () => {
@@ -687,6 +710,15 @@ function LiveSessionScreen() {
               style={styles.endButton}
             />
           )}
+          {rimLocked && !isTickDrivenMode && calSession == null && calRegistration == null && (
+            <PillButton
+              label="Calibrate court"
+              icon="grid-outline"
+              variant="ghost"
+              onPress={startCalibrate}
+              style={styles.endButton}
+            />
+          )}
         </Row>
         <PillButton
           label="End session"
@@ -700,6 +732,12 @@ function LiveSessionScreen() {
       {/* Mode-complete celebration sheet */}
       {activeMode != null && modeDone && !confirmEnd && !ending && (
         <ModeComplete mode={activeMode} onReplay={replayMode} onExit={() => void endSession()} />
+      )}
+
+      {/* Court calibration ("tap the court") — owns taps while active. Renders
+          over everything so its landmark taps aren't intercepted by the HUD. */}
+      {calMapping != null && calSession != null && (
+        <CourtCalibrationOverlay mapping={calMapping} onDone={() => setCalMapping(null)} />
       )}
 
       {/* In-screen end confirmation */}

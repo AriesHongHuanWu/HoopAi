@@ -66,3 +66,18 @@ export function mapAnalysisToView(o: OverlayState, view: { w: number; h: number 
   const cyV0 = (h - sh * scaleV) / 2;
   return { ok: true, scale: k, ox: cxV0 - cxA0 * k, oy: cyV0 - cyA0 * k };
 }
+
+/**
+ * Invert {@link mapAnalysisToView}: a VIEW-px point (e.g. a court-calibration
+ * tap on the live preview) → ANALYSIS-square px, the space the detector, rim
+ * boxes and the court homography all live in. Returns null for a bad mapping.
+ */
+export function mapViewToAnalysis(
+  m: Mapping,
+  viewX: number,
+  viewY: number,
+): { x: number; y: number } | null {
+  'worklet';
+  if (!m.ok || m.scale === 0) return null;
+  return { x: (viewX - m.ox) / m.scale, y: (viewY - m.oy) / m.scale };
+}

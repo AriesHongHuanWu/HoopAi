@@ -7,7 +7,7 @@
 import { describe, expect, test } from '@jest/globals';
 
 import type { OverlayState } from '../../../camera/useShotEngine';
-import { mapAnalysisToView } from '../overlayMapping';
+import { mapAnalysisToView, mapViewToAnalysis } from '../overlayMapping';
 
 /** Minimal OverlayState — the mapper only reads frameW/H + srcW/H. */
 function state(srcW: number, srcH: number): OverlayState {
@@ -61,5 +61,25 @@ describe('mapAnalysisToView', () => {
   test('degenerate inputs return ok:false (nothing drawn)', () => {
     expect(mapAnalysisToView(state(0, 0), { w: 800, h: 360 }).ok).toBe(false);
     expect(mapAnalysisToView(state(1920, 1080), { w: 0, h: 0 }).ok).toBe(false);
+  });
+});
+
+describe('mapViewToAnalysis (calibration tap inverse)', () => {
+  test('round-trips analysis → view → analysis in both orientations', () => {
+    for (const m of [
+      mapAnalysisToView(state(1920, 1080), { w: 800, h: 360 }),
+      mapAnalysisToView(state(1080, 1920), { w: 360, h: 800 }),
+    ]) {
+      for (const [ax, ay] of [[208, 208], [10, 91], [400, 300]] as const) {
+        const v = apply(m, ax, ay);
+        const back = mapViewToAnalysis(m, v.x, v.y)!;
+        expect(back.x).toBeCloseTo(ax, 4);
+        expect(back.y).toBeCloseTo(ay, 4);
+      }
+    }
+  });
+
+  test('a bad mapping yields null', () => {
+    expect(mapViewToAnalysis({ ok: false, scale: 0, ox: 0, oy: 0 }, 100, 100)).toBeNull();
   });
 });

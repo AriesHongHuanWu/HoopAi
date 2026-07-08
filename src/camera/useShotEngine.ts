@@ -44,6 +44,7 @@ import {
   type FtCaptureOutcome,
 } from '../pipeline/shotPipeline';
 import { useSettings } from '../state/settingsStore';
+import { useCourtCalibration } from '../state/courtCalibrationStore';
 import { resolvedTuning } from './deviceTuning';
 
 // Bundled detectors (user-selectable in Settings). 'standard' = YOLO11n
@@ -736,6 +737,13 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
   useEffect(() => {
     pipeline.setCourtRange(courtRange);
   }, [pipeline, courtRange]);
+  // Court registration (calibration ritual): the top-priority, corner-accurate,
+  // placement-agnostic 2/3 source when the user has tapped their court. Null =
+  // uncalibrated (metric/heuristic fallbacks unchanged).
+  const courtRegistration = useCourtCalibration((s) => s.registration);
+  useEffect(() => {
+    pipeline.setCourtRegistration(courtRegistration);
+  }, [pipeline, courtRegistration]);
   const reappearance = useSettings((s) => s.reappearance);
   useEffect(() => {
     pipeline.setReappearance(reappearance);
