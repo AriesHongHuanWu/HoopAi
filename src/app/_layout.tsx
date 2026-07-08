@@ -24,6 +24,7 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { color } from '@/constants/tokens';
+import { useDeviceTuning } from '@/camera/deviceTuning';
 import { useSettings } from '@/state/settingsStore';
 
 SplashScreen.preventAutoHideAsync().catch(() => {
@@ -66,6 +67,9 @@ export default function RootLayout() {
     Inter_600SemiBold,
   });
   const settingsHydrated = useSettingsHydrated();
+  // One-time per-device detector tuning, applied once settings have hydrated
+  // (so it never races the persisted store — see useDeviceTuning).
+  useDeviceTuning(settingsHydrated);
   // If fonts fail to load (rare, bundled assets) we still start the app with
   // system-font fallbacks rather than hanging on the splash forever.
   const ready = (fontsLoaded || fontError != null) && settingsHydrated;

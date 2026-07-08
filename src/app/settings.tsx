@@ -43,6 +43,9 @@ import {
   type TrackingPreset,
   type VoiceMetric,
 } from '@/state/settingsStore';
+import * as Device from 'expo-device';
+import { resolvedTuning } from '@/camera/deviceTuning';
+import { tierLabel, type DeviceTier } from '@/core/deviceProfile';
 
 const MIN_HEIGHT_CM = 120;
 const MAX_HEIGHT_CM = 230;
@@ -97,6 +100,13 @@ const DETECTION_RATE_OPTIONS: { value: DetectionRate; label: string; blurb: stri
   { value: 'auto', label: 'Auto · recommended', blurb: 'Smooth tracking on every supported phone.' },
   { value: 'battery', label: 'Battery saver', blurb: 'Cooler phone, longer sessions.' },
   { value: 'max', label: 'Maximum', blurb: 'Newest phones only.' },
+];
+
+const DEVICE_TIER_OPTIONS: { value: 'auto' | DeviceTier; label: string; blurb: string }[] = [
+  { value: 'auto', label: 'Auto · recommended', blurb: 'Detect this phone and tune detection for it.' },
+  { value: 'high', label: 'High', blurb: 'Newest phones — most accurate small-ball model, all features.' },
+  { value: 'mid', label: 'Balanced', blurb: 'Mid-range phones — a good speed / accuracy mix.' },
+  { value: 'entry', label: 'Entry', blurb: 'Older phones (iPhone XR class) — smooth, reliable tracking first.' },
 ];
 
 /**
@@ -499,6 +509,11 @@ export default function SettingsScreen() {
   const set = useSettings((s) => s.set);
   const applyTrackingPreset = useSettings((s) => s.applyTrackingPreset);
   const resetTutorial = useSettings((s) => s.resetTutorial);
+  const deviceTierOverride = useSettings((s) => s.deviceTierOverride);
+  const setDeviceTier = useSettings((s) => s.setDeviceTier);
+  // Live tier: the model-string guess refined by the last measured benchmark.
+  const resolvedTier = resolvedTuning(deviceTierOverride, lastBenchmark?.ms ?? null).tier;
+  const deviceName = Device.modelName ?? Device.deviceName ?? 'your phone';
 
   // Respect the system Reduce Motion setting: cards appear in place.
   const reducedMotion = useReducedMotion();
@@ -688,6 +703,32 @@ export default function SettingsScreen() {
               Pick one above to snap back to a bundle.
             </Text>
           )}
+          <View style={styles.divider} />
+          {/* Per-device tuning — the app detects this phone's capability and
+              tunes detection for it; the user can override if it runs hot or
+              wants max quality. */}
+          <View style={styles.settingText}>
+            <Text style={styles.settingLabel}>Your device</Text>
+            <Text style={styles.settingDesc}>
+              {deviceName} · tuned for{' '}
+              <Text style={{ color: color.accent }}>{tierLabel(resolvedTier)}</Text>. We pick the
+              detector model and speed that fit your phone. Override only if you know better.
+            </Text>
+          </View>
+          <View style={styles.presetList}>
+            {DEVICE_TIER_OPTIONS.map((opt) => (
+              <OptionRow
+                key={opt.value}
+                label={opt.label}
+                blurb={opt.blurb}
+                selected={deviceTierOverride === opt.value}
+                onPress={() => {
+                  tick();
+                  setDeviceTier(opt.value);
+                }}
+              />
+            ))}
+          </View>
           <View style={styles.divider} />
           {/* Debug mode is the ONE switch that reveals every advanced knob —
               the settings stay a 30-second read for everyone else. */}

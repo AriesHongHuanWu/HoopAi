@@ -6,6 +6,7 @@ import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
 
 import type { SoundPack } from '../camera/soundPacks';
+import { DEVICE_TUNING, type DeviceTier } from '../core/deviceProfile';
 import type { ShootingHand } from '../core/types';
 
 /** Which clips survive when a recorded session ends. */
@@ -209,6 +210,24 @@ export interface SettingsState {
    * showed it can distract the tracker with non-ball movers.
    */
   motionAssist: boolean;
+  /**
+   * Manual device-tier override. 'auto' (default) lets the app classify this
+   * phone (src/core/deviceProfile.ts) and, once, apply that tier's tuned
+   * detector defaults. A user who knows better can pin 'entry'/'mid'/'high'
+   * from Settings — e.g. force 'entry' on a phone that thermal-throttles.
+   */
+  deviceTierOverride: 'auto' | DeviceTier;
+  /**
+   * The tier we actually detected + tuned for (diagnostic display in
+   * Settings). Null until the one-time device tuning has run.
+   */
+  detectedTier: DeviceTier | null;
+  /**
+   * Guard so device tuning applies its defaults exactly ONCE (first launch on
+   * this device). After that the user owns the detector knobs — re-detecting
+   * on every launch would stomp their manual choices.
+   */
+  deviceTuned: boolean;
   /** Last session orientation — powers the Home quick-start (skip setup). */
   lastOrient: 'portrait' | 'landscape';
   /**
@@ -232,6 +251,21 @@ export interface SettingsState {
    * inconsistent intermediate state. See {@link TRACKING_PRESETS}.
    */
   applyTrackingPreset: (preset: Exclude<TrackingPreset, 'custom'>) => void;
+  /**
+   * Apply the tuned detector defaults for a device tier — but ONLY the first
+   * time (deviceTuned guard), so a user's later manual knob changes are never
+   * overwritten on relaunch. Records detectedTier for the Settings display and
+   * flips deviceTuned. A no-op once tuned (still records the tier). Called by
+   * {@link useDeviceTuning} after expo-device + the first benchmark resolve.
+   */
+  applyDeviceTuning: (tier: DeviceTier) => void;
+  /**
+   * Manual device-tier override from Settings. Unlike {@link applyDeviceTuning}
+   * this is a deliberate user choice, so it applies the tier's detector knobs
+   * immediately (no once-guard). 'auto' re-applies the detected tier's knobs
+   * and hands the live rung decision back to the benchmark.
+   */
+  setDeviceTier: (override: 'auto' | DeviceTier) => void;
   /** Mark one screen's walkthrough as seen (called on finish/skip). */
   markTutorialSeen: (screen: TutorialScreen) => void;
   /**
@@ -272,12 +306,45 @@ export const useSettings = create<SettingsState>()(
       metric23: false,
       reappearance: false,
       motionAssist: false,
+      deviceTierOverride: 'auto',
+      detectedTier: null,
+      deviceTuned: false,
       lastOrient: 'portrait',
       formAnalysis: false,
       tutorialSeen: TUTORIAL_SEEN_DEFAULT,
       dailyGoalMakes: 0,
       set: (key, value) => set({ [key]: value } as Pick<SettingsState, typeof key>),
       applyTrackingPreset: (preset) => set({ ...TRACKING_PRESETS[preset] }),
+      applyDeviceTuning: (tier) =>
+        set((s) => {
+          // Always record what we detected (cheap, drives the Settings label).
+          if (s.deviceTuned) return { detectedTier: tier };
+          const t = DEVICE_TUNING[tier];
+          // First-launch tuning: seed the detector knobs + heavy-feature
+          // defaults from the tier, then never again.
+          return {
+            detectedTier: tier,
+            deviceTuned: true,
+            perfMode: t.perfMode,
+            detectorAccel: t.detectorAccel,
+            detectionRate: t.detectionRate,
+            roiZoom: t.roiZoomSafe,
+            formAnalysis: t.poseSafe ? s.formAnalysis : false,
+          };
+        }),
+      setDeviceTier: (override) =>
+        set((s) => {
+          const tier = override === 'auto' ? s.detectedTier : override;
+          if (tier == null) return { deviceTierOverride: 'auto' };
+          const t = DEVICE_TUNING[tier];
+          return {
+            deviceTierOverride: override,
+            perfMode: t.perfMode,
+            detectorAccel: t.detectorAccel,
+            detectionRate: t.detectionRate,
+            roiZoom: t.roiZoomSafe,
+          };
+        }),
       markTutorialSeen: (screen) =>
         set((s) => ({ tutorialSeen: { ...s.tutorialSeen, [screen]: true } })),
       resetTutorial: () => set({ tutorialSeen: { ...TUTORIAL_SEEN_DEFAULT } }),

@@ -44,6 +44,7 @@ import {
   type FtCaptureOutcome,
 } from '../pipeline/shotPipeline';
 import { useSettings } from '../state/settingsStore';
+import { resolvedTuning } from './deviceTuning';
 
 // Bundled detectors (user-selectable in Settings). 'standard' = YOLO11n
 // (fast); 'precise' = YOLO11s trained on more scenes (accurate, slower).
@@ -326,6 +327,14 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
 
   const detectorModel = useSettings((s) => s.detectorModel);
   const perfMode = useSettings((s) => s.perfMode);
+  // Device tier → which model rung to LOAD FIRST. An 'entry' phone (iPhone XR
+  // class) is KNOWN to run Tiny too slowly, so we load Nano straight away
+  // instead of wasting ~1s loading Tiny only for the speed budget to step it
+  // back down. 'high' starts on Tiny; 'auto'/mid let the runtime budget
+  // decide. Refined live by the last measured benchmark (resolveTier).
+  const deviceTierOverride = useSettings((s) => s.deviceTierOverride);
+  const lastBenchmark = useSettings((s) => s.lastBenchmark);
+  const startRung = resolvedTuning(deviceTierOverride, lastBenchmark?.ms ?? null).tuning.startRung;
   // Opt-in Apache-2.0 YOLOX detector (beta). When on, it overrides model + input
   // size + pixel layout; when off (default) every path is byte-identical to the
   // shipping YOLO11 pipeline, so there is zero regression risk.
@@ -411,10 +420,19 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
         label: `nano${sizeTag}/${fast.label}`,
         delegates: fast.delegates,
       };
+      // Entry-tier phones load Nano first (Tiny is known-too-slow here); every
+      // other tier tries Tiny first and lets the speed budget step down.
+      const gpuFirst = detectorAccel === 'gpu';
+      const tinyFirst: Attempt[] = gpuFirst
+        ? [tinyGpu, tinyCpu, nanoGpu, nanoCpu]
+        : [tinyCpu, nanoCpu];
+      const nanoFirst: Attempt[] = gpuFirst
+        ? [nanoGpu, nanoCpu, tinyGpu, tinyCpu]
+        : [nanoCpu, tinyCpu];
       const attempts: Attempt[] = useYolox
-        ? detectorAccel === 'gpu'
-          ? [tinyGpu, tinyCpu, nanoGpu, nanoCpu]
-          : [tinyCpu, nanoCpu]
+        ? startRung === 'nano'
+          ? nanoFirst
+          : tinyFirst
         : perfMode === 'speed' || forceCpu
           ? [
               { asset: MODEL_ASSETS.fast, label: `fast/${fast.label}`, delegates: fast.delegates },
