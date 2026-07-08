@@ -195,6 +195,24 @@ export function SummaryHero({
           />
         </View>
       )}
+      {/* Integrity line: shots the detector couldn't call confidently are shown
+          as 'unsure' and EXCLUDED from FG% — never guessed into makes. Surfacing
+          the count is the trust promise made visible (the #1 rule: no bread
+          balls). Only shown when there were unsure shots. */}
+      {stats.unsure > 0 && (
+        <View
+          style={styles.integrityRow}
+          accessible
+          accessibilityLabel={`${stats.unsure} ${
+            stats.unsure === 1 ? 'shot' : 'shots'
+          } flagged unsure and not counted, so your field-goal percentage stays honest.`}
+        >
+          <Ionicons name="shield-checkmark-outline" size={13} color={color.textFaint} />
+          <Text style={styles.integrityText}>
+            {`${stats.unsure} ${stats.unsure === 1 ? 'shot' : 'shots'} unsure — not counted either way`}
+          </Text>
+        </View>
+      )}
     </View>
   );
 }
@@ -219,6 +237,17 @@ const styles = StyleSheet.create({
   chipRow: {
     alignItems: 'center',
     marginTop: space.lg,
+  },
+  integrityRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 5,
+    marginTop: space.md,
+  },
+  integrityText: {
+    ...type.caption,
+    color: color.textFaint,
   },
   chip: {
     flexDirection: 'row',
