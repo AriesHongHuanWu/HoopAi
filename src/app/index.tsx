@@ -661,6 +661,12 @@ export default function HomeScreen() {
           </Row>
           <Row gap={space.md}>
             <QuickLink
+              icon="school"
+              label="Coach"
+              hint="Your weekly report and coaching advice"
+              onPress={() => router.push('/coach')}
+            />
+            <QuickLink
               icon="basketball-outline"
               label="Scoreboard"
               hint="Track a live head-to-head score"
