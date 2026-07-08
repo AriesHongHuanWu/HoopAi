@@ -69,6 +69,9 @@ import { planClips } from '@/core/clipPlanner';
 import { clamp } from '@/core/geometry';
 import type { ResolvedShot, SessionStats, ShotOutcome } from '@/core/types';
 import type { SessionRow } from '@/data/db';
+import { buildReelSegments } from '@/media/reelExport';
+import * as videoStitcher from '@/media/videoStitcher';
+import { saveSessionVideo } from '@/data/videoLibrary';
 import { useSettings } from '@/state/settingsStore';
 
 // ---------------------------------------------------------------------------
@@ -233,17 +236,50 @@ function ReelEndFrame({
   session,
   shots,
   stats,
+  videoDurationSec,
   onReplay,
 }: {
   session: SessionRow;
   shots: readonly ResolvedShot[];
   stats: SessionStats;
+  /** Length of the source recording, from the player — needed to cut the MP4. */
+  videoDurationSec: number;
   onReplay: () => void;
 }) {
   const { width } = useWindowDimensions();
   const reducedMotion = useReducedMotion();
   const [sharing, setSharing] = useState(false);
   const [shareFailed, setShareFailed] = useState(false);
+  // Native MP4 export: stitch the make windows into one file and save it to
+  // Photos (ready to post as an Instagram Reel). Only offered when the native
+  // video-stitcher module is linked (real device builds) and the recording is
+  // long enough to plan from. 'idle' | 'working' | 'saved' | 'failed'.
+  const [exportState, setExportState] = useState<'idle' | 'working' | 'saved' | 'failed'>('idle');
+  const canExport = videoStitcher.available && videoDurationSec > 0;
+
+  const onExport = () => {
+    if (exportState === 'working' || !canExport) return;
+    void Haptics.selectionAsync();
+    setExportState('working');
+    void (async () => {
+      try {
+        const plan = buildReelSegments(session, shots, { videoDurationSec });
+        if (!plan.ok) {
+          setExportState('failed');
+          return;
+        }
+        const { uri } = await videoStitcher.stitch({
+          sourceUri: plan.sourceUri,
+          segments: plan.segments,
+          outputFileName: 'hoopilot-reel.mp4',
+        });
+        const saved = await saveSessionVideo(uri);
+        setExportState(saved ? 'saved' : 'failed');
+      } catch {
+        setExportState('failed');
+      }
+    })();
+  };
 
   const label =
     session.label.trim() !== '' ? session.label.trim() : 'Shooting session';
@@ -304,13 +340,34 @@ function ReelEndFrame({
         </View>
       )}
 
+      {exportState === 'saved' && (
+        <View style={{ marginTop: space.md }}>
+          <Chip label="Reel saved to Photos — post it to your story" tone="make" />
+        </View>
+      )}
+      {exportState === 'failed' && (
+        <View style={{ marginTop: space.md }}>
+          <Chip label="Couldn't save the reel — try again" tone="unsure" />
+        </View>
+      )}
+
       <Animated.View entering={enter(220)} style={styles.endActions}>
+        {canExport && (
+          <PillButton
+            label={exportState === 'working' ? 'Saving reel…' : 'Save reel to Photos'}
+            icon="film"
+            onPress={onExport}
+            disabled={exportState === 'working'}
+            style={{ alignSelf: 'stretch' }}
+          />
+        )}
         <PillButton
+          variant={canExport ? 'ghost' : 'primary'}
           label={sharing ? 'Preparing…' : 'Share my card'}
           icon="share-social"
           onPress={onShare}
           disabled={sharing}
-          style={{ alignSelf: 'stretch' }}
+          style={{ alignSelf: 'stretch', marginTop: canExport ? space.md : 0 }}
         />
         <PillButton
           variant="ghost"
@@ -575,6 +632,7 @@ function ReelPlayer({
           session={session}
           shots={shots}
           stats={stats}
+          videoDurationSec={durationSec}
           onReplay={startReel}
         />
       ) : (
