@@ -729,6 +729,89 @@ export const RULES: readonly Rule[] = [
 ];
 
 // ---------------------------------------------------------------------------
+// Personalization — the coach talks to WHO you are, not just what you shot
+// ---------------------------------------------------------------------------
+
+/**
+ * The slice of the player's profile the coach personalizes to. Structural +
+ * all-optional so core stays decoupled from the profile store; the Coach
+ * screen maps its persisted profile onto this shape. With no profile the
+ * coach behaves exactly as before (see {@link runCoach}).
+ */
+export interface CoachProfile {
+  experience?: 'rookie' | 'casual' | 'club' | 'veteran' | null;
+  goal?: 'fun' | 'improve' | 'team' | 'pro' | null;
+  position?: 'guard' | 'wing' | 'big' | null;
+}
+
+/**
+ * "Discipline" findings are about training HABITS (load, fatigue, data
+ * hygiene) rather than the shot itself — the ones a for-fun player doesn't
+ * want shouted at them.
+ */
+const DISCIPLINE_FINDINGS: ReadonlySet<FindingKind> = new Set([
+  'volumeTrend',
+  'fatigue',
+  'unsureRate',
+]);
+
+function clampSeverity(s: number): Severity {
+  return (s < 1 ? 1 : s > 3 ? 3 : s) as Severity;
+}
+
+/** A short, level-appropriate coaching line for the ONE top finding. */
+function experienceFraming(exp: CoachProfile['experience']): string | null {
+  switch (exp) {
+    case 'rookie':
+      return 'New to this? Lock in this one fix before layering on anything else — fundamentals compound.';
+    case 'club':
+      return "You've got the base — sharpen this and it'll show up in games.";
+    case 'veteran':
+      return "Nothing new to a shooter at your level — it's reps and discipline now, not information.";
+    default:
+      // casual / unset: keep the tone light, no extra sermon.
+      return null;
+  }
+}
+
+/**
+ * Re-tune a raw finding list to the player's profile. Honest, not hidden: it
+ * only shifts EMPHASIS (severity) and adds level-appropriate framing — no
+ * finding is fabricated or deleted, and the underlying evidence is untouched.
+ *
+ * - goal 'fun': training-load nags become gentle notes, never headlines.
+ * - goal 'pro'/'team': being off the pro band is a priority, not a footnote.
+ * - experience: the top finding gets a line pitched at your level.
+ *
+ * Returns a new array; inputs are not mutated.
+ */
+export function personalizeFindings(
+  findings: readonly CoachFinding[],
+  profile: CoachProfile,
+): CoachFinding[] {
+  const out = findings.map((f) => ({ ...f }));
+  const { goal, experience } = profile;
+
+  for (const f of out) {
+    if (goal === 'fun' && DISCIPLINE_FINDINGS.has(f.id) && f.severity > 1) {
+      f.severity = 1;
+    }
+    if ((goal === 'pro' || goal === 'team') && f.id === 'nbaBand') {
+      f.severity = clampSeverity(f.severity + 1);
+    }
+  }
+
+  // Frame the CURRENT top finding (after the severity re-tune above) so the
+  // level-appropriate line lands on whatever now matters most.
+  const framing = experienceFraming(experience);
+  if (framing != null && out.length > 0) {
+    const top = [...out].sort((a, b) => b.severity - a.severity || b.strength - a.strength)[0]!;
+    top.prescription = `${top.prescription} ${framing}`;
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
 // Runner
 // ---------------------------------------------------------------------------
 
@@ -736,16 +819,23 @@ export const RULES: readonly Rule[] = [
  * Run every rule over the session window and return the findings, ranked:
  * severity descending, then strength descending. At most one finding per
  * rule (rules are single-shot). Empty window ⇒ [].
+ *
+ * Pass a {@link CoachProfile} to personalize emphasis + framing to the player;
+ * omit it for the raw, profile-agnostic findings (identical to before).
  */
-export function runCoach(sessions: readonly CoachSession[]): CoachFinding[] {
+export function runCoach(
+  sessions: readonly CoachSession[],
+  profile?: CoachProfile,
+): CoachFinding[] {
   if (sessions.length === 0) return [];
   const w = buildWindow(sessions);
   if (w.decidedShots.length === 0) return [];
-  const out: CoachFinding[] = [];
+  let out: CoachFinding[] = [];
   for (const rule of RULES) {
     const f = rule(w);
     if (f) out.push(f);
   }
+  if (profile) out = personalizeFindings(out, profile);
   out.sort((a, b) => b.severity - a.severity || b.strength - a.strength);
   return out;
 }

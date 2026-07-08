@@ -25,6 +25,7 @@ import {
   runCoach,
   weeklyPlan,
   type CoachFinding,
+  type CoachProfile,
   type CoachSession,
   type Severity,
   type Trend,
@@ -39,6 +40,7 @@ import {
 import { matchArchetype, type ArchetypeMatch } from '@/core/shotLab';
 import { listSessions, sessionShots, shotFromRow } from '@/data/db';
 import { recomputeStats } from '@/core/stats';
+import { useProfile } from '@/state/profileStore';
 import type { ChartZone } from '@/core/types';
 
 /** Sessions scanned back for the coach window (a couple of months of weeks). */
@@ -462,13 +464,25 @@ export default function CoachScreen() {
     return buildWeeklyReport(sessions, activeWeek.startMs);
   }, [sessions, activeWeek]);
 
+  // Player profile → the coach personalizes emphasis + framing to who you are
+  // (a for-fun player isn't nagged about volume; a pro is held to the pro band;
+  // a rookie hears it at their level). Persisted profile fields, mapped onto
+  // the engine's structural CoachProfile.
+  const experience = useProfile((s) => s.experience);
+  const trainingGoal = useProfile((s) => s.trainingGoal);
+  const position = useProfile((s) => s.position);
+  const coachProfile = useMemo<CoachProfile>(
+    () => ({ experience, goal: trainingGoal, position }),
+    [experience, trainingGoal, position],
+  );
+
   // Findings shown are the report's own (already week-scoped + ranked). Kept as
   // a separate memo in case the UI later wants the full un-truncated list.
   const findings = useMemo<CoachFinding[]>(() => {
     if (activeWeek == null) return [];
     const weekSessions = sessions.filter((s) => weekStart(s.startedAt) === activeWeek.startMs);
-    return runCoach(weekSessions);
-  }, [sessions, activeWeek]);
+    return runCoach(weekSessions, coachProfile);
+  }, [sessions, activeWeek, coachProfile]);
 
   // NBA twin for the week: matchArchetype runs on shot-flight metrics (release/
   // entry angle, timing), so it works WITHOUT any pose data — every tracked
