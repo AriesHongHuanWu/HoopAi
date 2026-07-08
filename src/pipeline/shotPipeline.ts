@@ -149,6 +149,13 @@ export class ShotPipeline {
   private formHand: ShootingHand = 'right';
   /** Ball size (Settings > Player) — forwarded to the FSM's depth gate. */
   private ballSize: 7 | 6 | 5 = 7;
+  /**
+   * Rim height in meters (Settings > Player, P11). Feeds the metric 2/3
+   * estimator + FT calibration as their vertical ruler. Default 3.05
+   * (regulation) — the constant courtGeometric assumed before this was
+   * configurable, so the default path is byte-identical.
+   */
+  private rimHeightM = 3.05;
   /** Depth-ratio parallax veto flag (Settings, experimental). Applied when
    *  the FSM is created at rim lock — i.e. per session. */
   private depthVeto = false;
@@ -204,6 +211,12 @@ export class ShotPipeline {
   setBallSize(size: 7 | 6 | 5): void {
     this.ballSize = size;
     this.fsm?.setBallSize(size);
+  }
+
+  /** Rim height in meters (from Settings) — the metric 2/3 estimator's
+   *  vertical ruler. Applies from the next resolved shot / FT capture. */
+  setRimHeight(heightM: 3.05 | 2.6): void {
+    this.rimHeightM = heightM;
   }
 
   /** Depth-ratio parallax veto (from Settings). Takes effect at rim lock. */
@@ -486,6 +499,7 @@ export class ShotPipeline {
             footY: originY * frame.frameHeight,
             frameSize: frame.frameWidth,
             pitchDeg: this.viewPitchDeg,
+            rimHeightM: this.rimHeightM,
             // Optional FT-line refinement (null = default path, untouched).
             calibration: this.ftCalibration,
           });
@@ -581,6 +595,7 @@ export class ShotPipeline {
         // Same square side the per-shot metric estimator is fed.
         frameSize: frame.frameWidth,
         pitchDeg: this.viewPitchDeg,
+        rimHeightM: this.rimHeightM,
       };
       const result = deriveFtCalibration(anchor);
       if (result.ok) this.ftCalibration = result.calibration;

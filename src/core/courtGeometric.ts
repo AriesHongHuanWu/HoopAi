@@ -36,6 +36,14 @@ export interface MetricShotInput {
   /** Focal length prior in analysis px (default COURT/DEPTH_GATE prior). */
   focalPx?: number;
   /**
+   * Rim center height above the floor, meters — the vertical ruler the whole
+   * pinhole solve hangs off (camera height, then shooter depth). Defaults to
+   * {@link DEFAULT_RIM_HEIGHT_M} (3.05, regulation) so every existing caller
+   * and test is byte-identical; the app passes 2.6 for a youth hoop. A wrong
+   * value scales every distance, so it must match the real rim.
+   */
+  rimHeightM?: number;
+  /**
    * Optional FT-line calibration (src/core/ftCalibration.ts): multiplies the
    * final distanceM before the 2/3 threshold. Applied AFTER every confidence
    * gate — all gates run on the UNCALIBRATED geometry, so a calibration can
@@ -55,8 +63,8 @@ export interface MetricShotEstimate {
   camHeightM: number;
 }
 
-/** Rim center height above the floor, meters (regulation). */
-const RIM_HEIGHT_M = 3.05;
+/** Regulation rim center height above the floor, meters — the default ruler. */
+export const DEFAULT_RIM_HEIGHT_M = 3.05;
 /** Enablement floors/sanity bounds — outside them return null (fallback). */
 const MIN_RIM_WIDTH_PX = 30;
 const MIN_FEET_BELOW_HORIZON_DEG = 2;
@@ -78,6 +86,7 @@ export function estimateShotValueMetric(input: MetricShotInput): MetricShotEstim
   );
   const c = frameSize / 2; // optical center of the letterboxed square
   const theta = (pitchDeg ?? 0) * DEG;
+  const rimHeightM = input.rimHeightM ?? DEFAULT_RIM_HEIGHT_M;
 
   const wRim = rimBox.width;
   if (!(wRim >= MIN_RIM_WIDTH_PX)) return null;
@@ -87,7 +96,7 @@ export function estimateShotValueMetric(input: MetricShotInput): MetricShotEstim
   if (zRim < Z_RIM_RANGE_M[0] || zRim > Z_RIM_RANGE_M[1]) return null;
   const yRim = rimBox.y + rimBox.height / 2;
   const alphaRim = Math.atan((c - yRim) / f) + theta;
-  const camH = RIM_HEIGHT_M - zRim * Math.tan(alphaRim);
+  const camH = rimHeightM - zRim * Math.tan(alphaRim);
   if (camH < CAM_HEIGHT_RANGE_M[0] || camH > CAM_HEIGHT_RANGE_M[1]) return null;
 
   // Feet ray must point meaningfully below the horizon.

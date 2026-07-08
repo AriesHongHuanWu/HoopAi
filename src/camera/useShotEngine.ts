@@ -713,6 +713,10 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
   useEffect(() => {
     pipeline.setBallSize(ballSize);
   }, [pipeline, ballSize]);
+  const rimHeightM = useSettings((s) => s.rimHeightM);
+  useEffect(() => {
+    pipeline.setRimHeight(rimHeightM);
+  }, [pipeline, rimHeightM]);
   const depthVeto = useSettings((s) => s.depthVeto);
   useEffect(() => {
     pipeline.setDepthVeto(depthVeto);

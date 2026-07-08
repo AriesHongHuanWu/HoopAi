@@ -439,3 +439,94 @@ describe('jumps (v7)', () => {
     expect(ranV7).toBe(true);
   });
 });
+
+describe('clearSessionVideo (Q06)', () => {
+  it('nulls videoPath without deleting the session or its shots', async () => {
+    const fake = fakeDatabase();
+    sqlite.openDatabaseAsync.mockResolvedValue(fake);
+
+    await db.clearSessionVideo(42);
+
+    expect(fake.runAsync).toHaveBeenCalledWith(
+      'UPDATE sessions SET videoPath = NULL WHERE id = ?',
+      42,
+    );
+    // No DELETE — stats are kept.
+    const ranDelete = fake.runAsync.mock.calls.some(
+      (c: unknown[]) => typeof c[0] === 'string' && c[0].includes('DELETE'),
+    );
+    expect(ranDelete).toBe(false);
+  });
+
+  it('resolves void on a write failure (never throws)', async () => {
+    const broken = fakeDatabase();
+    broken.runAsync.mockRejectedValue(new Error('SQLITE_FULL'));
+    sqlite.openDatabaseAsync.mockResolvedValue(broken);
+    await expect(db.clearSessionVideo(1)).resolves.toBeUndefined();
+  });
+});
+
+describe('importBackup (P19)', () => {
+  const session = { id: 10, startedAt: 1, endedAt: 2, label: '', videoPath: null, keepMode: 'makes', recordingStartSec: null, modeId: null, modeResultJson: null };
+  const shot = { id: 100, sessionId: 10, shotIndex: 0, tStart: 0, tResolved: 1, outcome: 'make' as const, corrected: 0, rimBounce: 0, entryAngleDeg: null, releaseAngleDeg: null, xCross: null, originX: null, originY: null, signalsJson: '{}', trajectoryJson: '[]', clipPath: null };
+  const jump = { id: 7, ts: 5, heightCm: 55, method: 'hang-time', confidence: 0.9 };
+
+  it('inserts sessions, shots and jumps with their ids in one transaction', async () => {
+    const fake = fakeDatabase();
+    sqlite.openDatabaseAsync.mockResolvedValue(fake);
+
+    const counts = await db.importBackup({ sessions: [session], shots: [shot], jumps: [jump] });
+
+    expect(counts).toEqual({ sessions: 1, shots: 1, jumps: 1 });
+    expect(fake.withTransactionAsync).toHaveBeenCalledTimes(1);
+    // Session insert preserves the original id.
+    const sessionInsert = fake.runAsync.mock.calls.find(
+      (c: unknown[]) => typeof c[0] === 'string' && c[0].includes('INSERT INTO sessions'),
+    );
+    expect(sessionInsert?.[1]).toBe(10); // first bound param is id
+    // Shot + jump inserts fired too.
+    expect(
+      fake.runAsync.mock.calls.some((c: unknown[]) => typeof c[0] === 'string' && c[0].includes('INSERT INTO shots')),
+    ).toBe(true);
+    expect(
+      fake.runAsync.mock.calls.some((c: unknown[]) => typeof c[0] === 'string' && c[0].includes('INSERT INTO jumps')),
+    ).toBe(true);
+  });
+
+  it('returns all-zero counts on a write failure without throwing', async () => {
+    const broken = fakeDatabase();
+    broken.runAsync.mockRejectedValue(new Error('SQLITE_CONSTRAINT'));
+    sqlite.openDatabaseAsync.mockResolvedValue(broken);
+
+    await expect(
+      db.importBackup({ sessions: [session], shots: [shot], jumps: [jump] }),
+    ).resolves.toEqual({ sessions: 0, shots: 0, jumps: 0 });
+  });
+
+  it('is a no-op that still resolves counts for an empty plan', async () => {
+    const fake = fakeDatabase();
+    sqlite.openDatabaseAsync.mockResolvedValue(fake);
+    const counts = await db.importBackup({ sessions: [], shots: [], jumps: [] });
+    expect(counts).toEqual({ sessions: 0, shots: 0, jumps: 0 });
+  });
+});
+
+describe('export readers (P19)', () => {
+  it('allSessions / allShots / allJumps return rows from the db', async () => {
+    const fake = fakeDatabase();
+    fake.getAllAsync.mockResolvedValue([{ id: 1 }]);
+    sqlite.openDatabaseAsync.mockResolvedValue(fake);
+    await expect(db.allSessions()).resolves.toEqual([{ id: 1 }]);
+    await expect(db.allShots()).resolves.toEqual([{ id: 1 }]);
+    await expect(db.allJumps()).resolves.toEqual([{ id: 1 }]);
+  });
+
+  it('fall back to [] on a read failure (never throw)', async () => {
+    const broken = fakeDatabase();
+    broken.getAllAsync.mockRejectedValue(new Error('SQLITE_CORRUPT'));
+    sqlite.openDatabaseAsync.mockResolvedValue(broken);
+    await expect(db.allSessions()).resolves.toEqual([]);
+    await expect(db.allShots()).resolves.toEqual([]);
+    await expect(db.allJumps()).resolves.toEqual([]);
+  });
+});
