@@ -679,6 +679,26 @@ export default function HomeScreen() {
               onPress={() => router.push('/session/analyze')}
             />
           </Row>
+          <Row gap={space.md}>
+            <QuickLink
+              icon="fitness"
+              label="Jump Lab"
+              hint="Measure your vertical jump and train it"
+              onPress={() => router.push('/jump')}
+            />
+            <QuickLink
+              icon="body"
+              label="Form Studio"
+              hint="Compare your shooting form against NBA archetypes"
+              onPress={() => router.push('/formstudio')}
+            />
+            <QuickLink
+              icon="person-circle-outline"
+              label="Profile"
+              hint="Your height, experience and player details"
+              onPress={() => router.push('/profile')}
+            />
+          </Row>
         </View>
         </Animated.View>
       </View>
