@@ -123,10 +123,25 @@ export function courtLandmarks(spec: CourtSpec): CourtLandmark[] {
   ];
 }
 
-/** The four primary landmarks (exact homography). */
+/** The four primary landmarks — the minimum for an EXACT homography. */
 export const PRIMARY_LANDMARK_IDS: readonly LandmarkId[] = [
   'basket',
   'cornerThreeLeft',
   'cornerThreeRight',
   'topOfArc',
+];
+
+/**
+ * Landmarks the calibration ritual collects: the four primary + the FT center.
+ * The 5th makes the solve OVERDETERMINED, so a mis-tap shows up as
+ * reprojection error and can be rejected — 4 exact points always fit perfectly
+ * and would hide a bad tap. (basket/topOfArc/ftCenter are collinear on x = 0,
+ * but the two off-axis corners keep the configuration solvable.)
+ */
+export const CALIBRATION_LANDMARK_IDS: readonly LandmarkId[] = [
+  'basket',
+  'cornerThreeLeft',
+  'cornerThreeRight',
+  'topOfArc',
+  'ftCenter',
 ];
