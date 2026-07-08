@@ -151,6 +151,13 @@ export interface SettingsState {
    * mis-set size costs about half the far-range discrimination signal.
    */
   ballSize: 7 | 6 | 5;
+  /**
+   * Rim height above the floor, meters. 3.05 (regulation, default) or 2.6
+   * (youth hoops). Feeds the metric 2/3-point estimator's pinhole geometry
+   * (src/core/courtGeometric.ts) — the rim is the vertical ruler, so a
+   * youth-height hoop set to 3.05 would overstate every distance. Persisted.
+   */
+  rimHeightM: 3.05 | 2.6;
   /** For jump/release-height calibration. Null until profile setup. */
   playerHeightCm: number | null;
   onboardingDone: boolean;
@@ -290,6 +297,7 @@ export const useSettings = create<SettingsState>()(
       voiceMetric: 'none',
       shootingHand: 'right',
       ballSize: 7,
+      rimHeightM: 3.05,
       playerHeightCm: null,
       onboardingDone: false,
       detectorModel: 'auto',
@@ -359,7 +367,7 @@ export const useSettings = create<SettingsState>()(
       // "from version N" to branch on instead of relying on zustand's default
       // shallow-merge rehydration, which silently keeps stale/renamed keys
       // around forever.
-      version: 3,
+      version: 4,
       migrate: (persisted, version) => {
         const s = persisted as SettingsState;
         // v2: YOLOX (Apache-2.0, GPU-correct) becomes the default detector. Move
@@ -374,6 +382,11 @@ export const useSettings = create<SettingsState>()(
         // installs too (the old default was ours, not a meaningful choice);
         // anyone can re-pick Quality in Settings.
         if (version < 3) s.perfMode = 'speed';
+        // v4: rimHeightM added (P11). Existing installs predate the youth-hoop
+        // option, so default them to regulation 3.05 m — the height the metric
+        // 2/3 estimator already assumed as a hardcoded constant, making this a
+        // byte-identical no-op for every persisted user.
+        if (version < 4 && s.rimHeightM == null) s.rimHeightM = 3.05;
         return s;
       },
     },

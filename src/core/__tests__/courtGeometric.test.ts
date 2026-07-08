@@ -14,6 +14,8 @@ const RIM_D = 0.45;
 /**
  * Render a scene: camera at height `camH` (level, pitch 0), rim `zRim` meters
  * ahead (lateral xRim), shooter's feet on the floor at (`zFeet`, `xFeet`).
+ * `rimH` is the rim's real height above the floor — the pixel geometry is
+ * generated from it, and a matching estimate must be told the same value.
  */
 function scene(opts: {
   camH: number;
@@ -22,10 +24,11 @@ function scene(opts: {
   xRim?: number;
   xFeet?: number;
   pitchDeg?: number | null;
+  rimH?: number;
 }): MetricShotInput {
-  const { camH, zRim, zFeet, xRim = 0, xFeet = 0 } = opts;
+  const { camH, zRim, zFeet, xRim = 0, xFeet = 0, rimH = RIM_H } = opts;
   const wRim = (F * RIM_D) / zRim;
-  const yRim = C - (F * (RIM_H - camH)) / zRim;
+  const yRim = C - (F * (rimH - camH)) / zRim;
   const xRimPx = C + (F * xRim) / zRim;
   const footY = C + (F * camH) / zFeet;
   const footX = C + (F * xFeet) / zFeet;
@@ -36,6 +39,7 @@ function scene(opts: {
     frameSize: S,
     pitchDeg: opts.pitchDeg ?? 0,
     focalPx: F,
+    ...(rimH !== RIM_H ? { rimHeightM: rimH } : {}),
   };
 }
 
@@ -140,5 +144,52 @@ describe('estimateShotValueMetric', () => {
     expect(
       estimateShotValueMetric({ ...base, calibration: { correctionFactor: -2 } }),
     ).toEqual(ref);
+  });
+
+  // P11 — configurable rim height. A youth (2.6 m) hoop is a different vertical
+  // ruler; the estimator must recover ground truth when told the real height,
+  // and default (3.05 m) must be byte-identical to the previous constant.
+  describe('rim height (P11)', () => {
+    test('recovers ground truth on a 2.6m youth hoop', () => {
+      // Same layout as the flagship 7m→3PT case but generated for a 2.6m rim.
+      const est = estimateShotValueMetric(
+        scene({ camH: 0.6, zRim: 10, zFeet: 3, rimH: 2.6 }),
+      );
+      expect(est).not.toBeNull();
+      expect(est!.distanceM).toBeCloseTo(7.0, 1);
+      expect(est!.value).toBe(3);
+      expect(est!.camHeightM).toBeCloseTo(0.6, 2);
+      expect(est!.zRimM).toBeCloseTo(10, 3);
+    });
+
+    test('a 2.6m scene solved with the 3.05m default is wrong (why the setting exists)', () => {
+      // Generate a youth-hoop scene but omit rimHeightM so the estimator uses
+      // its regulation default: the mismatched ruler must shift the distance.
+      const youth = scene({ camH: 0.6, zRim: 10, zFeet: 3, rimH: 2.6 });
+      const asStandard = estimateShotValueMetric({ ...youth, rimHeightM: undefined });
+      const correct = estimateShotValueMetric(youth);
+      expect(asStandard).not.toBeNull();
+      expect(correct).not.toBeNull();
+      // The wrong ruler misplaces the camera height and thus the distance.
+      expect(Math.abs(asStandard!.distanceM - correct!.distanceM)).toBeGreaterThan(0.3);
+      expect(asStandard!.camHeightM).not.toBeCloseTo(0.6, 1);
+    });
+
+    test('explicit 3.05m default equals the omitted-parameter path (no regression)', () => {
+      const base = scene({ camH: 0.6, zRim: 10, zFeet: 3 });
+      const omitted = estimateShotValueMetric(base);
+      const explicit = estimateShotValueMetric({ ...base, rimHeightM: 3.05 });
+      expect(omitted).not.toBeNull();
+      expect(explicit).toEqual(omitted);
+    });
+
+    test('a lower rim classifies a closer 2 correctly', () => {
+      const est = estimateShotValueMetric(
+        scene({ camH: 0.6, zRim: 10, zFeet: 5.5, rimH: 2.6 }),
+      );
+      expect(est).not.toBeNull();
+      expect(est!.distanceM).toBeCloseTo(4.5, 1);
+      expect(est!.value).toBe(2);
+    });
   });
 });

@@ -11,7 +11,7 @@ import Constants from 'expo-constants';
 import * as Haptics from 'expo-haptics';
 import { router } from 'expo-router';
 import { useEffect, useRef, useState, type ComponentProps } from 'react';
-import { Linking, Pressable, StyleSheet, Switch, Text, View } from 'react-native';
+import { Linking, Modal, Pressable, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 
 import {
   getSoundSource,
@@ -28,6 +28,7 @@ import {
   countHardExamples,
   exportHardExamples,
 } from '@/data/hardExamples';
+import { runBackupExport, runBackupImport } from '@/data/backupRunner';
 
 /** Staggered card entrance (i = card index top-to-bottom). */
 const cardEnter = (i: number) => FadeInDown.delay(i * 70).duration(380);
@@ -94,6 +95,19 @@ const BALL_OPTIONS: { value: 7 | 6 | 5; label: string }[] = [
   { value: 7, label: 'Size 7 · standard' },
   { value: 6, label: 'Size 6 · women/youth' },
   { value: 5, label: 'Size 5 · kids' },
+];
+
+const RIM_HEIGHT_OPTIONS: { value: 3.05 | 2.6; label: string; blurb: string }[] = [
+  {
+    value: 3.05,
+    label: 'Standard · 3.05m',
+    blurb: "Regulation 10-foot rim — the default.",
+  },
+  {
+    value: 2.6,
+    label: 'Youth · 2.6m',
+    blurb: 'Lowered youth hoop (about 8.5 feet).',
+  },
 ];
 
 const DETECTION_RATE_OPTIONS: { value: DetectionRate; label: string; blurb: string }[] = [
@@ -491,6 +505,7 @@ export default function SettingsScreen() {
   const voiceMetric = useSettings((s) => s.voiceMetric);
   const shootingHand = useSettings((s) => s.shootingHand);
   const ballSize = useSettings((s) => s.ballSize);
+  const rimHeightM = useSettings((s) => s.rimHeightM);
   const playerHeightCm = useSettings((s) => s.playerHeightCm);
   const detectorModel = useSettings((s) => s.detectorModel);
   const detectionRate = useSettings((s) => s.detectionRate);
@@ -539,12 +554,28 @@ export default function SettingsScreen() {
   const [exportNotice, setExportNotice] = useState<string | null>(null);
   const exportNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // P19 backup — export/import all data. `backupBusy` guards double taps;
+  // `backupNotice` is the transient result caption under the rows.
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [backupNotice, setBackupNotice] = useState<string | null>(null);
+  const backupNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Import paste sheet (no clipboard/document-picker dep in this build).
+  const [importOpen, setImportOpen] = useState(false);
+  const [importDraft, setImportDraft] = useState('');
+
+  const showBackupNotice = (msg: string) => {
+    setBackupNotice(msg);
+    if (backupNoticeTimer.current != null) clearTimeout(backupNoticeTimer.current);
+    backupNoticeTimer.current = setTimeout(() => setBackupNotice(null), 5000);
+  };
+
   // Release the sound-pack preview player when leaving the screen.
   useEffect(() => releasePreview, []);
   // Clear the pending notice timers on unmount.
   useEffect(() => () => {
     if (tutorialNoticeTimer.current != null) clearTimeout(tutorialNoticeTimer.current);
     if (exportNoticeTimer.current != null) clearTimeout(exportNoticeTimer.current);
+    if (backupNoticeTimer.current != null) clearTimeout(backupNoticeTimer.current);
   }, []);
 
   // Count once on mount — corrections happen on other screens, so the number
@@ -584,6 +615,44 @@ export default function SettingsScreen() {
       setExportNotice("Couldn't open the share sheet — try again.");
       if (exportNoticeTimer.current != null) clearTimeout(exportNoticeTimer.current);
       exportNoticeTimer.current = setTimeout(() => setExportNotice(null), 3000);
+    }
+  };
+
+  const runExportAll = async () => {
+    if (backupBusy) return;
+    tick();
+    setBackupBusy(true);
+    const ok = await runBackupExport();
+    setBackupBusy(false);
+    if (!ok) showBackupNotice("Couldn't open the share sheet — try again.");
+  };
+
+  const IMPORT_ERRORS: Record<string, string> = {
+    'not-json': "That doesn't look like a backup file.",
+    'wrong-format': 'This is not a Hoopilot backup.',
+    'unsupported-version': 'This backup is from a newer version of the app.',
+    malformed: 'This backup is incomplete or damaged.',
+    'checksum-mismatch': 'This backup looks corrupted — it may have been truncated.',
+    'write-failed': "Couldn't save the imported data — nothing was changed.",
+  };
+
+  const runImport = async () => {
+    if (backupBusy) return;
+    const raw = importDraft.trim();
+    if (raw.length === 0) return;
+    tick();
+    setBackupBusy(true);
+    const result = await runBackupImport(raw);
+    setBackupBusy(false);
+    setImportOpen(false);
+    setImportDraft('');
+    if (result.ok) {
+      if (useSettings.getState().hapticsEnabled) {
+        void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      }
+      showBackupNotice(`Imported ${result.imported}, skipped ${result.skipped}.`);
+    } else {
+      showBackupNotice(IMPORT_ERRORS[result.error] ?? 'Import failed.');
     }
   };
 
@@ -1010,6 +1079,20 @@ export default function SettingsScreen() {
             valueLabel={dailyGoalMakes === 0 ? 'Off' : undefined}
             onChange={(v) => set('dailyGoalMakes', v)}
           />
+          <View style={styles.divider} />
+          {/* P18 daily reminder. Local notifications need expo-notifications,
+              which isn't bundled in the current Expo Go / preview client — the
+              scheduling API is a no-op without a store/dev build. Rather than
+              ship a switch that silently does nothing, surface it as a disabled
+              "coming soon" row so the intent is visible and honest. When the
+              dependency lands, this becomes a working hour-picker toggle. */}
+          <ToggleRow
+            label="Daily reminder"
+            description="A gentle nudge to get some shots up each day. Coming in a store build — needs a notifications capability this preview build doesn't include."
+            value={false}
+            disabled
+            onValueChange={() => {}}
+          />
         </Card>
 
         {/* Video */}
@@ -1077,6 +1160,15 @@ export default function SettingsScreen() {
           />
           </>
           )}
+          <View style={styles.divider} />
+          <ActionRow
+            label="Manage storage"
+            description="See how much space session recordings use and delete old videos. Your stats are always kept — only the video files go."
+            onPress={() => {
+              tick();
+              router.push('/storage');
+            }}
+          />
         </Card>
 
         {/* Player */}
@@ -1121,6 +1213,28 @@ export default function SettingsScreen() {
             ))}
           </View>
           <View style={styles.divider} />
+          <View style={styles.settingText}>
+            <Text style={styles.settingLabel}>Rim height</Text>
+            <Text style={styles.settingDesc}>
+              The rim's height is the ruler for the metric distance estimate —
+              set it to the hoop you actually shoot on.
+            </Text>
+          </View>
+          {RIM_HEIGHT_OPTIONS.map((opt, i) => (
+            <View key={opt.value}>
+              {i > 0 && <View style={styles.divider} />}
+              <OptionRow
+                label={opt.label}
+                blurb={opt.blurb}
+                selected={rimHeightM === opt.value}
+                onPress={() => {
+                  tick();
+                  set('rimHeightM', opt.value);
+                }}
+              />
+            </View>
+          ))}
+          <View style={styles.divider} />
           <Row style={styles.settingRow} gap={space.lg}>
             <View style={styles.settingText}>
               <Text style={styles.settingLabel}>Height</Text>
@@ -1150,8 +1264,31 @@ export default function SettingsScreen() {
           </Row>
         </Card>
 
-        {/* Help */}
+        {/* Data */}
         <Card entering={enter(6)}>
+          <SectionHeader icon="cloud-download">Data</SectionHeader>
+          <ActionRow
+            label={backupBusy ? 'Exporting…' : 'Export all data'}
+            description="Save a backup file of your sessions, shots, jumps, achievements and challenge points. No video is included — just your stats."
+            disabled={backupBusy}
+            onPress={() => void runExportAll()}
+          />
+          <View style={styles.divider} />
+          <ActionRow
+            label="Import data"
+            description="Paste a backup file to merge it in. Existing sessions are kept — only new ones are added, nothing is overwritten."
+            disabled={backupBusy}
+            onPress={() => {
+              tick();
+              setImportDraft('');
+              setImportOpen(true);
+            }}
+          />
+          {backupNotice != null && <Text style={styles.tutorialNotice}>{backupNotice}</Text>}
+        </Card>
+
+        {/* Help */}
+        <Card entering={enter(7)}>
           <SectionHeader icon="help-buoy">Help</SectionHeader>
           <ActionRow
             label="Restart tutorial"
@@ -1170,7 +1307,7 @@ export default function SettingsScreen() {
         </Card>
 
         {/* About */}
-        <Card entering={enter(7)}>
+        <Card entering={enter(8)}>
           <SectionHeader icon="information-circle">About</SectionHeader>
           <Row style={styles.settingRow} gap={space.lg}>
             <Text style={styles.settingLabel}>Version</Text>
@@ -1200,6 +1337,70 @@ export default function SettingsScreen() {
           />
         </Card>
       </View>
+
+      {/* Import paste sheet — no clipboard/document-picker dependency in this
+          build, so the user pastes the backup JSON directly. parseBackup does
+          all validation; a bad paste yields a caption, never a crash. */}
+      <Modal
+        visible={importOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setImportOpen(false)}
+      >
+        <View style={styles.importBackdrop}>
+          <View style={styles.importSheet}>
+            <Text style={styles.importTitle} accessibilityRole="header">
+              Import data
+            </Text>
+            <Text style={styles.settingDesc}>
+              Paste the contents of a Hoopilot backup file below. New sessions are
+              added; anything you already have is left untouched.
+            </Text>
+            <TextInput
+              value={importDraft}
+              onChangeText={setImportDraft}
+              placeholder="Paste backup JSON here"
+              placeholderTextColor={color.textFaint}
+              style={styles.importInput}
+              multiline
+              autoCorrect={false}
+              autoCapitalize="none"
+              accessibilityLabel="Backup file contents"
+              selectionColor={color.accent}
+            />
+            <Row gap={space.md} style={{ justifyContent: 'flex-end' }}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Cancel import"
+                onPress={() => {
+                  setImportOpen(false);
+                  setImportDraft('');
+                }}
+                style={({ pressed }) => [styles.importBtn, pressed && { opacity: 0.7 }]}
+              >
+                <Text style={styles.importBtnLabel}>Cancel</Text>
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Import"
+                accessibilityState={{ disabled: backupBusy || importDraft.trim().length === 0 }}
+                disabled={backupBusy || importDraft.trim().length === 0}
+                onPress={() => void runImport()}
+                style={({ pressed }) => [
+                  styles.importBtn,
+                  styles.importBtnPrimary,
+                  pressed && { opacity: 0.82 },
+                  (backupBusy || importDraft.trim().length === 0) && styles.disabled,
+                ]}
+              >
+                <Text style={[styles.importBtnLabel, styles.importBtnLabelPrimary]}>
+                  {backupBusy ? 'Importing…' : 'Import'}
+                </Text>
+              </Pressable>
+            </Row>
+          </View>
+        </View>
+      </Modal>
     </Screen>
   );
 }
@@ -1420,5 +1621,55 @@ const styles = StyleSheet.create({
   heightUnit: {
     ...type.caption,
     color: color.textDim,
+  },
+  // Import paste sheet (P19).
+  importBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    justifyContent: 'center',
+    padding: space.lg,
+  },
+  importSheet: {
+    backgroundColor: color.surface,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: color.border,
+    padding: space.lg,
+    gap: space.md,
+  },
+  importTitle: {
+    ...type.heading,
+    color: color.text,
+  },
+  importInput: {
+    ...type.body,
+    color: color.text,
+    minHeight: 120,
+    maxHeight: 220,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: color.border,
+    backgroundColor: color.surfaceRaised,
+    padding: space.md,
+    textAlignVertical: 'top',
+  },
+  importBtn: {
+    minHeight: touch.minTarget,
+    justifyContent: 'center',
+    paddingHorizontal: space.lg,
+    borderRadius: radius.pill,
+    borderWidth: 1,
+    borderColor: color.border,
+  },
+  importBtnPrimary: {
+    backgroundColor: color.accentTint,
+    borderColor: color.accent,
+  },
+  importBtnLabel: {
+    ...type.bodyMedium,
+    color: color.textDim,
+  },
+  importBtnLabelPrimary: {
+    color: color.accent,
   },
 });

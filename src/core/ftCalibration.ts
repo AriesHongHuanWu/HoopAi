@@ -54,6 +54,13 @@ export interface FtAnchor {
    * pipeline leaves this unset on both sides so they share the default prior.
    */
   focalPx?: number;
+  /**
+   * Rim height in meters (Settings > Player, P11). MUST match what the
+   * per-shot estimator is fed, for the same reason as focalPx — the factor
+   * corrects the exact quantity later shots report. Omitted → estimator's
+   * regulation default (3.05).
+   */
+  rimHeightM?: number;
 }
 
 /** A derived, accepted calibration. */
@@ -108,6 +115,7 @@ export function deriveFtCalibration(anchor: FtAnchor): FtCalibrationResult {
     frameSize,
     pitchDeg: anchor.pitchDeg,
     ...(anchor.focalPx !== undefined ? { focalPx: anchor.focalPx } : {}),
+    ...(anchor.rimHeightM !== undefined ? { rimHeightM: anchor.rimHeightM } : {}),
   });
   if (est == null) return { ok: false, reason: 'no-metric-estimate' };
   if (est.distanceM < ACCEPT_RANGE_M[0] || est.distanceM > ACCEPT_RANGE_M[1]) {

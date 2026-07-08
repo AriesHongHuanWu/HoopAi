@@ -368,6 +368,33 @@ export async function listVisibleSessions(requestedLimit = 50): Promise<SessionS
   return listSessions(effectiveLimit);
 }
 
+/**
+ * Every session row (raw columns, no summary join), newest first — the export
+ * side of the backup feature (src/data/backup.ts). Never throws.
+ */
+export async function allSessions(): Promise<SessionRow[]> {
+  return safe('allSessions', [], async () => {
+    const db = await getDb();
+    return db.getAllAsync<SessionRow>('SELECT * FROM sessions ORDER BY startedAt DESC');
+  });
+}
+
+/** Every shot row across all sessions (ordered for stable exports). Never throws. */
+export async function allShots(): Promise<ShotRow[]> {
+  return safe('allShots', [], async () => {
+    const db = await getDb();
+    return db.getAllAsync<ShotRow>('SELECT * FROM shots ORDER BY sessionId ASC, shotIndex ASC');
+  });
+}
+
+/** Every jump row. Never throws. */
+export async function allJumps(): Promise<JumpRow[]> {
+  return safe('allJumps', [], async () => {
+    const db = await getDb();
+    return db.getAllAsync<JumpRow>('SELECT * FROM jumps ORDER BY ts DESC');
+  });
+}
+
 export async function getSession(sessionId: number): Promise<SessionRow | null> {
   return safe('getSession', null, async () => {
     const db = await getDb();
@@ -385,6 +412,19 @@ export async function updateSessionLabel(sessionId: number, label: string): Prom
   return safe('updateSessionLabel', undefined, async () => {
     const db = await getDb();
     await db.runAsync('UPDATE sessions SET label = ? WHERE id = ?', label, sessionId);
+  });
+}
+
+/**
+ * Clear a session's videoPath WITHOUT touching its shots or stats — the
+ * storage manager (src/app/storage.tsx) deletes the recording FILE and calls
+ * this so History stops offering a replay that no longer exists on disk. The
+ * session, its shots, angles and FG% all stay. Never throws.
+ */
+export async function clearSessionVideo(sessionId: number): Promise<void> {
+  return safe('clearSessionVideo', undefined, async () => {
+    const db = await getDb();
+    await db.runAsync('UPDATE sessions SET videoPath = NULL WHERE id = ?', sessionId);
   });
 }
 
@@ -598,6 +638,89 @@ export function shotFromRow(row: ShotRow): ResolvedShot {
 export async function sessionStatsFromDb(sessionId: number): Promise<SessionStats> {
   const rows = await sessionShots(sessionId);
   return recomputeStats(rows.map(shotFromRow));
+}
+
+/**
+ * Insert an imported backup's rows (src/data/backup.ts mergeBackup output).
+ * Sessions/shots/jumps are inserted with their ORIGINAL ids preserved (the
+ * merge plan already excluded any id that collides locally), all inside one
+ * transaction so a partial failure rolls back. Returns the counts actually
+ * written; never throws (a failure logs + returns zeros, leaving the db
+ * untouched). Achievements-seen / challenge-ledger merges are applied by the
+ * caller against their persisted zustand stores, not here.
+ */
+export async function importBackup(plan: {
+  sessions: SessionRow[];
+  shots: ShotRow[];
+  jumps: JumpRow[];
+}): Promise<{ sessions: number; shots: number; jumps: number }> {
+  return safe('importBackup', { sessions: 0, shots: 0, jumps: 0 }, async () => {
+    const db = await getDb();
+    await db.withTransactionAsync(async () => {
+      for (const s of plan.sessions) {
+        await db.runAsync(
+          `INSERT INTO sessions (
+             id, startedAt, endedAt, label, videoPath, keepMode,
+             recordingStartSec, modeId, modeResultJson
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          s.id,
+          s.startedAt,
+          s.endedAt,
+          s.label,
+          s.videoPath,
+          s.keepMode,
+          s.recordingStartSec,
+          s.modeId,
+          s.modeResultJson,
+        );
+      }
+      for (const sh of plan.shots) {
+        await db.runAsync(
+          `INSERT INTO shots (
+             id, sessionId, shotIndex, tStart, tResolved, outcome, corrected,
+             rimBounce, entryAngleDeg, releaseAngleDeg, xCross, originX, originY,
+             signalsJson, trajectoryJson, clipPath, shotValue, formJson,
+             rechecked, outcomeCorrected
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          sh.id,
+          sh.sessionId,
+          sh.shotIndex,
+          sh.tStart,
+          sh.tResolved,
+          sh.outcome,
+          sh.corrected,
+          sh.rimBounce,
+          sh.entryAngleDeg,
+          sh.releaseAngleDeg,
+          sh.xCross,
+          sh.originX,
+          sh.originY,
+          sh.signalsJson,
+          sh.trajectoryJson,
+          sh.clipPath,
+          sh.shotValue ?? null,
+          sh.formJson ?? null,
+          sh.rechecked ?? 0,
+          sh.outcomeCorrected ?? 0,
+        );
+      }
+      for (const j of plan.jumps) {
+        await db.runAsync(
+          'INSERT INTO jumps (id, ts, heightCm, method, confidence) VALUES (?, ?, ?, ?, ?)',
+          j.id,
+          j.ts,
+          j.heightCm,
+          j.method,
+          j.confidence,
+        );
+      }
+    });
+    return {
+      sessions: plan.sessions.length,
+      shots: plan.shots.length,
+      jumps: plan.jumps.length,
+    };
+  });
 }
 
 // ---------------------------------------------------------------------------
