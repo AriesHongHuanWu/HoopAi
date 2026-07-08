@@ -27,6 +27,7 @@ import Animated, {
 import { modeCardData, shareCardImage } from '../ShareCard';
 import { Card, PillButton, Row } from '../ui';
 import { color, motion, space, type } from '../../constants/tokens';
+import { drillOf } from '../../core/drills';
 import { getModeDef, type ModeState } from '../../core/gameModes';
 import { useSession } from '../../state/sessionStore';
 import { MODE_IDENTITY } from './modeIdentity';
@@ -57,6 +58,25 @@ interface Headline {
 }
 
 function headlineFor(mode: ModeState): Headline {
+  // A structured drill rides inside spotShooting — give it its own headline
+  // instead of the generic "across five spots" copy (drills vary in spot count).
+  const drill = drillOf(mode);
+  if (drill != null) {
+    const makes = mode.spots?.reduce((a, s) => a + s.makes, 0) ?? mode.score;
+    const attempts = mode.spots?.reduce((a, s) => a + s.attempts, 0) ?? 0;
+    const cleared = mode.spots?.every(
+      (s, i) => s.makes >= (mode.config?.drill?.goals[i] ?? 1),
+    ) ?? false;
+    return {
+      banner: cleared ? 'DRILL DONE' : 'DRILL',
+      value: `${makes}`,
+      unit: makes === 1 ? 'make' : 'makes',
+      sub: cleared
+        ? `${drill.title} — every spot cleared${attempts > 0 ? ` on ${attempts} shots.` : '.'}`
+        : `${drill.title} — ${makes}/${attempts} before you ran out of shots.`,
+      share: `🎯 ${drill.title}: ${makes}/${attempts} on Hoopilot.`,
+    };
+  }
   const def = getModeDef(mode.modeId);
   switch (mode.modeId) {
     case 'timed':
@@ -281,6 +301,10 @@ export function ModeComplete({
   onExit: () => void;
 }) {
   const def = getModeDef(mode.modeId);
+  const drill = drillOf(mode);
+  // A drill hosts on spotShooting; show the DRILL's name/glyph so the sheet
+  // reads as the drill the player picked, not the host mode.
+  const displayName = drill?.title ?? def.name;
   const id = MODE_IDENTITY[mode.modeId];
   const h = headlineFor(mode);
   const statRows = statLinesFor(mode);
@@ -298,7 +322,7 @@ export function ModeComplete({
     if (sharing) return;
     setSharing(true);
     const data = modeCardData({
-      modeName: def.name,
+      modeName: displayName,
       value: h.value,
       unit: h.unit !== '' ? h.unit : h.banner,
       stats,
@@ -324,7 +348,7 @@ export function ModeComplete({
           <View style={[styles.iconBadge, { backgroundColor: id.tint, borderColor: id.accent }]}>
             <Ionicons name={id.icon} size={26} color={id.accent} />
           </View>
-          <Text style={styles.modeName}>{def.name.toUpperCase()}</Text>
+          <Text style={styles.modeName}>{displayName.toUpperCase()}</Text>
           <Text style={[styles.banner, { color: id.accent }]}>{h.banner}</Text>
 
           <Animated.View

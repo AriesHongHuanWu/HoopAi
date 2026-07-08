@@ -17,7 +17,7 @@
 import { router } from 'expo-router';
 import * as Haptics from 'expo-haptics';
 import { Ionicons } from '@expo/vector-icons';
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, type ComponentProps } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import Animated, {
   FadeIn,
@@ -28,9 +28,15 @@ import Animated, {
 
 import { ProBadge } from '@/components/ProBadge';
 import { BackPill } from '@/components/ShotList';
-import { MODE_IDENTITY, type ModeIdentity } from '@/components/modes/modeIdentity';
+import {
+  DRILL_IDENTITY,
+  MODE_IDENTITY,
+  type DrillIdentity,
+  type ModeIdentity,
+} from '@/components/modes/modeIdentity';
 import { Card, Eyebrow, Row, Screen } from '@/components/ui';
 import { color, motion, radius, space, touch, type } from '@/constants/tokens';
+import { DRILLS, type Drill } from '@/core/drills';
 import {
   GAME_MODES,
   GHOST_MIN_MAKES,
@@ -59,7 +65,10 @@ function ghostSourceTitle(row: SessionSummaryRow): string {
 
 export default function ModePickerScreen() {
   const selectMode = useMode((s) => s.selectMode);
+  const selectDrill = useMode((s) => s.selectDrill);
   const activeMode = useMode((s) => s.activeMode);
+  /** The active drill id when a drill is the picked mode (else undefined). */
+  const activeDrillId = activeMode?.config?.drill?.id;
   const hapticsEnabled = useSettings((s) => s.hapticsEnabled);
   const reducedMotion = useReducedMotion();
   const [proOpen, setProOpen] = useState(false);
@@ -97,6 +106,12 @@ export default function ModePickerScreen() {
   const pick = (id: GameModeDef['id']) => {
     if (hapticsEnabled) void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     selectMode(id);
+    router.push('/session/setup');
+  };
+
+  const pickDrill = (drill: Drill) => {
+    if (hapticsEnabled) void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    selectDrill(drill.id);
     router.push('/session/setup');
   };
 
@@ -138,6 +153,29 @@ export default function ModePickerScreen() {
             )}
           </Animated.View>
         ))}
+      </View>
+
+      {/* DRILLS — structured HomeCourt-style workouts. They run as spot shooting
+          under the hood but read as their own cartridges here. */}
+      <View style={styles.drillSection}>
+        <Eyebrow>Drills</Eyebrow>
+        <Text style={styles.sectionTitle}>Structured shooting workouts</Text>
+        <Text style={styles.sectionLede}>
+          Guided spot-by-spot routines with make goals — the live view maps your next spot as
+          you go.
+        </Text>
+        <View style={styles.list}>
+          {DRILLS.map((drill, i) => (
+            <Animated.View key={drill.id} entering={enter(GAME_MODES.length + i)}>
+              <DrillCard
+                drill={drill}
+                identity={DRILL_IDENTITY[drill.id]}
+                selected={activeDrillId === drill.id}
+                onPress={() => pickDrill(drill)}
+              />
+            </Animated.View>
+          ))}
+        </View>
       </View>
 
       {hasProModes && (
@@ -237,6 +275,87 @@ function ModeCard({
         </Text>
 
         {/* Rules at a glance + bold Start (the whole card is the button). */}
+        <Row gap={space.sm} style={styles.footRow}>
+          <Row gap={space.xs} style={styles.glanceRow}>
+            {identity.glance.map((g) => (
+              <View key={g} style={styles.glanceChip}>
+                <Text style={styles.glanceText}>{g.toUpperCase()}</Text>
+              </View>
+            ))}
+          </Row>
+          <View style={[styles.startPill, { backgroundColor: identity.accent }]}>
+            <Ionicons name="play" size={11} color={color.onAccent} />
+            <Text style={styles.startText}>START</Text>
+          </View>
+        </Row>
+      </View>
+    </Pressable>
+  );
+}
+
+/**
+ * Drill cartridge — same card anatomy as {@link ModeCard} (icon badge, name,
+ * tagline, two-line rules, glance chips + START), but drawn from the drill
+ * catalog + {@link DRILL_IDENTITY}. Tapping starts the drill (which runs as the
+ * spotShooting mode) and routes to setup.
+ */
+function DrillCard({
+  drill,
+  identity,
+  selected,
+  onPress,
+}: {
+  drill: Drill;
+  identity: DrillIdentity;
+  selected: boolean;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      onPress={onPress}
+      accessibilityRole="button"
+      accessibilityLabel={`${drill.title} drill. ${drill.tagline}`}
+      accessibilityHint={drill.rules}
+      accessibilityState={{ selected }}
+      style={({ pressed }) => [
+        styles.card,
+        selected && [styles.cardSelected, { borderColor: identity.accent }],
+        pressed && styles.cardPressed,
+        pressed && { transform: [{ scale: 0.985 }] },
+      ]}
+    >
+      <View
+        style={[
+          styles.iconBadge,
+          { borderColor: identity.accent, backgroundColor: identity.tint },
+        ]}
+      >
+        <Ionicons
+          name={drill.icon as ComponentProps<typeof Ionicons>['name']}
+          size={24}
+          color={identity.accent}
+        />
+      </View>
+
+      <View style={styles.cardBody}>
+        <Row style={styles.cardHead} gap={space.sm}>
+          <Text style={styles.name} numberOfLines={1}>
+            {drill.title}
+          </Text>
+          <Row gap={space.xs}>
+            <ProBadge />
+            {selected && (
+              <View style={[styles.selectedTag, { backgroundColor: identity.accent }]}>
+                <Text style={styles.selectedTagText}>✓ PICKED</Text>
+              </View>
+            )}
+          </Row>
+        </Row>
+        <Text style={[styles.tagline, { color: identity.accent }]}>{drill.tagline}</Text>
+        <Text style={styles.rules} numberOfLines={2}>
+          {drill.rules}
+        </Text>
+
         <Row gap={space.sm} style={styles.footRow}>
           <Row gap={space.xs} style={styles.glanceRow}>
             {identity.glance.map((g) => (
@@ -567,6 +686,20 @@ const styles = StyleSheet.create({
   ghostError: {
     ...type.caption,
     color: color.miss,
+  },
+  drillSection: {
+    marginTop: space.xl,
+  },
+  sectionTitle: {
+    ...type.heading,
+    color: color.text,
+    marginTop: space.xs,
+  },
+  sectionLede: {
+    ...type.body,
+    color: color.textDim,
+    marginTop: space.xs,
+    marginBottom: space.lg,
   },
   proSection: {
     marginTop: space.xl,

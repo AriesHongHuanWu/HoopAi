@@ -14,7 +14,14 @@
  * score nor advance nor cost a letter) so the AI's low-confidence calls don't
  * corrupt a game.
  */
+import { stepDrill, type DrillState } from './drills';
 import type { GameModeId, ResolvedShot, ShotOutcome, ShotValue } from './types';
+
+/**
+ * Structural alias for the drill progression stored on {@link ModeState.config}.
+ * Kept as an alias (not a re-declaration) so gameModes and drills never drift.
+ */
+type DrillConfig = DrillState;
 
 // ---------------------------------------------------------------------------
 // Mode catalog
@@ -224,6 +231,15 @@ export interface ModeState {
     durationSec?: number;
     makesPerSpot?: number;
     ghost?: GhostConfig;
+    /**
+     * Structured-drill progression (src/core/drills.ts). Present ONLY when a
+     * drill is running: a drill rides inside the `spotShooting` mode, so its
+     * running state lives here rather than as a new GameModeId. When set,
+     * {@link stepMode} delegates the shot to the drill engine. Typed as the
+     * drill layer's `DrillState`; kept as a structural field here so gameModes
+     * carries no value-import of the drills module (types only, no cycle).
+     */
+    drill?: DrillConfig;
   };
   /** ftStreak: best consecutive-make run so far. */
   bestStreak?: number;
@@ -416,6 +432,12 @@ export function stepMode(
   nowSec: number,
 ): ModeState {
   if (state.done) return state;
+
+  // A structured drill rides inside the spotShooting mode (config.drill set):
+  // its per-spot goals / zone attribution are variable, so delegate to the
+  // pure drill engine. Real Spot Shooting never sets config.drill, so its
+  // branch below stays untouched.
+  if (state.config?.drill != null) return stepDrill(state, shot);
 
   switch (state.modeId) {
     case 'free':
