@@ -23,10 +23,12 @@ import {
   decidedEntryAngles,
 } from '@/components/charts/AngleHistogram';
 import { Sparkline } from '@/components/charts/Sparkline';
+import { CourtHeatmap } from '@/components/charts/CourtHeatmap';
 import { Card, EmptyState, Eyebrow, Row, Screen, StatNumber } from '@/components/ui';
 import { color, font, motion, radius, space, type } from '@/constants/tokens';
-import { fgTrend, listSessions, sessionShots } from '@/data/db';
+import { fgTrend, listSessions, sessionShots, shotFromRow } from '@/data/db';
 import { monthlyProgress, type MonthlyProgress } from '@/core/progression';
+import { buildHeatmap, type Heatmap } from '@/core/heatmap';
 
 type TrendPoint = Awaited<ReturnType<typeof fgTrend>>[number];
 
@@ -34,6 +36,10 @@ const SPARK_H = 132;
 const BARS_H = 110;
 /** Cascade step between cards (ms). */
 const STAGGER_MS = 70;
+/** Recent tracked sessions aggregated into the court-zone heatmap. */
+const ZONE_SESSION_SCAN = 15;
+/** Min attempts before the zone map is worth showing. */
+const ZONE_MIN_ATTEMPTS = 6;
 
 function clamp01(v: number): number {
   return v < 0 ? 0 : v > 1 ? 1 : v;
@@ -163,6 +169,8 @@ export default function TrendsScreen() {
     makes: number;
   } | null>(null);
   const [monthly, setMonthly] = useState<MonthlyProgress | null>(null);
+  /** Aggregate court-zone heatmap across recent sessions (null = loading). */
+  const [zones, setZones] = useState<Heatmap | null>(null);
   const reducedMotion = useReducedMotion();
   const enter = (i: number) =>
     reducedMotion
@@ -183,7 +191,7 @@ export default function TrendsScreen() {
         const rows = await sessionShots(last.sessionId);
         if (alive) setLastAngles(decidedEntryAngles(rows));
       });
-      void listSessions(1000).then((rows) => {
+      void listSessions(1000).then(async (rows) => {
         if (!alive) return;
         const tracked = rows.filter((r) => r.attempts > 0);
         setLifetime({
@@ -192,6 +200,12 @@ export default function TrendsScreen() {
           makes: tracked.reduce((sum, r) => sum + (r.makes ?? 0), 0),
         });
         setMonthly(monthlyProgress(tracked, Date.now()));
+        // Court zones: decided shots across the most recent tracked sessions
+        // (bounded) so the map reflects the current game, not all-time.
+        const recent = tracked.slice(0, ZONE_SESSION_SCAN);
+        const shotRows = await Promise.all(recent.map((r) => sessionShots(r.id)));
+        if (!alive) return;
+        setZones(buildHeatmap(shotRows.flat().map(shotFromRow)));
       });
       return () => {
         alive = false;
@@ -345,8 +359,20 @@ export default function TrendsScreen() {
             </Card>
           )}
 
-          {lifetime != null && lifetime.sessions > 0 && (
+          {zones != null && zones.totalAttempts >= ZONE_MIN_ATTEMPTS && (
             <Card entering={enter(4)}>
+              <Eyebrow>{`Court zones · last ${ZONE_SESSION_SCAN} sessions`}</Eyebrow>
+              <View style={{ marginTop: space.sm }}>
+                <CourtHeatmap heatmap={zones} />
+              </View>
+              <Text style={[styles.caption, { marginTop: space.md }]}>
+                {`${zones.totalMakes}/${zones.totalAttempts} placed · where you're hot and where to get up more.`}
+              </Text>
+            </Card>
+          )}
+
+          {lifetime != null && lifetime.sessions > 0 && (
+            <Card entering={enter(5)}>
               <Eyebrow>Lifetime</Eyebrow>
               <View style={styles.statGrid}>
                 <View style={styles.statCell}>
