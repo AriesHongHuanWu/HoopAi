@@ -29,10 +29,33 @@
  * Pure TypeScript; unit-tested against every adversarial fixture that broke
  * the original design.
  */
-import { REAPPEAR } from './config';
+import { REAPPEAR, scaleFrameGate } from './config';
 import { depthConsistencyAtSample, type BallSizeSetting } from './depthRatioGate';
-import { evalArc, fitArc, predictLanding, type ArcFit } from './trajectory';
+import {
+  ABS_MIN_FIT_SAMPLES,
+  evalArc,
+  fitArc,
+  predictLanding,
+  type ArcFit,
+} from './trajectory';
 import type { BallSample, RimGeometry } from './types';
+
+/**
+ * Median forward inter-sample interval of a real-sample history (seconds), for
+ * fps-scaling the pre-gap fit floor. Median (not mean) so one long occlusion
+ * gap inside the history doesn't inflate the estimate. Returns null when there
+ * are too few samples to measure an interval.
+ */
+function medianSampleDt(samples: readonly BallSample[]): number | null {
+  const dts: number[] = [];
+  for (let i = 1; i < samples.length; i++) {
+    const dt = samples[i].t - samples[i - 1].t;
+    if (dt > 0) dts.push(dt);
+  }
+  if (dts.length === 0) return null;
+  dts.sort((a, b) => a - b);
+  return dts[Math.floor(dts.length / 2)];
+}
 
 export interface ReappearanceSample {
   cx: number;
@@ -72,8 +95,18 @@ export class ReappearanceTest {
   armOnBallLost(history: readonly BallSample[], rim: RimGeometry, t: number): void {
     if (this.armed) return;
     const reals = history.filter((s) => !s.predicted);
-    if (reals.length < REAPPEAR.minRealSamplesPreGap) return;
-    const fit = fitArc(reals);
+    // fps-scaled pre-gap sample floor: at 8 fps the pre-occlusion flight
+    // carries far fewer than the 30 fps count of 5, so scale the nominal to the
+    // history's own measured cadence (never below 3) — otherwise a slow-phone
+    // occluded shot can never arm the corroborator. At 30 fps this is 5,
+    // unchanged. dt unknown (too few samples) ⇒ the nominal floor.
+    const dt = medianSampleDt(reals);
+    const minReal =
+      dt === null
+        ? REAPPEAR.minRealSamplesPreGap
+        : scaleFrameGate(REAPPEAR.minRealSamplesPreGap, dt, ABS_MIN_FIT_SAMPLES);
+    if (reals.length < minReal) return;
+    const fit = fitArc(reals, minReal);
     if (!fit || fit.ya <= 0 || fit.r2y < REAPPEAR.minArcR2y) return;
     const cross = predictLanding(fit, rim.planeY);
     if (!cross || cross.t < t - 0.2) return; // crossing must be now-ish/future

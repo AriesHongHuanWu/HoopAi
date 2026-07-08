@@ -29,12 +29,24 @@
  *
  * Coordinates are analysis-frame pixels, +y DOWN (ball moving up ⇒ vy < 0).
  */
-import { DETECTION, RELEASE, SHOT_FSM } from './config';
+import {
+  DETECTION,
+  NOMINAL_FPS,
+  RELEASE,
+  SHOT_FSM,
+  scaleFrameGate,
+} from './config';
 import { depthRatioGate, type BallSizeSetting, type ViewBandName } from './depthRatioGate';
 import { elevationAngleDeg, interpolateXAtY } from './geometry';
 import { ReappearanceTest } from './reappearance';
 import { selectDepthSamples } from './sampleQuality';
-import { backfillPredictedGap, fitArc, predictLanding } from './trajectory';
+import {
+  ABS_MIN_FIT_SAMPLES,
+  MIN_FIT_SAMPLES,
+  backfillPredictedGap,
+  fitArc,
+  predictLanding,
+} from './trajectory';
 import type {
   BallSample,
   Box,
@@ -77,6 +89,16 @@ const MAX_TRAJ_SAMPLES = 48;
  */
 const PRE_ARM_MAX = 32;
 
+/** Nominal inter-frame interval (seconds) — seed for the cadence EMA. */
+const NOMINAL_DT = 1 / NOMINAL_FPS;
+
+/**
+ * EMA weight of the newest inter-step interval when tracking the mean frame
+ * cadence. Low (0.1) so one long stall (occlusion, a dropped frame) barely
+ * shifts the device-fps estimate that scales the sample-count fit floors.
+ */
+const DT_EMA_ALPHA = 0.1;
+
 /** Internal per-frame net-motion sample. */
 interface NetSample {
   t: number;
@@ -111,6 +133,18 @@ export class ShotFsm {
   private nextId = 1;
   private lastResolveT = -Infinity;
   private lastMakeT = -Infinity;
+
+  /** Timestamp of the previous `step` call, for the cadence EMA. */
+  private lastStepT: number | null = null;
+
+  /**
+   * EMA of the inter-step interval (seconds) — the FSM's own live estimate of
+   * the device frame cadence, used to convert NOMINAL_FPS sample-count fit
+   * floors (descend/virtual-crossing arc fits) into a wall-clock-correct
+   * count for THIS device (see config.scaleFrameGate). Seeded to the nominal
+   * interval so the first shots behave exactly as before until timing accrues.
+   */
+  private meanStepDt = NOMINAL_DT;
   /** Last resolve that ended with a rim bounce (putback guard). */
   private lastBounceResolveT = -Infinity;
 
@@ -257,6 +291,14 @@ export class ShotFsm {
   step(input: FsmFrameInput): FsmStepResult {
     const t = input.t;
 
+    // Track the device cadence from consecutive step timestamps (forward gaps
+    // only). Feeds the fps-scaled arc-fit sample floors below so a slow phone,
+    // whose arcs carry far fewer samples, isn't held to the 30 fps count.
+    if (this.lastStepT !== null && t > this.lastStepT) {
+      this.meanStepDt += DT_EMA_ALPHA * (t - this.lastStepT - this.meanStepDt);
+    }
+    this.lastStepT = t;
+
     // Latch a pose-gated release event in EVERY phase: an event arriving
     // during COOLDOWN must still be armable the moment IDLE resumes (the
     // window checks in canArmRelease are what keep it honest, not the phase
@@ -336,7 +378,9 @@ export class ShotFsm {
       // rewrite the straight-line Kalman coast between the two real sides with
       // the physics-true two-sided parabola. Improves the drawn comet AND the
       // crossing geometry the make/miss call is built on.
-      if (!ball.predicted) backfillPredictedGap(this.trajectory);
+      if (!ball.predicted) {
+        backfillPredictedGap(this.trajectory, this.minFitSamples(MIN_FIT_SAMPLES));
+      }
       // Reappearance corroborator (flagged): arm when the track goes
       // predicted-only mid-shot; feed real samples while armed.
       if (this.useReappearance) {
@@ -396,6 +440,17 @@ export class ShotFsm {
   // -------------------------------------------------------------------------
   // Arming
   // -------------------------------------------------------------------------
+
+  /**
+   * fps-scaled floor on the real-sample count an arc fit needs. A NOMINAL_FPS-
+   * authored count of `nominal` samples is a wall-clock budget; on a slow phone
+   * whose arcs carry far fewer samples the same budget is fewer frames, floored
+   * at ABS_MIN_FIT_SAMPLES (3 — the minimum that determines a quadratic). At
+   * NOMINAL_FPS this returns `nominal` unchanged, so 30 fps is untouched.
+   */
+  private minFitSamples(nominal: number): number {
+    return scaleFrameGate(nominal, this.meanStepDt, ABS_MIN_FIT_SAMPLES);
+  }
 
   private canArm(input: FsmFrameInput, ball: TrackedBall): ArmVia | null {
     // Shot cooldown (redundant with COOLDOWN phase gating, kept as a guard).
@@ -502,10 +557,14 @@ export class ShotFsm {
     if (ball.vy > cfg.maxFallVyRimWidthsPerSec * rim.box.width) return false;
     if (!pointInBox(rim.hoopRoi, ball.cx, ball.cy)) return false;
     const buf = this.preArm;
-    if (buf.length < cfg.minRealSamples) return false;
+    // fps-scaled sample floor: at 8 fps a floater's approach carries far fewer
+    // than the 30 fps count of 5, so the nominal minRealSamples is scaled down
+    // (never below 3) — otherwise a made floater on a slow phone never arms.
+    const minReal = this.minFitSamples(cfg.minRealSamples);
+    if (buf.length < minReal) return false;
     const first = buf[0];
     if (pointInBox(this.layupZone, first.cx, first.cy)) return false;
-    const fit = fitArc(buf);
+    const fit = fitArc(buf, minReal);
     if (fit === null || fit.r2y < cfg.minR2y) return false;
     // Gravity floor on ya (≈ g/2): rejects linear drift, whose fit is
     // near-degenerate in the quadratic term.
@@ -668,7 +727,12 @@ export class ShotFsm {
       tail.unshift(s);
       if (tail.length >= 12) break; // enough support; older samples add bias
     }
-    if (tail.length < cfg.minRealSamples) return null;
+    // fps-scaled floor: the occluded-arc tail (real, above-plane, descending
+    // samples) is only 2–4 samples at 8 fps, so the nominal 5 is scaled to the
+    // device cadence (never below 3) — otherwise a slow-phone occluded swish
+    // can never project its virtual crossing and always falls to 'unsure'.
+    const minReal = this.minFitSamples(cfg.minRealSamples);
+    if (tail.length < minReal) return null;
     const last = tail[tail.length - 1];
     // Net downward motion across the tail, ending where occlusion is
     // physically plausible: horizontally at the hoop (layup-zone x-range)
@@ -682,7 +746,7 @@ export class ShotFsm {
     ) {
       return null;
     }
-    const fit = fitArc(tail);
+    const fit = fitArc(tail, minReal);
     if (fit === null || fit.ya <= 0 || fit.r2y < cfg.minR2y) return null;
     const p = predictLanding(fit, this.rim.planeY);
     if (p === null) return null;
