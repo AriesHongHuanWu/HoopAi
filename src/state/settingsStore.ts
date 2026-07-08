@@ -224,6 +224,15 @@ export interface SettingsState {
    */
   reappearance: boolean;
   /**
+   * Full-flight parabola tracking (src/core/flightArc.ts). A persistent arc
+   * fitted over the whole shot gives the tracker a standing score-floor
+   * relaxation along the predicted path, so a faint mid-arc ball keeps being
+   * detected between the release and the rim — not only near the hoop. Default
+   * ON (trivial compute, recall-only, cannot mint a make); this toggle is the
+   * escape hatch if it ever misbehaves on a specific phone.
+   */
+  useFlightArc: boolean;
+  /**
    * Frame-diff motion assist (experimental): when the detector loses the ball
    * mid-flight, the strongest local mover on a coarse luma grid is injected as
    * a continuation-only synthetic candidate. Default OFF — field testing
@@ -326,6 +335,7 @@ export const useSettings = create<SettingsState>()(
       depthVeto: false,
       metric23: false,
       reappearance: false,
+      useFlightArc: true,
       motionAssist: false,
       deviceTierOverride: 'auto',
       detectedTier: null,
@@ -384,7 +394,7 @@ export const useSettings = create<SettingsState>()(
       // "from version N" to branch on instead of relying on zustand's default
       // shallow-merge rehydration, which silently keeps stale/renamed keys
       // around forever.
-      version: 4,
+      version: 5,
       migrate: (persisted, version) => {
         const s = persisted as SettingsState;
         // v2: YOLOX (Apache-2.0, GPU-correct) becomes the default detector. Move
@@ -415,6 +425,10 @@ export const useSettings = create<SettingsState>()(
           s.deviceTierOverride = 'auto';
           s.detectedTier = null;
         }
+        // v5: full-flight tracking added, default ON (recall-only, cannot mint a
+        // make). Turn it on for existing installs too — it's a strict detection
+        // improvement, and the Settings toggle lets anyone opt out.
+        if (version < 5 && s.useFlightArc == null) s.useFlightArc = true;
         return s;
       },
     },

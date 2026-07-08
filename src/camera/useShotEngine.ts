@@ -729,6 +729,10 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
   useEffect(() => {
     pipeline.setReappearance(reappearance);
   }, [pipeline, reappearance]);
+  const useFlightArc = useSettings((s) => s.useFlightArc);
+  useEffect(() => {
+    pipeline.setUseFlightArc(useFlightArc);
+  }, [pipeline, useFlightArc]);
 
   // IMU camera pitch (degrees, +up): from the gravity vector at ~4Hz, EMA'd.
   // Feeds the view-band classifier (under-hoop vs overhead disambiguation)

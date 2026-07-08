@@ -711,12 +711,19 @@ export const VIEW = {
  * arc (release -> rim across the entire frame) drives a standing score-floor
  * relaxation along the predicted path, so a faint mid-arc ball keeps being
  * tracked instead of dying between the release and the hoop ROI (the historic
- * "flight tracking collapsed while near-rim rescue worked" failure). Ships OFF
- * — flip only after the labeled-clip validation in the trajectory spec.
+ * "flight tracking collapsed while near-rim rescue worked" failure).
+ *
+ * Default ON: the compute is trivial (one arc fit over <= maxFlightSamples per
+ * tracked frame -- nothing like the model-compute cost behind the earlier
+ * low-fps regression), and the relaxation only ever ADMITS real ball
+ * detections (score >= tracking floor) that sit on the physics-validated path
+ * and pass every other gate -- it cannot mint a ball_in_basket or flip a make.
+ * The pipeline reads a per-session runtime copy (ShotPipeline.setUseFlightArc)
+ * so Settings can toggle it live as an escape hatch.
  */
 export const FLIGHT = {
-  /** Master flag for the FlightArc accumulator + tracker corridor relaxation. */
-  useFlightArc: false,
+  /** Default for the FlightArc accumulator + tracker corridor relaxation. */
+  useFlightArc: true,
   /** Min vertical-fit R² to trust the corridor for score relaxation (loose). */
   corridorMinR2yLoose: 0.6,
   /** Min R² to trust the corridor for a crossing/landing (strict). */

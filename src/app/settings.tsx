@@ -519,6 +519,7 @@ export default function SettingsScreen() {
   const reappearance = useSettings((s) => s.reappearance);
   const motionAssist = useSettings((s) => s.motionAssist);
   const metric23 = useSettings((s) => s.metric23);
+  const useFlightArc = useSettings((s) => s.useFlightArc);
   const formAnalysis = useSettings((s) => s.formAnalysis);
   const dailyGoalMakes = useSettings((s) => s.dailyGoalMakes);
   const set = useSettings((s) => s.set);
@@ -969,6 +970,16 @@ export default function SettingsScreen() {
               />
             </View>
           ))}
+          <View style={styles.divider} />
+          <ToggleRow
+            label="Full-flight tracking"
+            description="Fits one parabola over the WHOLE shot so the ball keeps being tracked across its entire flight — from the release, under the basket, all the way to the rim — not just near the hoop. On by default; it only recovers real ball detections along the physics path and can't invent a make. Turn off only if a specific phone misbehaves."
+            value={useFlightArc}
+            onValueChange={(v) => {
+              tick();
+              set('useFlightArc', v);
+            }}
+          />
           <View style={styles.divider} />
           <ToggleRow
             label="Metric 2/3 distance"

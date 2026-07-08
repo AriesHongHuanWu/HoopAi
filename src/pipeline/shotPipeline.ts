@@ -142,6 +142,9 @@ export class ShotPipeline {
    * release and the hoop ROI, not only near the rim.
    */
   private readonly flightArc = new FlightArc();
+  /** Live copy of config.FLIGHT.useFlightArc, toggled from Settings so the user
+   *  can disable full-flight tracking without a rebuild (escape hatch). */
+  private useFlight: boolean = FLIGHT.useFlightArc;
   private readonly rimLock = new RimLock({ lockHoldSec: RIM.lockHoldSec });
   private fsm: ShotFsm | null = null;
   private events: PipelineEvents;
@@ -248,6 +251,17 @@ export class ShotPipeline {
   /** Reappearance corroborator (from Settings). Takes effect at rim lock. */
   setReappearance(enabled: boolean): void {
     this.reappearance = enabled;
+  }
+
+  /**
+   * Full-flight tracking toggle (from Settings). Takes effect immediately —
+   * turning it OFF stops feeding/consulting the global arc from the next frame
+   * and clears any accumulated flight so a re-enable starts clean.
+   */
+  setUseFlightArc(enabled: boolean): void {
+    if (this.useFlight === enabled) return;
+    this.useFlight = enabled;
+    if (!enabled) this.flightArc.reset(0);
   }
 
   /** IMU camera pitch, degrees +up (EMA'd by the engine). Feeds the view-band
@@ -362,7 +376,7 @@ export class ShotPipeline {
     // relaxation the near-rim ROI never provided across the whole flight. The
     // lag is harmless: a mid-air ball moves << the rim-scaled tube per frame.
     const corridor =
-      FLIGHT.useFlightArc && this.lastRim
+      this.useFlight && this.lastRim
         ? this.flightArc.corridorPoint(
             frame.t,
             this.lastRim.box.width,
@@ -383,7 +397,7 @@ export class ShotPipeline {
     // Feed the accepted ball into the global arc. A discontinuity (first ball,
     // or the flight went dark past the freshness window) starts a fresh arc so
     // one shot's samples never contaminate the next shot's fit.
-    if (FLIGHT.useFlightArc && ball) {
+    if (this.useFlight && ball) {
       if (frame.t - this.flightArc.lastReal > FLIGHT.corridorFreshSec) {
         this.flightArc.reset(frame.t);
       }
@@ -424,7 +438,7 @@ export class ShotPipeline {
         this.pendingReleaseT = release.t;
         // A release is the cleanest "new flight starts here" signal: drop the
         // prior shot's samples so the global arc fits only this attempt.
-        if (FLIGHT.useFlightArc) this.flightArc.reset(release.t);
+        if (this.useFlight) this.flightArc.reset(release.t);
       }
       this.sawPoseThisShot = true;
       // Pose (MoveNet) gives a far more reliable shooter foot than the YOLO

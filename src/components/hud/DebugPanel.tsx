@@ -45,6 +45,7 @@ function buildDiagnostics(d: EngineDebug, rimAsp: number): string {
     `device: ${dev} (${model})`,
     `tier: ${tierLine}`,
     `engine: ${s.detectorEngine} ${s.perfMode} · accel ${s.detectorAccel} · rate ${s.detectionRate}`,
+    `flight: ${s.useFlightArc ? 'on' : 'off'} · roiZoom ${s.roiZoom ? 'on' : 'off'}`,
     `delegate: ${d.delegate}`,
     `speed: ${d.fps} fps · ${d.avgMs}ms avg`,
     `model: ${d.modelLoaded ? 'loaded' : 'DEMO'} · output ${d.outputLen} · ${d.layout}`,
