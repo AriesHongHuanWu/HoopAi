@@ -379,6 +379,20 @@ export async function allSessions(): Promise<SessionRow[]> {
   });
 }
 
+/**
+ * Every session's start time in epoch ms (lightweight — one column, all rows).
+ * Feeds the career day-streak (src/core/streak.ts) in Records. Never throws.
+ */
+export async function allSessionStartedAt(): Promise<number[]> {
+  return safe('allSessionStartedAt', [], async () => {
+    const db = await getDb();
+    const rows = await db.getAllAsync<{ startedAt: number }>(
+      'SELECT startedAt FROM sessions',
+    );
+    return rows.map((r) => r.startedAt);
+  });
+}
+
 /** Every shot row across all sessions (ordered for stable exports). Never throws. */
 export async function allShots(): Promise<ShotRow[]> {
   return safe('allShots', [], async () => {

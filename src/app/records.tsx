@@ -19,7 +19,8 @@ import { BackPill } from '@/components/ShotList';
 import { Card, Chip, Eyebrow, PillButton, Row, Screen, StatNumber } from '@/components/ui';
 import { color, motion, radius, space, type } from '@/constants/tokens';
 import { ACHIEVEMENTS, evaluate, type LifetimeTotals } from '@/core/achievements';
-import { lifetimeTotals } from '@/data/db';
+import { computeDayStreak } from '@/core/streak';
+import { allSessionStartedAt, lifetimeTotals } from '@/data/db';
 import { useAchievementsSeen } from '@/state/achievementsSeenStore';
 
 /** Cascade step between badge rows (ms), capped so long boards stay snappy. */
@@ -128,11 +129,18 @@ export default function RecordsScreen() {
   // Snapshot of "unlocked since last visit" ids, fixed for this visit so the
   // NEW pips don't vanish mid-view when the seen-store updates underneath.
   const [newIds, setNewIds] = useState<readonly string[]>([]);
+  // Longest career day-streak (consecutive calendar days shot) — computed from
+  // all session dates, distinct from totals.bestStreak (consecutive makes).
+  const [longestDayStreak, setLongestDayStreak] = useState(0);
   const seenHydrated = useAchievementsSeenHydrated();
 
   useFocusEffect(
     useCallback(() => {
       let alive = true;
+      void allSessionStartedAt().then((dates) => {
+        if (!alive) return;
+        setLongestDayStreak(computeDayStreak(dates, Date.now()).longest);
+      });
       void lifetimeTotals().then((t) => {
         if (!alive) return;
         setTotals(t);
@@ -219,6 +227,29 @@ export default function RecordsScreen() {
               tintBg={color.threePtTint}
               value={String(totals.bestStreak)}
               label="best streak"
+            />
+          </Row>
+          <Row gap={space.sm} style={styles.heroRow}>
+            <PbTile
+              icon="calendar-outline"
+              tint={color.accent}
+              tintBg={color.accentTint}
+              value={longestDayStreak > 0 ? `${longestDayStreak}d` : '—'}
+              label="longest streak"
+            />
+            <PbTile
+              icon="trophy-outline"
+              tint={color.make}
+              tintBg={color.makeTint}
+              value={totals.bestWeekSessions > 0 ? String(totals.bestWeekSessions) : '—'}
+              label="best week"
+            />
+            <PbTile
+              icon="disc-outline"
+              tint={color.threePt}
+              tintBg={color.threePtTint}
+              value={String(totals.threes)}
+              label="career 3s"
             />
           </Row>
         </Card>
