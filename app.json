@@ -10,12 +10,17 @@
     "ios": {
       "icon": "./assets/images/icon.png",
       "bundleIdentifier": "com.arieswu.hoopai",
+      "buildNumber": "1",
       "infoPlist": {
-        "NSCameraUsageDescription": "Hoopilot uses the camera to track your shots in real time.",
-        "NSMicrophoneUsageDescription": "Hoopilot records court audio with your session videos."
+        "NSCameraUsageDescription": "Hoopilot uses the camera to detect the ball and rim and score your shots in real time. Video is analyzed entirely on your device and is never uploaded.",
+        "NSMicrophoneUsageDescription": "Hoopilot records court audio together with your session clips so replays sound like you were there. Audio stays on your device and is never uploaded.",
+        "NSPhotoLibraryAddUsageDescription": "Hoopilot saves the highlight clips you choose to keep to your photo library.",
+        "NSPhotoLibraryUsageDescription": "Hoopilot reads a basketball video you pick so it can run the on-device shot detector on it. Only the video you select is read, and it never leaves your device.",
+        "ITSAppUsesNonExemptEncryption": false
       }
     },
     "android": {
+      "versionCode": 1,
       "permissions": [
         "android.permission.CAMERA",
         "android.permission.RECORD_AUDIO",
@@ -63,14 +68,14 @@
       [
         "expo-media-library",
         {
-          "photosPermission": "Hoopilot saves your made-shot highlight clips to your library.",
-          "savePhotosPermission": "Hoopilot saves your made-shot highlight clips to your library."
+          "photosPermission": "Hoopilot saves the highlight clips you choose to keep to your photo library.",
+          "savePhotosPermission": "Hoopilot saves the highlight clips you choose to keep to your photo library."
         }
       ],
       [
         "expo-image-picker",
         {
-          "photosPermission": "Hoopilot reads a basketball video you pick so it can run the shot detector on it."
+          "photosPermission": "Hoopilot reads a basketball video you pick so it can run the on-device shot detector on it. Only the video you select is read, and it never leaves your device."
         }
       ],
       [
