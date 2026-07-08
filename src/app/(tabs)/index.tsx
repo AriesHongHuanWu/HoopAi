@@ -35,6 +35,7 @@ import { Sparkline } from '@/components/charts/Sparkline';
 import { CoachMarks, useCoachMarks, type CoachStep } from '@/components/coach/CoachMarks';
 import { GoalRing } from '@/components/GoalRing';
 import { ProfileButton } from '@/components/profile/ProfileButton';
+import { StreakTierCard } from '@/components/StreakTierCard';
 import { Card, Chip, EmptyState, ErrorCard, Eyebrow, Row, Screen, StatNumber } from '@/components/ui';
 import { color, radius, space, touch, type } from '@/constants/tokens';
 import {
@@ -422,34 +423,11 @@ export default function HomeScreen() {
         </View>
         </Animated.View>
 
-        {/* Day streak — the return loop. Shown once a streak exists; stays live
-            through today until a full day is missed. */}
+        {/* Day streak — the return loop, gamified into a medal ladder. Shown
+            once a streak exists; stays live through today until a day is missed. */}
         {streak.current >= 1 && (
           <Animated.View entering={enter(3)}>
-            <View
-              style={styles.streakRow}
-              accessible
-              accessibilityLabel={`${streak.current} day shooting streak.${
-                streak.shotToday ? '' : ' Shoot today to keep it going.'
-              }`}
-            >
-              <View style={styles.streakFlame}>
-                <Ionicons name="flame" size={18} color={color.accent} />
-              </View>
-              <View style={styles.streakText}>
-                <Text style={styles.streakTitle}>
-                  {`${streak.current}-day streak`}
-                </Text>
-                <Text style={styles.streakSub} numberOfLines={1}>
-                  {streak.shotToday
-                    ? streak.current >= streak.longest && streak.longest > 1
-                      ? 'Your best run yet — keep it alive.'
-                      : `Longest: ${streak.longest} ${streak.longest === 1 ? 'day' : 'days'}`
-                    : 'Shoot today to keep it going.'}
-                </Text>
-              </View>
-              {!streak.shotToday && <Text style={styles.streakNudge}>TODAY</Text>}
-            </View>
+            <StreakTierCard streak={streak} />
           </Animated.View>
         )}
 
@@ -758,43 +736,6 @@ const styles = StyleSheet.create({
   modeSub: {
     ...type.body,
     color: color.textDim,
-  },
-  streakRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: space.md,
-    backgroundColor: color.surface,
-    borderRadius: radius.lg,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: color.border,
-    paddingVertical: space.md,
-    paddingHorizontal: space.lg,
-  },
-  streakFlame: {
-    width: 34,
-    height: 34,
-    borderRadius: radius.pill,
-    backgroundColor: color.accentTint,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  streakText: {
-    flex: 1,
-    minWidth: 0,
-    gap: 1,
-  },
-  streakTitle: {
-    ...type.bodyMedium,
-    color: color.text,
-  },
-  streakSub: {
-    ...type.caption,
-    color: color.textDim,
-  },
-  streakNudge: {
-    ...type.micro,
-    color: color.accent,
-    letterSpacing: 1,
   },
   cardPressed: {
     backgroundColor: color.surfaceRaised,

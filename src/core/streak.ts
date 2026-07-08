@@ -73,3 +73,59 @@ export function computeDayStreak(
 
   return { current, longest, shotToday };
 }
+
+// ---------------------------------------------------------------------------
+// Streak tiers — turn the raw day count into a "chase the next medal" ladder
+// ---------------------------------------------------------------------------
+
+export interface StreakTier {
+  /** Day count at which this tier unlocks. */
+  at: number;
+  /** Display name. */
+  label: string;
+}
+
+/**
+ * Reward tiers in ascending order. Chosen so the first is reachable in a few
+ * days (early momentum) and the top is a genuine season-long badge of honor.
+ */
+export const STREAK_TIERS: readonly StreakTier[] = [
+  { at: 3, label: 'Spark' },
+  { at: 7, label: 'Bronze' },
+  { at: 14, label: 'Silver' },
+  { at: 30, label: 'Gold' },
+  { at: 100, label: 'Legend' },
+];
+
+export interface StreakStanding {
+  /** The highest tier reached, or null before the first tier. */
+  tier: StreakTier | null;
+  /** The next tier to chase, or null once the top tier is held. */
+  next: StreakTier | null;
+  /** Days remaining to reach `next` (0 when there is no next). */
+  daysToNext: number;
+  /** Progress 0..1 from the current tier's floor toward `next` (1 when maxed). */
+  progressToNext: number;
+}
+
+/**
+ * Place a current day-streak on the tier ladder: which medal it holds, which
+ * it's chasing, and how close. Pure; drives the Home streak card.
+ */
+export function streakStanding(current: number): StreakStanding {
+  let tier: StreakTier | null = null;
+  let next: StreakTier | null = null;
+  for (const t of STREAK_TIERS) {
+    if (current >= t.at) {
+      tier = t;
+    } else {
+      next = t;
+      break;
+    }
+  }
+  const floor = tier ? tier.at : 0;
+  const daysToNext = next ? Math.max(0, next.at - current) : 0;
+  const span = next ? next.at - floor : 1;
+  const progressToNext = next ? Math.max(0, Math.min(1, (current - floor) / span)) : 1;
+  return { tier, next, daysToNext, progressToNext };
+}

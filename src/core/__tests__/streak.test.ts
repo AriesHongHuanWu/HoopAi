@@ -2,7 +2,7 @@
  * Day-streak tests. All times are built from a fixed local-noon anchor so the
  * local-midnight bucketing is unambiguous regardless of the runner's timezone.
  */
-import { computeDayStreak } from '../streak';
+import { computeDayStreak, streakStanding, STREAK_TIERS } from '../streak';
 
 const DAY = 86_400_000;
 /** A fixed "today" at local noon (avoids midnight/DST edge ambiguity in tests). */
@@ -74,5 +74,47 @@ describe('computeDayStreak', () => {
     const r = computeDayStreak([daysAgo(0), daysAgo(2), daysAgo(1)], TODAY_NOON);
     expect(r.current).toBe(3);
     expect(r.longest).toBe(3);
+  });
+});
+
+describe('streakStanding', () => {
+  test('below the first tier: no medal, chasing Spark', () => {
+    const s = streakStanding(0);
+    expect(s.tier).toBeNull();
+    expect(s.next?.label).toBe('Spark');
+    expect(s.daysToNext).toBe(3);
+    expect(s.progressToNext).toBe(0);
+  });
+
+  test('exactly on a tier holds it and chases the next', () => {
+    const s = streakStanding(7);
+    expect(s.tier?.label).toBe('Bronze');
+    expect(s.next?.label).toBe('Silver');
+    expect(s.daysToNext).toBe(7); // 14 - 7
+  });
+
+  test('mid-way between tiers reports fractional progress', () => {
+    // current 5: floor Spark(3), next Bronze(7), span 4, (5-3)/4 = 0.5
+    const s = streakStanding(5);
+    expect(s.tier?.label).toBe('Spark');
+    expect(s.next?.label).toBe('Bronze');
+    expect(s.daysToNext).toBe(2);
+    expect(s.progressToNext).toBeCloseTo(0.5, 6);
+  });
+
+  test('at or past the top tier: maxed, no next', () => {
+    for (const current of [100, 250]) {
+      const s = streakStanding(current);
+      expect(s.tier?.label).toBe('Legend');
+      expect(s.next).toBeNull();
+      expect(s.daysToNext).toBe(0);
+      expect(s.progressToNext).toBe(1);
+    }
+  });
+
+  test('tiers are strictly ascending', () => {
+    for (let i = 1; i < STREAK_TIERS.length; i++) {
+      expect(STREAK_TIERS[i]!.at).toBeGreaterThan(STREAK_TIERS[i - 1]!.at);
+    }
   });
 });
