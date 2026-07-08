@@ -216,6 +216,13 @@ export interface SettingsState {
    */
   metric23: boolean;
   /**
+   * Manual court range. 'auto' (default) uses the automatic 2/3-point estimate;
+   * '2pt'/'3pt' pin every decided shot's value — the calibration-free way to
+   * score a pure 3-point (or 2-point) session accurately when you're shooting
+   * from one spot/range.
+   */
+  courtRange: 'auto' | '2pt' | '3pt';
+  /**
    * Gap-crossing reappearance corroborator (experimental): when the ball
    * vanishes at the rim and reappears BELOW it on the same flight arc,
    * descending, in-span and depth-consistent, the occluded crossing may be
@@ -334,6 +341,7 @@ export const useSettings = create<SettingsState>()(
       roiZoom: true,
       depthVeto: false,
       metric23: false,
+      courtRange: 'auto',
       reappearance: false,
       useFlightArc: true,
       motionAssist: false,

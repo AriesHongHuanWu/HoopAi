@@ -191,6 +191,8 @@ export class ShotPipeline {
   private depthVeto = false;
   /** Metric 2/3 estimation flag (Settings, experimental). */
   private metric23 = false;
+  /** Manual court-range override (Settings). 'auto' = use the 2/3 estimate. */
+  private courtRange: 'auto' | '2pt' | '3pt' = 'auto';
   /** Reappearance corroborator flag (Settings, experimental). */
   private reappearance = false;
   /** Camera pitch at/around rim lock from the IMU, degrees +up; null = no IMU. */
@@ -257,6 +259,12 @@ export class ShotPipeline {
   /** Metric 2/3 estimation (from Settings). */
   setMetric23(enabled: boolean): void {
     this.metric23 = enabled;
+  }
+
+  /** Manual court range (Settings). 'auto' uses the 2/3 estimate; '2pt'/'3pt'
+   *  force every decided shot's value. Applies from the next resolved shot. */
+  setCourtRange(range: 'auto' | '2pt' | '3pt'): void {
+    this.courtRange = range;
   }
 
   /** Reappearance corroborator (from Settings). Takes effect at rim lock. */
@@ -705,6 +713,12 @@ export class ShotPipeline {
         resolved.shotValue = metric ? metric.value : est.value;
         resolved.distanceRimWidths = est.distanceRimWidths;
         if (metric) resolved.distanceM = metric.distanceM;
+        // Manual court-range override (Settings > Court range): when the user
+        // pins the range, every decided shot takes that value regardless of the
+        // auto 2/3 estimate — the calibration-free way to score a 3-point (or
+        // pure 2-point) session accurately. 'auto' leaves the estimate intact.
+        if (this.courtRange === '2pt') resolved.shotValue = 2;
+        else if (this.courtRange === '3pt') resolved.shotValue = 3;
       }
       // Finalize the pose-based form report (only if a pose was seen this shot).
       if (this.form && this.sawPoseThisShot) {

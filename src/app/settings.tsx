@@ -110,6 +110,28 @@ const RIM_HEIGHT_OPTIONS: { value: 3.05 | 2.6; label: string; blurb: string }[] 
   },
 ];
 
+const COURT_RANGE_OPTIONS: {
+  value: 'auto' | '2pt' | '3pt';
+  label: string;
+  blurb: string;
+}[] = [
+  {
+    value: 'auto',
+    label: 'Automatic',
+    blurb: 'Estimate 2 vs 3 from where you shoot. Best for mixed sessions.',
+  },
+  {
+    value: '2pt',
+    label: 'All 2-pointers',
+    blurb: 'Every make counts as 2 — for close-range / mid-range work.',
+  },
+  {
+    value: '3pt',
+    label: 'All 3-pointers',
+    blurb: 'Every make counts as 3 — for a pure 3-point session. No setup needed.',
+  },
+];
+
 const DETECTION_RATE_OPTIONS: { value: DetectionRate; label: string; blurb: string }[] = [
   { value: 'auto', label: 'Auto · recommended', blurb: 'Smooth tracking on every supported phone.' },
   { value: 'battery', label: 'Battery saver', blurb: 'Cooler phone, longer sessions.' },
@@ -506,6 +528,7 @@ export default function SettingsScreen() {
   const shootingHand = useSettings((s) => s.shootingHand);
   const ballSize = useSettings((s) => s.ballSize);
   const rimHeightM = useSettings((s) => s.rimHeightM);
+  const courtRange = useSettings((s) => s.courtRange);
   const playerHeightCm = useSettings((s) => s.playerHeightCm);
   const detectorModel = useSettings((s) => s.detectorModel);
   const detectionRate = useSettings((s) => s.detectionRate);
@@ -1241,6 +1264,29 @@ export default function SettingsScreen() {
                 onPress={() => {
                   tick();
                   set('rimHeightM', opt.value);
+                }}
+              />
+            </View>
+          ))}
+          <View style={styles.divider} />
+          <View style={styles.settingText}>
+            <Text style={styles.settingLabel}>Court range</Text>
+            <Text style={styles.settingDesc}>
+              Pin whether your makes score as 2 or 3 when you're shooting from one
+              range — accurate scoring without any line setup. Leave on Automatic
+              for mixed sessions.
+            </Text>
+          </View>
+          {COURT_RANGE_OPTIONS.map((opt, i) => (
+            <View key={opt.value}>
+              {i > 0 && <View style={styles.divider} />}
+              <OptionRow
+                label={opt.label}
+                blurb={opt.blurb}
+                selected={courtRange === opt.value}
+                onPress={() => {
+                  tick();
+                  set('courtRange', opt.value);
                 }}
               />
             </View>

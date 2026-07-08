@@ -732,6 +732,10 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
   useEffect(() => {
     pipeline.setMetric23(metric23);
   }, [pipeline, metric23]);
+  const courtRange = useSettings((s) => s.courtRange);
+  useEffect(() => {
+    pipeline.setCourtRange(courtRange);
+  }, [pipeline, courtRange]);
   const reappearance = useSettings((s) => s.reappearance);
   useEffect(() => {
     pipeline.setReappearance(reappearance);
