@@ -19,6 +19,7 @@ import { StyleSheet, Text, View } from 'react-native';
 import Animated, { FadeInDown, ReduceMotion } from 'react-native-reanimated';
 
 import { color, motion, radius, space, type } from '../../constants/tokens';
+import { drillOf } from '../../core/drills';
 import { getModeDef, type ModeState } from '../../core/gameModes';
 import { ContestRacks } from './ContestRacks';
 import { HorseLetters } from './HorseLetters';
@@ -80,6 +81,10 @@ export function ModeBanner({ mode }: { mode: ModeState }) {
   if (mode.modeId === 'free') return null;
 
   const id = MODE_IDENTITY[mode.modeId];
+  // A drill hosts on spotShooting — title the banner with the DRILL, not the
+  // host mode, so it matches the card the player picked.
+  const drill = drillOf(mode);
+  const displayName = drill?.title ?? def.name;
   const showBar =
     !def.needsTimer && !def.needsSpots && mode.modeId !== 'horse' && mode.modeId !== 'threePoint';
 
@@ -103,7 +108,7 @@ export function ModeBanner({ mode }: { mode: ModeState }) {
             <Ionicons name={id.icon} size={13} color={id.accent} />
           </View>
           <Text style={styles.name} numberOfLines={1}>
-            {def.name.toUpperCase()}
+            {displayName.toUpperCase()}
           </Text>
         </View>
         {mode.modeId === 'timed' ? (
@@ -126,7 +131,14 @@ export function ModeBanner({ mode }: { mode: ModeState }) {
           <SpotTracker
             spots={mode.spots}
             currentSpot={mode.currentSpot ?? 0}
-            makesPerSpot={mode.config?.makesPerSpot}
+            // Drill spots carry per-spot goals; feed the ACTIVE spot's goal so
+            // the n/N counter tracks it. Falls back to the mode's flat
+            // makesPerSpot (real Spot Shooting) when no drill is running.
+            makesPerSpot={
+              drill != null
+                ? mode.config?.drill?.goals[mode.currentSpot ?? 0]
+                : mode.config?.makesPerSpot
+            }
             done={mode.done}
           />
         </View>

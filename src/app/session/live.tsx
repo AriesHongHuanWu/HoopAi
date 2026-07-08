@@ -51,6 +51,7 @@ import {
 import { ShotFlash } from '../../components/hud/ShotFlash';
 import { DebugPanel } from '../../components/hud/DebugPanel';
 import { DetectionBoxes } from '../../components/hud/DetectionBoxes';
+import { DrillOverlay } from '../../components/hud/DrillOverlay';
 import { ShotToast } from '../../components/hud/ShotToast';
 import { StatStrip } from '../../components/hud/StatStrip';
 import { TrajectoryOverlay } from '../../components/hud/TrajectoryOverlay';
@@ -79,6 +80,12 @@ const LANDSCAPE_HUD_WIDTH = 300;
  * shrinking further.
  */
 const LANDSCAPE_HUD_MIN_WIDTH = 220;
+
+/**
+ * Vertical clearance reserved above the action bar so the drill guidance chip
+ * floats clear of the End / Re-aim buttons (their ~44pt touch target + gap).
+ */
+const BOTTOM_BAR_CLEARANCE = 56;
 
 /**
  * First-run HUD intro — shown once before the rim locks on, teaching the
@@ -146,6 +153,8 @@ function LiveSessionScreen() {
   /** Tick-driven modes: Timed's countdown and Ghost's race clock. */
   const isTickDrivenMode =
     activeMode?.modeId === 'timed' || activeMode?.modeId === 'ghost';
+  /** A structured drill is running (rides inside spotShooting via config.drill). */
+  const isDrill = activeMode?.config?.drill != null;
 
   const [drift, setDrift] = useState(false);
   const [confirmEnd, setConfirmEnd] = useState(false);
@@ -468,6 +477,14 @@ function LiveSessionScreen() {
   const replayMode = useCallback(() => {
     const mode = useMode.getState().activeMode;
     if (mode == null) return;
+    // A structured drill rides inside spotShooting (config.drill set): re-init
+    // via its own builder so the drill's variable spots/goals rebuild — a plain
+    // selectMode('spotShooting') would reset it to the fixed 5-spot mode.
+    const drill = mode.config?.drill;
+    if (drill != null) {
+      useMode.getState().selectDrill(drill.id);
+      return;
+    }
     useMode.getState().selectMode(mode.modeId, mode.config ?? undefined);
   }, []);
 
@@ -630,6 +647,22 @@ function LiveSessionScreen() {
           </View>
         )}
       </View>
+
+      {/* Drill guidance — an honest half-court map of the active spot (no fake
+          AR floor marker). Bottom-center, above the action bar; only while a
+          structured drill is running and the rim is locked, and it steps aside
+          for the mode-complete sheet. */}
+      {rimLocked && isDrill && activeMode != null && !modeDone && (
+        <View
+          pointerEvents="box-none"
+          style={[
+            styles.drillOverlay,
+            { bottom: insets.bottom + BOTTOM_BAR_CLEARANCE + (isLandscape ? space.md : space.lg) },
+          ]}
+        >
+          <DrillOverlay mode={activeMode} />
+        </View>
+      )}
 
       {/* Bottom bar — inset on all edges so the End button stays reachable on
           notched devices in either orientation. */}
@@ -1124,6 +1157,12 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+  },
+  drillOverlay: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    alignItems: 'center',
   },
   endButton: {
     backgroundColor: color.hudGlass,

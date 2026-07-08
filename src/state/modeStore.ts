@@ -14,6 +14,7 @@
  */
 import { create } from 'zustand';
 
+import { initDrillMode, type DrillId } from '../core/drills';
 import {
   initMode,
   shiftModeClock,
@@ -30,6 +31,13 @@ export interface ModeStoreState {
 
   /** Start a fresh game of `id`. Replaces any running mode. */
   selectMode: (id: GameModeId, opts?: InitModeOpts) => void;
+  /**
+   * Start a fresh structured drill (src/core/drills.ts). A drill runs AS the
+   * `spotShooting` mode with its progression on `config.drill`, so it flows
+   * through the same banner/complete/history surfaces. Replaces any running
+   * mode.
+   */
+  selectDrill: (id: DrillId) => void;
   /**
    * Fold a resolved shot into the active mode. No-op when no mode is active or
    * the game is already done. `nowSec` should be the shot's resolve time
@@ -60,6 +68,10 @@ export const useMode = create<ModeStoreState>((set, get) => ({
 
   selectMode: (id, opts) => {
     set({ activeMode: initMode(id, opts) });
+  },
+
+  selectDrill: (id) => {
+    set({ activeMode: initDrillMode(id) });
   },
 
   applyShot: (shot, nowSec) => {

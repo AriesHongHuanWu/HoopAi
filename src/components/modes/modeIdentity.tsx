@@ -15,6 +15,7 @@ import { View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 
 import { color } from '../../constants/tokens';
+import type { DrillId } from '../../core/drills';
 import type { GameModeId } from '../../core/types';
 
 export interface ModeIdentity {
@@ -76,6 +77,47 @@ export const MODE_IDENTITY: Record<GameModeId, ModeIdentity> = {
     accent: color.ghost,
     tint: color.ghostTint,
     glance: ['Your past run', 'Same clock'],
+  },
+} as const;
+
+/**
+ * Visual identity for each structured DRILL (src/core/drills.ts). Drills host on
+ * the spotShooting mode, so they need their own accent/tint/glance for the
+ * picker cards (the mode identity would paint them all the same green). Icons
+ * live on the drill catalog itself; accents are drawn from the same token hues
+ * as the modes so the picker stays one family.
+ */
+export interface DrillIdentity {
+  accent: string;
+  tint: string;
+  glance: readonly string[];
+}
+
+export const DRILL_IDENTITY: Record<DrillId, DrillIdentity> = {
+  corners3: {
+    accent: color.threePt,
+    tint: color.threePtTint,
+    glance: ['Both corners', '3PT'],
+  },
+  ftLadder: {
+    accent: color.make,
+    tint: color.makeTint,
+    glance: ['10 free throws', 'From the line'],
+  },
+  midClock: {
+    accent: color.info,
+    tint: 'rgba(79, 141, 232, 0.14)',
+    glance: ['5 spots', '3 makes each'],
+  },
+  aroundKey: {
+    accent: color.accent,
+    tint: color.accentTint,
+    glance: ['6 spots', 'At the rim'],
+  },
+  catchShoot10: {
+    accent: color.ghost,
+    tint: color.ghostTint,
+    glance: ['10 makes', '15 attempts'],
   },
 } as const;
 
