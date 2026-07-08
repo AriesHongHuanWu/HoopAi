@@ -27,11 +27,13 @@ import {
   useUndoableCorrection,
 } from '@/components/ShotList';
 import { CoachMarks, useCoachMarks, type CoachStep } from '@/components/coach/CoachMarks';
+import { CourtHeatmap } from '@/components/charts/CourtHeatmap';
 import { PersonalBestBanner } from '@/components/PersonalBestBanner';
 import { RecheckPanel } from '@/components/RecheckPanel';
+import { buildHeatmap } from '@/core/heatmap';
 import { SummaryHero, isPerfectSession } from '@/components/SummaryHero';
 import { Card, Chip, Eyebrow, PillButton, Row, Screen } from '@/components/ui';
-import { color, space, type } from '@/constants/tokens';
+import { color, radius, space, type } from '@/constants/tokens';
 import { detectNewBests, type CareerBests } from '@/core/achievements';
 import { detectMilestones, type Milestone } from '@/core/milestones';
 import type { ResolvedShot, ShotOutcome, ShotValue } from '@/core/types';
@@ -162,6 +164,9 @@ export default function SessionSummaryScreen() {
     () => shots.filter((s) => s.outcome === 'unsure' && s.corrected !== true).length,
     [shots],
   );
+  // Shot map: where you shot from this session (zone × distance). Live-session
+  // shots carry the distance estimate, so the full 3-band court map lights up.
+  const heatmap = useMemo(() => buildHeatmap(shots), [shots]);
   const onRecheckVerdict = useCallback(
     (shotIndex: number, outcome: 'make' | 'miss') => {
       const shot = shots.find((s) => s.id === shotIndex);
@@ -364,6 +369,14 @@ export default function SessionSummaryScreen() {
               )}
             </View>
           )}
+          {heatmap.totalAttempts >= 4 && (
+            <View style={styles.heatSection}>
+              <Eyebrow>Shot map</Eyebrow>
+              <View style={styles.heatCard}>
+                <CourtHeatmap heatmap={heatmap} />
+              </View>
+            </View>
+          )}
           <Eyebrow>Box score</Eyebrow>
           <SessionRecap
             shots={shots}
@@ -519,6 +532,17 @@ const styles = StyleSheet.create({
   },
   mediaSection: {
     marginBottom: space.xl,
+  },
+  heatSection: {
+    marginBottom: space.xl,
+  },
+  heatCard: {
+    marginTop: space.sm,
+    backgroundColor: color.surface,
+    borderRadius: radius.lg,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: color.border,
+    padding: space.lg,
   },
   actionsSection: {
     marginTop: space.xl,
