@@ -226,8 +226,8 @@ export default function TrendsScreen() {
         <EmptyState
           title="Not enough sessions yet"
           body="Finish at least two tracked sessions and your FG% trend will draw itself here."
-          actionLabel="View history"
-          onAction={() => router.push('/history')}
+          actionLabel="Start a session"
+          onAction={() => router.push('/session/setup')}
         />
       ) : (
         <View style={{ gap: space.lg }}>

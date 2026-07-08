@@ -254,7 +254,9 @@ export default function SessionSummaryScreen() {
     <Screen scroll>
       <Eyebrow>Session complete</Eyebrow>
       {loading ? (
-        <Text style={styles.dim}>Loading session…</Text>
+        <Card>
+          <Text style={styles.dim}>Loading session…</Text>
+        </Card>
       ) : empty ? (
         <Card>
           <Text style={styles.heading}>No session to show</Text>

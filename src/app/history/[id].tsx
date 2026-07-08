@@ -363,6 +363,11 @@ export default function SessionDetailScreen() {
             disabled={sharing || record.shots.length === 0}
             style={{ marginTop: space.md }}
           />
+          {record.shots.length === 0 && (
+            <View style={{ marginTop: space.md, alignItems: 'flex-start' }}>
+              <Chip label="No shots logged — nothing to analyze or share" />
+            </View>
+          )}
           {session.videoPath != null && (
             <Row gap={space.md} style={{ marginTop: space.lg }}>
               <PillButton

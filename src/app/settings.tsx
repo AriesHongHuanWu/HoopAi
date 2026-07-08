@@ -1250,8 +1250,8 @@ export default function SettingsScreen() {
             <View style={styles.settingText}>
               <Text style={styles.settingLabel}>Height</Text>
               <Text style={styles.settingDesc}>
-                Saved to your profile. Not yet used to calibrate estimates — coming in a future
-                update.
+                Saved to your profile. Not yet used to calibrate on-court distance — that's coming
+                in a future update.
               </Text>
             </View>
             <Row gap={space.sm}>
