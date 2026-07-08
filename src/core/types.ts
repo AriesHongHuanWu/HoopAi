@@ -251,6 +251,49 @@ export interface FormReport {
    * persisted with the shot (formJson).
    */
   releasePose?: PoseFrame;
+  /**
+   * Compact quantized keypoint SEQUENCE over the shot window (dip →
+   * follow-through), captured by {@link FormAnalyzer} when form analysis is
+   * enabled and a pose was tracked. Powers the Form Studio motion-comparison
+   * theater (animated skeletons vs an NBA reference form). Additive/optional:
+   * pre-existing formJson rows and no-sequence shots simply lack it. Serialized
+   * as int16-grid ints inside formJson — see {@link FormSequence} for the size
+   * budget. NOTE: this is 2D MoveNet data; true 2D→3D lifting is a future
+   * upgrade (the studio only *illustrates* depth via limb layering).
+   */
+  sequence?: FormSequence;
+}
+
+/**
+ * A compact, size-normalized keypoint SEQUENCE for one shot window.
+ *
+ * ENCODING (kept small so formJson stays a few KB):
+ * - Coordinates are normalized to a body-relative frame: origin at the
+ *   hip-center, axes scaled by the shooter's body height so absolute pixel
+ *   size cancels (a tall player and a short player overlay directly). +y is
+ *   DOWN, matching analysis-frame convention.
+ * - Each coordinate is quantized to a signed int16 grid at {@link SEQ_SCALE}
+ *   units per body-height (so ~[-2, 2] body-heights maps into int16 range).
+ *   A missing keypoint in a frame is encoded as the sentinel
+ *   {@link SEQ_MISSING}.
+ * - `data` is a flat row-major int array of length `frames * 17 * 2`
+ *   (frame, then COCO-17 keypoint in {@link SEQ_KEYPOINT_ORDER}, then x,y).
+ *   Flat ints keep the JSON compact (no per-point object keys).
+ */
+export interface FormSequence {
+  /** Schema version — bump if the packing changes. */
+  v: 1;
+  /** 'left' | 'right' shooting arm this sequence was captured for. */
+  hand: ShootingHand;
+  /** Number of frames (downsampled, typically ~24). */
+  frames: number;
+  /** Duration the frames span, seconds (dip → follow-through, ~1.2 s). */
+  durationSec: number;
+  /**
+   * Flat int16-grid coordinates, length `frames * 17 * 2`. See the interface
+   * doc for the exact layout and the sentinel for missing keypoints.
+   */
+  data: number[];
 }
 
 /** Per-frame input to the shot FSM. All in analysis-frame space. */

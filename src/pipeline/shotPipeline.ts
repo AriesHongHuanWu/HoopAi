@@ -13,6 +13,7 @@ import { DETECTION, RIM, SHOT_FSM } from '../core/config';
 import { BallTracker } from '../core/ballTracker';
 import { estimateShotValue } from '../core/court';
 import { FormAnalyzer, coachingTips } from '../core/formAnalysis';
+import { FormSequenceBuffer } from '../core/formSequence';
 import { ReleaseDetector } from '../core/releaseDetector';
 import { RimLock } from '../core/rimLock';
 import { estimateShotValueMetric } from '../core/courtGeometric';
@@ -133,6 +134,13 @@ export class ShotPipeline {
 
   /** Pose-based form analyzer (lazy; only alive while pose frames arrive). */
   private form: FormAnalyzer | null = null;
+  /**
+   * Motion-sequence recorder for Form Studio (lazy, additive alongside `form`).
+   * Buffers the shot-window keypoint sequence so the studio can play the
+   * shooter's motion back against a reference form. Zero cost/state when pose
+   * frames never arrive; never affects detection or make/miss judgment.
+   */
+  private formSeq: FormSequenceBuffer | null = null;
   /** Pose-gated release detector (lazy, like `form` — zero cost, zero state
    *  when pose frames never arrive). */
   private releaseDet: ReleaseDetector | null = null;
@@ -330,6 +338,11 @@ export class ShotPipeline {
     if (pose) {
       if (!this.form) this.form = new FormAnalyzer({ hand: this.formHand, frameHeight: frame.frameHeight });
       this.form.push(pose, ball);
+      // Record the motion sequence for Form Studio (additive; independent of
+      // the analyzer's phase/metric logic). Rolling window, downsampled on
+      // finalize — never touches the detection or make/miss path.
+      if (!this.formSeq) this.formSeq = new FormSequenceBuffer({ hand: this.formHand });
+      this.formSeq.push(pose);
       // Pose-gated release detection (see src/core/releaseDetector.ts): runs
       // ONLY while pose frames arrive, so it costs nothing with form analysis
       // off. On fire, the wrist seed lets the tracker reacquire the faint
@@ -495,16 +508,21 @@ export class ShotPipeline {
             releaseAngleDeg: resolved.releaseAngleDeg,
           });
           const releasePose = this.form.releasePose;
+          // Motion sequence for Form Studio — best-effort, additive; a null
+          // build (too little captured) simply omits the field.
+          const sequence = this.formSeq?.finalize() ?? null;
           resolved.form = {
             metrics,
             tips: coachingTips(metrics),
             ...(releasePose ? { releasePose } : {}),
+            ...(sequence ? { sequence } : {}),
           };
         } catch {
           // Form analysis must never break shot emission.
         }
       }
       if (this.form) this.form.reset();
+      if (this.formSeq) this.formSeq.reset();
       this.sawPoseThisShot = false;
       this.lastPoseFootPx = null; // freshen per shot
       this.events.onShot?.(resolved);
@@ -516,6 +534,7 @@ export class ShotPipeline {
     this.tracker.reset();
     this.rimLock.reset();
     this.form = null;
+    this.formSeq = null;
     this.releaseDet = null;
     this.pendingReleaseT = null;
     this.sawPoseThisShot = false;
