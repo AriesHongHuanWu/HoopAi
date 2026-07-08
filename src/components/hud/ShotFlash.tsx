@@ -3,16 +3,30 @@
  *
  * make   → a Skia "splash" burst (expanding ring + radiating spokes) blooms
  *          behind a scoreboard "SPLASH", scale-punched in on a stiff spring
- *          (fast in, gentle settle); the shot's point value rides along as a
- *          gold "3" ring for downtown makes; a flame "🔥 ×N" joins at streak ≥ 3.
+ *          (fast in, gentle settle). The celebration escalates with the streak
+ *          (v2, layered ON TOP of the base burst — see escalationTier):
+ *            3+ → a brief ember-ring pulse,
+ *            5+ → a rising heat-shimmer band,
+ *            7+ → a short flame-lick particle set around the score.
+ *          Downtown (3-pointer) makes get a dedicated crisp variant: a gold
+ *          flash wash + a "3" stinger that punches in and settles. A flame
+ *          "🔥 ×N" tag joins at streak ≥ 3.
  * miss   → a quiet neutral "MISS" (never punishing — no wash, no shake).
  * unsure → the quietest treatment: small chalk-yellow "UNSURE" with a faint
  *          "saved for review" line, eased in gently (fix later in the summary).
  *
- * The burst runs entirely on Skia/Reanimated shared values (no per-frame React
- * state) and is skipped when the system requests reduced motion. Everything is
- * pointerEvents="none" — the flash can never block a tap. Auto-dismisses after
- * motion.celebrate + fade headroom.
+ * The burst + all escalation layers run entirely on Skia/Reanimated shared
+ * values (no per-frame React state, pooled particle arrays, zero per-frame
+ * allocation) and are skipped when the system requests reduced motion — which
+ * collapses to a single static flash. Everything is pointerEvents="none" — the
+ * flash can never block a tap. Auto-dismisses after motion.celebrate + fade.
+ *
+ * Props: ShotFlash takes NONE — it reads `lastShot` and `stats.currentStreak`
+ * from the session store, so the streak drives escalation directly. NOTE: live
+ * FPS is not exposed to this component, so the "thermally-cheap under load"
+ * requirement is met structurally instead: every effect is one-shot and on-
+ * event (never continuous), particle counts are capped (<=14 here, budget 24),
+ * and reduced motion drops all Skia entirely.
  */
 import React, { useEffect, useState } from 'react';
 import { AccessibilityInfo, StyleSheet, Text, View } from 'react-native';
@@ -39,6 +53,9 @@ import {
 import { color, glow, motion, space, type } from '../../constants/tokens';
 import type { ResolvedShot } from '../../core/types';
 import { useSession } from '../../state/sessionStore';
+import { EscalationLayers } from '../fx/EscalationLayers';
+import { FlameLicks } from '../fx/FlameLicks';
+import { escalationTier } from '../fx/particles';
 
 const FLASH_MS = motion.celebrate + 100;
 const BURST_SPOKES = 12;
@@ -150,6 +167,61 @@ function ValueBadge({ value }: { value: 2 | 3 }) {
   );
 }
 
+/**
+ * DowntownStinger — the dedicated crisp three-pointer variant: a hard gold
+ * flash that snaps on and decays, plus an oversized "3" that punches in behind
+ * the SPLASH row. Reads as a broadcast "from DOWNTOWN" hit. Motion-only; not
+ * rendered under reduced motion (the downtown wash + badge carry the meaning).
+ */
+function DowntownStinger() {
+  const [size, setSize] = useState({ w: 0, h: 0 });
+  const t = useSharedValue(0);
+
+  useEffect(() => {
+    t.value = 0;
+    // Snap on hard, decay soft — a camera-flash feel, not a fade-in.
+    t.value = withTiming(1, { duration: motion.celebrate, easing: BURST_EASING });
+  }, [t]);
+
+  const cx = size.w / 2;
+  const cy = size.h / 2;
+  const maxR = Math.min(size.w, size.h) * 0.5;
+
+  // Gold flash: a big soft disc that blooms in the first frames and decays.
+  const flashR = useDerivedValue(() => maxR * (0.2 + t.value * 0.9));
+  const flashOpacity = useDerivedValue(() => Math.max(0, 1 - t.value * 1.6) * 0.5);
+  // Two crisp downtown rings staggered outward.
+  const ringOuterR = useDerivedValue(() => maxR * (0.4 + t.value * 0.75));
+  const ringOuterOpacity = useDerivedValue(() => (1 - t.value) * 0.85);
+
+  return (
+    <Canvas
+      style={absoluteFill}
+      pointerEvents="none"
+      onLayout={(e) => setSize({ w: e.nativeEvent.layout.width, h: e.nativeEvent.layout.height })}
+    >
+      {size.w > 0 && (
+        <Group>
+          <Circle cx={cx} cy={cy} r={flashR} color={glow.downtown} opacity={flashOpacity}>
+            <BlurMask blur={40} style="normal" />
+          </Circle>
+          <Circle
+            cx={cx}
+            cy={cy}
+            r={ringOuterR}
+            style="stroke"
+            strokeWidth={3}
+            color={glow.downtown}
+            opacity={ringOuterOpacity}
+          >
+            <BlurMask blur={3} style="normal" />
+          </Circle>
+        </Group>
+      )}
+    </Canvas>
+  );
+}
+
 /** Spoken confirmation for a resolved shot — independent of the Settings
  * "voice announcements" toggle, since this is the only screen-reader signal
  * for the core make/miss/unsure result. */
@@ -184,6 +256,9 @@ export function ShotFlash() {
   if (shot.outcome === 'make') {
     const value = shot.shotValue ?? 2;
     const is3 = value === 3;
+    // Streak drives the escalation tier (1: ember ring, 2: +heat band,
+    // 3: +flame licks). Additive and one-shot; pure fn shared with tests.
+    const tier = escalationTier(streak);
     return (
       <View
         style={styles.fill}
@@ -198,11 +273,41 @@ export function ShotFlash() {
           exiting={FadeOut.duration(motion.standard).reduceMotion(ReduceMotion.System)}
           style={[styles.fill, is3 ? styles.downtownWash : styles.makeWash]}
         />
-        {/* Skia burst is pure motion — drop it entirely under reduced motion. */}
+        {/* All Skia layers are pure motion — dropped entirely under reduced
+            motion, which collapses to the static wash + splash text below. */}
         {!reducedMotion && (
           <View style={styles.fill} pointerEvents="none">
             <MakeBurst key={`burst-${shot.id}`} is3={is3} />
+            {/* Crisp downtown variant: gold flash + rings behind the "3". */}
+            {is3 && <DowntownStinger key={`downtown-${shot.id}`} />}
+            {/* Streak escalation: ember ring (3+), heat band (5+). */}
+            <EscalationLayers key={`esc-${shot.id}-${tier}`} tier={tier} />
+            {/* Flame-lick particle set (7+) — the only particle field here. */}
+            {tier >= 3 && <FlameLicks key={`flames-${shot.id}`} trigger={shot.id} />}
           </View>
+        )}
+        {/* Downtown "3" stinger — an oversized gold numeral that punches in
+            behind the SPLASH row on a stiffer, later spring, so the three
+            reads as its own broadcast beat. Static (no ZoomIn) under RM. */}
+        {is3 && (
+          <Animated.View
+            key={`three-${shot.id}`}
+            entering={
+              reducedMotion
+                ? undefined
+                : ZoomIn.springify()
+                    .damping(11)
+                    .stiffness(360)
+                    .mass(0.7)
+                    .delay(motion.instant)
+                    .reduceMotion(ReduceMotion.System)
+            }
+            exiting={FadeOut.duration(motion.quick).reduceMotion(ReduceMotion.System)}
+            style={styles.threeStingerWrap}
+            pointerEvents="none"
+          >
+            <Text style={styles.threeStinger}>3</Text>
+          </Animated.View>
         )}
         <Animated.View
           key={`splash-${shot.id}`}
@@ -286,6 +391,21 @@ const styles = StyleSheet.create({
     color: color.threePt,
     letterSpacing: 2,
     marginTop: space.xs,
+  },
+  threeStingerWrap: {
+    ...absoluteFill,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  threeStinger: {
+    fontFamily: type.scoreboard.fontFamily,
+    fontSize: 260,
+    lineHeight: 260,
+    color: color.threePt,
+    // Sits behind the SPLASH row (rendered before it); kept faint so it's a
+    // ghosted broadcast numeral, not a competing headline.
+    opacity: 0.18,
+    fontVariant: ['tabular-nums'],
   },
   flame: {
     ...type.statMedium,
