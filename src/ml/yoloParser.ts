@@ -45,12 +45,29 @@ export interface YoloParseOptions {
    * Ultralytics YOLOv8/11 has no objectness (rows = 4 + nc); leave this false.
    */
   hasObjectness?: boolean;
+  /**
+   * RAW YOLOX head: the full-int8 model omits the exp()-based decode from the
+   * graph (so it can quantize), emitting UNDECODED box coords `[raw_cx, raw_cy,
+   * raw_logw, raw_logh, obj, cls…]` (grid-relative; obj/cls already sigmoided).
+   * When set, we decode per-anchor here — `cx=(raw+grid)*stride`,
+   * `w=exp(raw)*stride` — using a grid/stride table for `inputSize`. Implies
+   * objectness + a known channels-last layout (auto-detect skipped). Leave
+   * false for the folded float models, whose decode is already in the graph.
+   */
+  rawHead?: boolean;
 }
 
 interface Extracted {
   raw: Detection[];
   maxScore: number;
   coordMax: number;
+}
+
+/** Per-anchor YOLOX grid x/y + stride, for decoding a raw head (see rawHead). */
+interface GridTable {
+  gx: Float32Array;
+  gy: Float32Array;
+  st: Float32Array;
 }
 
 function extract(
@@ -63,6 +80,7 @@ function extract(
   scoreMin: number,
   normalized: boolean | undefined,
   hasObj: boolean,
+  grid: GridTable | null,
 ): Extracted {
   'worklet';
   // value(row, i)
@@ -72,19 +90,24 @@ function extract(
   // Class scores start after the 4 box coords, plus a YOLOX objectness channel.
   const clsBase = hasObj ? 5 : 4;
 
+  // Scale only applies to the ALREADY-decoded folded/Ultralytics path. A raw
+  // YOLOX head (grid != null) is decoded per-anchor below, in pixels already.
   let coordMax = 0;
-  for (let i = 0; i < n; i++) {
-    const v = val(0, i);
-    if (Number.isFinite(v) && v > coordMax) coordMax = v;
+  let scale = 1;
+  if (grid === null) {
+    for (let i = 0; i < n; i++) {
+      const v = val(0, i);
+      if (Number.isFinite(v) && v > coordMax) coordMax = v;
+    }
+    scale =
+      normalized === undefined
+        ? coordMax <= 2
+          ? inputSize
+          : 1
+        : normalized
+          ? inputSize
+          : 1;
   }
-  const scale =
-    normalized === undefined
-      ? coordMax <= 2
-        ? inputSize
-        : 1
-      : normalized
-        ? inputSize
-        : 1;
 
   const raw: Detection[] = [];
   let maxScore = 0;
@@ -109,10 +132,24 @@ function extract(
     const bestScore = Number.isFinite(obj) ? obj * bestCls : 0;
     if (bestScore > maxScore) maxScore = bestScore;
     if (best < 0 || bestScore < scoreMin) continue;
-    const cx = val(0, i) * scale;
-    const cy = val(1, i) * scale;
-    const w = val(2, i) * scale;
-    const h = val(3, i) * scale;
+    let cx: number;
+    let cy: number;
+    let w: number;
+    let h: number;
+    if (grid !== null) {
+      // Raw YOLOX head → decode to pixels. Matches the exporter/validator:
+      // cx=(raw+grid)*stride, w=exp(raw_logw)*stride. obj/cls already sigmoided.
+      const st = grid.st[i]!;
+      cx = (val(0, i) + grid.gx[i]!) * st;
+      cy = (val(1, i) + grid.gy[i]!) * st;
+      w = Math.exp(val(2, i)) * st;
+      h = Math.exp(val(3, i)) * st;
+    } else {
+      cx = val(0, i) * scale;
+      cy = val(1, i) * scale;
+      w = val(2, i) * scale;
+      h = val(3, i) * scale;
+    }
     // Bounds/NaN guard: reject boxes with non-finite geometry or degenerate
     // size before they reach NMS/the tracker (a single garbage box can other-
     // wise propagate Infinity/NaN into IoU math and the Kalman filter).
@@ -127,6 +164,38 @@ function extract(
     });
   }
   return { raw, maxScore, coordMax };
+}
+
+/**
+ * YOLOX grid x/y + stride for every anchor of a square `inputSize`, in the
+ * exported head's order: FPN levels stride 8, 16, 32; row-major (y outer, x
+ * inner) within each level. Used to decode a raw head (see rawHead). Pure.
+ */
+function buildYoloxGrid(inputSize: number): GridTable {
+  'worklet';
+  const strides = [8, 16, 32];
+  let total = 0;
+  for (let s = 0; s < strides.length; s++) {
+    const g = Math.floor(inputSize / strides[s]!);
+    total += g * g;
+  }
+  const gx = new Float32Array(total);
+  const gy = new Float32Array(total);
+  const st = new Float32Array(total);
+  let k = 0;
+  for (let s = 0; s < strides.length; s++) {
+    const stride = strides[s]!;
+    const g = Math.floor(inputSize / stride);
+    for (let yy = 0; yy < g; yy++) {
+      for (let xx = 0; xx < g; xx++) {
+        gx[k] = xx;
+        gy[k] = yy;
+        st[k] = stride;
+        k += 1;
+      }
+    }
+  }
+  return { gx, gy, st };
 }
 
 function iou(a: Detection, b: Detection): number {
@@ -196,15 +265,26 @@ export function parseYoloOutput(
     normalized,
     prevLayout,
     hasObjectness = false,
+    rawHead = false,
   } = opts;
   const nc = CLASS_ORDER.length;
-  const rows = (hasObjectness ? 5 : 4) + nc;
+  // A raw head is a YOLOX head, so it always carries the objectness channel.
+  const rows = (hasObjectness || rawHead ? 5 : 4) + nc;
   const n = Math.floor(data.length / rows);
+
+  // A raw YOLOX head (full-int8 model) has NO decode in the graph → decode each
+  // anchor here via the grid/stride table for `inputSize`, applied INSIDE both
+  // layout reads below. That keeps it robust to however onnx2tf lays the tensor
+  // out — the raw export comes out channels-FIRST `[1, 5+nc, N]` while the
+  // folded model is channels-last, and the same auto-detect picks correctly
+  // for either (obj/cls are pre-sigmoided; only the box coords are decoded).
+  const grid = rawHead ? buildYoloxGrid(inputSize) : null;
+  const withObj = hasObjectness || rawHead;
 
   // Parse under both layouts; keep whichever found more valid boxes (tie ->
   // the higher-confidence one; final tie -> channels-first default).
-  const cf = extract(data, nc, n, rows, true, inputSize, scoreMin, normalized, hasObjectness);
-  const cl = extract(data, nc, n, rows, false, inputSize, scoreMin, normalized, hasObjectness);
+  const cf = extract(data, nc, n, rows, true, inputSize, scoreMin, normalized, withObj, grid);
+  const cl = extract(data, nc, n, rows, false, inputSize, scoreMin, normalized, withObj, grid);
   // Layout pick. A strict valid-box-count winner always wins (self-healing). On
   // a TIE the maxScore tie-break is noise-dominated on degraded input and flips
   // the transposed (wrong) read frame-to-frame, scrambling class labels and
@@ -223,10 +303,11 @@ export function parseYoloOutput(
   const cfGarbage = cf.raw.length > garbageCeil;
   const clGarbage = cl.raw.length > garbageCeil;
   let useCf: boolean;
-  if (hasObjectness) {
-    // YOLOX folds its decode into the graph and always emits channels-last
-    // [1, N, 5+nc]. The layout is known, so skip the auto-detect (parsing it
-    // channels-first would read the transposed garbage).
+  if (hasObjectness && !rawHead) {
+    // A FOLDED YOLOX head always emits channels-last [1, N, 5+nc]. The layout is
+    // known, so skip the auto-detect (parsing it channels-first would read the
+    // transposed garbage). The raw head has no such guarantee — it falls through
+    // to the garbage-guard + valid-count auto-detect below.
     useCf = false;
   } else if (cfGarbage !== clGarbage) {
     useCf = clGarbage; // exactly one layout is garbage → take the clean one

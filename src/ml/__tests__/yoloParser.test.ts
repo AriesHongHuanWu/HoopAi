@@ -293,3 +293,113 @@ describe('parseYoloOutput — YOLOX (objectness) decode', () => {
     expect(out.debug?.corrupt).toBe(false);
   });
 });
+
+describe('parseYoloOutput — raw YOLOX head (full-int8 on-device decode)', () => {
+  const RAW_ROWS = 5 + NC; // 4 box + obj + nc cls
+
+  /** Build a channels-last [1, n, 5+nc] RAW tensor (undecoded box coords). */
+  function buildRaw(
+    n: number,
+    entries: { i: number; rx: number; ry: number; rw: number; rh: number; obj: number; cls: number; clsScore: number }[],
+  ): Float32Array {
+    const d = new Float32Array(n * RAW_ROWS);
+    for (const e of entries) {
+      const b = e.i * RAW_ROWS;
+      d[b + 0] = e.rx;
+      d[b + 1] = e.ry;
+      d[b + 2] = e.rw;
+      d[b + 3] = e.rh;
+      d[b + 4] = e.obj;
+      d[b + 5 + e.cls] = e.clsScore;
+    }
+    return d;
+  }
+
+  const has = (dets: Detection[], x: number, y: number, w: number, h: number) =>
+    dets.some(
+      (d) =>
+        Math.abs(d.box.x - x) < 0.01 &&
+        Math.abs(d.box.y - y) < 0.01 &&
+        Math.abs(d.box.width - w) < 0.01 &&
+        Math.abs(d.box.height - h) < 0.01,
+    );
+
+  test('decodes anchors across all three FPN levels (grid/stride boundaries)', () => {
+    // 640 -> 80x80 (s8, 6400) + 40x40 (s16, 1600) + 20x20 (s32, 400) = 8400.
+    const N = 8400;
+    // raw box [0.5,0.5,0,0] -> cx=(0.5+gx)*st, cy=(0.5+gy)*st, w=h=exp(0)*st=st.
+    const data = buildRaw(N, [
+      { i: 410, rx: 0.5, ry: 0.5, rw: 0, rh: 0, obj: 0.9, cls: 0, clsScore: 0.8 }, // L0 gx10,gy5
+      { i: 6522, rx: 0.5, ry: 0.5, rw: 0, rh: 0, obj: 0.9, cls: 0, clsScore: 0.8 }, // L1 gx2,gy3
+      { i: 8021, rx: 0.5, ry: 0.5, rw: 0, rh: 0, obj: 0.9, cls: 0, clsScore: 0.8 }, // L2 gx1,gy1
+    ]);
+    const out = parseYoloOutput(data, 0, { inputSize: 640, rawHead: true });
+    expect(out.detections).toHaveLength(3);
+    expect(out.detections.every((d) => d.cls === 'ball')).toBe(true);
+    expect(out.detections[0]!.score).toBeCloseTo(0.72, 5); // obj 0.9 * cls 0.8
+    expect(has(out.detections, 80, 40, 8, 8)).toBe(true); // L0 stride 8
+    expect(has(out.detections, 32, 48, 16, 16)).toBe(true); // L1 stride 16
+    expect(has(out.detections, 32, 32, 32, 32)).toBe(true); // L2 stride 32
+    expect(out.debug!.layout).toBe('channels-last');
+    expect(out.debug!.corrupt).toBe(false);
+  });
+
+  test('exp() decodes the log-width/height', () => {
+    // rw = ln(2) -> w = exp(ln2)*stride = 2*stride.
+    const data = buildRaw(8400, [
+      { i: 0, rx: 0, ry: 0, rw: Math.log(2), rh: Math.log(3), obj: 1, cls: 1, clsScore: 0.9 }, // L0 gx0,gy0, rim
+    ]);
+    const out = parseYoloOutput(data, 0, { inputSize: 640, rawHead: true });
+    expect(out.detections).toHaveLength(1);
+    const d = out.detections[0]!;
+    expect(d.cls).toBe('rim');
+    expect(d.box.width).toBeCloseTo(16, 4); // 2 * stride 8
+    expect(d.box.height).toBeCloseTo(24, 4); // 3 * stride 8
+  });
+
+  test('applies the score floor (obj * cls)', () => {
+    const data = buildRaw(8400, [
+      { i: 5, rx: 0.5, ry: 0.5, rw: 0, rh: 0, obj: 0.3, cls: 0, clsScore: 0.3 }, // 0.09 < 0.15
+    ]);
+    const out = parseYoloOutput(data, 0, { inputSize: 640, rawHead: true, scoreMin: 0.15 });
+    expect(out.detections).toHaveLength(0);
+  });
+
+  test('works at 416 (13x13 top level) too', () => {
+    // 416 -> 52x52 + 26x26 + 13x13 = 2704+676+169 = 3549.
+    const N = 3549;
+    const data = buildRaw(N, [
+      { i: 0, rx: 0, ry: 0, rw: 0, rh: 0, obj: 0.9, cls: 0, clsScore: 0.9 }, // L0 gx0,gy0
+    ]);
+    const out = parseYoloOutput(data, 0, { inputSize: 416, rawHead: true });
+    expect(out.detections).toHaveLength(1);
+    // cx=(0+0)*8=0, cy=0, w=h=8 -> box x=-4,y=-4,w8,h8
+    expect(out.detections[0]!.box.width).toBeCloseTo(8, 4);
+  });
+
+  test('decodes the CHANNELS-FIRST layout the int8 export emits [1, 5+nc, N]', () => {
+    // onnx2tf lays the raw head out channels-first; the auto-detect must pick it.
+    const N = 8400;
+    const buildRawCF = (
+      entries: { i: number; rx: number; ry: number; rw: number; rh: number; obj: number; cls: number; clsScore: number }[],
+    ) => {
+      const d = new Float32Array(RAW_ROWS * N);
+      for (const e of entries) {
+        d[0 * N + e.i] = e.rx;
+        d[1 * N + e.i] = e.ry;
+        d[2 * N + e.i] = e.rw;
+        d[3 * N + e.i] = e.rh;
+        d[4 * N + e.i] = e.obj;
+        d[(5 + e.cls) * N + e.i] = e.clsScore;
+      }
+      return d;
+    };
+    const data = buildRawCF([
+      { i: 410, rx: 0.5, ry: 0.5, rw: 0, rh: 0, obj: 0.9, cls: 0, clsScore: 0.8 }, // L0 gx10,gy5
+    ]);
+    const out = parseYoloOutput(data, 0, { inputSize: 640, rawHead: true });
+    expect(out.debug!.layout).toBe('channels-first');
+    expect(out.detections).toHaveLength(1);
+    expect(has(out.detections, 80, 40, 8, 8)).toBe(true); // same box as the CL test
+  });
+});
