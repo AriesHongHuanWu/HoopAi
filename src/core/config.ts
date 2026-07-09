@@ -321,8 +321,18 @@ export const SHOT_FSM = {
   netMotionThreshold: 0.25,
   /** Threshold multiplier when the ball bounced on the rim (patent-style). */
   netMotionRimBounceFactor: 1.5,
-  /** Net burst must occur within this many seconds of the plane crossing. */
-  netWindowSec: 0.35,
+  /**
+   * Net burst must occur within this many seconds of the plane crossing.
+   * Widened 0.35 → 0.45: the SAFE half of "make net detection more sensitive"
+   * for clean swishes — it catches a net ripple that lands slightly late
+   * without touching netMotionThreshold. Widening the WINDOW can't fabricate a
+   * make: the burst still has to CLEAR the strength threshold (and the raised
+   * rim-bounce threshold), and net only ever contributes to a make ALONGSIDE a
+   * real geo crossing. Lowering the strength threshold — which would catch a
+   * weak swish ripple but ALSO a graze on a miss — is the fake-make danger
+   * zone and stays put until tuned against labeled clips.
+   */
+  netWindowSec: 0.45,
   /**
    * Extra FORWARD (post-crossing) grace on the net window when the ball bounced
    * on the rim. A rim rattle re-ascends and drops LATE, so the genuine swish
