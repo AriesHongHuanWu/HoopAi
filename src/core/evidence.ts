@@ -14,7 +14,8 @@ import type { ResolvedShot, ShotOutcome, ShotSignals, ShotValueSource } from './
 export type EvidenceTone = 'make' | 'miss' | 'default';
 
 export interface EvidenceChannel {
-  key: keyof ShotSignals;
+  /** One of the three fusion channels (not the diagnostic `illusion` tag). */
+  key: 'geo' | 'net' | 'cls';
   /** Tiny chip label — receipts read as uppercase fine print. */
   label: string;
   /** Human phrase used in the accessibility summary. */
@@ -46,6 +47,26 @@ function phraseState(value: boolean | null): string {
 }
 
 /**
+ * Tiny receipt-chip label for a depth-illusion ("錯視") veto, or null when the
+ * parallax guard did not overturn this shot. Reads as the same uppercase fine
+ * print as the PATH/NET/SEEN chips.
+ */
+export function illusionChipLabel(signals: ShotSignals): string | null {
+  if (signals.illusion === 'front') return '✕ IN FRONT';
+  if (signals.illusion === 'behind') return '✕ BEHIND';
+  return null;
+}
+
+/** Human phrase for the accessibility summary, or null when no illusion veto. */
+export function illusionPhrase(signals: ShotSignals): string | null {
+  if (signals.illusion === 'front')
+    return 'ball crossed in front of the hoop — optical illusion, not a make';
+  if (signals.illusion === 'behind')
+    return 'ball passed behind the hoop — optical illusion, not a make';
+  return null;
+}
+
+/**
  * One-sentence accessibility summary of a shot's evidence, e.g.
  * "Evidence: ball path through hoop yes, net movement no, ball seen in hoop
  * no data, rim bounce."
@@ -55,6 +76,8 @@ export function evidenceSummary(signals: ShotSignals, rimBounce: boolean): strin
     (c) => `${c.phrase} ${phraseState(signals[c.key])}`,
   );
   if (rimBounce) parts.push('rim bounce');
+  const illusion = illusionPhrase(signals);
+  if (illusion) parts.push(illusion);
   return `Evidence: ${parts.join(', ')}`;
 }
 

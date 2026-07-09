@@ -202,10 +202,15 @@ export interface SettingsState {
    */
   roiZoom: boolean;
   /**
-   * Depth-ratio parallax veto (experimental): uses the ball's known size vs
-   * the rim's to catch airballs crossing IN FRONT of the hoop being miscalled
-   * as makes. Veto-only (can only turn a false make into a miss), silent
-   * outside its verified envelope. Default off pending field validation.
+   * Depth-ratio parallax veto ("錯視" / optical-illusion guard): uses the
+   * ball's known size vs the rim's to catch a ball crossing the 2D rim line
+   * while flying IN FRONT of (or behind) the hoop — the airball that "looks
+   * like it went in" — and stop it being miscalled a make. Veto-only: it can
+   * ONLY turn a would-be make into a miss, NEVER fabricate one, and it stays
+   * silent outside its verified confidence envelope (bread-ball-safe by
+   * construction). DEFAULT ON — the error direction is safe, the decision is
+   * surfaced in the per-shot receipt, and this toggle lets you disable it if
+   * it ever vetoes a real make on your setup. See depthRatioGate.ts.
    */
   depthVeto: boolean;
   /**
@@ -232,11 +237,14 @@ export interface SettingsState {
    */
   courtRange: 'auto' | '2pt' | '3pt';
   /**
-   * Gap-crossing reappearance corroborator (experimental): when the ball
-   * vanishes at the rim and reappears BELOW it on the same flight arc,
-   * descending, in-span and depth-consistent, the occluded crossing may be
-   * upgraded — only with net/cls agreement. Hardened against rim-bounce,
-   * parallax and putback fakes; default off pending field validation.
+   * Gap-crossing reappearance corroborator: when the ball vanishes at the rim
+   * and reappears BELOW it on the same flight arc, descending, in-span and
+   * depth-consistent, the occluded crossing may be upgraded to a make — but
+   * ONLY with net-motion or ball_in_basket agreement, never on its own. This
+   * recovers clean swishes that get swallowed by the net (the "I made it but
+   * it said nothing" case) while staying bread-ball-safe: it can never flip a
+   * seen miss into a make. Hardened against rim-bounce, parallax and putback
+   * fakes. DEFAULT ON (corroboration-gated, so the error direction is safe).
    */
   reappearance: boolean;
   /**
@@ -348,11 +356,11 @@ export const useSettings = create<SettingsState>()(
       lastBenchmark: null,
       debugMode: false,
       roiZoom: true,
-      depthVeto: false,
+      depthVeto: true,
       metric23: false,
       nanoV2: false,
       courtRange: 'auto',
-      reappearance: false,
+      reappearance: true,
       useFlightArc: true,
       motionAssist: false,
       deviceTierOverride: 'auto',

@@ -63,6 +63,7 @@ import {
   evidenceGlyph,
   evidenceSummary,
   evidenceTone,
+  illusionChipLabel,
   valueSourceLabel,
 } from '@/core/evidence';
 import { recomputeStats } from '@/core/stats';
@@ -363,6 +364,9 @@ function SignalReceipts({ shot }: { shot: ResolvedShot }) {
           );
         })}
         {shot.rimBounce && <Chip compact tone="unsure" label="RIM BOUNCE" />}
+        {illusionChipLabel(shot.signals) != null && (
+          <Chip compact tone="miss" label={illusionChipLabel(shot.signals)!} />
+        )}
       </View>
       {source != null && (
         <View style={styles.provenanceRow} importantForAccessibility="no-hide-descendants">

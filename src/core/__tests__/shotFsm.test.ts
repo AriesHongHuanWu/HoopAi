@@ -900,3 +900,100 @@ describe('ShotFsm', () => {
     expect(rIdle.phase).toBe('IDLE');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Depth-illusion (parallax) veto — the "錯視" guard, now default-ON in the app.
+// A ball whose apparent size shows it crossed the 2D rim line while flying IN
+// FRONT of the hoop must be overturned from a make to a miss, and the receipt
+// must carry the reason (signals.illusion). The veto is bread-ball-safe: it can
+// ONLY remove a make, never mint one.
+// ---------------------------------------------------------------------------
+
+describe('ShotFsm — depth-illusion (parallax) veto', () => {
+  // Rim width 92px clears the gate's ~40px enablement floor and matches the
+  // known-firing geometry in depthRatioGate.test.ts (rim ~92px, ball ~66px →
+  // ratio ~0.75 → veto_front). The stock RIM_BOX (width 40) sits AT the floor,
+  // where σ is too large to fire — hence a bespoke wider rim here.
+  const WIDE_RIM: Box = { x: 274, y: 200, width: 92, height: 46 };
+
+  function vetoFsm(): ShotFsm {
+    const fsm = new ShotFsm(rimFromBox(WIDE_RIM), FRAME, { useDepthRatioVeto: true });
+    fsm.setBallSize(7);
+    return fsm;
+  }
+
+  // A purely DESCENDING "drop" into the hoop (arms via the descend path). It
+  // never rises through the rim, so it can't trip rimBounce (which would make
+  // the gate stand down). cy(t)=40+250t+450t² crosses the plane (y=200) at
+  // t≈0.38; x0 places that descending crossing on the rim center (x=320).
+  const DVY0 = 250;
+  const DY0 = 40;
+  const DVX = 40;
+  const DG = 900;
+  const T_DROP_CROSS =
+    (-DVY0 + Math.sqrt(DVY0 * DVY0 - 4 * (DG / 2) * (DY0 - 200))) / (2 * (DG / 2));
+  const DROP_X0_CENTER = 320 - DVX * T_DROP_CROSS;
+
+  /** Descending drop: fixed ball radius r (the depth cue) + optional net. */
+  function dropFrames(x0: number, r: number, net?: (t: number) => number): FsmFrameInput[] {
+    const out: FsmFrameInput[] = [];
+    for (let i = 0; i < 24; i++) {
+      const t = i / FPS;
+      const cx = x0 + DVX * t;
+      const cy = DY0 + DVY0 * t + 0.5 * DG * t * t;
+      out.push(
+        fin(t, tb(cx, cy, t, DVY0 + DG * t, { vx: DVX, r }), {
+          netMotionScore: net ? net(t) : 0,
+        }),
+      );
+    }
+    return out;
+  }
+
+  /** Net burst straddling the drop's plane crossing (~t=0.38). */
+  const dropNet = (t: number): number => (t >= 0.35 && t <= 0.55 ? 0.6 : 0);
+
+  test('front airball (ball too big for rim depth) is vetoed even over net: → miss + illusion=front', () => {
+    // r=36 → diameter 72px → ratio ≈ 0.69 at rim width 92 → veto_front. The
+    // veto flips geo false, which fuse() turns into a miss BEFORE net is read.
+    const { resolved } = run(vetoFsm(), dropFrames(DROP_X0_CENTER, 36, dropNet));
+    expect(resolved).toHaveLength(1);
+    const s = resolved[0];
+    expect(s.geoDepth?.decision).toBe('veto_front');
+    expect(s.signals.geo).toBe(false);
+    expect(s.signals.illusion).toBe('front');
+    expect(s.outcome).toBe('miss');
+  });
+
+  test('the SAME shot with the veto OFF is a make — proving the veto is what overturned it', () => {
+    // Default FSM (veto off): geo true + net burst → make (geo && net).
+    const { resolved } = run(
+      new ShotFsm(rimFromBox(WIDE_RIM), FRAME),
+      dropFrames(DROP_X0_CENTER, 36, dropNet),
+    );
+    expect(resolved[0].outcome).toBe('make');
+    expect(resolved[0].signals.geo).toBe(true);
+    expect(resolved[0].signals.illusion).toBeUndefined();
+  });
+
+  test('a real make at rim depth survives the veto (silent — no false veto)', () => {
+    // r=25 → diameter 50px → ratio ≈ 0.99 → inside the make zone → silent, so
+    // geo stays true and the net burst carries it to a make.
+    const { resolved } = run(vetoFsm(), dropFrames(DROP_X0_CENTER, 25, dropNet));
+    const s = resolved[0];
+    expect(s.geoDepth?.decision).toBe('silent');
+    expect(s.signals.geo).toBe(true);
+    expect(s.signals.illusion).toBeUndefined();
+    expect(s.outcome).toBe('make');
+  });
+
+  test('BREAD-BALL: the veto only removes makes — a seen out-of-span miss (with net) never becomes a make', () => {
+    // Crossing shifted well left of the span: geo is already false, so the
+    // veto (which runs only on geo===true) has nothing to touch, and net can't
+    // mint a make over a seen out-of-span crossing. Never a make.
+    const { resolved } = run(vetoFsm(), dropFrames(DROP_X0_CENTER - 90, 36, dropNet));
+    expect(resolved).toHaveLength(1);
+    expect(resolved[0].signals.geo).toBe(false);
+    expect(resolved[0].outcome).not.toBe('make');
+  });
+});

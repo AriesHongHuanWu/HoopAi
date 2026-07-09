@@ -168,6 +168,16 @@ export interface ShotSignals {
   net: boolean | null;
   /** 'ball_in_basket' class fired during the live shot. */
   cls: boolean | null;
+  /**
+   * Depth-illusion ("錯視") veto outcome — set only when the parallax guard
+   * flipped a would-be geo make to a miss because the ball's apparent size
+   * showed it crossed the 2D rim line while in FRONT of ('front') or BEHIND
+   * ('behind') the hoop. Absent when the veto stayed silent or was off.
+   * Diagnostic only: the miss it caused is already reflected in `geo` — this
+   * just lets the receipt explain WHY (persists inside signalsJson, so old
+   * rows simply lack it).
+   */
+  illusion?: 'front' | 'behind';
 }
 
 export interface ResolvedShot {

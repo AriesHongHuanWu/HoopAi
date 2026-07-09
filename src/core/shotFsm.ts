@@ -1009,7 +1009,20 @@ export class ShotFsm {
       tStart: this.tStart,
       tResolved: t,
       outcome,
-      signals: { geo, net, cls },
+      signals: {
+        geo,
+        net,
+        cls,
+        // Surface WHY geo was vetoed so the receipt can explain the miss: the
+        // depth-illusion guard proved the ball crossed the 2D rim line while
+        // in front of / behind the hoop. geoDepth is only set when the veto
+        // ran; a 'silent' measurement carries no illusion tag.
+        ...(geoDepth?.decision === 'veto_front'
+          ? { illusion: 'front' as const }
+          : geoDepth?.decision === 'veto_behind'
+            ? { illusion: 'behind' as const }
+            : {}),
+      },
       rimBounce: this.rimBounce,
       xCross,
       entryAngleDeg,

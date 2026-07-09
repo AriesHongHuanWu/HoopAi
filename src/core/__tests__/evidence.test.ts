@@ -13,6 +13,8 @@ import {
   evidenceGlyph,
   evidenceSummary,
   evidenceTone,
+  illusionChipLabel,
+  illusionPhrase,
   valueSourceLabel,
   valueSourcePhrase,
 } from '../evidence';
@@ -60,6 +62,31 @@ describe('evidenceSummary', () => {
     expect(summary).toContain('no data');
     expect(summary).not.toContain('yes');
     expect(summary).not.toContain('rim bounce');
+  });
+
+  test('explains a depth-illusion veto in the summary', () => {
+    const signals: ShotSignals = { geo: false, net: null, cls: false, illusion: 'front' };
+    expect(evidenceSummary(signals, false)).toMatch(/in front of the hoop — optical illusion/);
+  });
+});
+
+describe('illusionChipLabel / illusionPhrase (depth-illusion receipt)', () => {
+  test('a front-pass veto reads as an IN FRONT miss chip + human phrase', () => {
+    const signals: ShotSignals = { geo: false, net: null, cls: false, illusion: 'front' };
+    expect(illusionChipLabel(signals)).toBe('✕ IN FRONT');
+    expect(illusionPhrase(signals)).toMatch(/front of the hoop/);
+  });
+
+  test('a behind-pass veto reads as a BEHIND miss chip', () => {
+    const signals: ShotSignals = { geo: false, net: null, cls: false, illusion: 'behind' };
+    expect(illusionChipLabel(signals)).toBe('✕ BEHIND');
+    expect(illusionPhrase(signals)).toMatch(/behind the hoop/);
+  });
+
+  test('no illusion tag → no chip, no phrase (silent on ordinary shots)', () => {
+    const signals: ShotSignals = { geo: true, net: true, cls: false };
+    expect(illusionChipLabel(signals)).toBeNull();
+    expect(illusionPhrase(signals)).toBeNull();
   });
 });
 

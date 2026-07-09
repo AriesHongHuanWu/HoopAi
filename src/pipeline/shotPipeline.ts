@@ -904,10 +904,12 @@ export class ShotPipeline {
       });
       this.fsm.setBallSize(this.ballSize);
     }
-    // Placement classification from the locked rim's aspect (IMU pitch not
-    // wired yet -> null; the classifier is conservative without it). Only the
-    // depth gate consumes the band today, so with the veto flag off this is
-    // pure telemetry.
+    // Placement classification from the locked rim's aspect plus live IMU
+    // pitch (this.viewPitchDeg, fed from DeviceMotion via setViewPitch; null
+    // only when the device has no motion sensor, where the classifier stays
+    // conservative). The depth-illusion veto consumes the band to decide where
+    // it's allowed to fire — and that veto now ships ON by default — so this is
+    // load-bearing, not just telemetry.
     const aspect = rim.box.height > 0 ? rim.box.width / rim.box.height : 1;
     this.fsm.setViewBand(classifyViewBand(aspect, this.viewPitchDeg).band);
     if (first) this.events.onRimLocked?.(rim);

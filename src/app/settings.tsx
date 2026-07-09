@@ -1028,9 +1028,8 @@ export default function SettingsScreen() {
           />
           <View style={styles.divider} />
           <ToggleRow
-            label="Parallax guard"
-            experimental
-            description="Uses your ball's real size vs the rim's to catch airballs flying IN FRONT of the hoop that would otherwise count as makes. Veto-only: it can cancel a fake make, never invent one, and stays silent beyond its verified range (~1m separation up to ~6m; needs the right Ball size set in Player). Takes effect at the next rim lock."
+            label="Parallax guard (optical-illusion)"
+            description="Uses your ball's real size vs the rim's to catch a ball that crosses the rim line while flying IN FRONT of (or behind) the hoop — the airball that 'looks like it went in' — instead of counting it as a make. Veto-only: it can cancel a fake make, never invent one, and stays silent beyond its verified range (~1m separation up to ~6m; needs the right Ball size set in Player). ON by default; when it overturns a shot the receipt shows an 'IN FRONT' tag. Takes effect at the next rim lock."
             value={depthVeto}
             onValueChange={(v) => {
               tick();
@@ -1040,8 +1039,7 @@ export default function SettingsScreen() {
           <View style={styles.divider} />
           <ToggleRow
             label="Ghost-swish rescue"
-            experimental
-            description="When the ball disappears into the net and reappears below the rim on the same flight path, count the make it implies — only when the net or the in-basket detector agrees. Hardened against rim-bounces and putback fakes."
+            description="When the ball disappears into the net and reappears below the rim on the same flight path, count the make it implies — but only when the net motion or the in-basket detector agrees, so it can never invent a make. Recovers clean swishes the net swallows. ON by default; hardened against rim-bounces and putback fakes."
             value={reappearance}
             onValueChange={(v) => {
               tick();

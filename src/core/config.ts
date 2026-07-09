@@ -485,10 +485,19 @@ export const SHOT_FSM = {
     maxAbovePlaneRimWidths: 1.5,
   },
   /**
-   * KILL-SWITCHES for the depth-aware judgment mechanisms. All ship FALSE:
-   * the code lands fully tested but inert, and flips only after the labeled-
-   * clip benchmark passes (see the depth-aware research spec). The FSM reads
-   * these as constructor defaults — tests override per-instance.
+   * Constructor defaults for the depth-aware judgment mechanisms. These stay
+   * FALSE as the conservative baseline the unit tests and the offline recheck
+   * replay run against (tests opt INTO the veto per-instance, so the pinned
+   * bread-ball truth table is exercised without the veto perturbing it).
+   *
+   * The LIVE app now defaults depthVeto + reappearance ON via settingsStore
+   * (they thread through adoptRim into the FSM opts, overriding these
+   * defaults). Both are bread-ball-safe by construction — the depth veto is
+   * one-directional (make→miss only, never fabricates a make) and reappearance
+   * upgrades a make only with net/cls agreement — so the safe error direction
+   * plus the in-app toggle and the receipt's illusion tag stand in for the
+   * labeled-clip benchmark until real clips exist. useViewBandRouting stays
+   * off end-to-end: its ellipse-primary hook is declared but unimplemented.
    */
   useDepthRatioVeto: false,
   useReappearance: false,
