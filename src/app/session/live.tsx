@@ -699,33 +699,31 @@ function LiveSessionScreen() {
           },
         ]}
       >
-        <Row gap={space.md}>
-          {isRecording && <RecIndicator />}
-          {rimLocked && (
-            <PillButton
-              label="Re-aim"
-              icon="scan-outline"
-              variant="ghost"
-              onPress={onReAim}
-              style={styles.endButton}
-            />
-          )}
-          {rimLocked && !isTickDrivenMode && calSession == null && calRegistration == null && (
-            <PillButton
-              label="Calibrate court"
-              icon="grid-outline"
-              variant="ghost"
-              onPress={startCalibrate}
-              style={styles.endButton}
-            />
-          )}
-        </Row>
+        {isRecording && <RecIndicator />}
+        {rimLocked && (
+          <PillButton
+            label="Re-aim"
+            icon="scan-outline"
+            variant="ghost"
+            onPress={onReAim}
+            style={styles.endButton}
+          />
+        )}
+        {rimLocked && !isTickDrivenMode && calSession == null && calRegistration == null && (
+          <PillButton
+            label="Calibrate"
+            icon="grid-outline"
+            variant="ghost"
+            onPress={startCalibrate}
+            style={styles.endButton}
+          />
+        )}
         <PillButton
           label="End session"
           icon="stop-circle-outline"
           variant="ghost"
           onPress={() => setConfirmEnd(true)}
-          style={styles.endButton}
+          style={[styles.endButton, styles.endSessionButton]}
         />
       </View>
 
@@ -1194,7 +1192,15 @@ const styles = StyleSheet.create({
     bottom: 0,
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
+    // Wrap so a crowded row (recording + Re-aim + Calibrate + End) drops onto a
+    // second line instead of pushing a button off-screen.
+    flexWrap: 'wrap',
+    columnGap: space.md,
+    rowGap: space.sm,
+  },
+  // End sits at the right edge of its line; the setup buttons cluster left.
+  endSessionButton: {
+    marginLeft: 'auto',
   },
   drillOverlay: {
     position: 'absolute',
