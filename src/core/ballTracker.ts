@@ -150,6 +150,8 @@ export class BallTracker {
    * on purpose — the gym doesn't get brighter because the track died.
    */
   private lightProfile: LightProfile = 'bright';
+  /** Per-model cold-gate override (see setColdGate); null = DETECTION default. */
+  private coldGate: number | null = null;
 
   /**
    * @param opts Optional tracker configuration; see {@link BallTrackerOptions}.
@@ -311,6 +313,17 @@ export class BallTracker {
     this.lightProfile = profile;
   }
 
+  /**
+   * Per-model COLD-acquisition gate override (open court, non-dark). Different
+   * detectors score the ball differently — a noisier one needs a higher bar to
+   * START a track without letting phantom boxes in — so the active model sets
+   * its own floor here. null restores the DETECTION.ballScoreMin default. Never
+   * touches the tracking-continuation or dark floors (those stay as configured).
+   */
+  setColdGate(gate: number | null): void {
+    this.coldGate = gate;
+  }
+
   /** Clears all tracker state, including the sample history. */
   reset(): void {
     this.resetTrack();
@@ -431,7 +444,7 @@ export class BallTracker {
       const coldFloor =
         this.lightProfile === 'dark'
           ? DETECTION.ballScoreMinDark
-          : DETECTION.ballScoreMin;
+          : (this.coldGate ?? DETECTION.ballScoreMin);
       const scoreGate = inHoopRoi
         ? DETECTION.ballScoreMinHoopRoi
         : trackFresh || nearWrist || inCorridor

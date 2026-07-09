@@ -21,6 +21,17 @@ export const DETECTION = {
    * shipping the cleaner (pre-nano-v2) nano, not by over-raising this gate.
    */
   ballScoreMin: 0.2,
+  /**
+   * COLD gate for the nano-v2 detector specifically (Settings › experimental
+   * "nano-v2" model). nano-v2 is a more aggressive small-ball finetune: it
+   * recalls more but also fires low-confidence phantom boxes (~0.33–0.34) on
+   * lights/rafters/background hoops, so it needs a higher bar to START a track.
+   * Applied per-model via pipeline.setColdBallGate when nano-v2 is the active
+   * model; every other detector keeps ballScoreMin (0.2). Measured on real
+   * footage: 0.35 drops nano-v2's multi-ball/phantom frames to the clean
+   * model's level while a clearly-seen ball still clears it.
+   */
+  ballScoreMinNanoV2: 0.35,
   /** Relaxed ball gate inside the hoop ROI (occlusion/blur near the rim). */
   ballScoreMinHoopRoi: 0.1,
   /**

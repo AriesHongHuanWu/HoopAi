@@ -254,6 +254,12 @@ export class ShotPipeline {
     this.fsm?.setBallSize(size);
   }
 
+  /** Per-model cold ball-acquisition gate (the active detector sets its own —
+   *  a noisier model needs a higher bar to start a track). null = default. */
+  setColdBallGate(gate: number | null): void {
+    this.tracker.setColdGate(gate);
+  }
+
   /** Rim height in meters (from Settings) — the metric 2/3 estimator's
    *  vertical ruler. Applies from the next resolved shot / FT capture. */
   setRimHeight(heightM: 3.05 | 2.6): void {

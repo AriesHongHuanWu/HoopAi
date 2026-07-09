@@ -216,6 +216,15 @@ export interface SettingsState {
    */
   metric23: boolean;
   /**
+   * nano-v2 detector (experimental): an aggressive small-ball finetune. Higher
+   * ball recall (finds a small/fast ball more often) but noisier — it fires
+   * more low-confidence phantom boxes on lights/rafters/background hoops, so it
+   * runs with a higher cold-acquisition gate (config ballScoreMinNanoV2) to
+   * hold those back. OFF (default) uses the cleaner conservative nano. Only
+   * affects the Nano rung (slow phones / Speed); the Tiny model is unchanged.
+   */
+  nanoV2: boolean;
+  /**
    * Manual court range. 'auto' (default) uses the automatic 2/3-point estimate;
    * '2pt'/'3pt' pin every decided shot's value — the calibration-free way to
    * score a pure 3-point (or 2-point) session accurately when you're shooting
@@ -341,6 +350,7 @@ export const useSettings = create<SettingsState>()(
       roiZoom: true,
       depthVeto: false,
       metric23: false,
+      nanoV2: false,
       courtRange: 'auto',
       reappearance: false,
       useFlightArc: true,

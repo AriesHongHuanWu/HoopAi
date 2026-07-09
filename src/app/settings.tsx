@@ -542,6 +542,7 @@ export default function SettingsScreen() {
   const reappearance = useSettings((s) => s.reappearance);
   const motionAssist = useSettings((s) => s.motionAssist);
   const metric23 = useSettings((s) => s.metric23);
+  const nanoV2 = useSettings((s) => s.nanoV2);
   const useFlightArc = useSettings((s) => s.useFlightArc);
   const formAnalysis = useSettings((s) => s.formAnalysis);
   const dailyGoalMakes = useSettings((s) => s.dailyGoalMakes);
@@ -1001,6 +1002,17 @@ export default function SettingsScreen() {
             onValueChange={(v) => {
               tick();
               set('useFlightArc', v);
+            }}
+          />
+          <View style={styles.divider} />
+          <ToggleRow
+            label="nano-v2 detector"
+            experimental
+            description="An aggressive small-ball model for the fast (Nano) rung. Finds a small or fast ball in more frames, but is noisier — it can flash phantom boxes on ceiling lights, rafters or a background hoop, so it runs with a higher confidence bar to hold those back. OFF uses the cleaner conservative model. Only affects the Nano rung (slow phones / Speed); the Tiny model is unchanged. Reloads the detector when toggled."
+            value={nanoV2}
+            onValueChange={(v) => {
+              tick();
+              set('nanoV2', v);
             }}
           />
           <View style={styles.divider} />

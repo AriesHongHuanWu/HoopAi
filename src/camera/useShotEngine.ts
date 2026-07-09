@@ -69,6 +69,10 @@ const MODEL_ASSETS = {
   // devices: fast phones get Tiny's recall, old phones keep a usable fps.
   yoloxNano: require('../../assets/models/hoopai-yolox-nano.tflite'),
   yoloxNano640: require('../../assets/models/hoopai-yolox-nano-640.tflite'),
+  // nano-v2: a more aggressive small-ball finetune (Settings › experimental).
+  // Higher recall but noisier — paired with a higher cold gate (ballScoreMinNanoV2).
+  yoloxNanoV2: require('../../assets/models/hoopai-yolox-nano-v2.tflite'),
+  yoloxNanoV2_640: require('../../assets/models/hoopai-yolox-nano-v2-640.tflite'),
 } as const;
 // MoveNet SinglePose Lightning (Apache-2.0) for opt-in form analysis.
 const POSE_ASSET = require('../../assets/models/movenet-pose.tflite');
@@ -344,6 +348,9 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
 
   const detectorModel = useSettings((s) => s.detectorModel);
   const perfMode = useSettings((s) => s.perfMode);
+  // nano-v2 experimental detector: swaps the Nano rung for the aggressive
+  // small-ball finetune (paired with a higher cold gate). Off = cleaner nano.
+  const nanoV2 = useSettings((s) => s.nanoV2);
   // Device tier → which model rung to LOAD FIRST. An 'entry' phone (iPhone XR
   // class) is KNOWN to run Tiny too slowly, so we load Nano straight away
   // instead of wasting ~1s loading Tiny only for the speed budget to step it
@@ -417,8 +424,18 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
       // MODEL_ASSETS comment. The nano rung has no budget: it is the floor.
       const speed416 = perfMode === 'speed';
       const tinyAsset = speed416 ? MODEL_ASSETS.yolox : MODEL_ASSETS.yolox640;
-      const nanoAsset = speed416 ? MODEL_ASSETS.yoloxNano : MODEL_ASSETS.yoloxNano640;
+      // Nano rung: the aggressive nano-v2 finetune when opted in, else the
+      // cleaner conservative nano. The label carries the variant so the cold
+      // gate can follow the ACTUAL loaded model (see the gate effect below).
+      const nanoAsset = nanoV2
+        ? speed416
+          ? MODEL_ASSETS.yoloxNanoV2
+          : MODEL_ASSETS.yoloxNanoV2_640
+        : speed416
+          ? MODEL_ASSETS.yoloxNano
+          : MODEL_ASSETS.yoloxNano640;
       const sizeTag = speed416 ? '416' : '640';
+      const nanoTag = nanoV2 ? 'nanoV2' : 'nano';
       const tinyGpu = {
         asset: tinyAsset,
         label: `tiny${sizeTag}/${fast.label}`,
@@ -431,10 +448,10 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
         delegates: none,
         maxMs: YOLOX_TINY_MAX_MS,
       };
-      const nanoCpu = { asset: nanoAsset, label: `nano${sizeTag}/cpu`, delegates: none };
+      const nanoCpu = { asset: nanoAsset, label: `${nanoTag}${sizeTag}/cpu`, delegates: none };
       const nanoGpu = {
         asset: nanoAsset,
-        label: `nano${sizeTag}/${fast.label}`,
+        label: `${nanoTag}${sizeTag}/${fast.label}`,
         delegates: fast.delegates,
       };
       // Entry-tier phones load Nano first (Tiny is known-too-slow here); every
@@ -526,7 +543,7 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
     return () => {
       alive = false;
     };
-  }, [detectorModel, perfMode, detInputSize, forceCpu, useYolox, detectorAccel]);
+  }, [detectorModel, perfMode, detInputSize, forceCpu, useYolox, detectorAccel, nanoV2]);
 
   const isModelLoaded = modelState.model != null;
   // 'camera' as soon as a real device exists and we're not in EXPLICIT demo
@@ -746,6 +763,14 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
   useEffect(() => {
     pipeline.setMetric23(metric23);
   }, [pipeline, metric23]);
+  // Per-model cold ball gate. Keyed off the ACTUALLY-loaded model's label (a
+  // fast phone with nano-v2 opted in may still run Tiny) so the gate always
+  // matches the running detector: nano-v2 → its higher bar, everything else →
+  // the default (null). See ballScoreMinNanoV2.
+  useEffect(() => {
+    const isNanoV2 = modelState.delegate.startsWith('nanoV2');
+    pipeline.setColdBallGate(isNanoV2 ? DETECTION.ballScoreMinNanoV2 : null);
+  }, [pipeline, modelState.delegate]);
   const courtRange = useSettings((s) => s.courtRange);
   useEffect(() => {
     pipeline.setCourtRange(courtRange);

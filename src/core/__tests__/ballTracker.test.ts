@@ -129,6 +129,22 @@ describe('BallTracker', () => {
     expect(tracker.getHistory()).toHaveLength(0);
   });
 
+  test('setColdGate raises the cold-acquisition bar per model (nano-v2), null restores default', () => {
+    // A score above the default cold gate but below the nano-v2 override.
+    const mid = (DETECTION.ballScoreMin + DETECTION.ballScoreMinNanoV2) / 2;
+    // Default gate: the mid-score ball STARTS a track.
+    const dflt = new BallTracker({});
+    expect(dflt.step(frameAt(0, [ballDet(200, 200, { score: mid })]), null)).not.toBeNull();
+    // Raised (nano-v2) gate: the SAME ball is rejected in open court.
+    const raised = new BallTracker({});
+    raised.setColdGate(DETECTION.ballScoreMinNanoV2);
+    expect(raised.step(frameAt(0, [ballDet(200, 200, { score: mid })]), null)).toBeNull();
+    expect(raised.getHistory()).toHaveLength(0);
+    // Clearing the override restores the default (mid-score now acquires).
+    raised.setColdGate(null);
+    expect(raised.step(frameAt(DT, [ballDet(200, 200, { score: mid })]), null)).not.toBeNull();
+  });
+
   test('rejects a giant near-frame-size ball box (no phantom track / screen-covering circle)', () => {
     const tracker = new BallTracker({});
     // A false "ball" filling most of a 640 frame (600×600): round aspect and
