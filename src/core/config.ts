@@ -11,14 +11,20 @@ export const DETECTION = {
   /** Detector input side (letterboxed square). 640 is the floor for a 20–40px ball. */
   inputSize: 640,
   /**
-   * Ball confidence gate in open court. Lowered from 0.3 → 0.2 for YOLOX: the
-   * ball is a small object and at the 416 letterboxed input the model scores it
-   * in the ~0.2–0.35 band (vs the old 640 YOLO11 which sat higher), so 0.3 was
-   * rejecting a real ball across most of its arc. 0.2 catches it; the Kalman
-   * tracker + shot FSM (up-zone entry, trajectory shape) reject stray boxes so a
-   * lower gate doesn't create phantom shots.
+   * COLD ball gate — the score needed to START a track in open court (a live
+   * track continues at the far lower ballScoreMinTracking). Raised 0.2 → 0.35
+   * for the nano-v2 detector: validated on real 12 fps footage, nano-v2 fires
+   * low-confidence phantom "ball" boxes (0.33–0.34) on ceiling lights, rafters
+   * and background hoops, and the old 0.2 let them START false tracks — the
+   * "floating box in the sky" a user reported. At 0.35 the phantom rate drops
+   * to the conservative model's level (multi-ball frames 287 → 17 on the test
+   * clip) while a CLEARLY-seen ball (held/dribbled) still scores well above it
+   * and, once acquired, is followed through its 0.2–0.35 flight band by the
+   * 0.12 tracking gate. So real continuity is preserved; only phantom track-
+   * STARTS are blocked. (Dark scenes use ballScoreMinDark; hoop ROI uses
+   * ballScoreMinHoopRoi.)
    */
-  ballScoreMin: 0.2,
+  ballScoreMin: 0.35,
   /** Relaxed ball gate inside the hoop ROI (occlusion/blur near the rim). */
   ballScoreMinHoopRoi: 0.1,
   /**
