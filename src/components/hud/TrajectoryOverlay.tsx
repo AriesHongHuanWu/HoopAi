@@ -2,17 +2,28 @@
  * TrajectoryOverlay — the broadcast-grade tracking canvas over the live scene.
  *
  * A transparent Skia layer that redraws every analysed frame straight from the
- * engine's OverlayState SharedValue (no per-frame React state). Four stacked
+ * engine's OverlayState SharedValue (no per-frame React state). Stacked
  * effects, back to front:
  *
  *   1. Rim reticle — a lock-on with four corner brackets that "snap" toward the
  *      rim, resting chalk-white and flaring swish-green while a shot is live.
- *   2. Comet trail — the shot arc as a glowing multi-layer trail: a wide soft
- *      bloom, a bright core stroke, and a tapered head, all quad-smoothed.
- *   3. Comet head — the ball as a bright chalk core inside a warm halo and an
+ *   2. Full-flight arc — the observed global parabola as a dashed guide, now
+ *      GRADED by entry-angle quality (green ideal / amber flat-steep) with a
+ *      diamond marker at the apex.
+ *   3. Comet trail — the shot arc as a glowing multi-layer trail, tapered:
+ *      the newer half keeps the full bloom/core/hot stack, the older half
+ *      renders thinner and dimmer so the comet visibly cools toward its tail.
+ *   4. Comet head — the ball as a bright chalk core inside a warm halo and an
  *      outer accent bloom, so it reads as light, not a sticker.
- *   4. Ball reticle — a thin tracking ring + crosshair ticks around the ball
+ *   5. Ball reticle — a thin tracking ring + crosshair ticks around the ball
  *      when no shot is live, so idle tracking still looks intentional.
+ *   6. Landing ghost — the predicted-landing crosshair, now LATCHED into
+ *      COOLDOWN with a 1.2s fade so the player sees where the fit said the
+ *      ball would land vs where it actually went.
+ *
+ * The root is a pointer-transparent View wrapping the Canvas plus the
+ * ArcReadout chip (live entry/release angle numbers), so live.tsx keeps
+ * mounting a single element.
  *
  * COORDINATE MAPPING (orientation-correct)
  * ----------------------------------------
@@ -23,7 +34,7 @@
  * pixel-identical. All per-frame math runs inside useDerivedValue worklets.
  */
 import React from 'react';
-import { StyleSheet, type LayoutChangeEvent, type StyleProp, type ViewStyle } from 'react-native';
+import { View, type LayoutChangeEvent, type StyleProp, type ViewStyle } from 'react-native';
 import {
   BlurMask,
   Canvas,
@@ -32,10 +43,12 @@ import {
   Group,
   Path,
   Skia,
+  type SkPath,
 } from '@shopify/react-native-skia';
 import {
   useDerivedValue,
   useFrameCallback,
+  useReducedMotion,
   useSharedValue,
   withRepeat,
   withTiming,
@@ -45,12 +58,18 @@ import {
 
 import type { OverlayState } from '../../camera/useShotEngine';
 import { color, glow } from '../../constants/tokens';
+import { apexOfFlatArc, arcQuality, entryAngleDegFromFlat, splitFlatTail, type ArcQuality } from './arcHudGeometry';
+import { ArcReadout } from './ArcReadout';
 import { mapAnalysisToView } from './overlayMapping';
 
 /** Widths of the three stacked trail passes (bloom → core → hot). */
 const TRAIL_BLOOM = 16;
 const TRAIL_CORE = 5;
 const TRAIL_HOT = 2;
+/** Widths of the two tapered TAIL passes (older half of the trail — no bloom
+ *  pass on the tail: that is the perf save that keeps the taper at +2 elements). */
+const TRAIL_TAIL_CORE = 3;
+const TRAIL_TAIL_HOT = 1.2;
 /**
  * Max time (seconds) to extrapolate the ball forward from its last processed
  * sample. Bounds the glide so a lost/occluded ball can't fly off screen: at
@@ -61,6 +80,65 @@ const MAX_EXTRAPOLATION_SEC = 0.12;
 /** Corner-bracket arm length as a fraction of the rim box's shorter side. */
 const BRACKET_FRAC = 0.28;
 const BRACKET_STROKE = 3;
+/** How long (ms) the latched landing ghost lingers + fades through COOLDOWN. */
+const LANDING_GHOST_FADE_MS = 1200;
+
+// RN 0.86 removed StyleSheet.absoluteFillObject — local const per the
+// repo-documented pattern (see live.tsx).
+const absoluteFill = { position: 'absolute' as const, top: 0, left: 0, right: 0, bottom: 0 };
+
+/**
+ * Quad-smoothed Skia path from a flat [x,y,...] ANALYSIS-px polyline, mapped
+ * into view px: quad through midpoints with the previous sample as control
+ * point. Shared by the full arc + both trail segments. Declared ABOVE the
+ * component — Babel captures worklet dependencies eagerly, so a worklet helper
+ * must exist before any worklet that calls it.
+ */
+function flatToQuadPath(
+  pts: readonly number[],
+  m: { scale: number; ox: number; oy: number },
+): SkPath {
+  'worklet';
+  const path = Skia.Path.Make();
+  const n = pts.length >> 1;
+  if (n < 2) return path;
+  const x0 = pts[0]! * m.scale + m.ox;
+  const y0 = pts[1]! * m.scale + m.oy;
+  path.moveTo(x0, y0);
+  let px = x0;
+  let py = y0;
+  for (let i = 1; i < n; i++) {
+    const x = pts[i * 2]! * m.scale + m.ox;
+    const y = pts[i * 2 + 1]! * m.scale + m.oy;
+    path.quadTo(px, py, (px + x) / 2, (py + y) / 2);
+    px = x;
+    py = y;
+  }
+  path.lineTo(px, py);
+  return path;
+}
+
+/**
+ * Shared empty path returned by predPath whenever no crosshair should draw.
+ * A single cached object (never mutated) instead of a fresh Skia.Path.Make()
+ * per run, so the idle branch doesn't churn native SkPath allocations.
+ */
+const EMPTY_PATH = Skia.Path.Make();
+
+/** Landing-ghost crosshair: ring + four airy ticks, in VIEW px. Declared above
+ *  the component for the same worklet capture-order reason as flatToQuadPath. */
+function crosshairPath(x: number, y: number): SkPath {
+  'worklet';
+  const p = Skia.Path.Make();
+  const r = 10;
+  p.addCircle(x, y, r);
+  // four crosshair ticks (gap between ring and tick keeps it airy)
+  p.moveTo(x - r * 1.8, y); p.lineTo(x - r * 0.7, y);
+  p.moveTo(x + r * 0.7, y); p.lineTo(x + r * 1.8, y);
+  p.moveTo(x, y - r * 1.8); p.lineTo(x, y - r * 0.7);
+  p.moveTo(x, y + r * 0.7); p.lineTo(x, y + r * 1.8);
+  return p;
+}
 
 export function TrajectoryOverlay({
   overlay,
@@ -77,15 +155,21 @@ export function TrajectoryOverlay({
   };
 
   // A free-running 0→1→0 pulse drives the rim's "breathing" glow. Ambient, so
-  // the lock never looks frozen even between shots.
+  // the lock never looks frozen even between shots. Under reduced motion the
+  // pulse stays at 0 and everything pulse-driven renders at its base opacity.
+  const reducedMotion = useReducedMotion();
   const pulse = useSharedValue(0);
   React.useEffect(() => {
+    if (reducedMotion) {
+      pulse.value = 0;
+      return;
+    }
     pulse.value = withRepeat(
       withTiming(1, { duration: 1400, easing: Easing.inOut(Easing.ease) }),
       -1,
       true,
     );
-  }, [pulse]);
+  }, [pulse, reducedMotion]);
 
   // --- analysis → view transform (worklet-local) ---------------------------
   // 'contain' letterbox (camera → analysis square) composed with the preview's
@@ -94,31 +178,20 @@ export function TrajectoryOverlay({
   // ./overlayMapping for the derivation.
   const mapping = useDerivedValue(() => mapAnalysisToView(overlay.value, viewSize.value));
 
-  // --- shot-arc trail ------------------------------------------------------
-  const trajPath = useDerivedValue(() => {
-    const path = Skia.Path.Make();
-    const o = overlay.value;
+  // --- shot-arc trail (tapered comet) --------------------------------------
+  // The trail is split at its midpoint: the newer half (head, nearest the
+  // ball) keeps the full bloom/core/hot stack; the older half (tail) renders
+  // as two thin dim passes so the comet visibly cools toward its origin.
+  const trailSplit = useDerivedValue(() => splitFlatTail(overlay.value.traj, 0.5));
+  const trailHeadPath = useDerivedValue(() => {
     const m = mapping.value;
-    if (!m.ok) return path;
-    const pts = o.traj;
-    const n = pts.length >> 1;
-    if (n < 2) return path;
-
-    const x0 = pts[0]! * m.scale + m.ox;
-    const y0 = pts[1]! * m.scale + m.oy;
-    path.moveTo(x0, y0);
-    // Smooth: quad through midpoints, previous sample as control point.
-    let px = x0;
-    let py = y0;
-    for (let i = 1; i < n; i++) {
-      const x = pts[i * 2]! * m.scale + m.ox;
-      const y = pts[i * 2 + 1]! * m.scale + m.oy;
-      path.quadTo(px, py, (px + x) / 2, (py + y) / 2);
-      px = x;
-      py = y;
-    }
-    path.lineTo(px, py);
-    return path;
+    if (!m.ok) return Skia.Path.Make();
+    return flatToQuadPath(trailSplit.value.head, m);
+  });
+  const trailTailPath = useDerivedValue(() => {
+    const m = mapping.value;
+    if (!m.ok) return Skia.Path.Make();
+    return flatToQuadPath(trailSplit.value.tail, m);
   });
 
   const trailOpacity = useDerivedValue(() => {
@@ -128,36 +201,20 @@ export function TrajectoryOverlay({
     return 0;
   });
   const bloomOpacity = useDerivedValue(() => trailOpacity.value * 0.5);
+  const tailCoreOpacity = useDerivedValue(() => trailOpacity.value * 0.5);
+  const tailHotOpacity = useDerivedValue(() => trailOpacity.value * 0.45);
 
   // --- full-flight arc (phase-independent) ---------------------------------
   // The whole OBSERVED parabola from the global FlightArc, drawn from the first
   // sample across the entire flight — the fix for "the line only shows near the
-  // rim". The near-rim FSM comet (trajPath above) only exists once a shot arms;
+  // rim". The near-rim FSM comet (trail above) only exists once a shot arms;
   // this quiet guide line traces a 3-pointer or high arc long before that. It is
   // purely visual and already curvature-gated in the pipeline (a rim rattle
   // yields an empty fullArc, never a 90° line).
   const fullArcPath = useDerivedValue(() => {
-    const path = Skia.Path.Make();
-    const o = overlay.value;
     const m = mapping.value;
-    if (!m.ok) return path;
-    const pts = o.fullArc;
-    const n = pts.length >> 1;
-    if (n < 2) return path;
-    const x0 = pts[0]! * m.scale + m.ox;
-    const y0 = pts[1]! * m.scale + m.oy;
-    path.moveTo(x0, y0);
-    let px = x0;
-    let py = y0;
-    for (let i = 1; i < n; i++) {
-      const x = pts[i * 2]! * m.scale + m.ox;
-      const y = pts[i * 2 + 1]! * m.scale + m.oy;
-      path.quadTo(px, py, (px + x) / 2, (py + y) / 2);
-      px = x;
-      py = y;
-    }
-    path.lineTo(px, py);
-    return path;
+    if (!m.ok) return Skia.Path.Make();
+    return flatToQuadPath(overlay.value.fullArc, m);
   });
   // Shown whenever a confident arc exists (≥2 points), dimmer while the bright
   // comet is also live so it reads as a guide, not a competing line.
@@ -165,6 +222,46 @@ export function TrajectoryOverlay({
     if (overlay.value.fullArc.length < 4) return 0;
     return overlay.value.phase === 'SHOT_LIVE' ? 0.4 : 0.6;
   });
+
+  // --- arc quality grading ---------------------------------------------------
+  // HOUSE RULE: this grading is arc-SHAPE feedback only — green for the ideal
+  // entry band (43–52°), amber for flat/steep. It must NEVER use color.miss
+  // red (red would read as a make/miss judgment) and NEVER feeds the FSM or
+  // any outcome. planeY ≈ the rim box's top edge — a display approximation of
+  // core RimGeometry.planeY, which OverlayState does not carry.
+  const arcEntryQuality = useDerivedValue<ArcQuality | null>(() => {
+    const o = overlay.value;
+    if (o.rim == null || o.fullArc.length < 10) return null;
+    return arcQuality(entryAngleDegFromFlat(o.fullArc, o.rim.y));
+  });
+  const arcColor = useDerivedValue(() => {
+    const q = arcEntryQuality.value;
+    if (q === 'ideal') return glow.rimLive;
+    if (q != null) return color.unsure;
+    return color.accent;
+  });
+
+  // --- apex marker ----------------------------------------------------------
+  // A small diamond at the arc's highest point (min y — analysis px are +y
+  // DOWN), so the peak of the flight reads at a glance.
+  const apexPath = useDerivedValue(() => {
+    const p = Skia.Path.Make();
+    const o = overlay.value;
+    const m = mapping.value;
+    if (!m.ok) return p;
+    const apex = apexOfFlatArc(o.fullArc);
+    if (apex == null) return p;
+    const x = apex.x * m.scale + m.ox;
+    const y = apex.y * m.scale + m.oy;
+    const r = 5;
+    p.moveTo(x, y - r);
+    p.lineTo(x + r, y);
+    p.lineTo(x, y + r);
+    p.lineTo(x - r, y);
+    p.close();
+    return p;
+  });
+  const apexFillOpacity = useDerivedValue(() => Math.min(1, fullArcOpacity.value * 1.4));
 
   // --- ball glide clock ----------------------------------------------------
   // The ball's x,y,vx,vy arrive only on each PROCESSED detection frame
@@ -178,14 +275,31 @@ export function TrajectoryOverlay({
   const displayNowMs = useSharedValue(0);
   const sampleArrivalMs = useSharedValue(0);
   const lastSampleKey = useSharedValue(-1);
+  // Landing-ghost latch: the last predicted landing seen during SHOT_LIVE,
+  // held (as SharedValues — never closed-over JS state) so the crosshair can
+  // linger through COOLDOWN. Cleared on IDLE.
+  const lastPred = useSharedValue<{ x: number; y: number; inSpan: boolean } | null>(null);
+  const lastPredAtMs = useSharedValue(0);
   useFrameCallback((frameInfo) => {
     'worklet';
     const nowMs = frameInfo.timestamp;
     displayNowMs.value = nowMs;
-    const key = overlay.value.ball?.t ?? -1;
+    const o = overlay.value;
+    const key = o.ball?.t ?? -1;
     if (key !== lastSampleKey.value) {
       lastSampleKey.value = key;
       sampleArrivalMs.value = nowMs;
+    }
+    if (o.pred != null && o.phase === 'SHOT_LIVE') {
+      // Re-stamp the time every frame (fade starts from the LAST live moment)
+      // but only allocate a new latch object when the prediction moved.
+      const lp = lastPred.value;
+      if (lp == null || lp.x !== o.pred.x || lp.y !== o.pred.y || lp.inSpan !== o.pred.inSpan) {
+        lastPred.value = { x: o.pred.x, y: o.pred.y, inSpan: o.pred.inSpan };
+      }
+      lastPredAtMs.value = nowMs;
+    } else if (o.phase === 'IDLE') {
+      lastPred.value = null;
     }
   });
 
@@ -284,30 +398,46 @@ export function TrajectoryOverlay({
   // Where the fitted arc says the ball is COMING DOWN through the rim plane —
   // drawn as a pulsing crosshair target mid-flight, green when the prediction
   // is inside the rim span (on target), miss-red when it's sailing wide.
+  // After the shot resolves, the LAST live prediction stays latched through
+  // COOLDOWN with a 1.2s linear fade (no pulse) — a visual echo of where the
+  // fit predicted the landing vs where the ball actually went. Trust/education
+  // beat, display only: the latch never touches the FSM or any outcome.
+  // PERF: this mapper must NOT read displayNowMs — useDerivedValue re-runs on
+  // every closure-captured shared value regardless of which branch reads it,
+  // so a display-clock read here re-ran the mapper (allocating a fresh SkPath
+  // and dirtying the whole blurred canvas) at 60-120Hz for the entire camera
+  // session, even fully idle / under reduced motion. The crosshair GEOMETRY
+  // is static through the cooldown fade — predOpacity alone (a deduped
+  // primitive) animates it to 0, which makes a time-based path cutoff
+  // redundant; lastPred is cleared on IDLE by the frame callback.
   const predPath = useDerivedValue(() => {
-    const p = Skia.Path.Make();
     const o = overlay.value;
     const m = mapping.value;
-    if (!m.ok || o.pred == null || o.phase !== 'SHOT_LIVE') return p;
-    const x = o.pred.x * m.scale + m.ox;
-    const y = o.pred.y * m.scale + m.oy;
-    const r = 10;
-    p.addCircle(x, y, r);
-    // four crosshair ticks (gap between ring and tick keeps it airy)
-    p.moveTo(x - r * 1.8, y); p.lineTo(x - r * 0.7, y);
-    p.moveTo(x + r * 0.7, y); p.lineTo(x + r * 1.8, y);
-    p.moveTo(x, y - r * 1.8); p.lineTo(x, y - r * 0.7);
-    p.moveTo(x, y + r * 0.7); p.lineTo(x, y + r * 1.8);
-    return p;
+    if (!m.ok) return EMPTY_PATH;
+    if (o.phase === 'SHOT_LIVE' && o.pred != null) {
+      return crosshairPath(o.pred.x * m.scale + m.ox, o.pred.y * m.scale + m.oy);
+    }
+    const lp = lastPred.value;
+    if (o.phase === 'COOLDOWN' && lp != null) {
+      return crosshairPath(lp.x * m.scale + m.ox, lp.y * m.scale + m.oy);
+    }
+    return EMPTY_PATH;
   });
-  const predColor = useDerivedValue(() =>
-    overlay.value.pred?.inSpan === true ? glow.rimLive : color.miss,
-  );
-  const predOpacity = useDerivedValue(() =>
-    overlay.value.pred != null && overlay.value.phase === 'SHOT_LIVE'
-      ? 0.55 + pulse.value * 0.35
-      : 0,
-  );
+  const predColor = useDerivedValue(() => {
+    const o = overlay.value;
+    const inSpan =
+      o.phase === 'SHOT_LIVE' && o.pred != null ? o.pred.inSpan : lastPred.value?.inSpan === true;
+    return inSpan ? glow.rimLive : color.miss;
+  });
+  const predOpacity = useDerivedValue(() => {
+    const o = overlay.value;
+    if (o.pred != null && o.phase === 'SHOT_LIVE') return 0.55 + pulse.value * 0.35;
+    if (o.phase === 'COOLDOWN' && lastPred.value != null) {
+      const age = displayNowMs.value - lastPredAtMs.value;
+      if (age < LANDING_GHOST_FADE_MS) return 0.5 * (1 - age / LANDING_GHOST_FADE_MS);
+    }
+    return 0;
+  });
 
   // --- rim lock-on ---------------------------------------------------------
   const rimRect = useDerivedValue(() => {
@@ -374,143 +504,186 @@ export function TrajectoryOverlay({
   );
 
   return (
-    <Canvas style={[StyleSheet.absoluteFill, style]} pointerEvents="none" onLayout={onLayout}>
-      {/* Rim: live fill wash (blurred green bloom) */}
-      <Circle cx={rimFillCx} cy={rimFillCy} r={rimFillR} color={glow.rimLiveGlow} opacity={rimFillOpacity}>
-        <BlurMask blur={18} style="normal" />
-      </Circle>
+    <View pointerEvents="none" style={[absoluteFill, style]}>
+      <Canvas style={absoluteFill} onLayout={onLayout}>
+        {/* Rim: live fill wash (blurred green bloom) */}
+        <Circle cx={rimFillCx} cy={rimFillCy} r={rimFillR} color={glow.rimLiveGlow} opacity={rimFillOpacity}>
+          <BlurMask blur={18} style="normal" />
+        </Circle>
 
-      {/* Rim: corner brackets, glow pass then crisp pass */}
-      <Group>
+        {/* Rim: corner brackets, glow pass then crisp pass */}
+        <Group>
+          <Path
+            path={bracketPath}
+            style="stroke"
+            strokeWidth={BRACKET_STROKE + 4}
+            strokeCap="round"
+            strokeJoin="round"
+            color={bracketColor}
+            opacity={bracketOpacity}
+          >
+            <BlurMask blur={7} style="normal" />
+          </Path>
+          <Path
+            path={bracketPath}
+            style="stroke"
+            strokeWidth={BRACKET_STROKE}
+            strokeCap="round"
+            strokeJoin="round"
+            color={bracketColor}
+            opacity={bracketOpacity}
+          />
+        </Group>
+
+        {/* Full-flight arc: the whole observed parabola as a quiet dashed
+            guide, drawn under the bright comet so the flight reads end-to-end.
+            Color = shape grade (green ideal / amber flat-steep / accent when
+            unknown) — see arcEntryQuality's house rule. */}
         <Path
-          path={bracketPath}
+          path={fullArcPath}
           style="stroke"
-          strokeWidth={BRACKET_STROKE + 4}
+          strokeWidth={2}
           strokeCap="round"
           strokeJoin="round"
-          color={bracketColor}
-          opacity={bracketOpacity}
+          color={arcColor}
+          opacity={fullArcOpacity}
         >
-          <BlurMask blur={7} style="normal" />
+          <DashPathEffect intervals={[7, 7]} />
+        </Path>
+
+        {/* Apex diamond: glow pass + crisp fill, same grade color as the arc */}
+        <Path
+          path={apexPath}
+          style="stroke"
+          strokeWidth={4}
+          strokeJoin="round"
+          color={arcColor}
+          opacity={fullArcOpacity}
+        >
+          <BlurMask blur={4} style="normal" />
+        </Path>
+        <Path path={apexPath} style="fill" color={arcColor} opacity={apexFillOpacity} />
+
+        {/* Trail tail (older half): two thin dim passes, no bloom — the taper */}
+        <Path
+          path={trailTailPath}
+          style="stroke"
+          strokeWidth={TRAIL_TAIL_CORE}
+          strokeCap="round"
+          strokeJoin="round"
+          color={glow.trail}
+          opacity={tailCoreOpacity}
+        />
+        <Path
+          path={trailTailPath}
+          style="stroke"
+          strokeWidth={TRAIL_TAIL_HOT}
+          strokeCap="round"
+          strokeJoin="round"
+          color={glow.cometHalo}
+          opacity={tailHotOpacity}
+        />
+
+        {/* Trail head (newer half): soft bloom pass */}
+        <Path
+          path={trailHeadPath}
+          style="stroke"
+          strokeWidth={TRAIL_BLOOM}
+          strokeCap="round"
+          strokeJoin="round"
+          color={glow.trailBloom}
+          opacity={bloomOpacity}
+        >
+          <BlurMask blur={12} style="normal" />
+        </Path>
+        {/* Trail head: core stroke */}
+        <Path
+          path={trailHeadPath}
+          style="stroke"
+          strokeWidth={TRAIL_CORE}
+          strokeCap="round"
+          strokeJoin="round"
+          color={glow.trail}
+          opacity={trailOpacity}
+        />
+        {/* Trail head: hot white centerline */}
+        <Path
+          path={trailHeadPath}
+          style="stroke"
+          strokeWidth={TRAIL_HOT}
+          strokeCap="round"
+          strokeJoin="round"
+          color={glow.cometHalo}
+          opacity={trailOpacity}
+        />
+
+        {/* Predicted future path: dashed arc to the landing point */}
+        <Path
+          path={predTrajPath}
+          style="stroke"
+          strokeWidth={2.5}
+          strokeCap="round"
+          color={predColor}
+          opacity={predOpacity}
+        >
+          <DashPathEffect intervals={[9, 8]} />
+        </Path>
+
+        {/* Predicted landing ghost: soft glow pass + crisp crosshair (latched
+            through COOLDOWN with a fade — see predPath) */}
+        <Path
+          path={predPath}
+          style="stroke"
+          strokeWidth={4.5}
+          strokeCap="round"
+          color={predColor}
+          opacity={predOpacity}
+        >
+          <BlurMask blur={6} style="normal" />
         </Path>
         <Path
-          path={bracketPath}
+          path={predPath}
           style="stroke"
-          strokeWidth={BRACKET_STROKE}
+          strokeWidth={2}
           strokeCap="round"
-          strokeJoin="round"
-          color={bracketColor}
-          opacity={bracketOpacity}
+          color={predColor}
+          opacity={predOpacity}
         />
-      </Group>
 
-      {/* Full-flight arc: the whole observed parabola as a quiet dashed accent
-          guide, drawn under the bright comet so the flight reads end-to-end. */}
-      <Path
-        path={fullArcPath}
-        style="stroke"
-        strokeWidth={2}
-        strokeCap="round"
-        strokeJoin="round"
-        color={color.accent}
-        opacity={fullArcOpacity}
-      >
-        <DashPathEffect intervals={[7, 7]} />
-      </Path>
+        {/* Idle ball reticle */}
+        <Path
+          path={reticlePath}
+          style="stroke"
+          strokeWidth={1.5}
+          strokeCap="round"
+          color={glow.reticle}
+          opacity={reticleOpacity}
+        />
 
-      {/* Trail: soft bloom pass */}
-      <Path
-        path={trajPath}
-        style="stroke"
-        strokeWidth={TRAIL_BLOOM}
-        strokeCap="round"
-        strokeJoin="round"
-        color={glow.trailBloom}
-        opacity={bloomOpacity}
-      >
-        <BlurMask blur={12} style="normal" />
-      </Path>
-      {/* Trail: core stroke */}
-      <Path
-        path={trajPath}
-        style="stroke"
-        strokeWidth={TRAIL_CORE}
-        strokeCap="round"
-        strokeJoin="round"
-        color={glow.trail}
-        opacity={trailOpacity}
-      />
-      {/* Trail: hot white centerline */}
-      <Path
-        path={trajPath}
-        style="stroke"
-        strokeWidth={TRAIL_HOT}
-        strokeCap="round"
-        strokeJoin="round"
-        color={glow.cometHalo}
-        opacity={trailOpacity}
-      />
+        {/* Comet head: outer bloom → warm halo → chalk core */}
+        <Circle cx={ballCx} cy={ballCy} r={bloomR} color={glow.trailBloom} opacity={ballBloomOpacity}>
+          <BlurMask blur={14} style="normal" />
+        </Circle>
+        <Circle cx={ballCx} cy={ballCy} r={haloR} color={glow.cometHalo} opacity={ballVisible}>
+          <BlurMask blur={4} style="normal" />
+        </Circle>
+        <Circle cx={ballCx} cy={ballCy} r={coreR} color={glow.cometCore} opacity={ballVisible} />
+        {/* faint accent ring so the ball keeps leather identity up close */}
+        <Circle
+          cx={ballCx}
+          cy={ballCy}
+          r={ballR}
+          style="stroke"
+          strokeWidth={1.5}
+          color={color.accent}
+          opacity={ballVisible}
+        />
+      </Canvas>
 
-      {/* Predicted future path: dashed arc to the landing point */}
-      <Path
-        path={predTrajPath}
-        style="stroke"
-        strokeWidth={2.5}
-        strokeCap="round"
-        color={predColor}
-        opacity={predOpacity}
-      >
-        <DashPathEffect intervals={[9, 8]} />
-      </Path>
-
-      {/* Predicted landing ghost: soft glow pass + crisp crosshair */}
-      <Path
-        path={predPath}
-        style="stroke"
-        strokeWidth={4.5}
-        strokeCap="round"
-        color={predColor}
-        opacity={predOpacity}
-      >
-        <BlurMask blur={6} style="normal" />
-      </Path>
-      <Path
-        path={predPath}
-        style="stroke"
-        strokeWidth={2}
-        strokeCap="round"
-        color={predColor}
-        opacity={predOpacity}
-      />
-
-      {/* Idle ball reticle */}
-      <Path
-        path={reticlePath}
-        style="stroke"
-        strokeWidth={1.5}
-        strokeCap="round"
-        color={glow.reticle}
-        opacity={reticleOpacity}
-      />
-
-      {/* Comet head: outer bloom → warm halo → chalk core */}
-      <Circle cx={ballCx} cy={ballCy} r={bloomR} color={glow.trailBloom} opacity={ballBloomOpacity}>
-        <BlurMask blur={14} style="normal" />
-      </Circle>
-      <Circle cx={ballCx} cy={ballCy} r={haloR} color={glow.cometHalo} opacity={ballVisible}>
-        <BlurMask blur={4} style="normal" />
-      </Circle>
-      <Circle cx={ballCx} cy={ballCy} r={coreR} color={glow.cometCore} opacity={ballVisible} />
-      {/* faint accent ring so the ball keeps leather identity up close */}
-      <Circle
-        cx={ballCx}
-        cy={ballCy}
-        r={ballR}
-        style="stroke"
-        strokeWidth={1.5}
-        color={color.accent}
-        opacity={ballVisible}
-      />
-    </Canvas>
+      {/* Live arc readout chip (measured degrees only — no outcome words).
+          Mounted here, inside the overlay's pointer-transparent root, so
+          live.tsx keeps mounting a single element. */}
+      <ArcReadout overlay={overlay} />
+    </View>
   );
 }

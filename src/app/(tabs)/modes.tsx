@@ -14,10 +14,10 @@
  * session's persisted shots and starts the mode. With no eligible session the
  * card is disabled with the reason inked where the rules normally sit.
  */
-import { router } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 import * as Haptics from 'expo-haptics';
 import { Ionicons } from '@expo/vector-icons';
-import React, { useEffect, useState, type ComponentProps } from 'react';
+import React, { useEffect, useRef, useState, type ComponentProps } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import Animated, {
   FadeIn,
@@ -36,7 +36,8 @@ import {
 } from '@/components/modes/modeIdentity';
 import { Card, Eyebrow, Row, Screen } from '@/components/ui';
 import { color, motion, radius, space, touch, type } from '@/constants/tokens';
-import { DRILLS, type Drill } from '@/core/drills';
+import { levelOfGoals, type DrillLevel } from '@/core/drillProgression';
+import { DRILLS, type Drill, type DrillId } from '@/core/drills';
 import {
   GAME_MODES,
   GHOST_MIN_MAKES,
@@ -73,6 +74,24 @@ export default function ModePickerScreen() {
   const reducedMotion = useReducedMotion();
   const [proOpen, setProOpen] = useState(false);
   const hasProModes = GAME_MODES.some((m) => m.id !== 'free');
+
+  // Deep-link preselect from Coach's Corner ("Practice at level N"): arm the
+  // drill at the prescribed level once per param value. The ref guard keeps
+  // tab revisits (params persist on tab roots) from re-arming the mode — it
+  // keys on drill AND level so next week's "same drill, level 3" prescription
+  // still re-arms.
+  const params = useLocalSearchParams<{ drill?: string; level?: string }>();
+  const consumed = useRef<string | null>(null);
+  useEffect(() => {
+    const id = params.drill;
+    const key = `${params.drill}:${params.level}`;
+    if (!id || consumed.current === key) return;
+    if (!DRILLS.some((d) => d.id === id)) return;
+    consumed.current = key;
+    const n = Number(params.level);
+    const level: DrillLevel = n === 2 || n === 3 ? (n as DrillLevel) : 1;
+    selectDrill(id as DrillId, level);
+  }, [params.drill, params.level, selectDrill]);
 
   // Ghost Challenge sources: the last few sessions with enough makes to race.
   // null = still loading (the card stays tappable and shows a loading row).
@@ -111,7 +130,14 @@ export default function ModePickerScreen() {
 
   const pickDrill = (drill: Drill) => {
     if (hapticsEnabled) void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    selectDrill(drill.id);
+    // Preserve an armed level: the coach deep link above arms the drill at a
+    // prescribed level, and the start tap lands here — re-selecting without it
+    // would silently downgrade the prescription to Level 1. The level is
+    // inferred from the armed goals (levelOfGoals — same recovery History
+    // uses), and selectDrill still re-inits fresh progress at that level.
+    const armedGoals =
+      activeDrillId === drill.id ? activeMode?.config?.drill?.goals : undefined;
+    selectDrill(drill.id, armedGoals != null ? levelOfGoals(drill.id, armedGoals) : undefined);
     router.push('/session/setup');
   };
 

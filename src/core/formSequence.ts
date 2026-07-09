@@ -92,6 +92,13 @@ export const SEQ_WINDOW_SEC = 1.2;
 /** Score gate below which a keypoint is treated as missing (matches FORM). */
 const KP_SCORE_MIN = 0.3;
 
+/**
+ * Max |sampled frame t − releaseT| (seconds) accepted when locating the
+ * release marker. Beyond this the marker is OMITTED rather than snapped to a
+ * far-away frame — never fabricate an alignment.
+ */
+export const RELEASE_MATCH_SLACK_SEC = 0.2;
+
 // ---------------------------------------------------------------------------
 // Body-frame normalization
 // ---------------------------------------------------------------------------
@@ -205,9 +212,13 @@ export class FormSequenceBuffer {
    *
    * Downsamples to at most {@link SEQ_TARGET_FRAMES} evenly across the window,
    * normalizes each frame to hip-center + body height, and quantizes.
+   *
+   * `releaseT` (camera seconds, e.g. the pose-gated release pose timestamp)
+   * optionally marks the output frame nearest the release — see
+   * {@link buildSequence}.
    */
-  finalize(): FormSequence | null {
-    return buildSequence(this.frames, this.hand);
+  finalize(releaseT: number | null = null): FormSequence | null {
+    return buildSequence(this.frames, this.hand, releaseT);
   }
 
   /** Clear buffered frames for the next shot. */
@@ -247,14 +258,34 @@ function quantize(v: number): number {
 }
 
 /**
+ * {@link FormSequence} plus the optional release marker. Mirrors the
+ * `releaseFrame?: number` field the integrator adds to FormSequence in
+ * src/core/types.ts (`v` stays 1 — the `data` packing is unchanged and old
+ * decoders ignore the extra JSON key). Exported so consumers can read the
+ * marker with type safety before/independent of that types.ts change.
+ */
+export type FormSequenceWithRelease = FormSequence & {
+  /** 0-based OUTPUT-frame index nearest in time to the pose-gated release. */
+  releaseFrame?: number;
+};
+
+/**
  * Core packer: takes raw (px) frames and produces a normalized, quantized
  * {@link FormSequence}. Exported so tests and any offline reprocessing can
  * build a sequence without the streaming buffer. Returns null on too-little
  * data.
+ *
+ * When `releaseT` (camera seconds) is a finite number, the output frame whose
+ * sampled timestamp is nearest to it is marked as `releaseFrame` — but only
+ * within {@link RELEASE_MATCH_SLACK_SEC}; otherwise the key is omitted
+ * entirely (an absent marker is honest, a snapped-far one is not). The index
+ * space is OUTPUT frames: all-missing rows still occupy an index and carry a
+ * valid timestamp, so they participate in the nearest-match.
  */
 export function buildSequence(
   rawFrames: readonly RawSeqFrame[],
   hand: ShootingHand,
+  releaseT: number | null = null,
 ): FormSequence | null {
   if (rawFrames.length < 4) return null;
   const idx = pickIndices(rawFrames.length, SEQ_TARGET_FRAMES);
@@ -283,6 +314,19 @@ export function buildSequence(
     }
   }
   if (kept < 4) return null;
+  let releaseFrame: number | null = null;
+  if (releaseT != null && Number.isFinite(releaseT)) {
+    let bestK = -1;
+    let bestD = Infinity;
+    for (let k = 0; k < idx.length; k++) {
+      const d = Math.abs(rawFrames[idx[k]!]!.t - releaseT);
+      if (d < bestD) {
+        bestD = d;
+        bestK = k;
+      }
+    }
+    if (bestK >= 0 && bestD <= RELEASE_MATCH_SLACK_SEC) releaseFrame = bestK;
+  }
   const t0 = rawFrames[idx[0]!]!.t;
   const t1 = rawFrames[idx[idx.length - 1]!]!.t;
   return {
@@ -291,6 +335,9 @@ export function buildSequence(
     frames: idx.length,
     durationSec: Math.max(0, t1 - t0),
     data,
+    // Conditional spread keeps the key entirely absent when unmatched, so a
+    // two-arg call serializes byte-identically to the pre-marker output.
+    ...(releaseFrame != null ? { releaseFrame } : {}),
   };
 }
 

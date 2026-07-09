@@ -18,7 +18,10 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import Animated, { FadeInDown, useReducedMotion } from 'react-native-reanimated';
 
-import { shareWeekCard } from '@/components/ShareCard';
+import { shareCoachCard, shareWeekCard } from '@/components/ShareCard';
+import { CoachTimelineCard } from '@/components/coach/CoachTimelineCard';
+import { FormReadinessCard } from '@/components/coach/FormReadinessCard';
+import { SeasonStrip } from '@/components/coach/SeasonStrip';
 import { Card, Chip, EmptyState, PillButton, Row, Screen, StatNumber } from '@/components/ui';
 import { color, font, radius, space, type } from '@/constants/tokens';
 import {
@@ -31,7 +34,16 @@ import {
   type Trend,
   type WeeklyAssignment,
 } from '@/core/coachEngine';
+import { coachTimeline, formReadiness, seasonComparison } from '@/core/coachInsights';
 import { getDrill } from '@/core/drills';
+import {
+  drillPrescription,
+  drillResultFromModeState,
+  levelForDrill,
+  LEVEL_LABEL,
+  type DrillLevel,
+  type DrillResult,
+} from '@/core/drillProgression';
 import {
   buildWeeklyReport,
   weekStart,
@@ -292,7 +304,7 @@ function WeekSelector({
 type LoadState =
   | { status: 'loading' }
   | { status: 'error' }
-  | { status: 'ready'; sessions: CoachSession[] };
+  | { status: 'ready'; sessions: CoachSession[]; drillResults: DrillResult[] };
 
 function useCoachSessions(): { state: LoadState; reload: () => void } {
   const [state, setState] = useState<LoadState>({ status: 'loading' });
@@ -303,6 +315,18 @@ function useCoachSessions(): { state: LoadState; reload: () => void } {
     void (async () => {
       try {
         const rows = await listSessions(SCAN_LIMIT);
+        // Drill history for the level ladder — parsed off the SAME rows (no
+        // extra DB queries). Drills persist as finished spotShooting states.
+        const drillResults = rows
+          .filter((r) => r.modeId === 'spotShooting' && r.modeResultJson)
+          .map((r) => {
+            try {
+              return drillResultFromModeState(JSON.parse(r.modeResultJson!), r.startedAt);
+            } catch {
+              return null;
+            }
+          })
+          .filter((x): x is DrillResult => x != null);
         const withShots = rows.filter((r) => r.attempts > 0);
         const sessions = await Promise.all(
           withShots.map(async (r): Promise<CoachSession> => {
@@ -317,7 +341,7 @@ function useCoachSessions(): { state: LoadState; reload: () => void } {
             };
           }),
         );
-        if (alive) setState({ status: 'ready', sessions });
+        if (alive) setState({ status: 'ready', sessions, drillResults });
       } catch {
         if (alive) setState({ status: 'error' });
       }
@@ -410,9 +434,12 @@ function NbaTwinCard({
  */
 function WeeklyPlanCard({
   plan,
+  levels,
   entering,
 }: {
   plan: readonly WeeklyAssignment[];
+  /** Per-drill progression: current level + the coach's level prescription. */
+  levels: Partial<Record<string, { level: DrillLevel; prescription: string }>>;
   entering?: React.ComponentProps<typeof Animated.View>['entering'];
 }) {
   return (
@@ -424,6 +451,7 @@ function WeeklyPlanCard({
       <View style={styles.planList}>
         {plan.map((item, i) => {
           const drill = getDrill(item.drillId);
+          const lv = levels[item.drillId];
           return (
             <View key={item.finding.id} style={styles.planItem}>
               <View style={styles.planNum}>
@@ -432,10 +460,27 @@ function WeeklyPlanCard({
               <View style={styles.planBody}>
                 <Text style={styles.assignTitle}>{item.finding.title}</Text>
                 <Text style={styles.body}>{item.finding.prescription}</Text>
+                {lv != null && (
+                  <>
+                    <Row gap={space.sm} style={styles.planLevelRow}>
+                      <Chip
+                        label={`LEVEL ${lv.level} · ${LEVEL_LABEL[lv.level].toUpperCase()}`}
+                        tone={lv.level > 1 ? 'accent' : 'default'}
+                        compact
+                      />
+                    </Row>
+                    <Text style={styles.planLevelRx}>{lv.prescription}</Text>
+                  </>
+                )}
                 <Pressable
                   accessibilityRole="button"
-                  accessibilityLabel={`Practice ${drill.title} in Train`}
-                  onPress={() => router.push('/modes')}
+                  accessibilityLabel={`Practice ${drill.title} at level ${lv?.level ?? 1} in Train`}
+                  onPress={() =>
+                    router.push({
+                      pathname: '/modes',
+                      params: { drill: item.drillId, level: String(lv?.level ?? 1) },
+                    })
+                  }
                   style={({ pressed }) => [styles.planDrill, pressed && { opacity: 0.6 }]}
                 >
                   <Ionicons name="basketball" size={14} color={color.accent} />
@@ -456,6 +501,7 @@ export default function CoachScreen() {
   const [weekIndex, setWeekIndex] = useState(0);
 
   const sessions = load.status === 'ready' ? load.sessions : [];
+  const drillResults = load.status === 'ready' ? load.drillResults : [];
   const weeks = useMemo(() => weeksOf(sessions), [sessions]);
   const activeWeek = weeks[Math.min(weekIndex, Math.max(0, weeks.length - 1))];
 
@@ -502,6 +548,33 @@ export default function CoachScreen() {
     [findings],
   );
 
+  // Four-week timeline ending at the selected week (oldest-first, empty weeks
+  // included so the bars read as a calendar, not a highlight reel).
+  const timeline = useMemo(
+    () => (activeWeek ? coachTimeline(sessions, activeWeek.startMs, 4) : []),
+    [sessions, activeWeek],
+  );
+
+  // Last 28 days vs the 28 before — the season-scale trend strip.
+  const season = useMemo(
+    () => (activeWeek ? seasonComparison(sessions, activeWeek.startMs) : null),
+    [sessions, activeWeek],
+  );
+
+  // Pose/form data coverage across the whole scan window (not week-scoped).
+  const readiness = useMemo(() => formReadiness(sessions.flatMap((s) => s.shots)), [sessions]);
+
+  // Drill progression per planned drill: current level + the level prescription.
+  const planLevels = useMemo(() => {
+    const m: Partial<Record<string, { level: DrillLevel; prescription: string }>> = {};
+    for (const item of plan) {
+      const rs = drillResults.filter((r) => r.drillId === item.drillId);
+      const level = levelForDrill(rs);
+      m[item.drillId] = { level, prescription: drillPrescription(item.drillId, level, rs) };
+    }
+    return m;
+  }, [plan, drillResults]);
+
   const cardEnter = (i: number) => (reducedMotion ? undefined : FadeInDown.delay(i * 70).duration(380));
 
   return (
@@ -540,11 +613,39 @@ export default function CoachScreen() {
 
             <WeeklyHero report={report} reducedMotion={reducedMotion} />
 
+            {/* Four-week timeline — tap a bar to jump the week selector */}
+            {timeline.some((w) => w.sessions > 0) && (
+              <CoachTimelineCard
+                weeks={timeline}
+                activeStartMs={activeWeek!.startMs}
+                onPickWeek={(ms) => {
+                  const i = weeks.findIndex((w) => w.startMs === ms);
+                  if (i >= 0) setWeekIndex(i);
+                }}
+                entering={cardEnter(1)}
+              />
+            )}
+
+            {/* Season strip — last 28 days vs the 28 before */}
+            {season != null && season.prior.attempts > 0 && (
+              <SeasonStrip comparison={season} entering={cardEnter(2)} />
+            )}
+
             {/* NBA twin — who you shoot like this week + what to steal */}
-            {twin != null && <NbaTwinCard match={twin} entering={cardEnter(1)} />}
+            {twin != null && <NbaTwinCard match={twin} entering={cardEnter(3)} />}
 
             {/* This week's plan — the top fixes + drills to groove them */}
-            {plan.length > 0 && <WeeklyPlanCard plan={plan} entering={cardEnter(2)} />}
+            {plan.length > 0 && (
+              <WeeklyPlanCard plan={plan} levels={planLevels} entering={cardEnter(4)} />
+            )}
+
+            {/* Form-data readiness — how much of the coach's form read is fed */}
+            <FormReadinessCard
+              readiness={readiness}
+              onOpenSettings={() => router.push('/settings')}
+              onOpenFormStudio={() => router.push('/formstudio')}
+              entering={cardEnter(5)}
+            />
 
             {/* Findings */}
             <View>
@@ -565,6 +666,27 @@ export default function CoachScreen() {
                 </View>
               )}
             </View>
+
+            {/* Share the whole coach read as a story card */}
+            {report.sessions > 0 && (
+              <PillButton
+                label="Share coach report"
+                icon="share-outline"
+                variant="ghost"
+                onPress={() => {
+                  void shareCoachCard({
+                    label: report.label,
+                    wss: report.wss,
+                    fgPct: report.fgPct,
+                    makes: report.makes,
+                    attempts: report.attempts,
+                    sessions: report.sessions,
+                    topFinding: findings[0]?.title ?? null,
+                    focus: report.nextWeekFocus,
+                  });
+                }}
+              />
+            )}
 
             {/* Deeper dive hook */}
             <Card entering={cardEnter(2)}>
@@ -658,6 +780,15 @@ const styles = StyleSheet.create({
   planBody: {
     flex: 1,
     minWidth: 0,
+  },
+  planLevelRow: {
+    marginTop: space.sm,
+    alignItems: 'center',
+  },
+  planLevelRx: {
+    ...type.caption,
+    color: color.textDim,
+    marginTop: 4,
   },
   planDrill: {
     flexDirection: 'row',

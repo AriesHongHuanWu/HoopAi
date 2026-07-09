@@ -275,6 +275,13 @@ export interface ResolvedShot {
    * RELEASE.maxReleaseToRimSec), and a crossing time exists.
    */
   releaseToRimSec?: number;
+  /**
+   * Persisted flight-arc snapshot, present only when a confident full-flight
+   * fit existed at resolve time (useFlightArc on + the r2y/curvature gates in
+   * the pipeline passed). Persisted in shots.arcJson (db v9); old rows simply
+   * lack it. VISUAL-ONLY — see {@link PersistedFlightArc}.
+   */
+  flightArc?: PersistedFlightArc;
 }
 
 /** Pose-based form metrics + prioritized coaching cues for one shot. */
@@ -330,6 +337,48 @@ export interface FormSequence {
    * doc for the exact layout and the sentinel for missing keypoints.
    */
   data: number[];
+  /**
+   * 0-based index into the DOWNSAMPLED output frames nearest the pose-gated
+   * release event, matched within 0.2 s slack (formSequence's
+   * RELEASE_MATCH_SLACK_SEC). Absent when the ReleaseDetector did not fire
+   * for the shot or no sampled frame fell inside the slack. ADDITIVE — the
+   * data packing is unchanged, so `v` stays 1.
+   */
+  releaseFrame?: number;
+}
+
+/**
+ * Persisted flight-arc snapshot (shots.arcJson, db v9): the confidence-gated
+ * full-flight parabola frozen at the resolve frame, in ANALYSIS-FRAME px
+ * (+y DOWN) with ABSOLUTE-TIME coefficients (camera seconds). VISUAL-ONLY by
+ * contract: it powers replay thumbnails and the 3D replay theater and must
+ * never feed make/miss, recheck, or 2/3 estimation (drawing != judging).
+ * `path` carries at most 17 sampled points (34 flat numbers); the whole JSON
+ * blob stays within a ~700-byte budget. See src/core/arcSnapshot.ts for the
+ * encode/decode + validation rules.
+ */
+export interface PersistedFlightArc {
+  v: 1;
+  /**
+   * Absolute-time parabola: y(t) = ya*t² + yb*t + yc, x(t) = xm*t + xq,
+   * valid over the observed window [tMin, tMax]; r2y = vertical-fit R².
+   */
+  fit: {
+    ya: number;
+    yb: number;
+    yc: number;
+    xm: number;
+    xq: number;
+    r2y: number;
+    tMin: number;
+    tMax: number;
+  };
+  /** Flat [x0,y0,x1,y1,...] samples over the observed window (≤ 34 numbers). */
+  path: number[];
+  /** Rim box at resolve (analysis px) — a defensive copy, never an alias. */
+  rimBox: Box;
+  frameW: number;
+  frameH: number;
 }
 
 /** Per-frame input to the shot FSM. All in analysis-frame space. */
@@ -349,6 +398,14 @@ export interface FsmFrameInput {
    * corroborates it in the upper frame within RELEASE.armWindowSec.
    */
   releaseEventT?: number;
+  /**
+   * When true, the FSM must not ARM a new attempt this frame (multi-ball
+   * warmup scene, or the rim lock is drift-stale after a camera bump). It
+   * never affects an attempt that is already live, and it can only SUPPRESS
+   * calls — it can never create one. Absent = false. recheck/offline replay
+   * never sets it, so default behavior is byte-identical.
+   */
+  armLockout?: boolean;
 }
 
 export interface FsmStepResult {

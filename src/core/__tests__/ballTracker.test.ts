@@ -74,7 +74,7 @@ jest.mock(
   { virtual: true },
 );
 
-import { BallTracker } from '../ballTracker';
+import { BallTracker, distToSegment } from '../ballTracker';
 import { DETECTION, RELEASE, TRACKER } from '../config';
 import type { Box, Detection, FrameDetections } from '../types';
 
@@ -232,6 +232,96 @@ describe('BallTracker', () => {
     expect(
       tracker.step(frameAt(0, [ballDet(200, 200, { score })]), null, corridor),
     ).toBeNull();
+  });
+
+  describe('corridor capsule (segment between successive corridor points)', () => {
+    // In the tracking band (>= 0.12) but under cold acquisition (0.2): the
+    // faint fast-flight band the capsule exists to keep alive at low fps.
+    const faintScore =
+      (DETECTION.ballScoreMinTracking + DETECTION.ballScoreMin) / 2; // 0.16
+    const corridorA = { p: { x: 100, y: 300 }, tubeR: 40 };
+    const corridorB = { p: { x: 300, y: 300 }, tubeR: 40 };
+
+    test('distToSegment: interior projection, endpoint clamp, degenerate segment', () => {
+      expect(distToSegment(200, 310, 100, 300, 300, 300)).toBeCloseTo(10);
+      // Beyond endpoint A: clamps to the endpoint, not the infinite line.
+      expect(distToSegment(50, 300, 100, 300, 300, 300)).toBeCloseTo(50);
+      // Degenerate (zero-length) segment = plain point distance.
+      expect(distToSegment(0, 0, 3, 4, 3, 4)).toBeCloseTo(5);
+    });
+
+    test('capsule accepts between corridor points', () => {
+      const tracker = new BallTracker({});
+      // Prime last frame's corridor point A, then step frame B 1/8 s later
+      // (within the 0.35 s capsule gap). The candidate at (200,310) sits 10 px
+      // off segment A-B but ~100 px from EITHER point — the per-frame point
+      // test alone would reject it (100 > tubeR 40).
+      tracker.step(frameAt(0, []), null, corridorA);
+      const out = tracker.step(
+        frameAt(1 / 8, [ballDet(200, 310, { score: faintScore })]),
+        null,
+        corridorB,
+      );
+      expect(out).not.toBeNull();
+      expect(out!.predicted).toBe(false);
+      expect(out!.cx).toBeCloseTo(200);
+      expect(out!.cy).toBeCloseTo(310);
+    });
+
+    test('capsule inert when stale (corridor points too far apart in time)', () => {
+      const tracker = new BallTracker({});
+      // Same geometry but 0.5 s between corridor frames (> 0.35 s gap): the
+      // capsule must NOT bridge — back to the point test, which rejects.
+      tracker.step(frameAt(0, []), null, corridorA);
+      expect(
+        tracker.step(
+          frameAt(0.5, [ballDet(200, 310, { score: faintScore })]),
+          null,
+          corridorB,
+        ),
+      ).toBeNull();
+    });
+
+    test('capsule inert without a current corridor (cold gate applies)', () => {
+      const tracker = new BallTracker({});
+      // A last corridor point alone opens nothing: with corridor=null this
+      // frame the faint candidate faces the full cold-acquisition gate.
+      tracker.step(frameAt(0, []), null, corridorA);
+      expect(
+        tracker.step(
+          frameAt(1 / 8, [ballDet(200, 310, { score: faintScore })]),
+          null,
+          null,
+        ),
+      ).toBeNull();
+    });
+  });
+
+  test('gravity-aware projection: the gravity-corrected candidate wins the weighting', () => {
+    const g = 900;
+    const tracker = new BallTracker({ gravityPxPerSec2: g });
+    // Two accepts giving vy ≈ +400 px/s (descending, +y down) at t1.
+    const y1 = 100 + 400 * DT;
+    tracker.step(frameAt(0, [ballDet(300, 100)]), null);
+    tracker.step(frameAt(DT, [ballDet(300, y1)]), null);
+
+    // After a 0.15 s detection gap (still inside jumpWindowSec so the track is
+    // fresh), offer the constant-velocity position vs the gravity-corrected
+    // one (+0.5·g·0.15² ≈ +10 px lower) at EQUAL scores: the inverse-distance
+    // weighting must pick the physically correct (gravity) position.
+    const gap = 0.15;
+    const cvY = y1 + 400 * gap;
+    const gravY = cvY + 0.5 * g * gap * gap;
+    const out = tracker.step(
+      frameAt(DT + gap, [
+        ballDet(300, cvY, { score: 0.5 }),
+        ballDet(300, gravY, { score: 0.5 }),
+      ]),
+      null,
+    );
+    expect(out).not.toBeNull();
+    expect(out!.predicted).toBe(false);
+    expect(out!.cy).toBeCloseTo(gravY, 3);
   });
 
   test('tracks a clean projectile arc (y down: rising ball has vy < 0)', () => {

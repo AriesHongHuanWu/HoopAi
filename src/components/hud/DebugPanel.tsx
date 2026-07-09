@@ -52,6 +52,7 @@ function buildDiagnostics(d: EngineDebug, rimAsp: number): string {
     `ball: maxScore ${d.maxScore.toFixed(3)} · dets ${d.detCount}`,
     `input: ${d.inputMin.toFixed(2)}..${d.inputMax.toFixed(2)} · ${d.nonZeroPct}% nz`,
     `light: ${d.light > 0 ? `${d.light.toFixed(2)} ${classifyLight(d.light)}` : '--'}`,
+    `lens: ${d.lens === '' ? 'ok' : d.lens} · thermal L${d.thermalLevel}`,
     `rim aspect: ${rimAsp > 0 ? rimAsp.toFixed(2) : '--'}`,
     `roi: ${d.roiFrames > 0 ? `${d.roiHits}/${d.roiFrames} · ${d.roiAvgMs}ms` : 'idle'}`,
     `frames ${d.frames} · dropped ${d.dropped}`,
@@ -83,7 +84,9 @@ function debugChanged(a: EngineDebug, b: EngineDebug): boolean {
     // in the 3rd decimal every frame.
     a.light.toFixed(2) !== b.light.toFixed(2) ||
     a.roiFrames !== b.roiFrames ||
-    a.roiHits !== b.roiHits
+    a.roiHits !== b.roiHits ||
+    a.lens !== b.lens ||
+    a.thermalLevel !== b.thermalLevel
   );
 }
 
@@ -162,11 +165,27 @@ export function DebugPanel({
               : color.unsure
         }
       />
+      <Row
+        k="lens"
+        v={d.lens === '' ? 'ok' : d.lens}
+        vc={d.lens === '' ? color.textFaint : color.unsure}
+      />
       <Row k="buf" v={`${Math.round(d.bufBytes / 1024)} KB`} vc={d.bufBytes > 0 ? color.text : color.miss} />
       <Row
         k="speed"
         v={`${d.fps} fps · ${d.avgMs}ms`}
         vc={d.fps >= 25 ? color.make : d.fps >= 12 ? color.unsure : color.miss}
+      />
+      <Row
+        k="thermal"
+        v={`L${d.thermalLevel}`}
+        vc={
+          d.thermalLevel === 0
+            ? color.textFaint
+            : d.thermalLevel >= 2
+              ? color.miss
+              : color.unsure
+        }
       />
       <Row
         k="roi zoom"

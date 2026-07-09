@@ -20,6 +20,7 @@ import {
   type SoundPack,
 } from '@/camera/soundPacks';
 import { BackPill } from '@/components/ShotList';
+import { CalibrationHealthCard } from '@/components/CalibrationHealthCard';
 import { Card, Eyebrow, Row, Screen } from '@/components/ui';
 import { color, radius, space, touch, type } from '@/constants/tokens';
 import type { ShootingHand } from '@/core/types';
@@ -544,6 +545,11 @@ export default function SettingsScreen() {
   const metric23 = useSettings((s) => s.metric23);
   const nanoV2 = useSettings((s) => s.nanoV2);
   const useFlightArc = useSettings((s) => s.useFlightArc);
+  const replay3d = useSettings((s) => s.replay3d);
+  const multiBallGuard = useSettings((s) => s.multiBallGuard);
+  const rimGuard = useSettings((s) => s.rimGuard);
+  const adaptiveThermal = useSettings((s) => s.adaptiveThermal);
+  const lensCheck = useSettings((s) => s.lensCheck);
   const formAnalysis = useSettings((s) => s.formAnalysis);
   const dailyGoalMakes = useSettings((s) => s.dailyGoalMakes);
   const set = useSettings((s) => s.set);
@@ -1069,6 +1075,49 @@ export default function SettingsScreen() {
             }}
           />
           <View style={styles.divider} />
+          {/* Detection guards — suppression/advisory-only safety nets. None of
+              them can ever create a make call; each toggle is an escape hatch. */}
+          <Eyebrow>Detection guards</Eyebrow>
+          <ToggleRow
+            label="Multi-ball guard"
+            description="Pause new shot detection while several balls are in the air. Prevents false calls during warmups."
+            value={multiBallGuard}
+            onValueChange={(v) => {
+              tick();
+              set('multiBallGuard', v);
+            }}
+          />
+          <View style={styles.divider} />
+          <ToggleRow
+            label="Rim bump guard"
+            description="Re-settle the rim quickly after camera bumps and hold judgment while the rim is uncertain."
+            value={rimGuard}
+            onValueChange={(v) => {
+              tick();
+              set('rimGuard', v);
+            }}
+          />
+          <View style={styles.divider} />
+          <ToggleRow
+            label="Thermal auto-throttle"
+            description="Ease off detection when the phone runs hot, instead of stuttering."
+            value={adaptiveThermal}
+            onValueChange={(v) => {
+              tick();
+              set('adaptiveThermal', v);
+            }}
+          />
+          <View style={styles.divider} />
+          <ToggleRow
+            label="Lens check"
+            description="Warn before a session if glare or a smudged lens may hurt tracking."
+            value={lensCheck}
+            onValueChange={(v) => {
+              tick();
+              set('lensCheck', v);
+            }}
+          />
+          <View style={styles.divider} />
           {/* Correction flywheel — fully manual, opt-in, one tap. */}
           <View style={styles.settingText}>
             <Text style={styles.settingLabel}>Improve detection</Text>
@@ -1178,6 +1227,18 @@ export default function SettingsScreen() {
               />
             </View>
           ))}
+          <View style={styles.divider} />
+          {/* Replay rendering — independent of recording: the 3D theater draws
+              from persisted arc/skeleton data, so it works without clips. */}
+          <ToggleRow
+            label="3D replay"
+            description="Render shot replays as a 3D scene. Turn off if replay feels slow on this phone."
+            value={replay3d}
+            onValueChange={(v) => {
+              tick();
+              set('replay3d', v);
+            }}
+          />
           {debugMode && (
           <>
           <View style={styles.divider} />
@@ -1331,8 +1392,19 @@ export default function SettingsScreen() {
           </Row>
         </Card>
 
-        {/* Data */}
+        {/* Calibration */}
         <Card entering={enter(6)}>
+          <SectionHeader icon="locate">Calibration</SectionHeader>
+          {/* `bare` — the health card renders content-only inside this Card. */}
+          <CalibrationHealthCard
+            variant="settings"
+            bare
+            onOpenGuide={() => router.push('/calibration-guide')}
+          />
+        </Card>
+
+        {/* Data */}
+        <Card entering={enter(7)}>
           <SectionHeader icon="cloud-download">Data</SectionHeader>
           <ActionRow
             label={backupBusy ? 'Exporting…' : 'Export all data'}
@@ -1355,7 +1427,7 @@ export default function SettingsScreen() {
         </Card>
 
         {/* Help */}
-        <Card entering={enter(7)}>
+        <Card entering={enter(8)}>
           <SectionHeader icon="help-buoy">Help</SectionHeader>
           <ActionRow
             label="Restart tutorial"
@@ -1374,7 +1446,7 @@ export default function SettingsScreen() {
         </Card>
 
         {/* About */}
-        <Card entering={enter(8)}>
+        <Card entering={enter(9)}>
           <SectionHeader icon="information-circle">About</SectionHeader>
           <Row style={styles.settingRow} gap={space.lg}>
             <Text style={styles.settingLabel}>Version</Text>

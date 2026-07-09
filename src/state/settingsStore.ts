@@ -8,6 +8,9 @@ import { createJSONStorage, persist } from 'zustand/middleware';
 import type { SoundPack } from '../camera/soundPacks';
 import { DEVICE_TUNING, type DeviceTier } from '../core/deviceProfile';
 import type { ShootingHand } from '../core/types';
+// Type-only: courtCalibrationStore imports useSettings at runtime, so this
+// import MUST stay `import type` to keep the runtime dependency one-way.
+import type { CourtCalSummary } from './courtCalibrationStore';
 
 /** Which clips survive when a recorded session ends. */
 export type KeepMode = 'makes' | 'decided' | 'all' | 'none';
@@ -296,6 +299,56 @@ export interface SettingsState {
    * the Settings stepper.
    */
   dailyGoalMakes: number;
+  /**
+   * Receipt of the last successful court-landmark calibration. Written
+   * imperatively by courtCalibrationStore.commit() on every successful
+   * registration; read by CalibrationHealthCard. Registrations themselves are
+   * per-camera-pose and never persisted — only this receipt survives.
+   */
+  lastCourtCalSummary: CourtCalSummary | null;
+  /**
+   * Receipt of the last successful FT-line calibration, written by live.tsx's
+   * FtCalibrationChip success branch. Null until an FT calibration succeeds.
+   */
+  lastFtCalSummary: { ts: number } | null;
+  /** One-shot flag: the calibration guide screen has been opened once. */
+  calGuideSeen: boolean;
+  /**
+   * One-shot flag: the first-ball receipt tour (FirstBallRitual) has run.
+   * Same pattern as tutorialSeen — consumed/written only by FirstBallRitual.
+   */
+  receiptTourSeen: boolean;
+  /**
+   * 3D replay viewer master switch. Pure-Skia projection is visual-only but
+   * costs GPU on entry phones — this is the escape hatch.
+   *
+   * Consumers: src/app/formstudio.tsx hides its VIEW IN 3D entry button when
+   * false, and src/app/formstudio3d.tsx (also reachable by deep link) gates
+   * itself — it shows a "turned off in Settings" empty state instead of
+   * fetching/lifting/rendering the 3D theater. Toggled by the Settings › Video
+   * row (src/app/settings.tsx).
+   */
+  replay3d: boolean;
+  /**
+   * Suppress NEW shot arming while several confident balls are in flight
+   * (warmups). Suppression-only — can never create a call.
+   */
+  multiBallGuard: boolean;
+  /**
+   * Fast rim re-settle after camera bumps + hold new arming while the rim
+   * lock is drift-stale.
+   */
+  rimGuard: boolean;
+  /**
+   * Inference-time-based thermal governor: sheds ROI/pose and caps frame
+   * rate when the chip is hot.
+   */
+  adaptiveThermal: boolean;
+  /**
+   * Pre-session advisory chip when lens glare or haze is detected. Never
+   * gates anything.
+   */
+  lensCheck: boolean;
 
   set: <K extends keyof SettingsState>(key: K, value: SettingsState[K]) => void;
   /**
@@ -370,6 +423,15 @@ export const useSettings = create<SettingsState>()(
       formAnalysis: false,
       tutorialSeen: TUTORIAL_SEEN_DEFAULT,
       dailyGoalMakes: 0,
+      lastCourtCalSummary: null,
+      lastFtCalSummary: null,
+      calGuideSeen: false,
+      receiptTourSeen: false,
+      replay3d: true,
+      multiBallGuard: true,
+      rimGuard: true,
+      adaptiveThermal: true,
+      lensCheck: true,
       set: (key, value) => set({ [key]: value } as Pick<SettingsState, typeof key>),
       // Picking a tracking preset is an explicit knob choice, so hand the tier
       // control back to 'auto' — otherwise the "Your device" row would keep
@@ -420,7 +482,7 @@ export const useSettings = create<SettingsState>()(
       // "from version N" to branch on instead of relying on zustand's default
       // shallow-merge rehydration, which silently keeps stale/renamed keys
       // around forever.
-      version: 5,
+      version: 6,
       migrate: (persisted, version) => {
         const s = persisted as SettingsState;
         // v2: YOLOX (Apache-2.0, GPU-correct) becomes the default detector. Move
@@ -455,6 +517,13 @@ export const useSettings = create<SettingsState>()(
         // make). Turn it on for existing installs too — it's a strict detection
         // improvement, and the Settings toggle lets anyone opt out.
         if (version < 5 && s.useFlightArc == null) s.useFlightArc = true;
+        // v6 (mega-upgrade — bumped exactly ONCE for every sibling feature):
+        // 3D replay viewer added, default ON (visual-only; the persisted
+        // arc/skeleton data exists either way). The other keys landing at v6
+        // (calibration receipts, one-shot tour flags, detection guards) are
+        // plain additive keys whose creator defaults merge cleanly on
+        // rehydrate, so replay3d is the only backfill this version needs.
+        if (version < 6 && s.replay3d == null) s.replay3d = true;
         return s;
       },
     },

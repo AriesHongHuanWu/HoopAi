@@ -1,8 +1,9 @@
 import { weeklyAssignment, weeklyPlan } from '../coachEngine';
 import type { CoachFinding, FindingKind } from '../coachEngine';
+import type { DrillId } from '../drills';
 
-function finding(id: FindingKind, severity: 1 | 2 | 3 = 2): CoachFinding {
-  return {
+function finding(id: FindingKind, severity: 1 | 2 | 3 = 2, drillId?: DrillId): CoachFinding {
+  const f: CoachFinding = {
     id,
     severity,
     title: `t:${id}`,
@@ -11,6 +12,8 @@ function finding(id: FindingKind, severity: 1 | 2 | 3 = 2): CoachFinding {
     trend: 'flat',
     strength: 1,
   };
+  if (drillId) f.drillId = drillId;
+  return f;
 }
 
 describe('weeklyAssignment', () => {
@@ -42,6 +45,18 @@ describe('weeklyAssignment', () => {
     expect(weeklyAssignment([finding('fatigue')])!.drillId).toBe('ftLadder');
   });
 
+  test('a finding-carried drillId overrides the FINDING_DRILL table', () => {
+    // coldZone has no table entry — its own drillId must win.
+    const a = weeklyAssignment([finding('coldZone', 3, 'aroundKey'), finding('entryAngleLow', 2)]);
+    expect(a).not.toBeNull();
+    expect(a!.finding.id).toBe('coldZone');
+    expect(a!.drillId).toBe('aroundKey');
+  });
+
+  test('formRegression maps to catch-and-shoot via the table', () => {
+    expect(weeklyAssignment([finding('formRegression')])!.drillId).toBe('catchShoot10');
+  });
+
   test('returns null when no finding has a drill', () => {
     expect(
       weeklyAssignment([finding('unsureRate'), finding('volumeTrend'), finding('improving')]),
@@ -69,6 +84,16 @@ describe('weeklyPlan', () => {
   test('respects a custom max', () => {
     const plan = weeklyPlan([finding('entryAngleLow'), finding('twoVsThree')], 1);
     expect(plan).toHaveLength(1);
+  });
+
+  test('mixes drillId-carrying and table-mapped findings', () => {
+    const plan = weeklyPlan([
+      finding('coldZone', 3, 'aroundKey'),
+      finding('entryAngleLow', 2),
+      finding('formRegression', 2),
+    ]);
+    expect(plan.map((p) => p.finding.id)).toEqual(['coldZone', 'entryAngleLow', 'formRegression']);
+    expect(plan.map((p) => p.drillId)).toEqual(['aroundKey', 'catchShoot10', 'catchShoot10']);
   });
 
   test('empty when nothing is drillable', () => {

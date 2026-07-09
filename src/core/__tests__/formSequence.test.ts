@@ -2,11 +2,13 @@ import {
   FormSequenceBuffer,
   buildSequence,
   decodeSequence,
+  RELEASE_MATCH_SLACK_SEC,
   SEQ_KEYPOINT_ORDER,
   SEQ_MISSING,
   SEQ_SCALE,
   SEQ_STRIDE,
   SEQ_TARGET_FRAMES,
+  type FormSequenceWithRelease,
   type RawSeqFrame,
 } from '../formSequence';
 import type { PoseFrame, PoseKeypoint, PoseKeypointName } from '../types';
@@ -215,5 +217,151 @@ describe('buildSequence / encoding', () => {
     const json = JSON.stringify(seq);
     // Sanity budget: well under 8 KB.
     expect(json.length).toBeLessThan(8000);
+  });
+});
+
+describe('releaseFrame marker', () => {
+  /** A fully anchored frame (hips + nose + ankles) at time t; body ≈ 200 px. */
+  function anchoredFrame(t: number): RawSeqFrame {
+    return rawFrame(t, [
+      ['left_hip', [290, 400]],
+      ['right_hip', [310, 400]],
+      ['nose', [300, 300]],
+      ['left_ankle', [290, 500]],
+      ['right_ankle', [310, 500]],
+    ]);
+  }
+
+  function anchoredStream(n: number): RawSeqFrame[] {
+    return Array.from({ length: n }, (_, f) => anchoredFrame(f * DT));
+  }
+
+  test('releaseT exactly on a sampled frame maps to that output index', () => {
+    // 8 frames ≤ target ⇒ output index space is the raw index space.
+    const seq = buildSequence(anchoredStream(8), 'right', 4 * DT) as
+      | FormSequenceWithRelease
+      | null;
+    expect(seq!.releaseFrame).toBe(4);
+  });
+
+  test('downsampled stream: releaseT at the last raw frame marks the last OUTPUT index', () => {
+    // 30 raw frames > SEQ_TARGET_FRAMES ⇒ indices are remapped; pickIndices
+    // always keeps the last frame, so its output index is frames - 1.
+    const seq = buildSequence(anchoredStream(30), 'right', 29 * DT) as
+      | FormSequenceWithRelease
+      | null;
+    expect(seq!.frames).toBe(SEQ_TARGET_FRAMES);
+    expect(seq!.releaseFrame).toBe(seq!.frames - 1);
+  });
+
+  test('releaseT between two sampled frames: nearest wins', () => {
+    const raw = anchoredStream(8);
+    const closerTo3 = buildSequence(raw, 'right', 3.4 * DT) as
+      | FormSequenceWithRelease
+      | null;
+    const closerTo4 = buildSequence(raw, 'right', 3.6 * DT) as
+      | FormSequenceWithRelease
+      | null;
+    expect(closerTo3!.releaseFrame).toBe(3);
+    expect(closerTo4!.releaseFrame).toBe(4);
+  });
+
+  test('null / undefined / NaN releaseT produce no releaseFrame key', () => {
+    const raw = anchoredStream(8);
+    for (const t of [null, undefined, Number.NaN]) {
+      const seq = buildSequence(raw, 'right', t);
+      expect(seq).not.toBeNull();
+      expect('releaseFrame' in seq!).toBe(false);
+    }
+  });
+
+  test('releaseT beyond the slack gate is omitted, not snapped', () => {
+    const raw = anchoredStream(8);
+    const lastT = 7 * DT;
+    // 0.5 s after the last buffered frame — outside RELEASE_MATCH_SLACK_SEC.
+    const far = buildSequence(raw, 'right', lastT + 0.5);
+    expect('releaseFrame' in far!).toBe(false);
+    // Just inside the gate still matches (pins the constant's meaning).
+    const near = buildSequence(
+      raw,
+      'right',
+      lastT + RELEASE_MATCH_SLACK_SEC - 1e-6,
+    ) as FormSequenceWithRelease | null;
+    expect(near!.releaseFrame).toBe(7);
+  });
+
+  test('an all-missing row still occupies an index and can carry the marker', () => {
+    // 10 frames; frame 5 has NO hip ⇒ it packs as an all-missing row but
+    // still owns output index 5 with a valid timestamp.
+    const raw = anchoredStream(10);
+    raw[5] = rawFrame(5 * DT, [
+      ['nose', [300, 300]],
+      ['left_ankle', [290, 500]],
+      ['right_ankle', [310, 500]],
+    ]);
+    const seq = buildSequence(raw, 'right', 5 * DT) as
+      | FormSequenceWithRelease
+      | null;
+    expect(seq!.frames).toBe(10);
+    expect(seq!.releaseFrame).toBe(5);
+    // Confirm row 5 really is the all-missing row.
+    for (let k = 0; k < SEQ_STRIDE; k++) {
+      expect(seq!.data[5 * SEQ_STRIDE + k]).toBe(SEQ_MISSING);
+    }
+  });
+
+  test('regression: two-arg buildSequence output is byte-identical to pre-marker shape', () => {
+    const M = SEQ_MISSING;
+    // Expected packed row for anchoredFrame: center (300,400), height 200.
+    // SEQ_KEYPOINT_ORDER: nose, eyes/ears (missing), shoulders/elbows/wrists
+    // (missing), hips, knees (missing), ankles.
+    const row = [
+      0, -4000, // nose
+      M, M, M, M, M, M, M, M, // eyes + ears
+      M, M, M, M, // shoulders
+      M, M, M, M, // elbows
+      M, M, M, M, // wrists
+      -400, 0, 400, 0, // hips
+      M, M, M, M, // knees
+      -400, 4000, 400, 4000, // ankles
+    ];
+    const raw = anchoredStream(4);
+    const seq = buildSequence(raw, 'right');
+    expect(seq).toEqual({
+      v: 1,
+      hand: 'right',
+      frames: 4,
+      durationSec: 3 * DT,
+      data: [...row, ...row, ...row, ...row],
+    });
+    // Key set is exactly the pre-change one — no releaseFrame key at all.
+    expect(Object.keys(seq!).sort()).toEqual([
+      'data',
+      'durationSec',
+      'frames',
+      'hand',
+      'v',
+    ]);
+    // Explicit null behaves identically to the two-arg call.
+    expect(buildSequence(raw, 'right', null)).toEqual(seq);
+  });
+
+  test('decodeSequence output is unaffected by the marker', () => {
+    const raw = anchoredStream(8);
+    const plain = buildSequence(raw, 'right')!;
+    const marked = buildSequence(raw, 'right', 4 * DT)! as FormSequenceWithRelease;
+    expect(marked.releaseFrame).toBe(4);
+    expect(decodeSequence(marked)).toEqual(decodeSequence(plain));
+  });
+
+  test('FormSequenceBuffer.finalize forwards releaseT', () => {
+    const b = new FormSequenceBuffer({ hand: 'right' });
+    // 20 frames (0.63 s) — inside the window, no pruning, identity sampling.
+    for (let f = 0; f < 20; f++) b.push(fullPose(f * DT));
+    const seq = b.finalize(10 * DT) as FormSequenceWithRelease | null;
+    expect(seq).not.toBeNull();
+    expect(seq!.releaseFrame).toBe(10);
+    // Zero-arg finalize still omits the marker.
+    expect('releaseFrame' in b.finalize()!).toBe(false);
   });
 });

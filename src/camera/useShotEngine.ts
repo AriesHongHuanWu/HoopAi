@@ -31,6 +31,8 @@ import {
 import { NitroModules } from 'react-native-nitro-modules';
 
 import { DETECTION } from '../core/config';
+import { LENS, LensCheckAccumulator } from '../core/lensCheck';
+import { ThermalGovernor } from '../core/thermalGovernor';
 import type { Box, ResolvedShot, RimGeometry } from '../core/types';
 import { createMockDetector } from '../ml/mockDetector';
 import { parseYoloOutput, nmsPerClass } from '../ml/yoloParser';
@@ -244,6 +246,13 @@ export interface EngineDebug {
   roiHits: number;
   /** Live EMA of the ROI pass's own inference time (ms), separate from avgMs. */
   roiAvgMs: number;
+  /** Thermal governor level 0-3 (0 = cool / no shedding). Diagnostic. */
+  thermalLevel: number;
+  /**
+   * Lens glare/haze advisory status ('' = ok or unmeasured). ADVISORY ONLY —
+   * drives a pre-session hint chip and never gates detection or judgment.
+   */
+  lens: '' | 'glare' | 'haze';
 }
 
 export const EMPTY_DEBUG: EngineDebug = {
@@ -267,6 +276,8 @@ export const EMPTY_DEBUG: EngineDebug = {
   roiFrames: 0,
   roiHits: 0,
   roiAvgMs: 0,
+  thermalLevel: 0,
+  lens: '',
 };
 
 export interface ShotEngineEvents {
@@ -607,6 +618,16 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
   // compute the net-motion make/miss signal; previous samples live worklet-side.
   const netRoiSv = useSharedValue<Box | null>(null);
   const prevNetSamples = useSharedValue<number[]>([]);
+  // Net-ROI GENERATION, bumped on every netRoiSv (re)publish. The worklet's
+  // net-motion diff compares this frame's sample grid against prevNetSamples
+  // taken at the PREVIOUS rect position — after a rect move most cells land
+  // on adjacent pixels of the high-contrast net/rim texture and the diff
+  // reads as a phantom motion burst with ZERO physical net movement (a
+  // fabricated make-corroboration channel). The worklet therefore skips the
+  // diff (baseline-only frame) whenever the generation changed — suppression
+  // toward null, never toward a fake burst.
+  const netRoiGenSv = useSharedValue(0);
+  const netGenSeenSv = useSharedValue(0);
   // Previous frame's coarse luma grid for the frame-diff motion assist.
   const prevMotionGrid = useSharedValue<number[]>([]);
   // Locked-rim hoop ROI + FSM phase, published to the worklet so the ROI
@@ -623,18 +644,43 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
 
   const pipeline = useMemo(() => {
     const p = new ShotPipeline();
-    let lastRimRef: unknown = null;
+    // Last PUBLISHED net ROI (a defensive copy — see below).
+    let lastNetRoi: Box | null = null;
     p.setEvents({
       onShot: (s) => eventsRef.current.onShot?.(s),
       onRimLocked: (r) => eventsRef.current.onRimLocked?.(r),
       onRimDrift: () => eventsRef.current.onRimDrift?.(),
       onFrame: (state) => {
-        // Keep the worklet's net + hoop ROIs in sync with the locked rim (rare
-        // writes — only when the rim reference changes: lock / re-lock / drift).
-        if (state.rim !== lastRimRef) {
-          lastRimRef = state.rim;
-          netRoiSv.value = state.rim ? { ...state.rim.netRoi } : null;
+        // Keep the worklet's net + hoop ROIs in sync with the locked rim.
+        // VALUE compare, not reference: RimLock mutates its geometry (and the
+        // derived ROI rects) IN PLACE, so a hard re-lock or EMA-moved rim never
+        // changes the object reference — a reference gate froze the worklet
+        // ROIs at the first lock forever. lastNetRoi is a defensive COPY for
+        // the same reason (comparing against the live object always matches).
+        // HYSTERESIS (>= 1 px): RimLock EMA-damps on every accepted rim
+        // detection (and the bump-settle boost moves the lock ~1px/frame for
+        // a while), so an exact compare republished the rect nearly every
+        // analysed frame — each republish shifts the worklet's net sample
+        // grid and costs one skipped net-motion diff (see netRoiGenSv). The
+        // 1 px step restores rare writes and bounds the skips to one per
+        // whole-pixel move; a sub-pixel-stale rect samples the same pixels.
+        const netRoi = state.rim ? state.rim.netRoi : null;
+        const roiMoved =
+          (netRoi == null) !== (lastNetRoi == null) ||
+          (netRoi != null &&
+            lastNetRoi != null &&
+            (Math.abs(netRoi.x - lastNetRoi.x) >= 1 ||
+              Math.abs(netRoi.y - lastNetRoi.y) >= 1 ||
+              Math.abs(netRoi.width - lastNetRoi.width) >= 1 ||
+              Math.abs(netRoi.height - lastNetRoi.height) >= 1));
+        if (roiMoved) {
+          lastNetRoi = netRoi ? { ...netRoi } : null;
+          netRoiSv.value = netRoi ? { ...netRoi } : null;
           hoopRoiSv.value = state.rim ? { ...state.rim.hoopRoi } : null;
+          // Invalidate the worklet's net-diff baseline: prevNetSamples were
+          // taken at the OLD rect position, so the next diff would read the
+          // grid shift itself as net motion. One-frame suppression only.
+          netRoiGenSv.value = netRoiGenSv.value + 1;
         }
         // FSM phase for the ROI trigger (published every frame; the worklet
         // reads it one analysed frame late, which the net-motion arm covers).
@@ -759,6 +805,15 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
   useEffect(() => {
     pipeline.setDepthVeto(depthVeto);
   }, [pipeline, depthVeto]);
+  // Detection guards (Settings): multi-ball arm suppression + rim bump guard.
+  const multiBallGuard = useSettings((s) => s.multiBallGuard);
+  useEffect(() => {
+    pipeline.setMultiBallGuard(multiBallGuard);
+  }, [pipeline, multiBallGuard]);
+  const rimGuard = useSettings((s) => s.rimGuard);
+  useEffect(() => {
+    pipeline.setRimGuard(rimGuard);
+  }, [pipeline, rimGuard]);
   const metric23 = useSettings((s) => s.metric23);
   useEffect(() => {
     pipeline.setMetric23(metric23);
@@ -870,6 +925,58 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
   const avgInferMs = useSharedValue(0);
   // Diagnostic: how many delivered frames VisionCamera dropped before onFrame.
   const droppedFrames = useSharedValue(0);
+  // Thermal governor (Settings > adaptiveThermal): consumes the avgInferMs EMA
+  // on the JS thread (onPayload) and publishes its shedding decision to the
+  // worklet via these SharedValues. Defaults mirror THERMAL_LEVELS[0], so an
+  // idle/disabled governor is byte-identical to the old hardcoded
+  // `avgInferMs * 1.4` gate.
+  const adaptiveThermal = useSettings((s) => s.adaptiveThermal);
+  const governor = useRef(new ThermalGovernor()).current;
+  const thermalMinGateSv = useSharedValue(0);
+  const thermalMultSv = useSharedValue(1.4);
+  const thermalRoiSv = useSharedValue(true);
+  const thermalPoseSv = useSharedValue(true);
+  const thermalLevelSv = useSharedValue(0);
+  // RE-BASELINE ON MODEL REGIME CHANGE (ThermalGovernor contract: "call on
+  // model reload"). The governor's cool baseline can NEVER inflate by design,
+  // so any reload to a slower regime — the corrupt-streak GPU→CPU self-heal,
+  // a Settings-driven delegate/rung/input-size switch while the hook stays
+  // mounted — would read as permanent heat: ratio locks >= enterRatios[2]
+  // and the governor walks to L3 (~10fps cap, ROI + pose shed) forever on a
+  // cool phone. modelState.delegate changes on every load attempt/success,
+  // so keying on it re-baselines exactly when the running regime changes;
+  // the L0 SharedValue defaults + a fresh avgInferMs EMA follow the new
+  // model's real speed within a few frames. Extra resets during a load
+  // sequence are harmless (idempotent, and no frames run mid-load).
+  useEffect(() => {
+    governor.reset();
+    avgInferMs.value = 0;
+    thermalMinGateSv.value = 0;
+    thermalMultSv.value = 1.4;
+    thermalRoiSv.value = true;
+    thermalPoseSv.value = true;
+    thermalLevelSv.value = 0;
+  }, [
+    modelState.delegate,
+    governor,
+    avgInferMs,
+    thermalMinGateSv,
+    thermalMultSv,
+    thermalRoiSv,
+    thermalPoseSv,
+    thermalLevelSv,
+  ]);
+  // Lens glare/haze advisory (Settings > lensCheck): the worklet samples an
+  // 8x8 content-rect luma grid every ~2 s; the JS-side accumulator classifies
+  // it (never gates anything). lensCheck is a worklet-captured const — the
+  // frame processor re-registers when it changes, like gateMs/roiZoom.
+  const lensCheck = useSettings((s) => s.lensCheck);
+  const lens = useRef(new LensCheckAccumulator()).current;
+  const lastLensMs = useSharedValue(0);
+  useEffect(() => {
+    // Reset on disable so a stale flag can't resurface on re-enable.
+    if (!lensCheck) lens.reset();
+  }, [lensCheck, lens]);
 
   const { resizer } = useResizer({
     width: detInputSize,
@@ -937,13 +1044,56 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
           corruptStreak.current = 0;
         }
       }
+      // Thermal governor: fed the inference-time EMA on the camera clock and
+      // published to the worklet's SharedValues. When the setting is off, the
+      // L0 defaults are restored exactly once and the baseline resets.
+      if (adaptiveThermal) {
+        governor.push(avgInferMs.value, t);
+        const d = governor.decision;
+        thermalMinGateSv.value = d.minGateMs;
+        thermalMultSv.value = d.inferMultiplier;
+        thermalRoiSv.value = d.allowRoi;
+        thermalPoseSv.value = d.allowPose;
+        thermalLevelSv.value = d.level;
+      } else if (thermalMultSv.value !== 1.4) {
+        thermalMinGateSv.value = 0;
+        thermalMultSv.value = 1.4;
+        thermalRoiSv.value = true;
+        thermalPoseSv.value = true;
+        thermalLevelSv.value = 0;
+        governor.reset();
+      }
+      // Lens advisory: consume + STRIP the worklet's luma grid BEFORE the
+      // pipeline hop — the pipeline contract never sees it. The debug write is
+      // change-gated so the SharedValue isn't churned every 2 s.
+      const { lensGrid, ...rest } = payload;
+      if (lensGrid) {
+        lens.push(lensGrid, t);
+        const lensLabel = lens.status === 'ok' ? ('' as const) : lens.status;
+        if (debug.value.lens !== lensLabel) {
+          debug.value = { ...debug.value, lens: lensLabel };
+        }
+      }
       pipeline.step({
-        ...payload,
+        ...rest,
         frame: { ...payload.frame, t },
         pose: payload.pose ? { ...payload.pose, t } : payload.pose,
       });
     },
-    [pipeline, nowSec],
+    [
+      pipeline,
+      nowSec,
+      adaptiveThermal,
+      governor,
+      lens,
+      avgInferMs,
+      thermalMinGateSv,
+      thermalMultSv,
+      thermalRoiSv,
+      thermalPoseSv,
+      thermalLevelSv,
+      debug,
+    ],
   );
 
   const frameOutput = useFrameOutput({
@@ -981,11 +1131,18 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
           debug.value = { ...debug.value, mode: 'camera' };
         }
         // Adaptive thermal gate: run no faster than the base rate AND no faster
-        // than ~1.4× the current inference time — so a hot, throttled chip (slow
-        // inference) gets idle time between frames to cool, while a cool chip
-        // runs at the full requested rate. 'max' (gateMs 0) still self-limits by
-        // inference time to avoid pinning the chip at 100% in the sun.
-        const effGate = Math.max(gateMs, avgInferMs.value * 1.4);
+        // than a multiple of the current inference time — so a hot, throttled
+        // chip (slow inference) gets idle time between frames to cool, while a
+        // cool chip runs at the full requested rate. 'max' (gateMs 0) still
+        // self-limits by inference time to avoid pinning the chip at 100% in
+        // the sun. The thermal governor (JS side) raises the floor/multiplier
+        // as the chip heats; its idle defaults (0 / 1.4) reproduce the old
+        // hardcoded gate exactly.
+        const effGate = Math.max(
+          gateMs,
+          thermalMinGateSv.value,
+          avgInferMs.value * thermalMultSv.value,
+        );
         if (effGate > 0) {
           const nowMs = Date.now();
           if (nowMs - lastRunMs.value < effGate) return;
@@ -1012,6 +1169,8 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
         let detErr = '';
         let parsed: ReturnType<typeof parseYoloOutput> | null = null;
         let netMotionScore = 0;
+        // Lens advisory luma grid (sampled ~every 2 s; null = not this frame).
+        let lensGrid: number[] | null = null;
         // Hoisted so the finally can ALWAYS dispose it — otherwise a throw
         // between resize() and the old dispose() call (e.g. runSync failing on
         // one frame) leaks the GPU buffer, and leaked buffers accumulate until
@@ -1122,8 +1281,15 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
                 : inArr[gPlane + py * S + px]!;
             }
           }
+          // Diff ONLY when the previous samples were taken at the SAME rect
+          // position (generation match): after a rect move the grid lands on
+          // different pixels of the high-contrast net/rim texture and the
+          // diff would read as a phantom burst — a fabricated make signal.
+          // The first frame at a new rect is baseline-only (net stays 0 →
+          // suppression direction, never fabrication).
+          const gen = netRoiGenSv.value;
           const prev = prevNetSamples.value;
-          if (prev.length === samples.length) {
+          if (prev.length === samples.length && netGenSeenSv.value === gen) {
             let acc = 0;
             for (let i = 0; i < samples.length; i++) {
               acc += Math.abs(samples[i]! - prev[i]!);
@@ -1132,6 +1298,45 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
             netMotionScore = Math.min(1, meanDiff / 0.12);
           }
           prevNetSamples.value = samples;
+          netGenSeenSv.value = gen;
+        }
+
+        // Lens glare/haze sampling (ADVISORY only — never gates anything): an
+        // 8x8 mean-luma grid over the CONTENT rect, letterbox bars excluded
+        // (same geometry as the light-profile compensation above), every
+        // ~LENS.snapshotIntervalSec. Green-channel indexing mirrors the net
+        // grid exactly. Shipped to the JS-side accumulator via the payload.
+        if (
+          lensCheck &&
+          frame.width > 0 &&
+          frame.height > 0 &&
+          Date.now() - lastLensMs.value >= LENS.snapshotIntervalSec * 1000
+        ) {
+          lastLensMs.value = Date.now();
+          const S = detInputSize;
+          const G = LENS.grid;
+          const lensPlane = S * S;
+          const contentScale = S / Math.max(frame.width, frame.height);
+          const contentW = frame.width * contentScale;
+          const contentH = frame.height * contentScale;
+          const lox = (S - contentW) / 2;
+          const loy = (S - contentH) / 2;
+          const grid: number[] = new Array(G * G);
+          let li = 0;
+          for (let gy = 0; gy < G; gy++) {
+            let py = Math.round(loy + ((gy + 0.5) / G) * contentH);
+            if (py < 0) py = 0;
+            if (py > S - 1) py = S - 1;
+            for (let gx = 0; gx < G; gx++) {
+              let px = Math.round(lox + ((gx + 0.5) / G) * contentW);
+              if (px < 0) px = 0;
+              if (px > S - 1) px = S - 1;
+              grid[li++] = useYolox
+                ? inArr[(py * S + px) * 3 + 1]!
+                : inArr[lensPlane + py * S + px]!;
+            }
+          }
+          lensGrid = grid;
         }
 
         // Camera presentation timestamp for THIS frame, in seconds, so
@@ -1194,6 +1399,7 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
         const hoop = hoopRoiSv.value;
         if (
           roiZoom &&
+          thermalRoiSv.value &&
           hoop != null &&
           avgInferMs.value < DETECTION.roi.skipIfAvgMsAbove &&
           (phaseSv.value === 1 || netMotionScore > DETECTION.roi.netMotionArm)
@@ -1422,11 +1628,23 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
           delegate: debug.value.delegate,
           modelError: detErr,
           avgMs: Math.round(avgInferMs.value),
-          fps: Math.round(1000 / Math.max(gateMs, avgInferMs.value * 1.4, 1)),
+          // Mirrors effGate above (thermal floor + multiplier included) so the
+          // panel shows the fps the governor actually allows.
+          fps: Math.round(
+            1000 /
+              Math.max(
+                gateMs,
+                thermalMinGateSv.value,
+                avgInferMs.value * thermalMultSv.value,
+                1,
+              ),
+          ),
           dropped: droppedFrames.value,
           roiFrames: roiFramesSv.value,
           roiHits: roiHitsSv.value,
           roiAvgMs: Math.round(avgRoiMs.value),
+          thermalLevel: thermalLevelSv.value,
+          lens: debug.value.lens,
         };
         if (!parsed) {
           // Detection threw this frame — still disposed via finally; skip the
@@ -1440,7 +1658,8 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
         // never slowed. Guarded so a pose failure can't kill the frame.
         let pose = null;
         const poseBox = boxedPoseSv.value;
-        if (poseBox != null && poseResizer != null) {
+        // thermalPoseSv: the governor sheds the pose pass LAST (L3 only).
+        if (poseBox != null && poseResizer != null && thermalPoseSv.value) {
           let pResized: { getPixelBuffer(): ArrayBuffer; dispose(): void } | null = null;
           try {
             const pModel = poseBox.unbox() as TensorflowModel;
@@ -1467,6 +1686,8 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
           // Light-aware detection profile: the pipeline classifies this and
           // relaxes the tracker's cold ball gate in genuinely dark scenes.
           light: lightSv.value,
+          // Lens advisory grid (stripped in onPayload before pipeline.step).
+          ...(lensGrid ? { lensGrid } : {}),
         });
       } catch (outerErr) {
         // A throw ANYWHERE in the frame worklet outside the inner detect

@@ -21,10 +21,25 @@ import {
 } from '@/core/courtCalibration';
 import { FIBA_COURT, type CourtSpec, type LandmarkId } from '@/core/courtModel';
 import type { CourtRegistration } from '@/core/courtRegistration';
+import { useSettings } from './settingsStore';
+
+/**
+ * Persisted receipt of the last successful court-tap (when + how tight),
+ * written into settingsStore under 'lastCourtCalSummary' so the calibration
+ * health card can show it. Only the SUMMARY persists — never the homography.
+ */
+export interface CourtCalSummary {
+  /** Wall-clock ms of the successful commit. */
+  ts: number;
+  /** Mean reprojection error of that solve, meters. */
+  reprojErrM: number;
+}
 
 interface CourtCalibrationState {
   /** The active registration fed to the pipeline, or null (uncalibrated). */
   registration: CourtRegistration | null;
+  /** Mean reprojection error of the ACTIVE registration, meters; null when uncalibrated. */
+  reprojectionErrorM: number | null;
   /** The in-progress tap session, or null when not calibrating. */
   session: CalibrationSession | null;
   /** Start a fresh calibration for a rulebook (default FIBA). */
@@ -43,6 +58,7 @@ interface CourtCalibrationState {
 
 export const useCourtCalibration = create<CourtCalibrationState>((set, get) => ({
   registration: null,
+  reprojectionErrorM: null,
   session: null,
   begin: (spec = FIBA_COURT) => set({ session: startCalibration(spec) }),
   placeTap: (id, image) => {
@@ -57,9 +73,21 @@ export const useCourtCalibration = create<CourtCalibrationState>((set, get) => (
     const s = get().session;
     if (!s) return { ok: false, reason: 'incomplete' };
     const result = buildRegistration(s);
-    if (result.ok) set({ registration: result.registration, session: null });
+    if (result.ok) {
+      set({
+        registration: result.registration,
+        session: null,
+        reprojectionErrorM: result.reprojectionErrorM,
+      });
+      // Persist a lightweight receipt for the calibration health card (same
+      // imperative pattern as the engine's lastBenchmark write). One-way
+      // runtime dependency: settingsStore only type-imports this store.
+      const summary: CourtCalSummary = { ts: Date.now(), reprojErrM: result.reprojectionErrorM };
+      useSettings.getState().set('lastCourtCalSummary', summary);
+    }
     return result;
   },
+  // Old registration (and its error) survives a cancelled re-calibration.
   cancel: () => set({ session: null }),
-  clear: () => set({ registration: null, session: null }),
+  clear: () => set({ registration: null, session: null, reprojectionErrorM: null }),
 }));

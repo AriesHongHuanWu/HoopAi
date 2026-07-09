@@ -19,6 +19,7 @@ import {
 } from 'react-native-vision-camera';
 
 import { BackPill } from '@/components/ShotList';
+import { CalibrationHealthCard } from '@/components/CalibrationHealthCard';
 import { ModeMark } from '@/components/modes/modeIdentity';
 import { Card, Chip, Eyebrow, PillButton, Row, Screen } from '@/components/ui';
 import { color, font, motion, radius, space, touch, type } from '@/constants/tokens';
@@ -298,6 +299,18 @@ export default function SessionSetupScreen() {
           </Row>
         ))}
       </Card>
+
+      {/* Calibration health — receipts for the three rituals + guide entry.
+          The component renders its own Card (no style prop), so a plain View
+          carries the between-card margin; the entering animation lives on the
+          inner Card. Duplicate stagger index is fine (Home precedent). */}
+      <View style={styles.card}>
+        <CalibrationHealthCard
+          variant="setup"
+          entering={enter(3)}
+          onOpenGuide={() => router.push('/calibration-guide')}
+        />
+      </View>
 
       <Card entering={enter(3)} style={styles.card}>
         <Row style={styles.optionRow} gap={space.md}>

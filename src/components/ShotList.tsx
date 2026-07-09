@@ -39,7 +39,10 @@ import Animated, { FadeInDown, FadeOutDown, ReduceMotion } from 'react-native-re
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { HeroArcStat, ShotChart } from '@/components/charts/ShotChart';
+import { MiniArcReplay } from '@/components/charts/MiniArcReplay';
 import { FormReportCard } from '@/components/FormReport';
+import { ShotReceipt } from '@/components/ShotReceipt';
+import { SessionStory } from './SessionStory';
 import {
   Card,
   Chip,
@@ -49,23 +52,11 @@ import {
   Row,
   StatNumber,
 } from '@/components/ui';
-import { Ionicons } from '@expo/vector-icons';
 
-import { color, confidenceColor, motion, radius, space, touch, type } from '@/constants/tokens';
+import { color, motion, radius, space, touch, type } from '@/constants/tokens';
 import { planClips } from '@/core/clipPlanner';
 import { FORM } from '@/core/config';
-import {
-  confidenceLabel,
-  confidenceLevel,
-  correctionMessage,
-  correctionRevert,
-  EVIDENCE_CHANNELS,
-  evidenceGlyph,
-  evidenceSummary,
-  evidenceTone,
-  illusionChipLabel,
-  valueSourceLabel,
-} from '@/core/evidence';
+import { correctionMessage, correctionRevert } from '@/core/evidence';
 import { recomputeStats } from '@/core/stats';
 import type { ResolvedShot, SessionStats, ShotOutcome, ShotValue } from '@/core/types';
 import * as db from '@/data/db';
@@ -323,75 +314,6 @@ function ValuePill({
 }
 
 /**
- * SignalReceipts — the per-shot evidence row ("shows its work"). One tiny
- * chip per fusion channel (geo/net/cls): green check when the signal said
- * make, red x when it said miss, dim "—" when the channel had no data that
- * shot; plus a rim-bounce chip. The verdict dot above is never shown without
- * this receipt, so a user can always see WHY the app called it.
- *
- * A second line surfaces the 2/3 PROVENANCE — which estimator decided the
- * point value, its confidence (on the one shared scale), and the real distance
- * when court-registered — so even the 2-vs-3 call is auditable, not a guess.
- */
-function SignalReceipts({ shot }: { shot: ResolvedShot }) {
-  const source = shot.valueSource;
-  const conf = shot.valueConfidence;
-  const level = conf != null ? confidenceLevel(conf) : null;
-
-  const provenanceA11y =
-    source != null
-      ? `. Two or three call by ${valueSourceLabel(source)}${
-          level != null ? `, ${confidenceLabel(level)} confidence` : ''
-        }`
-      : '';
-
-  return (
-    <View style={styles.receiptCol}>
-      <View
-        accessible
-        accessibilityLabel={evidenceSummary(shot.signals, shot.rimBounce) + provenanceA11y}
-        style={styles.receiptRow}
-      >
-        {EVIDENCE_CHANNELS.map((c) => {
-          const value = shot.signals[c.key];
-          return (
-            <Chip
-              key={c.key}
-              compact
-              tone={evidenceTone(value)}
-              label={`${evidenceGlyph(value)} ${c.label}`}
-            />
-          );
-        })}
-        {shot.rimBounce && <Chip compact tone="unsure" label="RIM BOUNCE" />}
-        {illusionChipLabel(shot.signals) != null && (
-          <Chip compact tone="miss" label={illusionChipLabel(shot.signals)!} />
-        )}
-      </View>
-      {source != null && (
-        <View style={styles.provenanceRow} importantForAccessibility="no-hide-descendants">
-          <Ionicons
-            name={source === 'court' ? 'locate' : 'analytics-outline'}
-            size={11}
-            color={source === 'court' ? color.make : color.textFaint}
-          />
-          <Text style={styles.provenanceText} numberOfLines={1}>
-            {'2/3: '}
-            <Text style={styles.provenanceSource}>{valueSourceLabel(source)}</Text>
-            {level != null && (
-              <Text style={{ color: confidenceColor[level] }}>{` · ${confidenceLabel(level)}`}</Text>
-            )}
-            {source === 'court' && shot.distanceM != null && (
-              <Text style={styles.provenanceText}>{` · ${shot.distanceM.toFixed(1)} m`}</Text>
-            )}
-          </Text>
-        </View>
-      )}
-    </View>
-  );
-}
-
-/**
  * SwipeUnderlay — the outcome revealed behind a row mid-swipe. Width fixes
  * the Swipeable open distance; color + shape (dot/X) match MakeMissDot so the
  * gesture target is readable without color vision.
@@ -458,7 +380,7 @@ const ShotListItem = React.memo(function ShotListItem({
               <Chip label="Review" tone="unsure" />
             )}
           </Row>
-          <SignalReceipts shot={shot} />
+          <ShotReceipt shot={shot} />
           {(shot.entryAngleDeg != null || shot.releaseAngleDeg != null || hasForm) && (
             <Row gap={space.xs} style={{ flexWrap: 'wrap' }}>
               {shot.entryAngleDeg != null && (
@@ -690,6 +612,12 @@ export function SessionRecap({
   videoPath,
   keepMode = 'makes',
 }: SessionRecapProps) {
+  // Arc replay: the shot picked on the shot chart. Cleared whenever the shot
+  // set reloads so a stale selection can't outlive its session.
+  const [replayShot, setReplayShot] = useState<ResolvedShot | null>(null);
+  useEffect(() => {
+    setReplayShot(null);
+  }, [shots]);
   const fgValue =
     stats.attempts > 0 ? `${Math.round(stats.fgPct * 100)}%` : '—';
   const avgEntry = stats.avgEntryAngleDeg;
@@ -813,10 +741,32 @@ export function SessionRecap({
           )}
         </Card>
 
+        <SessionStory shots={shots} stats={stats} />
+
         <Card>
           <Eyebrow>Shot chart</Eyebrow>
-          <ShotChart shots={shots} />
+          <ShotChart shots={shots} onSelect={setReplayShot} />
+          <Text style={styles.cardCaption}>Tap a mark to replay its arc</Text>
         </Card>
+
+        {replayShot != null && replayShot.trajectory.length >= 5 && (
+          <Card>
+            {/* Card (read-only ui.tsx) takes no a11y props — group the header
+                instead, so MiniArcReplay's own replay button stays reachable. */}
+            <View accessible accessibilityLabel="Arc replay for selected shot">
+              <Eyebrow>Arc replay</Eyebrow>
+              <Row gap={space.sm} style={{ alignItems: 'center', marginBottom: space.sm }}>
+                <MakeMissDot outcome={replayShot.outcome} />
+                <Text style={styles.consistencyText}>
+                  {replayShot.entryAngleDeg != null
+                    ? `Entry ${Math.round(replayShot.entryAngleDeg)}°`
+                    : 'Entry angle unavailable'}
+                </Text>
+              </Row>
+            </View>
+            <MiniArcReplay shot={replayShot} height={110} />
+          </Card>
+        )}
 
         {videoPath != null && (
           <HighlightsCard shots={shots} keepMode={keepMode} />
@@ -1131,29 +1081,6 @@ const styles = StyleSheet.create({
   correctBtn: {
     paddingHorizontal: space.lg,
   },
-  receiptCol: {
-    gap: 4,
-  },
-  receiptRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    alignItems: 'center',
-    gap: space.xs,
-  },
-  provenanceRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-  },
-  provenanceText: {
-    ...type.micro,
-    color: color.textFaint,
-  },
-  provenanceSource: {
-    ...type.micro,
-    color: color.textDim,
-  },
-
   // Swipe-to-correct (underlay revealed behind the translating row)
   swipeChildren: {
     backgroundColor: color.bg,

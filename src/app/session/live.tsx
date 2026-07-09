@@ -53,7 +53,12 @@ import {
 import { ShotFlash } from '../../components/hud/ShotFlash';
 import { DebugPanel } from '../../components/hud/DebugPanel';
 import { DetectionBoxes } from '../../components/hud/DetectionBoxes';
+import { DetectionHealthPanel } from '../../components/hud/DetectionHealthPanel';
 import { DrillOverlay } from '../../components/hud/DrillOverlay';
+import { FirstBallRitual } from '../../components/hud/FirstBallRitual';
+import { FormCueToast } from '../../components/hud/FormCueToast';
+import { GoalChip } from '../../components/hud/GoalChip';
+import { RimLockChecklist } from '../../components/hud/RimLockChecklist';
 import { ShotToast } from '../../components/hud/ShotToast';
 import { StatStrip } from '../../components/hud/StatStrip';
 import { TrajectoryOverlay } from '../../components/hud/TrajectoryOverlay';
@@ -582,6 +587,11 @@ function LiveSessionScreen() {
           onTap={onTapSetRim}
         />
       )}
+      {/* Rim-lock checklist — self-positioned, pointerEvents none, so the
+          tap-to-set-rim Pressable underneath keeps every touch. */}
+      {!rimLocked && engine.activeMode === 'camera' && (
+        <RimLockChecklist overlay={engine.overlay} debug={engine.debug} />
+      )}
 
       {!rimLocked && liveCoach.visible && (
         <CoachMarks
@@ -622,14 +632,19 @@ function LiveSessionScreen() {
         // tap and the StatStrip expand/collapse Pressable.
         pointerEvents="box-none"
       >
-        {engine.activeMode === 'camera' && <DetectionHeartbeat debug={engine.debug} />}
+        {engine.activeMode === 'camera' && (
+          <DetectionHealthPanel debug={engine.debug} overlay={engine.overlay} drift={drift} />
+        )}
         {rimLocked && <StatStrip compact={isLandscape} />}
+        {rimLocked && activeMode == null && <GoalChip />}
         {rimLocked && activeMode != null && (
           <View style={styles.modeBanner}>
             <ModeBanner mode={activeMode} />
           </View>
         )}
         <ShotToast shot={toastShot} streak={streak} />
+        <FormCueToast shot={toastShot} streak={streak} />
+        {engine.activeMode === 'camera' && <FirstBallRitual overlay={engine.overlay} />}
         {/* One-time FT-line calibration offer (optional 2/3 refinement).
             Mounts fresh at each rim lock (rimLocked flips false on re-aim),
             self-hides after FT_OFFER_MS, and renders nothing once done.
@@ -709,9 +724,9 @@ function LiveSessionScreen() {
             style={styles.endButton}
           />
         )}
-        {rimLocked && !isTickDrivenMode && calSession == null && calRegistration == null && (
+        {rimLocked && !isTickDrivenMode && calSession == null && (
           <PillButton
-            label="Calibrate"
+            label={calRegistration == null ? 'Calibrate' : 'Recalibrate'}
             icon="grid-outline"
             variant="ghost"
             onPress={startCalibrate}
@@ -733,8 +748,12 @@ function LiveSessionScreen() {
       )}
 
       {/* Court calibration ("tap the court") — owns taps while active. Renders
-          over everything so its landmark taps aren't intercepted by the HUD. */}
-      {calMapping != null && calSession != null && (
+          over everything so its landmark taps aren't intercepted by the HUD.
+          Gated on the mapping ONLY: a successful commit nulls the session
+          before the overlay's post-commit success card can render, and the
+          overlay itself renders null when there is neither a session nor a
+          pending success receipt. */}
+      {calMapping != null && (
         <CourtCalibrationOverlay mapping={calMapping} onDone={() => setCalMapping(null)} />
       )}
 
@@ -775,39 +794,6 @@ function LiveSessionScreen() {
 // ---------------------------------------------------------------------------
 
 /**
- * Detection heartbeat — an always-on "is the AI seeing anything?" chip so the
- * user knows tracking is alive WITHOUT enabling Debug mode. Polls the engine's
- * debug SharedValue (maxScore is written every analysed frame regardless of the
- * debug panel) at ~3 Hz. Green = detecting, amber = weak, red = blind.
- */
-function DetectionHeartbeat({ debug }: { debug: ShotEngine['debug'] }) {
-  const [tone, setTone] = useState<'good' | 'weak' | 'blind'>('blind');
-  useEffect(() => {
-    const id = setInterval(() => {
-      const s = debug.value.maxScore;
-      const next = s > 0.3 ? 'good' : s > 0.05 ? 'weak' : 'blind';
-      setTone((prev) => (prev !== next ? next : prev));
-    }, 300);
-    return () => clearInterval(id);
-  }, [debug]);
-  const dot =
-    tone === 'good' ? color.make : tone === 'weak' ? color.unsure : color.miss;
-  const label = tone === 'good' ? 'Tracking' : tone === 'weak' ? 'Weak signal' : 'No detection';
-  return (
-    <View style={styles.heartbeatWrap}>
-      <HudChip>
-        <Row gap={space.sm}>
-          <View style={[styles.heartbeatDot, { backgroundColor: dot }]} />
-          <Text style={styles.heartbeatLabel} accessibilityLiveRegion="polite">
-            {label}
-          </Text>
-        </Row>
-      </HudChip>
-    </View>
-  );
-}
-
-/**
  * FT-line calibration chip — the one-time, entirely OPTIONAL offer to sharpen
  * 2/3-point calls: stand at the free-throw line, tap, hold still through a
  * 3-2-1 countdown while the engine medians the shooter's foot. Success and
@@ -843,6 +829,11 @@ function FtCalibrationChip({ capture }: { capture: () => Promise<FtCaptureOutcom
     let alive = true;
     capture()
       .then((r) => {
+        if (r.ok) {
+          // Persisted FT-cal receipt for the calibration health card
+          // (setup/settings surfaces).
+          useSettings.getState().set('lastFtCalSummary', { ts: Date.now() });
+        }
         if (alive) setStage(r.ok ? 'done' : 'failed');
       })
       .catch(() => {
@@ -1131,19 +1122,6 @@ const styles = StyleSheet.create({
   topCenter: {
     alignItems: 'center',
     marginTop: space.sm,
-  },
-  heartbeatWrap: {
-    alignSelf: 'flex-start',
-    marginBottom: space.sm,
-  },
-  heartbeatDot: {
-    width: 9,
-    height: 9,
-    borderRadius: 5,
-  },
-  heartbeatLabel: {
-    ...type.caption,
-    color: color.text,
   },
   modeBanner: {
     marginTop: space.sm,

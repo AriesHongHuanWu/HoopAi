@@ -30,6 +30,28 @@ const LOCK_CLUSTER_SIZE = 3;
  */
 const DRIFT_REJECT_COUNT = 5;
 
+/**
+ * Bump-settle boost (rim bump guard). A small camera bump that stays INSIDE
+ * the accept zone (displacement < maxDriftDiagFactor·diag) never trips drift,
+ * so the lock converges to the true position at RIM.lockAlpha (0.05) — about
+ * 45 accepted frames of subtly-wrong rim geometry. The boost watches an EMA
+ * of each ACCEPTED observation's center offset from the lock: symmetric
+ * detector jitter cancels out, a sustained one-sided offset (real bump) does
+ * not. While that EMA exceeds SETTLE_ENTER_FRAC of the lock diagonal, the
+ * damp runs at SETTLE_ALPHA and re-centers in ~4-6 accepted frames.
+ *
+ * One-sided by construction: the accept/reject decision is untouched and only
+ * the convergence SPEED toward already-accepted observations changes
+ * (location, never judgment). Kill switch: {@link RimLock.setBumpSettle}.
+ */
+const SETTLE_OFF_EMA_ALPHA = 0.3;
+/** Boost engages when |offset EMA| exceeds this fraction of the lock diagonal. */
+const SETTLE_ENTER_FRAC = 0.12;
+/** ...and disengages below this fraction (hysteresis, so it cannot chatter). */
+const SETTLE_EXIT_FRAC = 0.05;
+/** EMA weight used while the boost is engaged (vs RIM.lockAlpha 0.05). */
+const SETTLE_ALPHA = 0.35;
+
 /** Allocates a zeroed RimGeometry skeleton (filled by `writeGeometry`). */
 function newRimGeometry(): RimGeometry {
   return {
@@ -135,9 +157,10 @@ export function computeRimGeometry(box: Box): RimGeometry {
  *    observations mutually agree (each within maxDriftDiagFactor·diag of the
  *    cluster's running mean), locks at the cluster mean. `step` returns null
  *    until then.
- * 2. LOCKED — each accepted observation EMA-damps the box with RIM.lockAlpha.
- *    Observations displaced more than maxDriftDiagFactor·diag from the lock
- *    are rejected outright.
+ * 2. LOCKED — each accepted observation EMA-damps the box with RIM.lockAlpha
+ *    (or SETTLE_ALPHA while the bump-settle boost is engaged; see the
+ *    SETTLE_* constants). Observations displaced more than
+ *    maxDriftDiagFactor·diag from the lock are rejected outright.
  * 3. DRIFT — DRIFT_REJECT_COUNT consecutive rejects set `driftDetected`
  *    (camera bumped). While drifted, a fresh consistent cluster of
  *    LOCK_CLUSTER_SIZE observations at the new location re-locks there and
@@ -185,6 +208,31 @@ export class RimLock {
    */
   private preDriftW = 0;
   private preDriftH = 0;
+
+  /**
+   * EMA of accepted-observation center offsets from the lock (bump-settle
+   * boost input; see the SETTLE_* constants). Symmetric jitter cancels here;
+   * a sustained bump does not.
+   */
+  private offEmaX = 0;
+  private offEmaY = 0;
+
+  /** True while the fast SETTLE_ALPHA damp is engaged (hysteresis-latched). */
+  private settleBoost = false;
+
+  /** Bump-settle kill switch; default ON. See {@link setBumpSettle}. */
+  private bumpSettle = true;
+
+  /**
+   * Monotonic (re-)lock counter, incremented only by lockAtClusterMean() and
+   * setManual() — never by ordinary EMA accepts. WHY it exists: the
+   * RimGeometry object is mutated IN PLACE and its reference never changes,
+   * so downstream consumers (pipeline fsm.setRim, worklet net-ROI sync)
+   * cannot see a re-lock through ref-equality — this counter is the explicit
+   * signal. Deliberately NOT cleared in reset() so a consumer comparing
+   * against a cached value can never miss a re-lock across a session reset.
+   */
+  private lockGen = 0;
 
   /** Seconds the rim must stay stable before the lock commits (0 = immediate). */
   private readonly holdSec: number;
@@ -276,10 +324,36 @@ export class RimLock {
   }
 
   /**
+   * Monotonic count of hard (re-)locks: cluster locks (initial, post-drift,
+   * large-jump) and manual overrides. Because `geometry` is mutated in place,
+   * ref-equality can never reveal a re-lock — consumers that cache derived
+   * state (FSM zones, worklet ROI rects) must watch this counter and rebuild
+   * when it changes. Ordinary EMA accepts do NOT increment it.
+   */
+  get lockGeneration(): number {
+    return this.lockGen;
+  }
+
+  /**
+   * Kill switch for the bump-settle boost (default ON). Disabling zeroes the
+   * offset EMA and drops any engaged boost, so damping reverts exactly to the
+   * plain RIM.lockAlpha behavior.
+   */
+  setBumpSettle(enabled: boolean): void {
+    this.bumpSettle = enabled;
+    if (!enabled) {
+      this.offEmaX = 0;
+      this.offEmaY = 0;
+      this.settleBoost = false;
+    }
+  }
+
+  /**
    * User tap-adjust: overrides the rim box immediately and locks on it,
    * clearing any pending cluster and drift state.
    */
   setManual(box: Box): void {
+    this.lockGen++;
     this.lockX = box.x;
     this.lockY = box.y;
     this.lockW = box.width;
@@ -290,10 +364,17 @@ export class RimLock {
     this.drift = false;
     this.preDriftW = 0;
     this.preDriftH = 0;
+    this.offEmaX = 0;
+    this.offEmaY = 0;
+    this.settleBoost = false;
     this.refreshGeometry();
   }
 
-  /** Returns to the initial unlocked state. */
+  /**
+   * Returns to the initial unlocked state. `lockGen` intentionally survives
+   * (monotonic across resets) and `bumpSettle` is a user setting, not
+   * per-session transient state.
+   */
   reset(): void {
     this.locked = false;
     this.geom = null;
@@ -306,6 +387,9 @@ export class RimLock {
     this.drift = false;
     this.preDriftW = 0;
     this.preDriftH = 0;
+    this.offEmaX = 0;
+    this.offEmaY = 0;
+    this.settleBoost = false;
     this.clusterStartT = 0;
     this.lastObsT = 0;
     this.countdownSec = null;
@@ -361,8 +445,22 @@ export class RimLock {
     }
 
     if (!displaced) {
+      // Bump-settle boost: fold this accepted offset into the offset EMA and
+      // run the enter/exit hysteresis BEFORE damping, so the very frame the
+      // EMA crosses the threshold already damps fast. See the SETTLE_*
+      // constants for the one-sidedness argument.
+      this.offEmaX += SETTLE_OFF_EMA_ALPHA * (dx - this.offEmaX);
+      this.offEmaY += SETTLE_OFF_EMA_ALPHA * (dy - this.offEmaY);
+      const off = Math.hypot(this.offEmaX, this.offEmaY);
+      if (this.bumpSettle) {
+        if (!this.settleBoost && off > SETTLE_ENTER_FRAC * diag) {
+          this.settleBoost = true;
+        } else if (this.settleBoost && off < SETTLE_EXIT_FRAC * diag) {
+          this.settleBoost = false;
+        }
+      }
       // Accept: EMA-damp the lock toward the observation.
-      const a = RIM.lockAlpha;
+      const a = this.settleBoost ? SETTLE_ALPHA : RIM.lockAlpha;
       this.lockX += a * (box.x - this.lockX);
       this.lockY += a * (box.y - this.lockY);
       this.lockW += a * (box.width - this.lockW);
@@ -452,6 +550,7 @@ export class RimLock {
 
   /** Locks (or re-locks) at the cluster mean and clears transient state. */
   private lockAtClusterMean(): void {
+    this.lockGen++;
     const n = this.clusterCount;
     this.lockX = this.clusterSumX / n;
     this.lockY = this.clusterSumY / n;
@@ -463,6 +562,10 @@ export class RimLock {
     this.drift = false;
     this.preDriftW = 0;
     this.preDriftH = 0;
+    // The lock IS the cluster mean now — any accumulated offset EMA is stale.
+    this.offEmaX = 0;
+    this.offEmaY = 0;
+    this.settleBoost = false;
     this.refreshGeometry();
   }
 

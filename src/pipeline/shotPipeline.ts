@@ -10,8 +10,10 @@
  * the scheduleOnRN hop for direct SharedValue writes (docs/ARCHITECTURE.md §2).
  */
 import { DETECTION, FLIGHT, RIM, SHOT_FSM, scaleFrameGate } from '../core/config';
+import { buildArcSnapshot } from '../core/arcSnapshot';
 import { BallTracker } from '../core/ballTracker';
 import { FlightArc } from '../core/flightArc';
+import { MultiBallGuard } from '../core/multiBallGuard';
 import { estimateShotValue } from '../core/court';
 import { FormAnalyzer, coachingTips } from '../core/formAnalysis';
 import { FormSequenceBuffer } from '../core/formSequence';
@@ -69,6 +71,13 @@ export interface FramePayload {
    * light profile untouched. Drives the tracker's dark-relaxed cold gate.
    */
   light?: number;
+  /**
+   * 8x8 mean-luma grid (0..1) sampled by the worklet over the CONTENT rect
+   * every ~2 s for the lens glare/haze advisory (src/core/lensCheck.ts).
+   * ENGINE-ONLY: useShotEngine's onPayload consumes and strips it BEFORE
+   * pipeline.step — the pipeline itself never reads it.
+   */
+  lensGrid?: readonly number[];
 }
 
 export interface PipelineEvents {
@@ -158,6 +167,30 @@ export class ShotPipeline {
    *  can disable full-flight tracking without a rebuild (escape hatch). */
   private useFlight: boolean = FLIGHT.useFlightArc;
   private readonly rimLock = new RimLock({ lockHoldSec: RIM.lockHoldSec });
+  /**
+   * Multi-ball warmup guard (suppression-only): while several confident balls
+   * fly at once, new arming is held via FsmFrameInput.armLockout. It can never
+   * create/upgrade a call or touch a live attempt (see multiBallGuard.ts).
+   */
+  private readonly multiBall = new MultiBallGuard();
+  private multiBallEnabled = true;
+  /**
+   * Active per-model cold ball gate (mirror of the tracker's own, set via
+   * setColdBallGate; null = default). The multi-ball count must use the SAME
+   * bar as track acquisition: nano-v2 deliberately raises its cold gate
+   * because it emits spurious balls in the 0.2..0.35 band that the tracker
+   * ignores — counting those phantoms would chronically latch the arm
+   * lockout and silently swallow real shots (see {@link multiBallCountGate}).
+   */
+  private coldBallGate: number | null = null;
+  /** Rim bump guard (Settings): fast rim re-settle + drift-stale arm hold. */
+  private rimGuard = true;
+  /**
+   * Last seen RimLock.lockGeneration. The geometry object is mutated IN PLACE,
+   * so a hard re-lock never changes its reference — this counter is the only
+   * honest "the rim moved" signal for the FSM's cached zones. -1 = unseen.
+   */
+  private lastLockGen = -1;
   private fsm: ShotFsm | null = null;
   private events: PipelineEvents;
   private lastRim: RimGeometry | null = null;
@@ -257,6 +290,7 @@ export class ShotPipeline {
   /** Per-model cold ball-acquisition gate (the active detector sets its own —
    *  a noisier model needs a higher bar to start a track). null = default. */
   setColdBallGate(gate: number | null): void {
+    this.coldBallGate = gate;
     this.tracker.setColdGate(gate);
   }
 
@@ -269,6 +303,18 @@ export class ShotPipeline {
   /** Depth-ratio parallax veto (from Settings). Takes effect at rim lock. */
   setDepthVeto(enabled: boolean): void {
     this.depthVeto = enabled;
+  }
+
+  /** Multi-ball warmup guard (from Settings). Suppression-only — see step(). */
+  setMultiBallGuard(enabled: boolean): void {
+    this.multiBallEnabled = enabled;
+    if (!enabled) this.multiBall.reset();
+  }
+
+  /** Rim bump guard (from Settings): bump-settle boost + drift arm hold. */
+  setRimGuard(enabled: boolean): void {
+    this.rimGuard = enabled;
+    this.rimLock.setBumpSettle(enabled);
   }
 
   /** Metric 2/3 estimation (from Settings). */
@@ -392,6 +438,13 @@ export class ShotPipeline {
 
     const rim = this.rimLock.step(frame, frame.t) ?? this.rimLock.geometry;
     if (rim && rim !== this.lastRim) this.adoptRim(rim, dims);
+    const lockGen = this.rimLock.lockGeneration;
+    if (lockGen !== this.lastLockGen) {
+      this.lastLockGen = lockGen;
+      // Re-lock moved the (in-place mutated) geometry: recompute the FSM's
+      // cached zones — reference equality can never reveal a hard re-lock.
+      if (rim) this.fsm?.setRim(rim);
+    }
 
     if (this.rimLock.driftDetected && !this.wasDrifted) {
       this.wasDrifted = true;
@@ -502,6 +555,19 @@ export class ShotPipeline {
     let liveTrajectory: readonly BallSample[] = [];
     let resolved: ResolvedShot | null = null;
 
+    // Arm suppression (suppression-only, can never mint a call): multi-ball
+    // warmup scenes and a drift-stale rim both hold NEW arming. The guard is
+    // stepped EVERY frame (its clear timer only advances when stepped); the
+    // count uses the ACTIVE cold-acquisition gate (per-model, never below the
+    // default) so faint noise the tracker itself ignores can never trigger it.
+    const multiGate = multiBallCountGate(this.coldBallGate);
+    let ballCount = 0;
+    for (const d of frame.detections) {
+      if (d.cls === 'ball' && d.score >= multiGate) ballCount++;
+    }
+    const multiLock = this.multiBallEnabled && this.multiBall.step(ballCount, frame.t);
+    const armLockout = multiLock || (this.rimGuard && this.rimLock.driftDetected);
+
     if (this.fsm && this.lastRim) {
       const person = this.pickShooterBox(frame, ball);
       const result = this.fsm.step({
@@ -515,6 +581,7 @@ export class ShotPipeline {
         ...(this.pendingReleaseT !== null
           ? { releaseEventT: this.pendingReleaseT }
           : {}),
+        ...(armLockout ? { armLockout: true } : {}),
       });
       phase = result.phase;
       liveTrajectory = result.liveTrajectory;
@@ -769,6 +836,19 @@ export class ShotPipeline {
         else if (this.courtRange === '3pt') resolved.shotValue = 3;
         if (this.courtRange !== 'auto') resolved.valueSource = 'manual';
       }
+      // Persisted flight-arc snapshot — VISUAL ONLY (replay thumbnails + 3D
+      // replay). Never re-judged: the FSM/recheck never read it (drawing !=
+      // judging).
+      if (arcFit && fullFlightPath.length >= 8 && this.lastRim) {
+        const snap = buildArcSnapshot(
+          arcFit,
+          fullFlightPath,
+          this.lastRim.box,
+          frame.frameWidth,
+          frame.frameHeight,
+        );
+        if (snap) resolved.flightArc = snap;
+      }
       // Finalize the pose-based form report (only if a pose was seen this shot).
       if (this.form && this.sawPoseThisShot) {
         try {
@@ -779,7 +859,7 @@ export class ShotPipeline {
           const releasePose = this.form.releasePose;
           // Motion sequence for Form Studio — best-effort, additive; a null
           // build (too little captured) simply omits the field.
-          const sequence = this.formSeq?.finalize() ?? null;
+          const sequence = this.formSeq?.finalize(releasePose ? releasePose.t : null) ?? null;
           resolved.form = {
             metrics,
             tips: coachingTips(metrics),
@@ -803,6 +883,9 @@ export class ShotPipeline {
     this.tracker.reset();
     this.flightArc.reset(0);
     this.rimLock.reset();
+    this.multiBall.reset();
+    // lockGeneration is monotonic across resets by design — re-arm the watch.
+    this.lastLockGen = -1;
     this.form = null;
     this.formSeq = null;
     this.releaseDet = null;
@@ -970,6 +1053,21 @@ function bestPerson(
     if (best == null || key < best.key) best = { key, box: d.box };
   }
   return best?.box ?? null;
+}
+
+/**
+ * Score bar for the multi-ball guard's per-frame ball count: the ACTIVE cold
+ * acquisition gate, floored at the default. When nano-v2 is the running
+ * detector its cold gate is raised to ballScoreMinNanoV2 precisely because it
+ * is "higher recall but noisier" — spurious balls in the 0.2..0.35 band that
+ * the tracker deliberately never acquires. Counting those phantoms at the
+ * fixed 0.2 gate made one recurring 0.22 blob + the real ball read as a
+ * multi-ball scene, chronically latching the arm lockout (real shots silently
+ * never counted). Never BELOW the default: a per-model gate can only make the
+ * guard stricter about what counts as a ball. Exported for tests.
+ */
+export function multiBallCountGate(coldGate: number | null): number {
+  return Math.max(DETECTION.ballScoreMin, coldGate ?? 0);
 }
 
 function maxScore(frame: FrameDetections, cls: 'ball_in_basket'): number {

@@ -24,8 +24,9 @@
  *   card can say "improving" / "worsening" / "flat" honestly.
  * - Thresholds live in {@link COACH} so the benchmark clip pass can tune them.
  */
-import { FORM } from './config';
-import type { DrillId } from './drills';
+import { DEFAULT_3PT_RIMWIDTHS, FORM } from './config';
+import { DRILLS, type DrillId } from './drills';
+import { buildHeatmap, cellLabel, type HeatCell } from './heatmap';
 import { BENCHMARK_AXES, type BenchmarkAxis } from './nbaBenchmarks';
 import { metricOf, type LabMetricKey } from './shotLab';
 import { zoneOf } from './stats';
@@ -66,6 +67,7 @@ export type FindingKind =
   | 'entryAngleVolatile'
   | 'releaseDrift'
   | 'zoneImbalance'
+  | 'coldZone'
   | 'sideBias'
   | 'streaky'
   | 'fatigue'
@@ -74,6 +76,7 @@ export type FindingKind =
   | 'unsureRate'
   | 'volumeTrend'
   | 'nbaBand'
+  | 'formRegression'
   | 'improving';
 
 export interface CoachFinding {
@@ -93,6 +96,8 @@ export interface CoachFinding {
    * ties in the ranking. Bigger = more clearly outside its band.
    */
   strength: number;
+  /** Drill this finding prescribes, overriding FINDING_DRILL when set. */
+  drillId?: DrillId;
 }
 
 // ---------------------------------------------------------------------------
@@ -125,6 +130,14 @@ export const COACH = {
   volumeTrendFrac: 0.4,
   /** A 3-week improvement worth celebrating: FG% up at least this (points). */
   celebrateFgGainPts: 8,
+  /** A heat-map cell needs this many decided attempts to rank as a cold zone. */
+  coldZoneMinCellAttempts: 5,
+  /** Window FG% minus worst-cell FG% (points) at/above which coldZone fires. */
+  coldZoneGapPts: 20,
+  /** Min form-metric samples per window half before regression can compare. */
+  formRegressionMinPerHalf: 6,
+  /** Per-metric deadband on the deviation-from-band increase (metric's unit). */
+  formRegressionDeadband: { setPointElbowDeg: 6, kneeFlexionDeg: 8, releaseTimeMs: 90, followThroughHeldMs: 80 },
   /** Minimum decided shots before most rules will speak at all. */
   minDecided: 8,
   /** Minimum sessions before window-level trend rules engage. */
@@ -403,6 +416,71 @@ const ruleZoneImbalance: Rule = (w) => {
   };
 };
 
+/** Catalog title for a drill id — used in prescription copy. */
+const drillTitle = (id: DrillId) => DRILLS.find((d) => d.id === id)!.title;
+
+/**
+ * Distance band a shot falls in — mirrors heatmap.ts's private bandOfShot
+ * (near < 4.5 rim widths, far at/past the 3-point line, shotValue fallback)
+ * so the trend split places shots exactly like the heat map did.
+ */
+function bandOfShotLocal(s: ResolvedShot): HeatCell['band'] | null {
+  const d = s.distanceRimWidths;
+  if (d != null && Number.isFinite(d)) {
+    if (d < 4.5) return 'near';
+    if (d < DEFAULT_3PT_RIMWIDTHS) return 'mid';
+    return 'far';
+  }
+  if (s.shotValue === 3) return 'far';
+  if (s.shotValue === 2) return 'mid';
+  return null;
+}
+
+/** The drill that best trains a given heat-map cell. */
+function drillForCell(cell: HeatCell): DrillId {
+  if (cell.band === 'far') return cell.zone === 'center' ? 'catchShoot10' : 'corners3';
+  if (cell.band === 'mid') return 'midClock';
+  return 'aroundKey';
+}
+
+/**
+ * RULE 4b — Cold zone (cell-level). Where {@link ruleZoneImbalance} compares
+ * horizontal thirds, this drills into the 3×3 heat-map grid and names the ONE
+ * cell clearly under the window's overall FG%. Shots without a distance band
+ * land in the heatmap's `unplaced` bucket, so netless-of-distance users simply
+ * never trigger it — honest silence. Carries its own drill via `drillId`.
+ */
+const ruleColdZone: Rule = (w) => {
+  if (w.fgPct == null) return null;
+  const hm = buildHeatmap(w.decidedShots, COACH.coldZoneMinCellAttempts);
+  if (hm.worst == null) return null;
+  const worst = hm.worst;
+  const gapPts = (w.fgPct - worst.fgPct) * 100;
+  if (gapPts < COACH.coldZoneGapPts) return null;
+  const drillId = drillForCell(worst);
+  // Trend: FG% inside the cold cell, recent half vs older half of the window.
+  const cellShots = w.decidedShots.filter(
+    (s) => zoneOf(s.originX ?? null) === worst.zone && bandOfShotLocal(s) === worst.band,
+  );
+  const { older, recent } = halves(cellShots);
+  let trend: Trend = 'n/a';
+  if (older.length >= 3 && recent.length >= 3) {
+    const olderFg = older.filter((s) => s.outcome === 'make').length / older.length;
+    const recentFg = recent.filter((s) => s.outcome === 'make').length / recent.length;
+    trend = trendHigherBetter(olderFg, recentFg, 0.05);
+  }
+  return {
+    id: 'coldZone',
+    severity: 2,
+    title: `Cold spot: the ${cellLabel(worst)}`,
+    evidence: `You're ${worst.makes}/${worst.attempts} (${pct(worst.fgPct)}) from the ${cellLabel(worst)} — ${Math.round(gapPts)} points under your ${pct(w.fgPct)} overall.`,
+    prescription: `Give the ${cellLabel(worst)} its own block this week — short sets, full reset between reps. ${drillTitle(drillId)} trains exactly that spot.`,
+    trend,
+    strength: gapPts / COACH.coldZoneGapPts,
+    drillId,
+  };
+};
+
 /**
  * RULE 5 — Left/right miss bias. Compares where MADE shots cross the rim
  * plane (near the rim center, by definition of a make) with where MISSES
@@ -667,6 +745,80 @@ const ruleNbaBand: Rule = (w) => {
   };
 };
 
+/** Metrics the form-regression rule watches (releaseAngleDeg is excluded — {@link ruleReleaseDrift} owns it). */
+const REGRESSION_METRICS: readonly {
+  key: keyof typeof COACH.formRegressionDeadband;
+  label: string;
+  unit: string;
+  band: readonly [number, number];
+}[] = [
+  { key: 'setPointElbowDeg', label: 'set-point elbow', unit: '°', band: [FORM.elbowSetPoint.min, FORM.elbowSetPoint.max] },
+  { key: 'kneeFlexionDeg', label: 'knee flexion', unit: '°', band: [FORM.kneeFlexion.min, FORM.kneeFlexion.max] },
+  // FORM.releaseTime is in seconds; the metric is ms.
+  { key: 'releaseTimeMs', label: 'release time', unit: 'ms', band: [0, FORM.releaseTime.typical * 1000] },
+  { key: 'followThroughHeldMs', label: 'follow-through hold', unit: 'ms', band: [FORM.followThrough.holdSec * 1000, Number.POSITIVE_INFINITY] },
+];
+
+/** Distance of x OUTSIDE the [lo, hi] band; 0 when inside. */
+function bandDev(x: number, band: readonly [number, number]): number {
+  const [lo, hi] = band;
+  return x < lo ? lo - x : x > hi ? x - hi : 0;
+}
+
+/**
+ * RULE 11b — Form regression vs the window's own baseline. The OLDER half of
+ * the window sets a per-metric baseline (mean deviation from its FORM band);
+ * if the RECENT half's deviation has grown past a per-metric deadband, the
+ * form is quietly slipping. Uses only the pose metrics already persisted per
+ * shot (formJson via metricOf) — min samples per half keep it honest.
+ */
+const ruleFormRegression: Rule = (w) => {
+  if (w.sessions.length < COACH.minSessions) return null;
+  const { older, recent } = halves(w.sessions);
+  const olderShots = decided(older.flatMap((s) => s.shots));
+  const recentShots = decided(recent.flatMap((s) => s.shots));
+  type Cand = {
+    m: (typeof REGRESSION_METRICS)[number];
+    olderMean: number;
+    recentMean: number;
+    score: number;
+  };
+  let top: Cand | null = null;
+  for (const m of REGRESSION_METRICS) {
+    const olderVals = collect(olderShots, m.key);
+    const recentVals = collect(recentShots, m.key);
+    if (
+      olderVals.length < COACH.formRegressionMinPerHalf ||
+      recentVals.length < COACH.formRegressionMinPerHalf
+    ) {
+      continue;
+    }
+    const olderMean = mean(olderVals)!;
+    const recentMean = mean(recentVals)!;
+    const regression = bandDev(recentMean, m.band) - bandDev(olderMean, m.band);
+    if (regression <= COACH.formRegressionDeadband[m.key]) continue;
+    const score = regression / COACH.formRegressionDeadband[m.key];
+    if (top == null || score > top.score) top = { m, olderMean, recentMean, score };
+  }
+  if (top == null) return null;
+  const { m, olderMean, recentMean, score } = top;
+  const [lo, hi] = m.band;
+  const bandText = !Number.isFinite(hi)
+    ? `${lo}${m.unit}+`
+    : lo === 0
+      ? `under ${hi}${m.unit}`
+      : `${lo}–${hi}${m.unit}`;
+  return {
+    id: 'formRegression',
+    severity: 2,
+    title: `Form slip: ${m.label}`,
+    evidence: `Your ${m.label} averaged ${Math.round(olderMean)}${m.unit} earlier in this window; lately it's ${Math.round(recentMean)}${m.unit} — drifting outside the ${bandText} band you held before.`,
+    prescription: `Open Form Studio and play an early make next to a recent one — watch the ${m.label} frame by frame, one cue at a time. Groove the fix with slow ${drillTitle('catchShoot10')} reps.`,
+    trend: 'worsening',
+    strength: score,
+  };
+};
+
 /**
  * RULE 12 — Improvement celebration. When the window spans enough sessions
  * and the RECENT half's FG% clearly beats the OLDER half's, say so — coaching
@@ -718,6 +870,7 @@ export const RULES: readonly Rule[] = [
   ruleReleaseDrift,
   ruleThreePtFlat,
   ruleZoneImbalance,
+  ruleColdZone,
   ruleSideBias,
   ruleStreaky,
   ruleFatigue,
@@ -725,6 +878,7 @@ export const RULES: readonly Rule[] = [
   ruleUnsureRate,
   ruleVolumeTrend,
   ruleNbaBand,
+  ruleFormRegression,
   ruleImproving,
 ];
 
@@ -856,6 +1010,8 @@ const FINDING_DRILL: Partial<Record<FindingKind, DrillId>> = {
   twoVsThree: 'corners3',
   threePtFlat: 'corners3',
   fatigue: 'ftLadder',
+  // coldZone is deliberately absent — it carries its own cell-specific drillId.
+  formRegression: 'catchShoot10',
 };
 
 export interface WeeklyAssignment {
@@ -874,7 +1030,7 @@ export function weeklyAssignment(
   findings: readonly CoachFinding[],
 ): WeeklyAssignment | null {
   for (const f of findings) {
-    const drillId = FINDING_DRILL[f.id];
+    const drillId = f.drillId ?? FINDING_DRILL[f.id];
     if (drillId) return { finding: f, drillId };
   }
   return null;
@@ -892,7 +1048,7 @@ export function weeklyPlan(
 ): WeeklyAssignment[] {
   const out: WeeklyAssignment[] = [];
   for (const f of findings) {
-    const drillId = FINDING_DRILL[f.id];
+    const drillId = f.drillId ?? FINDING_DRILL[f.id];
     if (drillId) {
       out.push({ finding: f, drillId });
       if (out.length >= max) break;

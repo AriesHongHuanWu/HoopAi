@@ -37,10 +37,14 @@ import { SummaryHero, isPerfectSession } from '@/components/SummaryHero';
 import { Card, Chip, Eyebrow, PillButton, Row, Screen } from '@/components/ui';
 import { color, radius, space, type } from '@/constants/tokens';
 import { detectNewBests, type CareerBests } from '@/core/achievements';
+import { levelOfGoals } from '@/core/drillProgression';
+import type { ModeState } from '@/core/gameModes';
+import { todayMakes } from '@/core/goals';
 import { detectMilestones, type Milestone } from '@/core/milestones';
 import type { ResolvedShot, ShotOutcome, ShotValue } from '@/core/types';
-import { careerBests, lifetimeTotals } from '@/data/db';
+import { careerBests, getSession, lifetimeTotals, listSessions } from '@/data/db';
 import { saveSessionVideo } from '@/data/videoLibrary';
+import { useMode } from '@/state/modeStore';
 import { useSession } from '@/state/sessionStore';
 import { useSettings } from '@/state/settingsStore';
 
@@ -58,6 +62,7 @@ export default function SessionSummaryScreen() {
   const resetToIdle = useSession((s) => s.resetToIdle);
   const keepSetting = useSettings((s) => s.keepMode);
   const saveToPhotos = useSettings((s) => s.saveToPhotos);
+  const dailyGoal = useSettings((s) => s.dailyGoalMakes);
 
   const storeMode = phase === 'ended';
   const paramId =
@@ -133,6 +138,44 @@ export default function SessionSummaryScreen() {
       .catch(() => {});
   }, [storeMode, stats.makes]);
 
+  // RUN IT BACK — recover the finished game's final ModeState so the restart
+  // can re-arm the same mode/drill. DB mode parses the already-loaded row;
+  // storeMode does a one-shot fetch of the just-persisted row (endSession
+  // awaits finish() before navigating here, so it exists). Any parse failure
+  // stays null, which honestly degrades the restart to free play.
+  const [prevMode, setPrevMode] = useState<ModeState | null>(null);
+  useEffect(() => {
+    const json = record.session?.modeResultJson;
+    if (json == null) return;
+    try {
+      setPrevMode(JSON.parse(json) as ModeState);
+    } catch {}
+  }, [record.session]);
+  const modeFetched = useRef(false);
+  useEffect(() => {
+    if (!storeMode || liveSessionId == null || modeFetched.current) return;
+    modeFetched.current = true;
+    void getSession(liveSessionId).then((row) => {
+      try {
+        if (row?.modeResultJson) setPrevMode(JSON.parse(row.modeResultJson) as ModeState);
+      } catch {}
+    });
+  }, [storeMode, liveSessionId]);
+
+  // DAILY GOAL — closes the loop the live GoalChip opens. One-shot fetch,
+  // just-ended sessions only. The session is already persisted (endSession
+  // awaits finish() before navigating here), so today's total honestly
+  // includes tonight — plain todayMakes, no exclusion needed.
+  const [goalMade, setGoalMade] = useState<number | null>(null);
+  const goalFetched = useRef(false);
+  useEffect(() => {
+    if (!storeMode || dailyGoal <= 0 || goalFetched.current) return;
+    goalFetched.current = true;
+    void listSessions(100)
+      .then((rows) => setGoalMade(todayMakes(rows, Date.now())))
+      .catch(() => {});
+  }, [storeMode, dailyGoal]);
+
   const newBests = useMemo(() => {
     if (!storeMode || pbBaseline == null) return [];
     const bests = detectNewBests(stats, pbBaseline);
@@ -189,6 +232,39 @@ export default function SessionSummaryScreen() {
     resetToIdle();
     router.replace('/');
   };
+
+  // Restart with the same setup — mirrors home quickStart ((tabs)/index.tsx)
+  // and live.tsx replayMode: reset session state, re-arm the same mode/drill,
+  // then jump to live with the persisted orientation (recordVideo/keepMode
+  // flow from persisted settings automatically — that IS "same setup").
+  const runItBack = useCallback(() => {
+    const mode = prevMode;
+    resetToIdle();
+    const m = useMode.getState();
+    const drill = mode?.config?.drill;
+    if (drill != null) {
+      // A structured drill rides inside spotShooting — re-init via its own
+      // builder so variable spots/goals rebuild, at the SAME level the run was
+      // played at (recovered from the persisted goals — "same setup" includes
+      // the level). getDrill throws on a stale/unknown persisted DrillId
+      // (levelOfGoals reads the catalog too), so fall back to free play.
+      try {
+        m.selectDrill(drill.id, levelOfGoals(drill.id, drill.goals));
+      } catch {
+        m.reset();
+      }
+    } else if (mode != null && mode.config?.ghost == null) {
+      m.selectMode(mode.modeId, mode.config ?? undefined);
+    } else {
+      // Free play — or a Ghost race, whose persisted timeline was stripped at
+      // endSession; an empty timeline can't be honestly re-raced, so fall back.
+      m.reset();
+    }
+    useSession.getState().beginSetup();
+    // replace (not push): a back-gesture from pre-lock live must never pop
+    // onto this now-reset summary.
+    router.replace(`/session/live?orient=${useSettings.getState().lastOrient}`);
+  }, [prevMode, resetToIdle]);
 
   // Share-card generation: disabled while the snapshot renders; failure shows
   // a quiet chip (shareSessionCard itself never throws).
@@ -321,6 +397,23 @@ export default function SessionSummaryScreen() {
             </View>
           )}
           <SummaryHero stats={stats} style={styles.hero} />
+          {storeMode && dailyGoal > 0 && goalMade != null && (
+            <View
+              style={styles.goalLineWrap}
+              accessibilityLabel={`Daily goal: ${goalMade} of ${dailyGoal} makes today`}
+            >
+              {goalMade >= dailyGoal ? (
+                <Chip
+                  label={`Daily goal hit — ${goalMade}/${dailyGoal} makes today`}
+                  tone="make"
+                />
+              ) : (
+                <Text style={styles.goalLine}>
+                  {`Daily goal · ${goalMade}/${dailyGoal} — ${dailyGoal - goalMade} to go`}
+                </Text>
+              )}
+            </View>
+          )}
           {milestones.length > 0 && (
             <View style={styles.milestoneBanner}>
               <View style={styles.milestoneIcon}>
@@ -369,6 +462,15 @@ export default function SessionSummaryScreen() {
                   sessionId={sessionId}
                   unsureCount={unsureCount}
                   onVerdict={onRecheckVerdict}
+                  unsureShotIndexes={shots
+                    .filter((s) => s.outcome === 'unsure' && s.corrected !== true)
+                    .map((s) => s.id)}
+                  onManualCorrect={(shotIndex, outcome) => {
+                    const s = shots.find((x) => x.id === shotIndex);
+                    // No third arg: corrected defaults to true — a hand edit
+                    // earns the Edited badge, unlike machine re-reads above.
+                    if (s) applyCorrection(s, outcome);
+                  }}
                   style={{ marginTop: space.md }}
                 />
               )}
@@ -430,6 +532,13 @@ export default function SessionSummaryScreen() {
                 style={{ flex: 1 }}
               />
             </Row>
+            <PillButton
+              variant="ghost"
+              label="Run it back"
+              icon="refresh"
+              onPress={runItBack}
+              style={{ marginTop: space.md }}
+            />
             <PillButton
               label="Done"
               icon="checkmark"
@@ -501,6 +610,15 @@ const styles = StyleSheet.create({
   pbBanner: {
     marginTop: -space.md,
     marginBottom: space.xl,
+  },
+  /** Daily-goal result line: same tuck-up rhythm as pbBanner under the hero. */
+  goalLineWrap: {
+    marginTop: -space.md,
+    marginBottom: space.xl,
+  },
+  goalLine: {
+    ...type.caption,
+    color: color.textDim,
   },
   // Career-milestone banner: a gold "moment" tucked under the hero, above PBs.
   milestoneBanner: {

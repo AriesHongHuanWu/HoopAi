@@ -1,4 +1,4 @@
-import { goalProgress, todayMakes } from '../goals';
+import { goalBaselineMakes, goalProgress, todayMakes } from '../goals';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -52,6 +52,54 @@ describe('todayMakes', () => {
   it('treats a missing makes value as 0', () => {
     const rows = [{ startedAt: localMs(2026, 6, 3, 9, 0), makes: undefined }];
     expect(todayMakes(rows, now)).toBe(0);
+  });
+});
+
+describe('goalBaselineMakes', () => {
+  const now = localMs(2026, 6, 3, 15, 0); // 2026-07-03 15:00 local
+
+  it('excludes the row whose id matches excludeSessionId', () => {
+    const rows = [
+      { id: 1, startedAt: localMs(2026, 6, 3, 9, 0), makes: 5 },
+      { id: 2, startedAt: localMs(2026, 6, 3, 11, 30), makes: 3 },
+    ];
+    expect(goalBaselineMakes(rows, now, 2)).toBe(5);
+  });
+
+  it('is identical to todayMakes when excludeSessionId is undefined', () => {
+    const rows = [
+      { id: 1, startedAt: localMs(2026, 6, 3, 9, 0), makes: 5 },
+      { id: 2, startedAt: localMs(2026, 6, 3, 11, 30), makes: 3 },
+      { id: 3, startedAt: localMs(2026, 6, 2, 20, 0), makes: 100 }, // yesterday
+    ];
+    expect(goalBaselineMakes(rows, now)).toBe(todayMakes(rows, now));
+    expect(goalBaselineMakes(rows, now)).toBe(8);
+  });
+
+  it('excludes nothing when excludeSessionId matches no row', () => {
+    const rows = [
+      { id: 1, startedAt: localMs(2026, 6, 3, 9, 0), makes: 5 },
+      { id: 2, startedAt: localMs(2026, 6, 3, 11, 30), makes: 3 },
+    ];
+    expect(goalBaselineMakes(rows, now, 999)).toBe(8);
+  });
+
+  it('composes exclusion with the same-local-day filter', () => {
+    const rows = [
+      { id: 1, startedAt: localMs(2026, 6, 3, 9, 0), makes: 5 },
+      { id: 2, startedAt: localMs(2026, 6, 3, 11, 30), makes: 3 }, // excluded by id
+      { id: 3, startedAt: localMs(2026, 6, 2, 20, 0), makes: 100 }, // excluded by date
+    ];
+    expect(goalBaselineMakes(rows, now, 2)).toBe(5);
+  });
+
+  it('never excludes rows without an id', () => {
+    const rows = [
+      { startedAt: localMs(2026, 6, 3, 9, 0), makes: 4 },
+      { id: 7, startedAt: localMs(2026, 6, 3, 11, 30), makes: 3 },
+    ];
+    expect(goalBaselineMakes(rows, now, 7)).toBe(4);
+    expect(goalBaselineMakes(rows, now, 4)).toBe(7);
   });
 });
 

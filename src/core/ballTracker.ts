@@ -53,6 +53,14 @@ const BLUR_STREAK_MIN_DIAMETERS_PER_FRAME = 2;
 const NOMINAL_FRAME_DT = 1 / 30;
 
 /**
+ * Max wall-clock gap (seconds) between successive corridor points for the
+ * capsule test to bridge them. Older last-points fall back to the plain
+ * point-in-tube test — a segment across a long detection gap would sweep
+ * far more court than the corridor prior justifies.
+ */
+const CORRIDOR_CAPSULE_MAX_GAP_SEC = 0.35;
+
+/**
  * EMA weight of the newest inter-step interval when tracking the mean sample
  * cadence. Low (0.1) so a single long gap (occlusion, a dropped frame) barely
  * moves the estimate — the estimate must reflect the DEVICE'S steady fps, not
@@ -82,6 +90,24 @@ interface Candidate {
   det: Detection;
   cx: number;
   cy: number;
+}
+
+/** Distance from point (px,py) to segment (ax,ay)-(bx,by). Degenerate segment = point distance. */
+export function distToSegment(
+  px: number,
+  py: number,
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+): number {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq <= 0) return Math.hypot(px - ax, py - ay);
+  const u = ((px - ax) * dx + (py - ay) * dy) / lenSq;
+  const uc = u < 0 ? 0 : u > 1 ? 1 : u;
+  return Math.hypot(px - (ax + uc * dx), py - (ay + uc * dy));
 }
 
 /**
@@ -143,6 +169,20 @@ export class BallTracker {
    * the track died at release is exactly its job.
    */
   private releaseSeed: { x: number; y: number; t: number } | null = null;
+
+  /**
+   * Previous frame's flight-corridor point (+ tube radius, camera seconds),
+   * for the capsule test in pickCandidate. Like releaseSeed this is an
+   * EXTERNAL prior independent of the track, so it survives resetTrack() and
+   * is cleared only by reset(). lastCorridorT = -Infinity means "none yet".
+   */
+  private lastCorridorX = 0;
+
+  private lastCorridorY = 0;
+
+  private lastCorridorTubeR = 0;
+
+  private lastCorridorT = Number.NEGATIVE_INFINITY;
 
   /**
    * Scene-light profile from the pipeline (see setLightProfile). An
@@ -209,6 +249,15 @@ export class BallTracker {
     this.pruneStale(t);
 
     const candidate = this.pickCandidate(frame, hoopRoi, corridor ?? null);
+    // Record this frame's corridor point only AFTER pickCandidate has used
+    // it — the capsule spans the PREVIOUS and CURRENT points, so recording
+    // first would collapse the segment to a point.
+    if (corridor != null) {
+      this.lastCorridorX = corridor.p.x;
+      this.lastCorridorY = corridor.p.y;
+      this.lastCorridorTubeR = corridor.tubeR;
+      this.lastCorridorT = t;
+    }
     if (candidate !== null) {
       return this.accept(candidate, t);
     }
@@ -330,6 +379,7 @@ export class BallTracker {
     this.history.length = 0;
     this.frameIndex = 0;
     this.releaseSeed = null;
+    this.lastCorridorT = Number.NEGATIVE_INFINITY;
     // Cadence estimate survives a track drop (resetTrack) — the device fps
     // doesn't change when a track dies — but a full reset() is a new session,
     // so re-seed it to the nominal interval.
@@ -354,8 +404,11 @@ export class BallTracker {
 
   /**
    * Extrapolates the current Kalman state to time `t` WITHOUT mutating the
-   * filter (constant-velocity read-only projection, used for candidate
-   * weighting and the blur-streak gate).
+   * filter (read-only projection, used for candidate weighting and the
+   * blur-streak gate). Physics-correct coast: the Kalman already knows
+   * gravity; the cheap projection should too, so candidate weighting and the
+   * blur-streak axis stay honest during descent. DETECTION-side only — the
+   * FSM judges the same raw ball.
    */
   private projectStateTo(t: number): KalmanEstimate | null {
     if (!this.kalman.initialized) return null;
@@ -365,7 +418,13 @@ export class BallTracker {
       this.lastSampleT !== null && t > this.lastSampleT
         ? t - this.lastSampleT
         : 0;
-    return { x: s.x + s.vx * dt, y: s.y + s.vy * dt, vx: s.vx, vy: s.vy };
+    const g = this.gravityPxPerSec2;
+    return {
+      x: s.x + s.vx * dt,
+      y: s.y + s.vy * dt + 0.5 * g * dt * dt,
+      vx: s.vx,
+      vy: s.vy + g * dt,
+    };
   }
 
   /** Inter-frame interval used to convert px/s speeds to px/frame. */
@@ -435,9 +494,22 @@ export class BallTracker {
       // no live track — the corridor is the locality that trackFresh's jump gate
       // provides, so a faint mid-arc ball keeps the flight alive across the WHOLE
       // frame. This is the standing relaxation the arc lacked away from the rim.
+      // Capsule between successive corridor points closes the low-fps gap where
+      // a fast ball lands between two per-frame tube tests; still a score-floor
+      // relaxation only — never feeds judgment.
       const inCorridor =
         corridor !== null &&
-        Math.hypot(center.x - corridor.p.x, center.y - corridor.p.y) <= corridor.tubeR;
+        (t - this.lastCorridorT <= CORRIDOR_CAPSULE_MAX_GAP_SEC
+          ? distToSegment(
+              center.x,
+              center.y,
+              this.lastCorridorX,
+              this.lastCorridorY,
+              corridor.p.x,
+              corridor.p.y,
+            ) <= Math.max(corridor.tubeR, this.lastCorridorTubeR)
+          : Math.hypot(center.x - corridor.p.x, center.y - corridor.p.y) <=
+            corridor.tubeR);
       // Cold-acquisition floor: relaxed to ballScoreMinDark in genuinely
       // DARK scenes only (see setLightProfile) — a real low-light ball
       // scores under the 0.2 open-court gate, so no track ever started.

@@ -384,6 +384,15 @@ export default function SessionDetailScreen() {
               sessionId={session.id}
               unsureCount={unsureCount}
               onVerdict={onRecheckVerdict}
+              unsureShotIndexes={record.shots
+                .filter((s) => s.outcome === 'unsure' && s.corrected !== true)
+                .map((s) => s.id)}
+              onManualCorrect={(shotIndex, outcome) => {
+                const s = record.shots.find((x) => x.id === shotIndex);
+                // No corrected=false here: a hand triage is a user edit and
+                // gets the Edited badge (record.correct defaults corrected).
+                if (s) record.correct(s, outcome);
+              }}
               style={{ marginTop: space.md }}
             />
           )}

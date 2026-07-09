@@ -455,6 +455,10 @@ export class ShotFsm {
   }
 
   private canArm(input: FsmFrameInput, ball: TrackedBall): ArmVia | null {
+    // Multi-ball / rim-drift hold: SUPPRESSION-ONLY. May refuse a NEW arm;
+    // never touches a live attempt (step() only reaches here from IDLE) and
+    // absent behaves exactly like false. See multiBallGuard.ts.
+    if (input.armLockout) return null;
     // Shot cooldown (redundant with COOLDOWN phase gating, kept as a guard).
     if (input.t < this.lastResolveT + SHOT_FSM.shotCooldownSec) return null;
     // Putback guard: after a rim-bounce resolve, hold arming a little longer
