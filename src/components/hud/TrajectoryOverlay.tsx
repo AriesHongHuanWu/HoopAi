@@ -190,13 +190,20 @@ export function TrajectoryOverlay({
   });
 
   // Seconds since the current sample landed, clamped to the cap. Only glide
-  // while a shot is live — a settled/lost ball holds its last position.
+  // while a shot is live — a settled/lost ball holds its last position. A
+  // PREDICTED (Kalman-coast) sample never glides: extrapolating a ball we can't
+  // actually see is exactly what made a lost ball "fall" across the screen.
   const extrapSec = useDerivedValue(() => {
     if (overlay.value.phase !== 'SHOT_LIVE') return 0;
+    if (overlay.value.ball?.predicted) return 0;
     const dt = (displayNowMs.value - sampleArrivalMs.value) / 1000;
     if (!(dt > 0)) return 0;
     return dt < MAX_EXTRAPOLATION_SEC ? dt : MAX_EXTRAPOLATION_SEC;
   });
+
+  // Fade factor for a coasting (predicted) ball — a lost ball reads as a faint
+  // "best guess", never a confident detection. Real detections draw full.
+  const predictedFade = useDerivedValue(() => (overlay.value.ball?.predicted ? 0.35 : 1));
 
   // --- ball comet ----------------------------------------------------------
   // Extrapolate in ANALYSIS px (x + vx·dt) BEFORE the *scale+offset view
@@ -223,9 +230,9 @@ export function TrajectoryOverlay({
   const haloR = useDerivedValue(() => ballR.value * 1.05);
   const bloomR = useDerivedValue(() => ballR.value * 1.6);
   const ballBloomOpacity = useDerivedValue(() =>
-    ballR.value > 0 ? (overlay.value.phase === 'SHOT_LIVE' ? 0.6 : 0.4) : 0,
+    ballR.value > 0 ? (overlay.value.phase === 'SHOT_LIVE' ? 0.6 : 0.4) * predictedFade.value : 0,
   );
-  const ballVisible = useDerivedValue(() => (ballR.value > 0 ? 1 : 0));
+  const ballVisible = useDerivedValue(() => (ballR.value > 0 ? predictedFade.value : 0));
 
   // Idle tracking reticle: a thin ring + four crosshair ticks around the ball,
   // shown only when no shot is live so a live comet stays clean.

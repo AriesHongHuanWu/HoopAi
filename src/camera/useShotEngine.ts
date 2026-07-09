@@ -121,7 +121,17 @@ export interface OverlayState {
    * extrapolates x+vx*dt each display frame. t is used only as a change key to
    * detect a new sample, never subtracted from the UI display clock.
    */
-  ball: { x: number; y: number; r: number; vx: number; vy: number; t: number } | null;
+  ball: {
+    x: number;
+    y: number;
+    r: number;
+    vx: number;
+    vy: number;
+    t: number;
+    /** True when this sample is a Kalman COAST (no fresh detection) — the HUD
+     *  draws it faded + frozen so a lost ball never reads as a real one. */
+    predicted: boolean;
+  } | null;
   rim: Box | null;
   /** Flattened x,y pairs of the live shot trajectory (analysis px). */
   traj: number[];
@@ -623,6 +633,9 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
                 vx: state.ball.vx,
                 vy: state.ball.vy,
                 t: state.ball.t,
+                // Coast flag — the HUD fades + freezes a predicted (no-detection)
+                // ball instead of drawing it as a real, gliding comet.
+                predicted: state.ball.predicted,
               }
             : null,
           rim: state.rim?.box ?? null,
