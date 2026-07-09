@@ -1,0 +1,24 @@
+{
+  "classes": [
+    "ball",
+    "rim",
+    "ball_in_basket",
+    "person"
+  ],
+  "num_classes": 4,
+  "train_input_size": [
+    640,
+    640
+  ],
+  "multiscale": [
+    416,
+    640
+  ],
+  "arch": "yolox_nano",
+  "recipe": "small-ball: multiscale 416-640, mosaic (0.1,2.0) p0.7, small-ball oversample (<0.25% rel-area, cap +30%), 7 epochs finetune",
+  "artifacts": {
+    "pth": "yolox_nano_sb_hoop.pth",
+    "onnx": [],
+    "tflite": []
+  }
+}
