@@ -1,8 +1,8 @@
 /**
  * Coach insights — pure aggregates over a CoachSession window that power the
- * coach tab's timeline, form-readiness meter and season strip. No I/O, no
- * wall clock: every timestamp is a parameter, so the module is deterministic
- * and unit-testable.
+ * coach tab's timeline, form-readiness meter, season strip and arc profile.
+ * No I/O, no wall clock: every timestamp is a parameter, so the module is
+ * deterministic and unit-testable.
  *
  * This module deliberately reuses weeklyReport's exported week helpers
  * (weekStart / weekEnd / weekLabel / sessionsInWeek / weekShootingScore)
@@ -11,6 +11,13 @@
  * building 4 full reports per render would burn the coach engine 4× for
  * nothing.
  */
+// Deliberate display-layer import: arcProfile must grade with EXACTLY the
+// band the live HUD grades with, and arcHudGeometry is dependency-free pure
+// math (no Skia/React/Reanimated), so core stays plain-jest testable.
+import {
+  ARC_ENTRY_IDEAL_MAX,
+  ARC_ENTRY_IDEAL_MIN,
+} from '../components/hud/arcHudGeometry';
 import type { CoachSession } from './coachEngine';
 import type { ResolvedShot } from './types';
 import {
@@ -224,5 +231,61 @@ export function seasonComparison(
     fgDeltaPts,
     attemptsDelta: recent.attempts - prior.attempts,
     sessionsDelta: recent.sessions - prior.sessions,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Arc profile
+// ---------------------------------------------------------------------------
+
+export interface ArcProfile {
+  /** Shots that carried a DETECTED entry angle — everything else is excluded. */
+  n: number;
+  /** Mean detected entry angle in degrees, null when n === 0. */
+  avgEntryDeg: number | null;
+  /** Fraction of n inside the ideal band (inclusive edges), null when n === 0. */
+  idealPct: number | null;
+  /** Fraction of n below the band, null when n === 0. */
+  flatPct: number | null;
+  /** Fraction of n above the band, null when n === 0. */
+  steepPct: number | null;
+}
+
+/**
+ * Split of DETECTED entry angles into flat / ideal / steep against the same
+ * band the live HUD grades with ([ARC_ENTRY_IDEAL_MIN, ARC_ENTRY_IDEAL_MAX]
+ * inclusive — arcQuality in src/components/hud/arcHudGeometry.ts), so the
+ * coach tab's Arc Profile card can never disagree with the on-court readout.
+ * Shots without a detected entry angle (null, or a non-finite value from bad
+ * persisted data) are excluded from n entirely: this is a read of what the
+ * camera measured, never a claim about every shot taken. Display aggregate
+ * only — nothing here feeds arming, judging, or make/miss.
+ */
+export function arcProfile(
+  shots: readonly { entryAngleDeg: number | null }[],
+): ArcProfile {
+  let n = 0;
+  let sum = 0;
+  let flat = 0;
+  let ideal = 0;
+  let steep = 0;
+  for (const shot of shots) {
+    const deg = shot.entryAngleDeg;
+    if (deg == null || !Number.isFinite(deg)) continue;
+    n += 1;
+    sum += deg;
+    if (deg < ARC_ENTRY_IDEAL_MIN) flat += 1;
+    else if (deg > ARC_ENTRY_IDEAL_MAX) steep += 1;
+    else ideal += 1;
+  }
+  if (n === 0) {
+    return { n: 0, avgEntryDeg: null, idealPct: null, flatPct: null, steepPct: null };
+  }
+  return {
+    n,
+    avgEntryDeg: sum / n,
+    idealPct: ideal / n,
+    flatPct: flat / n,
+    steepPct: steep / n,
   };
 }

@@ -2,8 +2,10 @@
  * Coach's Corner — the multi-session coaching room.
  *
  * A weekly-report hero card (broadcast box-score idiom, like SummaryHero) with
- * a Mon–Sun week selector, then the ranked coach findings for that week:
- * severity-toned cards carrying the user's OWN evidence numbers and a
+ * a Mon–Sun week selector, then the insight cards in narrative order — arc
+ * profile, four-week timeline, season strip, NBA twin, weekly plan (+ Form
+ * Studio 3D promo), form readiness — then the ranked coach findings for that
+ * week: severity-toned cards carrying the user's OWN evidence numbers and a
  * prescription chip. "Share my week" pushes the report through the existing
  * ShareCard story pipeline.
  *
@@ -19,6 +21,7 @@ import { Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-na
 import Animated, { FadeInDown, useReducedMotion } from 'react-native-reanimated';
 
 import { shareCoachCard, shareWeekCard } from '@/components/ShareCard';
+import { ArcProfileCard } from '@/components/coach/ArcProfileCard';
 import { CoachTimelineCard } from '@/components/coach/CoachTimelineCard';
 import { FormReadinessCard } from '@/components/coach/FormReadinessCard';
 import { SeasonStrip } from '@/components/coach/SeasonStrip';
@@ -34,7 +37,7 @@ import {
   type Trend,
   type WeeklyAssignment,
 } from '@/core/coachEngine';
-import { coachTimeline, formReadiness, seasonComparison } from '@/core/coachInsights';
+import { arcProfile, coachTimeline, formReadiness, seasonComparison } from '@/core/coachInsights';
 import { getDrill } from '@/core/drills';
 import {
   drillPrescription,
@@ -561,6 +564,22 @@ export default function CoachScreen() {
     [sessions, activeWeek],
   );
 
+  // Arc profile — the release-arc signature over the last ~15 sessions
+  // (sessions come newest-first from listSessions). Deliberately NOT
+  // week-scoped: the arc read is a habit, and it should hold steady while the
+  // user flips between weeks. arcProfile is pure (band 43–52°).
+  const arc = useMemo(
+    () => arcProfile(sessions.slice(0, 15).flatMap((s) => s.shots)),
+    [sessions],
+  );
+
+  // Timeline emptiness — with 3+ of the 4 weeks blank, the bars need one
+  // gentle line of context so a new user reads "calendar", not "broken chart".
+  const timelineMostlyEmpty = useMemo(
+    () => timeline.filter((w) => w.sessions === 0).length >= 3,
+    [timeline],
+  );
+
   // Pose/form data coverage across the whole scan window (not week-scoped).
   const readiness = useMemo(() => formReadiness(sessions.flatMap((s) => s.shots)), [sessions]);
 
@@ -613,45 +632,78 @@ export default function CoachScreen() {
 
             <WeeklyHero report={report} reducedMotion={reducedMotion} />
 
+            {/* Arc profile — the release-arc signature over recent sessions.
+                The card owns its own n<5 "charging" state, so it mounts from
+                the very first measured shot. */}
+            {arc.n >= 1 && <ArcProfileCard profile={arc} entering={cardEnter(1)} />}
+
             {/* Four-week timeline — tap a bar to jump the week selector */}
             {timeline.some((w) => w.sessions > 0) && (
-              <CoachTimelineCard
-                weeks={timeline}
-                activeStartMs={activeWeek!.startMs}
-                onPickWeek={(ms) => {
-                  const i = weeks.findIndex((w) => w.startMs === ms);
-                  if (i >= 0) setWeekIndex(i);
-                }}
-                entering={cardEnter(1)}
-              />
+              <View style={styles.timelineBlock}>
+                <CoachTimelineCard
+                  weeks={timeline}
+                  activeStartMs={activeWeek!.startMs}
+                  onPickWeek={(ms) => {
+                    const i = weeks.findIndex((w) => w.startMs === ms);
+                    if (i >= 0) setWeekIndex(i);
+                  }}
+                  entering={cardEnter(2)}
+                />
+                {timelineMostlyEmpty && (
+                  <Text style={styles.timelineHint}>
+                    Your timeline fills in as the weeks stack up.
+                  </Text>
+                )}
+              </View>
             )}
 
-            {/* Season strip — last 28 days vs the 28 before */}
-            {season != null && season.prior.attempts > 0 && (
-              <SeasonStrip comparison={season} entering={cardEnter(2)} />
+            {/* Season strip — shown whenever EITHER 28-day window has data */}
+            {season != null && (season.recent.attempts > 0 || season.prior.attempts > 0) && (
+              <SeasonStrip comparison={season} entering={cardEnter(3)} />
             )}
 
             {/* NBA twin — who you shoot like this week + what to steal */}
-            {twin != null && <NbaTwinCard match={twin} entering={cardEnter(3)} />}
+            {twin != null && <NbaTwinCard match={twin} entering={cardEnter(4)} />}
 
             {/* This week's plan — the top fixes + drills to groove them */}
             {plan.length > 0 && (
-              <WeeklyPlanCard plan={plan} levels={planLevels} entering={cardEnter(4)} />
+              <WeeklyPlanCard plan={plan} levels={planLevels} entering={cardEnter(5)} />
             )}
+
+            {/* Form Studio 3D promo — the upgrade's flagship, one tap away */}
+            <Card entering={cardEnter(6)}>
+              <Row gap={space.sm} style={styles.promoHead}>
+                <Ionicons name="cube-outline" size={18} color={color.accent} />
+                <Text style={styles.promoTitle} numberOfLines={1}>
+                  See your shooting form in 3D
+                </Text>
+                <Chip label="NEW" tone="accent" compact />
+              </Row>
+              <Text style={styles.body}>
+                Your tracked shots, rebuilt as a 3D skeleton you can orbit from any angle.
+              </Text>
+              <PillButton
+                label="Open Form Studio"
+                icon="cube-outline"
+                variant="ghost"
+                onPress={() => router.push('/formstudio')}
+                style={styles.promoBtn}
+              />
+            </Card>
 
             {/* Form-data readiness — how much of the coach's form read is fed */}
             <FormReadinessCard
               readiness={readiness}
               onOpenSettings={() => router.push('/settings')}
               onOpenFormStudio={() => router.push('/formstudio')}
-              entering={cardEnter(5)}
+              entering={cardEnter(7)}
             />
 
             {/* Findings */}
             <View>
               <SectionEyebrow icon="clipboard-outline">The read on your week</SectionEyebrow>
               {findings.length === 0 ? (
-                <Card entering={cardEnter(1)}>
+                <Card entering={cardEnter(8)}>
                   <Text style={styles.body}>
                     {report.attempts < 8
                       ? 'A few more shots this week and the coach will have enough to break things down.'
@@ -689,7 +741,7 @@ export default function CoachScreen() {
             )}
 
             {/* Deeper dive hook */}
-            <Card entering={cardEnter(2)}>
+            <Card entering={cardEnter(9)}>
               <SectionEyebrow icon="flask-outline">Go deeper</SectionEyebrow>
               <Text style={styles.body}>
                 Coach's Corner reads across your whole week. For a single session — make-vs-miss
@@ -838,6 +890,31 @@ const styles = StyleSheet.create({
     ...type.caption,
     color: color.textFaint,
     letterSpacing: 1,
+  },
+
+  // Timeline block (card + optional sparse-history hint hugging it)
+  timelineBlock: {
+    gap: space.xs,
+  },
+  timelineHint: {
+    ...type.caption,
+    color: color.textFaint,
+    paddingHorizontal: space.xs,
+  },
+
+  // Form Studio 3D promo
+  promoHead: {
+    alignItems: 'center',
+  },
+  promoTitle: {
+    ...type.heading,
+    color: color.text,
+    flex: 1,
+    minWidth: 0,
+  },
+  promoBtn: {
+    marginTop: space.md,
+    alignSelf: 'flex-start',
   },
 
   // Week selector

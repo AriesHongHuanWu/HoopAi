@@ -1,8 +1,11 @@
 /**
  * Coach insights tests — 4-week timeline (order, empty weeks, DST-safe week
- * walk, arithmetic), form-readiness levels, and the 28-day season comparison.
+ * walk, arithmetic), form-readiness levels, the 28-day season comparison,
+ * and the detected-entry-angle arc profile.
  */
+import { arcQuality } from '../../components/hud/arcHudGeometry';
 import {
+  arcProfile,
   coachTimeline,
   formReadiness,
   seasonComparison,
@@ -252,5 +255,71 @@ describe('coachInsights — seasonComparison', () => {
     expect(c.fgDeltaPts).toBeNull();
     expect(c.attemptsDelta).toBe(0);
     expect(c.sessionsDelta).toBe(0);
+  });
+});
+
+describe('coachInsights — arcProfile', () => {
+  const EMPTY = {
+    n: 0,
+    avgEntryDeg: null,
+    idealPct: null,
+    flatPct: null,
+    steepPct: null,
+  };
+
+  test('empty input yields n 0 and all-null aggregates', () => {
+    expect(arcProfile([])).toEqual(EMPTY);
+  });
+
+  test('shots without a detected entry angle contribute nothing', () => {
+    expect(
+      arcProfile([{ entryAngleDeg: null }, { entryAngleDeg: null }]),
+    ).toEqual(EMPTY);
+  });
+
+  test('mixed angles: nulls and non-finite values excluded, average and split hand-computed', () => {
+    const p = arcProfile([
+      { entryAngleDeg: 38 }, // flat
+      { entryAngleDeg: 45 }, // ideal
+      { entryAngleDeg: 50 }, // ideal
+      { entryAngleDeg: 61 }, // steep
+      { entryAngleDeg: null }, // excluded
+      { entryAngleDeg: Number.NaN }, // excluded (defensive: bad persisted data)
+    ]);
+    expect(p.n).toBe(4);
+    expect(p.avgEntryDeg).toBeCloseTo((38 + 45 + 50 + 61) / 4, 5);
+    expect(p.flatPct).toBeCloseTo(1 / 4, 5);
+    expect(p.idealPct).toBeCloseTo(2 / 4, 5);
+    expect(p.steepPct).toBeCloseTo(1 / 4, 5);
+  });
+
+  test('band edges 43 and 52 are ideal (inclusive); just outside grades flat / steep', () => {
+    const edges = arcProfile([{ entryAngleDeg: 43 }, { entryAngleDeg: 52 }]);
+    expect(edges.n).toBe(2);
+    expect(edges.idealPct).toBe(1);
+    expect(edges.flatPct).toBe(0);
+    expect(edges.steepPct).toBe(0);
+
+    const outside = arcProfile([{ entryAngleDeg: 42.9 }, { entryAngleDeg: 52.1 }]);
+    expect(outside.idealPct).toBe(0);
+    expect(outside.flatPct).toBeCloseTo(0.5, 5);
+    expect(outside.steepPct).toBeCloseTo(0.5, 5);
+  });
+
+  test('grading agrees with the HUD arcQuality band for every category', () => {
+    for (const deg of [30, 42.99, 43, 47.5, 52, 52.01, 70]) {
+      const p = arcProfile([{ entryAngleDeg: deg }]);
+      const q = arcQuality(deg);
+      expect(p.flatPct).toBe(q === 'flat' ? 1 : 0);
+      expect(p.idealPct).toBe(q === 'ideal' ? 1 : 0);
+      expect(p.steepPct).toBe(q === 'steep' ? 1 : 0);
+    }
+  });
+
+  test('accepts ResolvedShot directly (structural param)', () => {
+    const p = arcProfile([mkShot('make', { entryAngleDeg: 45 }), mkShot('miss')]);
+    expect(p.n).toBe(1);
+    expect(p.avgEntryDeg).toBe(45);
+    expect(p.idealPct).toBe(1);
   });
 });

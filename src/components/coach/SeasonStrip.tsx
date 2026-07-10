@@ -1,14 +1,17 @@
 /**
- * SeasonStrip — last 4 weeks vs the 4 before, as a broadcast box-score strip
- * of paired value + delta cells (FG% / shots / sessions).
+ * SeasonStrip — the last 4 weeks as a broadcast box-score strip (FG% / shots
+ * / sessions), with head-to-head delta cells against the 4 weeks before when
+ * that prior window actually has attempts.
  *
  * Presentational only: the comparison comes from seasonComparison()
  * (src/core/coachInsights.ts). Deltas always carry a glyph (▲/▼/'level')
  * alongside color — never color alone (colorblind rule).
  *
- * The caller guarantees comparison.prior.attempts > 0 (coach.tsx only renders
- * this strip when there is a prior block to compare against), so there is no
- * empty-state branch here.
+ * When the prior 28-day block is empty (new users with under ~5 weeks of
+ * history) the strip still renders the current 28-day numbers but drops every
+ * delta and shows an honest unlock line instead. Prior numbers are NEVER
+ * faked or imputed as a zero baseline — a "▲ +40 shots" against nothing would
+ * be a lie.
  */
 import { Ionicons } from '@expo/vector-icons';
 import type { ComponentProps } from 'react';
@@ -55,6 +58,13 @@ function countDeltaVisual(delta: number): DeltaVisual {
   return { text: 'level', fg: color.textFaint, spoken: 'level' };
 }
 
+/**
+ * Copy for the no-prior unlock line. Fixed wording: SeasonComparison carries
+ * no history-extent field, so an exact "N more weeks" countdown cannot be
+ * computed honestly from these props.
+ */
+const UNLOCK_COPY = 'Keep logging sessions — the head-to-head unlocks after 4 more weeks.';
+
 export function SeasonStrip({
   comparison,
   entering,
@@ -63,21 +73,24 @@ export function SeasonStrip({
   entering?: ComponentProps<typeof Card>['entering'];
 }) {
   const { recent } = comparison;
+  const hasPrior = comparison.prior.attempts > 0;
   const fgText = recent.fgPct != null ? `${Math.round(recent.fgPct * 100)}%` : '—';
-  const fgDelta = fgDeltaVisual(comparison.fgDeltaPts);
-  const shotsDelta = countDeltaVisual(comparison.attemptsDelta);
-  const sessionsDelta = countDeltaVisual(comparison.sessionsDelta);
+  const fgDelta = hasPrior ? fgDeltaVisual(comparison.fgDeltaPts) : null;
+  const shotsDelta = hasPrior ? countDeltaVisual(comparison.attemptsDelta) : null;
+  const sessionsDelta = hasPrior ? countDeltaVisual(comparison.sessionsDelta) : null;
 
-  const a11y =
-    `Last four weeks versus the four before: field goals ${fgText}` +
-    `${fgDelta ? `, ${fgDelta.spoken}` : ''}, ` +
-    `${recent.attempts} shots, ${shotsDelta.spoken}, ` +
-    `${recent.sessions} sessions, ${sessionsDelta.spoken}.`;
+  const a11y = hasPrior
+    ? `Last four weeks versus the four before: field goals ${fgText}` +
+      `${fgDelta ? `, ${fgDelta.spoken}` : ''}, ` +
+      `${recent.attempts} shots, ${shotsDelta!.spoken}, ` +
+      `${recent.sessions} sessions, ${sessionsDelta!.spoken}.`
+    : `Last four weeks: field goals ${fgText}, ${recent.attempts} shots, ` +
+      `${recent.sessions} sessions. ${UNLOCK_COPY}`;
 
   return (
     <Card entering={entering}>
-      <SectionEyebrow icon="swap-horizontal-outline">
-        Last 4 weeks vs the 4 before
+      <SectionEyebrow icon={hasPrior ? 'swap-horizontal-outline' : 'calendar-outline'}>
+        {hasPrior ? 'Last 4 weeks vs the 4 before' : 'Last 4 weeks'}
       </SectionEyebrow>
 
       <View style={styles.strip} accessible accessibilityLabel={a11y}>
@@ -90,14 +103,25 @@ export function SeasonStrip({
         <View style={styles.divider} />
         <View style={styles.col}>
           <StatNumber value={String(recent.attempts)} label="shots" size="medium" />
-          <Text style={[styles.delta, { color: shotsDelta.fg }]}>{shotsDelta.text}</Text>
+          {shotsDelta != null && (
+            <Text style={[styles.delta, { color: shotsDelta.fg }]}>{shotsDelta.text}</Text>
+          )}
         </View>
         <View style={styles.divider} />
         <View style={styles.col}>
           <StatNumber value={String(recent.sessions)} label="sessions" size="medium" />
-          <Text style={[styles.delta, { color: sessionsDelta.fg }]}>{sessionsDelta.text}</Text>
+          {sessionsDelta != null && (
+            <Text style={[styles.delta, { color: sessionsDelta.fg }]}>{sessionsDelta.text}</Text>
+          )}
         </View>
       </View>
+
+      {!hasPrior && (
+        <Row gap={6} style={styles.unlockRow}>
+          <Ionicons name="lock-closed-outline" size={12} color={color.textFaint} />
+          <Text style={styles.unlockText}>{UNLOCK_COPY}</Text>
+        </Row>
+      )}
     </Card>
   );
 }
@@ -134,5 +158,15 @@ const styles = StyleSheet.create({
     ...type.micro,
     fontVariant: ['tabular-nums'],
     marginTop: space.xs,
+  },
+
+  // Honest unlock line shown while the prior 28-day block is still empty.
+  unlockRow: {
+    marginTop: space.md,
+  },
+  unlockText: {
+    ...type.caption,
+    color: color.textFaint,
+    flex: 1,
   },
 });

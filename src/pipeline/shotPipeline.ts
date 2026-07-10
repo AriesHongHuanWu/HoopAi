@@ -13,6 +13,7 @@ import { DETECTION, FLIGHT, RIM, SHOT_FSM, scaleFrameGate } from '../core/config
 import { buildArcSnapshot } from '../core/arcSnapshot';
 import { BallTracker } from '../core/ballTracker';
 import { FlightArc } from '../core/flightArc';
+import { apexAboveRim, DribbleDetector } from '../core/dribbleGate';
 import { MultiBallGuard } from '../core/multiBallGuard';
 import { estimateShotValue } from '../core/court';
 import { FormAnalyzer, coachingTips } from '../core/formAnalysis';
@@ -166,6 +167,16 @@ export class ShotPipeline {
   /** Live copy of config.FLIGHT.useFlightArc, toggled from Settings so the user
    *  can disable full-flight tracking without a rebuild (escape hatch). */
   private useFlight: boolean = FLIGHT.useFlightArc;
+  /**
+   * Dribble suppression gate — VISUAL ONLY (honesty: drawing != judging). A
+   * dribble bounce fits a parabola just fine, so the global FlightArc would
+   * happily paint a confident flight line / landing ghost / snapped ball over
+   * a non-shot. The detector watches tracked-ball vertical motion for the
+   * bounce signature; its verdict suppresses un-armed flight DRAWING below
+   * and nothing else. It never touches FsmFrameInput / fsm.step — the
+   * make/miss judgment path is byte-identical with the gate on or off.
+   */
+  private readonly dribble = new DribbleDetector();
   private readonly rimLock = new RimLock({ lockHoldSec: RIM.lockHoldSec });
   /**
    * Multi-ball warmup guard (suppression-only): while several confident balls
@@ -444,6 +455,10 @@ export class ShotPipeline {
       // Re-lock moved the (in-place mutated) geometry: recompute the FSM's
       // cached zones — reference equality can never reveal a hard re-lock.
       if (rim) this.fsm?.setRim(rim);
+      // The dribble gate's bounce state is rim-relative — a moved rim makes
+      // it stale. Resetting errs in the permissive direction: an inactive
+      // detector suppresses nothing, so a re-lock can never blank a real shot.
+      this.dribble.reset();
     }
 
     if (this.rimLock.driftDetected && !this.wasDrifted) {
@@ -496,6 +511,15 @@ export class ShotPipeline {
         this.flightArc.reset(frame.t);
       }
       this.flightArc.push(ball);
+    }
+    // Dribble-gate feed (visual-only): every tracked sample, honestly flagged
+    // real vs Kalman-coasted, plus the current rim for scale. Consulted below
+    // solely to suppress un-armed flight DRAWING; the FSM path never reads it.
+    if (ball) {
+      this.dribble.update(
+        { t: ball.t, cy: ball.cy, vy: ball.vy, real: !ball.predicted },
+        this.lastRim,
+      );
     }
 
     // Form analysis (opt-in): feed each frame's pose to the analyzer so it can
@@ -591,6 +615,43 @@ export class ShotPipeline {
     // holding it could deliver a seconds-stale event at a later rim lock.
     this.pendingReleaseT = null;
 
+    // Confident, physically-plausible global arc (if any) — powers the drawn
+    // full-flight line, the landing-ghost fallback and the occlusion snap
+    // below, plus the dribble gate's apex test. Computed ONCE, after fsm.step,
+    // so it can never feed judgment. (Hoisted above the landing prediction so
+    // the gate is known before any visual output is produced.)
+    let arcFit: ArcFit | null = null;
+    if (this.useFlight && this.lastRim) {
+      const floor = scaleFrameGate(
+        MIN_FIT_SAMPLES,
+        this.tracker.estimatedStepDt(),
+        ABS_MIN_FIT_SAMPLES,
+      );
+      const gfit = this.flightArc.fit(floor);
+      if (
+        gfit &&
+        gfit.ya > 0 &&
+        gfit.tMax > gfit.tMin &&
+        gfit.r2y >= FLIGHT.corridorMinR2yLoose &&
+        plausibleArcCurvature(gfit.ya, this.lastRim.box.width, FLIGHT.maxArcYaRimWidths)
+      ) {
+        arcFit = gfit;
+      }
+    }
+
+    // Dribble visual gate (honesty: drawing != judging). While the detector
+    // sees a bounce pattern — or the fitted apex never even nears the rim
+    // plane — the un-armed flight visuals are suppressed: an honest blank
+    // beats a confident parabola over a dribble. Never fires during SHOT_LIVE
+    // (an armed real shot is not a dribble, so live drawing is untouched) and
+    // feeds nothing back into the FSM above.
+    const dribbleSuppress = suppressDribbleVisuals(
+      phase,
+      this.dribble.active,
+      arcFit,
+      this.lastRim,
+    );
+
     // Predicted landing: fit the live arc and extrapolate to the rim plane.
     // Cheap (O(n) over ≤48 samples, only while a shot is live) and it's what
     // powers the on-screen "this is where it's coming down" ghost target.
@@ -637,8 +698,11 @@ export class ShotPipeline {
     // shaky arc shows nothing rather than a wrong marker. Off-path untouched:
     // the branch is skipped entirely when full-flight tracking is off or the
     // live fit already produced a prediction.
+    // (Dribble gate: redundant today — the gate never fires in SHOT_LIVE —
+    // but the guard keeps this ghost gated if its phase condition ever widens.)
     if (
       predictedLanding === null &&
+      !dribbleSuppress &&
       this.useFlight &&
       phase === 'SHOT_LIVE' &&
       this.lastRim
@@ -681,29 +745,10 @@ export class ShotPipeline {
     // it from the first observed sample. STRICTLY visual: it never arms a shot
     // or feeds make/miss (drawing != judging). Confidence + plausible-curvature
     // gated, so a rattle (huge ya) or a shaky fit draws nothing, not a bad line.
-    // Confident, physically-plausible global arc (if any) — powers BOTH the
-    // drawn full-flight line and the occlusion snap below. Computed once.
-    let arcFit: ArcFit | null = null;
-    if (this.useFlight && this.lastRim) {
-      const floor = scaleFrameGate(
-        MIN_FIT_SAMPLES,
-        this.tracker.estimatedStepDt(),
-        ABS_MIN_FIT_SAMPLES,
-      );
-      const gfit = this.flightArc.fit(floor);
-      if (
-        gfit &&
-        gfit.ya > 0 &&
-        gfit.tMax > gfit.tMin &&
-        gfit.r2y >= FLIGHT.corridorMinR2yLoose &&
-        plausibleArcCurvature(gfit.ya, this.lastRim.box.width, FLIGHT.maxArcYaRimWidths)
-      ) {
-        arcFit = gfit;
-      }
-    }
-
+    // Dribble-gated (arcFit itself is computed above the landing prediction):
+    // while dribbleSuppress holds, emit NO path at all.
     const fullFlightPath: number[] = [];
-    if (arcFit) {
+    if (arcFit && !dribbleSuppress) {
       const span = arcFit.tMax - arcFit.tMin;
       const K = 16;
       for (let i = 0; i <= K; i++) {
@@ -722,7 +767,10 @@ export class ShotPipeline {
     // HUD glide follows the real flight instead of flying off. The FSM already
     // ran above on the RAW ball, so make/miss is completely untouched by this.
     let displayBall = ball;
-    if (arcFit && ball && ball.predicted) {
+    // Dribble-gated: during a dribble the RAW tracked ball passes through —
+    // snapping a bouncing ball onto a bogus parabola is exactly the fabricated
+    // motion this gate exists to prevent.
+    if (arcFit && !dribbleSuppress && ball && ball.predicted) {
       const p = evalArc(arcFit, ball.t);
       if (Number.isFinite(p.x) && Number.isFinite(p.y)) {
         displayBall = {
@@ -884,6 +932,7 @@ export class ShotPipeline {
     this.flightArc.reset(0);
     this.rimLock.reset();
     this.multiBall.reset();
+    this.dribble.reset();
     // lockGeneration is monotonic across resets by design — re-arm the watch.
     this.lastLockGen = -1;
     this.form = null;
@@ -978,6 +1027,9 @@ export class ShotPipeline {
   private adoptRim(rim: RimGeometry, frame: { width: number; height: number }): void {
     const first = this.lastRim == null;
     this.lastRim = rim;
+    // Rim (re-)adoption starts a fresh session context for the visual dribble
+    // gate — same per-session lifecycle as the FSM's rim-scaled zones below.
+    this.dribble.reset();
     if (this.fsm) {
       this.fsm.setRim(rim);
     } else {
@@ -1068,6 +1120,39 @@ function bestPerson(
  */
 export function multiBallCountGate(coldGate: number | null): number {
   return Math.max(DETECTION.ballScoreMin, coldGate ?? 0);
+}
+
+/**
+ * Apex margin (rim widths BELOW the rim plane, +y down) for the dribble
+ * gate's "could this arc even be a shot" test: an arc whose fitted apex never
+ * climbs within 2 rim widths of the rim plane cannot be a shot at THIS hoop,
+ * so drawing it as one would be a fabrication. The gate module is permissive
+ * by contract — no fit or no rim means the test passes and nothing is
+ * suppressed (never blank a real shot for lack of information).
+ */
+export const DRIBBLE_APEX_MARGIN_RIM_WIDTHS = 2;
+
+/**
+ * Pure seam for the dribble visual gate (exported for tests): should the
+ * UN-ARMED flight visuals — fullFlightPath, the global-arc landing-ghost
+ * fallback, the display-ball parabola snap — be suppressed this frame?
+ *
+ * Honesty rationale: a dribble bounce fits a parabola just fine, so without
+ * this gate the HUD paints confident flight lines over non-shots. DRAWING
+ * only: the result never flows into FsmFrameInput or fsm.step, and while the
+ * FSM reports SHOT_LIVE the gate never fires — an armed real shot is not a
+ * dribble, so live-shot visuals draw exactly as before.
+ */
+export function suppressDribbleVisuals(
+  phase: ShotPhase,
+  detectorActive: boolean,
+  fit: { ya: number; yb: number; yc: number } | null,
+  rim: RimGeometry | null,
+): boolean {
+  if (phase === 'SHOT_LIVE') return false;
+  return (
+    detectorActive || !apexAboveRim(fit, rim, DRIBBLE_APEX_MARGIN_RIM_WIDTHS)
+  );
 }
 
 function maxScore(frame: FrameDetections, cls: 'ball_in_basket'): number {
