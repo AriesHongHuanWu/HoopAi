@@ -267,6 +267,30 @@ export interface SettingsState {
    */
   reappearance: boolean;
   /**
+   * Rattle-out make guard: stricter make confirmation. When the ball crosses
+   * the rim line in-span and the net twitches — but the ball is then SEEN
+   * bouncing/caroming back OUT instead of dropping cleanly through the hoop —
+   * the shot is held as 'unsure' instead of being counted as a make. Recovers
+   * accuracy on rim rattles and front-lip caroms that a net brush would
+   * otherwise miscount. Bread-ball-safe: it can only downgrade a make to
+   * unsure, never invent a miss, and it never touches a clean swish or a
+   * swish the net swallows. DEFAULT ON (safe error direction); this toggle is
+   * the escape hatch if it ever holds a real make on your setup. Takes effect
+   * at the next rim lock.
+   */
+  rattleGuard: boolean;
+  /**
+   * Settle window before a make is scored. When ON, the tracker waits a few
+   * frames (~0.13s) after the ball drops below the rim before deciding, so a
+   * LATE rim bounce-out — the ball dips in then pops back up over the rim and
+   * out — is caught and held as 'unsure' instead of being counted. Pairs with
+   * the rattle-out guard. Bread-ball-safe: it can only downgrade a make to
+   * unsure, never invent a miss, and a clean or net-swallowed swish (which
+   * never climbs back above the rim) is untouched. DEFAULT ON; this toggle is
+   * the escape hatch. Takes effect at the next rim lock.
+   */
+  settleWindow: boolean;
+  /**
    * Full-flight parabola tracking (src/core/flightArc.ts). A persistent arc
    * fitted over the whole shot gives the tracker a standing score-floor
    * relaxation along the predicted path, so a faint mid-arc ball keeps being
@@ -446,6 +470,8 @@ export const useSettings = create<SettingsState>()(
       nanoV2: false,
       courtRange: 'auto',
       reappearance: true,
+      rattleGuard: true,
+      settleWindow: true,
       useFlightArc: true,
       motionAssist: false,
       deviceTierOverride: 'auto',
@@ -525,7 +551,7 @@ export const useSettings = create<SettingsState>()(
       // "from version N" to branch on instead of relying on zustand's default
       // shallow-merge rehydration, which silently keeps stale/renamed keys
       // around forever.
-      version: 7,
+      version: 9,
       migrate: (persisted, version) => {
         const s = persisted as SettingsState;
         // v2: YOLOX (Apache-2.0, GPU-correct) becomes the default detector. Move
@@ -592,6 +618,17 @@ export const useSettings = create<SettingsState>()(
           if (s.lastDurationSec == null) s.lastDurationSec = 60;
           if (s.lastMakesPerSpot == null) s.lastMakesPerSpot = 5;
         }
+        // v8: rattle-out make guard added, default ON (bread-ball-safe — it can
+        // only downgrade a make to 'unsure', never fabricate a miss, and never
+        // touches a clean/occluded swish). Turn it on for existing installs too;
+        // the Settings toggle lets anyone opt out.
+        if (version < 8 && s.rattleGuard == null) s.rattleGuard = true;
+        // v9: settle window before scoring a make added, default ON (bread-ball-
+        // safe — make -> 'unsure' only, never a fabricated miss; a clean or net-
+        // swallowed swish never climbs back above the rim so it is untouched).
+        // Enable it for existing installs too; the Settings toggle lets anyone
+        // opt out.
+        if (version < 9 && s.settleWindow == null) s.settleWindow = true;
         return s;
       },
     },

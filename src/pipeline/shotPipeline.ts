@@ -295,6 +295,12 @@ export class ShotPipeline {
   private courtRegistration: CourtRegistration | null = null;
   /** Reappearance corroborator flag (Settings, experimental). */
   private reappearance = false;
+  /** Rattle-out make guard flag (Settings). Applied when the FSM is created at
+   *  rim lock — i.e. per session, same lifecycle as depthVeto/reappearance. */
+  private rattleGuard = false;
+  /** Settle-window flag (Settings). Applied at rim lock, same lifecycle as the
+   *  rattle guard — defers the belowRim resolve so late bounce-outs are seen. */
+  private settleWindow = false;
   /** Camera pitch at/around rim lock from the IMU, degrees +up; null = no IMU. */
   private viewPitchDeg: number | null = null;
   /**
@@ -417,6 +423,17 @@ export class ShotPipeline {
   /** Reappearance corroborator (from Settings). Takes effect at rim lock. */
   setReappearance(enabled: boolean): void {
     this.reappearance = enabled;
+  }
+
+  /** Rattle-out make guard (from Settings). Takes effect at rim lock. */
+  setRattleGuard(enabled: boolean): void {
+    this.rattleGuard = enabled;
+  }
+
+  /** Settle window before the belowRim resolve (from Settings). Takes effect
+   *  at rim lock. */
+  setSettleWindow(enabled: boolean): void {
+    this.settleWindow = enabled;
   }
 
   /**
@@ -1265,6 +1282,8 @@ export class ShotPipeline {
       this.fsm = new ShotFsm(rim, frame, {
         useDepthRatioVeto: this.depthVeto,
         useReappearance: this.reappearance,
+        useRattleGuard: this.rattleGuard,
+        useSettleWindow: this.settleWindow,
       });
       this.fsm.setBallSize(this.ballSize);
     }

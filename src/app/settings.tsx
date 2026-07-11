@@ -538,6 +538,8 @@ export default function SettingsScreen() {
   const roiZoom = useSettings((s) => s.roiZoom);
   const depthVeto = useSettings((s) => s.depthVeto);
   const reappearance = useSettings((s) => s.reappearance);
+  const rattleGuard = useSettings((s) => s.rattleGuard);
+  const settleWindow = useSettings((s) => s.settleWindow);
   const motionAssist = useSettings((s) => s.motionAssist);
   const metric23 = useSettings((s) => s.metric23);
   const nanoV2 = useSettings((s) => s.nanoV2);
@@ -1045,6 +1047,26 @@ export default function SettingsScreen() {
             onValueChange={(v) => {
               tick();
               set('reappearance', v);
+            }}
+          />
+          <View style={styles.divider} />
+          <ToggleRow
+            label="Rattle-out guard (stricter makes)"
+            description="When the ball crosses the rim line and the net twitches, but you then SEE it bounce or carom back out instead of dropping through, hold the shot as 'unsure' rather than counting a make. Cleans up rim rattles and front-rim caroms a net brush would miscount. Bread-ball-safe: it can only downgrade a make to unsure, never invent a miss, and never touches a clean swish or one the net swallows. ON by default. Takes effect at the next rim lock."
+            value={rattleGuard}
+            onValueChange={(v) => {
+              tick();
+              set('rattleGuard', v);
+            }}
+          />
+          <View style={styles.divider} />
+          <ToggleRow
+            label="Settle window (late bounce-out)"
+            description="Wait a few frames (~0.13s) after the ball drops below the rim before scoring a make, so a LATE rim bounce-out — the ball dips in then pops back up over the rim and out — is caught and held as 'unsure' instead of counted. Pairs with the rattle-out guard. Bread-ball-safe: it can only downgrade a make to unsure, never invent a miss, and a clean swish or one the net swallows is untouched. ON by default. Takes effect at the next rim lock."
+            value={settleWindow}
+            onValueChange={(v) => {
+              tick();
+              set('settleWindow', v);
             }}
           />
           <View style={styles.divider} />

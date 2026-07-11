@@ -56,6 +56,8 @@ Repo:`AriesHongHuanWu/HoopAi`,本機 `C:\Users\aries\claude\claudeCode\hoop-ai`�
 - **教學層**:live 聚光燈 CoachMarks、HintChip 情境提示、校正指南 Skia 動畫場景、`/how-it-works` 偵測原理誠實說明頁、summary 誠實文案修正(改判不會訓練模型)。
 - 審查波抓到 13 個確認 bug 全修/處置(最重:stale FT-seed 回饋會假告「已錨定」+ rim 漂移不清 seed → 都修掉)。
 
+**2026-07-12 進球判定過度靈敏修正(候選→雙向對抗→實作 workflow;1994 tests)**:使用者回報「球一穿過拋物線就判進、其實 rattle 出來卻算進」。根因=geo 只認「框頂平面 in-span 下穿」+ 球一過 belowY 即結算,配 net brush 就 fuse 成 make,從不確認乾淨出框;rimBounce 只防「彈回框頂以上」。兩個 flag-gated 槓桿(雙向對抗都存活):`rattleGuard`(rim-contact 球被「看到」彈/滾出→held unsure,保留 observed-deep-exit 逃生口不誤殺被網吞的空心球)+ `settleWindow`(球掉到 belowY 後等 ~0.13s 才結算,抓 late bounce-out)。皆 bread-ball-safe(只降 make→unsure,不造假 miss)。FSM constructor flag 預設 false(recheck/pinned truth table 逐位元不變),live 由 settingsStore 預設 ON(persist v9+migration)、各有 Settings 開關。**否決** Lever A/D:belowRim 在第一個 below 樣本就結算 + geoExitObserved 是 depth-blind(正面 carom 直落也滿足),故會殺真 make 又補不到洞。**硬限制**:純正面貼框直落 carom 在單鏡頭 2D 本質模糊,唯一防線是 depth-ratio veto(已預設 ON)。
+
 
 **2026-07-10 171-agent mega-upgrade(21 偵察/設計 + 45 實作/整合 + 101 審查/驗證/修復 + 4 收尾;1502 tests 全綠):**
 - **偵測**:多球熱身防護(suppression-only `multiBallGuard` + FSM `armLockout`,吃 per-model cold gate)、籃框撞歪 settle-boost 重鎖 + drift 期 arm 鎖(`rimGuard`)、推論延遲熱調速器(`thermalGovernor` L0-L3,model reload 會 reset)、鏡頭眩光/霧化自檢 advisory(`lensCheck`,HUD chip + DebugPanel lens/thermal 列)、追蹤走廊 capsule + 重力感知投影。淨 ROI 相位假爆發 bug(會鑄假 make)已在審查波抓到修掉(rect 移動時 diff 基線失效化)。

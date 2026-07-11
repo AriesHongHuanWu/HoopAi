@@ -36,13 +36,13 @@ const opts: any = persistApi.getOptions();
 describe('useSettings persist options', () => {
   test('persist version + storage key pin', () => {
     expect(opts.name).toBe('hoopai-settings');
-    // v7: round-2 mega-upgrade — bumped exactly once for all sibling features
-    // (tutorialSeen re-spread for liveHud/formstudio3d, hintSeen ledger,
-    // detectionExplainerSeen, trackerRescue, setup pre-flight defaults).
-    expect(opts.version).toBe(7);
+    // v9: settle window before scoring a make added (default ON, bread-ball-
+    // safe). Bumped in the same commit as the migrate branch + the assertions
+    // below.
+    expect(opts.version).toBe(9);
   });
 
-  test('migrate from v1 backfills engine/perf defaults (full chain to v7)', () => {
+  test('migrate from v1 backfills engine/perf defaults (full chain to v9)', () => {
     const out: any = opts.migrate({}, 1);
     expect(out.detectorEngine).toBe('yolox'); // v2: YOLOX becomes default
     expect(out.perfMode).toBe('speed'); // v3: 416 becomes default
@@ -62,6 +62,8 @@ describe('useSettings persist options', () => {
       summary: false,
       formstudio3d: false,
     }); // v7: nested record fully backfilled
+    expect(out.rattleGuard).toBe(true); // v8: rattle-out guard on
+    expect(out.settleWindow).toBe(true); // v9: settle window on
   });
 
   test('migrate from v3 backfills rim height and freezes manual tuning', () => {
@@ -140,6 +142,24 @@ describe('useSettings persist options', () => {
     const chips: any = opts.migrate({ lastDurationSec: 120, lastMakesPerSpot: 3 }, 7);
     expect(chips.lastDurationSec).toBe(120);
     expect(chips.lastMakesPerSpot).toBe(3);
+  });
+
+  test('migrate from v7 turns the rattle-out guard on', () => {
+    // A v7 blob predates the rattleGuard key entirely — default ON.
+    const out: any = opts.migrate({}, 7);
+    expect(out.rattleGuard).toBe(true);
+    // ...but never stomps an explicit opt-out persisted under a v8 shape.
+    const optedOut: any = opts.migrate({ rattleGuard: false }, 7);
+    expect(optedOut.rattleGuard).toBe(false);
+  });
+
+  test('migrate from v8 turns the settle window on', () => {
+    // A v8 blob predates the settleWindow key entirely — default ON.
+    const out: any = opts.migrate({}, 8);
+    expect(out.settleWindow).toBe(true);
+    // ...but never stomps an explicit opt-out persisted under a v9 shape.
+    const optedOut: any = opts.migrate({ settleWindow: false }, 8);
+    expect(optedOut.settleWindow).toBe(false);
   });
 
   test('migrate is idempotent at current version', () => {

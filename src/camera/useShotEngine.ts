@@ -918,6 +918,14 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
   useEffect(() => {
     pipeline.setReappearance(reappearance);
   }, [pipeline, reappearance]);
+  const rattleGuard = useSettings((s) => s.rattleGuard);
+  useEffect(() => {
+    pipeline.setRattleGuard(rattleGuard);
+  }, [pipeline, rattleGuard]);
+  const settleWindow = useSettings((s) => s.settleWindow);
+  useEffect(() => {
+    pipeline.setSettleWindow(settleWindow);
+  }, [pipeline, settleWindow]);
   const useFlightArc = useSettings((s) => s.useFlightArc);
   useEffect(() => {
     pipeline.setUseFlightArc(useFlightArc);
