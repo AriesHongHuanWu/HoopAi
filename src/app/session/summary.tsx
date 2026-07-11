@@ -4,6 +4,15 @@
  * row, the full SessionRecap under a "Box score" eyebrow, and a grouped
  * action stack (analysis / share / primary Done).
  *
+ * Motion: top-level sections enter with the canonical card stagger
+ * (useCardStagger — returns undefined under system reduced-motion, so Views
+ * render statically), and a new personal best fires a one-shot Confetti
+ * burst overlaid on the whole screen. The burst is presentation only: it is
+ * keyed on sessionId (once per mount per session), pointerEvents-none, and
+ * renders nothing under reduced motion — PersonalBestBanner remains the
+ * always-on carrier of the record. UndoSnackbar, modals and CoachMarks are
+ * deliberately NOT staggered.
+ *
  * Data source: the live session store when a session just ended
  * (phase === 'ended'); otherwise falls back to the database via the ?id=
  * search param so the screen also works after a reload / deep link.
@@ -12,6 +21,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { router, useLocalSearchParams } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { StyleSheet, Text, View, type LayoutRectangle } from 'react-native';
+import Animated from 'react-native-reanimated';
 
 import { ReelEntryButton } from '@/components/ReelEntryButton';
 import { shareSessionCard, sessionCardData, type CardFormat } from '@/components/ShareCard';
@@ -29,6 +39,8 @@ import {
 import { CoachMarks, useCoachMarks, type CoachStep } from '@/components/coach/CoachMarks';
 import { CourtHeatmap } from '@/components/charts/CourtHeatmap';
 import { CourtPlacementMap } from '@/components/charts/CourtPlacementMap';
+import { HintChip } from '@/components/hud/HintChip';
+import { Confetti, useCardStagger } from '@/components/motion';
 import { PersonalBestBanner } from '@/components/PersonalBestBanner';
 import { RecheckPanel } from '@/components/RecheckPanel';
 import { buildHeatmap } from '@/core/heatmap';
@@ -63,6 +75,16 @@ export default function SessionSummaryScreen() {
   const keepSetting = useSettings((s) => s.keepMode);
   const saveToPhotos = useSettings((s) => s.saveToPhotos);
   const dailyGoal = useSettings((s) => s.dailyGoalMakes);
+  // One-shot "how detection works" nudge flag (settingsStore v7).
+  // how-it-works.tsx flips it on mount, so the nudge disappears after a
+  // single visit — no local state.
+  const explainerSeen = useSettings((s) => s.detectionExplainerSeen);
+
+  // Canonical section entrance stagger (undefined under reduced motion).
+  const enter = useCardStagger();
+  // Personal-best confetti mounts once per screen mount, then unmounts on
+  // completion. Corrections that re-derive newBests can never re-fire it.
+  const [confettiOn, setConfettiOn] = useState(true);
 
   const storeMode = phase === 'ended';
   const paramId =
@@ -349,7 +371,10 @@ export default function SessionSummaryScreen() {
   const summarySteps: CoachStep[] = [
     {
       title: 'Fix a make, miss or 2/3',
-      text: "Swipe a shot right to mark a make, left for a miss — or tap to correct it, including 2-point vs. 3-point. Every correction you make trains sharper detection for next time.",
+      // HONESTY: corrections rewrite the outcome only — signalsJson is never
+      // touched and nothing retrains (see core/evidence.ts). Never claim
+      // corrections improve detection.
+      text: 'Swipe a shot right to mark a make, left for a miss — or tap to correct it, including 2-point vs. 3-point. Corrections are yours: always labeled EDITED, never used to re-judge anything.',
     },
     {
       title: 'Watch the replay',
@@ -396,9 +421,15 @@ export default function SessionSummaryScreen() {
               />
             </View>
           )}
-          <SummaryHero stats={stats} style={styles.hero} />
+          <Animated.View entering={enter(0)}>
+            <SummaryHero stats={stats} style={styles.hero} />
+          </Animated.View>
+          {/* Block 1 — goal line + milestone share one stagger slot. The PB
+              banner below stays unwrapped: it carries its own hero-synced
+              entrance (and is the reduced-motion carrier for the confetti). */}
           {storeMode && dailyGoal > 0 && goalMade != null && (
-            <View
+            <Animated.View
+              entering={enter(1)}
               style={styles.goalLineWrap}
               accessibilityLabel={`Daily goal: ${goalMade} of ${dailyGoal} makes today`}
             >
@@ -412,10 +443,10 @@ export default function SessionSummaryScreen() {
                   {`Daily goal · ${goalMade}/${dailyGoal} — ${dailyGoal - goalMade} to go`}
                 </Text>
               )}
-            </View>
+            </Animated.View>
           )}
           {milestones.length > 0 && (
-            <View style={styles.milestoneBanner}>
+            <Animated.View entering={enter(1)} style={styles.milestoneBanner}>
               <View style={styles.milestoneIcon}>
                 <Ionicons
                   name={milestones[0]!.icon as React.ComponentProps<typeof Ionicons>['name']}
@@ -434,13 +465,13 @@ export default function SessionSummaryScreen() {
                   </Text>
                 )}
               </View>
-            </View>
+            </Animated.View>
           )}
           {newBests.length > 0 && (
             <PersonalBestBanner bests={newBests} style={styles.pbBanner} />
           )}
           {videoPath != null && sessionId != null && (
-            <View style={styles.mediaSection}>
+            <Animated.View entering={enter(2)} style={styles.mediaSection}>
               <Eyebrow>Watch it back</Eyebrow>
               <View ref={replayRef} onLayout={() => {
                 replayRef.current?.measureInWindow((x, y, w, h) =>
@@ -457,6 +488,18 @@ export default function SessionSummaryScreen() {
                   <ReelEntryButton sessionId={sessionId} variant="ghost" style={{ flex: 1 }} />
                 </Row>
               </View>
+              {/* One-time honesty hint above the re-check region: UNSURE never
+                  flips on its own, and corrections train nothing. HintChip
+                  persists its own seen-flag and renders null afterwards. */}
+              {unsureCount > 0 && (
+                <HintChip
+                  hintKey="unsureSummary"
+                  text="UNSURE stays unsure until you say otherwise — honest receipts only. Swipe to correct; it's labeled, and it trains nothing."
+                  actionLabel="How calls are made"
+                  onAction={() => router.push('/how-it-works')}
+                  style={{ marginTop: space.md }}
+                />
+              )}
               {recordingStartSec != null && (
                 <RecheckPanel
                   sessionId={sessionId}
@@ -474,40 +517,59 @@ export default function SessionSummaryScreen() {
                   style={{ marginTop: space.md }}
                 />
               )}
-            </View>
+            </Animated.View>
           )}
           {heatmap.totalAttempts >= 4 && (
-            <View style={styles.heatSection}>
+            <Animated.View entering={enter(3)} style={styles.heatSection}>
               <Eyebrow>Shot map</Eyebrow>
               <View style={styles.heatCard}>
                 <CourtHeatmap heatmap={heatmap} />
               </View>
-            </View>
+            </Animated.View>
           )}
           {courtPlaced >= 3 && (
-            <View style={styles.heatSection}>
+            <Animated.View entering={enter(4)} style={styles.heatSection}>
               <Eyebrow>Court map · calibrated</Eyebrow>
               <View style={styles.heatCard}>
                 <CourtPlacementMap shots={shots} spec={FIBA_COURT} />
               </View>
-            </View>
+            </Animated.View>
           )}
-          <Eyebrow>Box score</Eyebrow>
-          <SessionRecap
-            shots={shots}
-            stats={stats}
-            onCorrect={onCorrect}
-            onCorrectValue={onCorrectValue}
-            videoPath={videoPath}
-            keepMode={keepMode}
-          />
+          <Animated.View entering={enter(5)}>
+            <Eyebrow>Box score</Eyebrow>
+            <SessionRecap
+              shots={shots}
+              stats={stats}
+              onCorrect={onCorrect}
+              onCorrectValue={onCorrectValue}
+              videoPath={videoPath}
+              keepMode={keepMode}
+            />
+          </Animated.View>
           {shareFailed && (
             <View style={{ marginTop: space.lg }}>
               <Chip label="Couldn't share — try again" tone="unsure" />
             </View>
           )}
-          <View style={styles.actionsSection}>
+          <Animated.View entering={enter(6)} style={styles.actionsSection}>
             <Eyebrow>Next up</Eyebrow>
+            {/* First-summary explainer nudge — how-it-works.tsx flips the
+                persisted flag on mount, so this row retires itself after one
+                visit (from anywhere); the Settings entry remains. */}
+            {!explainerSeen && (
+              <>
+                <Text style={styles.explainerCaption}>
+                  First session? See exactly how makes, misses and UNSURE get decided.
+                </Text>
+                <PillButton
+                  variant="ghost"
+                  label="How every call is made"
+                  icon="receipt-outline"
+                  onPress={() => router.push('/how-it-works')}
+                  style={styles.explainerButton}
+                />
+              </>
+            )}
             <PillButton
               variant="ghost"
               label="Shot Lab — deep analysis"
@@ -545,7 +607,7 @@ export default function SessionSummaryScreen() {
               onPress={onDone}
               style={{ marginTop: space.md }}
             />
-          </View>
+          </Animated.View>
         </>
       )}
     </Screen>
@@ -582,6 +644,20 @@ export default function SessionSummaryScreen() {
           setPickingFormat(false);
           setPendingBg(undefined);
         }}
+      />
+    )}
+    {/* Personal-best confetti — LAST child so it z-sits above everything.
+        One burst per screen mount per session (trigger keyed on sessionId;
+        confettiOn never resets, so re-renders/corrections can't replay it).
+        pointerEvents-none inside Confetti keeps every button tappable during
+        the burst; under reduced motion Confetti renders null and the
+        PersonalBestBanner above carries the record on its own. */}
+    {newBests.length > 0 && confettiOn && (
+      <Confetti
+        trigger={sessionId ?? 0}
+        seed={(sessionId ?? 1) as number}
+        style={styles.confetti}
+        onDone={() => setConfettiOn(false)}
       />
     )}
     </View>
@@ -677,6 +753,23 @@ const styles = StyleSheet.create({
   },
   actionsSection: {
     marginTop: space.xl,
+  },
+  /** First-summary explainer nudge: one-line caption over its ghost CTA. */
+  explainerCaption: {
+    ...type.micro,
+    color: color.textDim,
+    marginBottom: space.sm,
+  },
+  explainerButton: {
+    marginBottom: space.md,
+  },
+  /** Full-screen confetti overlay (RN 0.86 has no absoluteFillObject). */
+  confetti: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
   },
   heading: {
     ...type.heading,

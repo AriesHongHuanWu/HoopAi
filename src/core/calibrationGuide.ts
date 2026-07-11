@@ -298,6 +298,7 @@ export const WHY_CALIBRATE = {
   ladder: [
     { source: 'heuristic', label: 'Estimated', blurb: 'Rim-size geometry. Solid, but corners can fool it.' },
     { source: 'metric', label: 'Measured', blurb: 'Your free-throw anchor scales the whole scene.' },
+    { source: 'ftSeed', label: 'FT-anchored', blurb: 'Your first free throw pins scale and direction. Court-placed calls, no taps.' },
     { source: 'court', label: 'Court-registered', blurb: 'A tapped court map. Corner-accurate 2/3 calls.' },
   ],
 } as const;

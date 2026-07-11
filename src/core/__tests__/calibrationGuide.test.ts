@@ -228,12 +228,29 @@ describe('daysAgoLabel', () => {
 
 describe('guide copy constants', () => {
   test('ladder sources align with evidence.ts valueSource language', () => {
-    expect(WHY_CALIBRATE.ladder.map((l) => l.source)).toEqual(['heuristic', 'metric', 'court']);
+    // Rung order = trust order: the ftSeed tier sits between metric and
+    // court. Labels are the evidence.ts valueSourceLabel strings verbatim —
+    // 'FT-anchored' MUST equal valueSourceLabel('ftSeed').
+    expect(WHY_CALIBRATE.ladder.map((l) => l.source)).toEqual([
+      'heuristic',
+      'metric',
+      'ftSeed',
+      'court',
+    ]);
     expect(WHY_CALIBRATE.ladder.map((l) => l.label)).toEqual([
       'Estimated',
       'Measured',
+      'FT-anchored',
       'Court-registered',
     ]);
+  });
+
+  test('every ladder rung has a non-empty blurb and the ftSeed rung names the anchor', () => {
+    for (const rung of WHY_CALIBRATE.ladder) {
+      expect(rung.blurb.length).toBeGreaterThan(0);
+    }
+    const ftSeed = WHY_CALIBRATE.ladder.find((l) => l.source === 'ftSeed')!;
+    expect(ftSeed.blurb).toMatch(/free throw/);
   });
 
   test('placement coach has the three placement rules', () => {

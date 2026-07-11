@@ -53,7 +53,7 @@ import type {
   BallSample,
   Box,
   FsmFrameInput,
-  FsmStepResult,
+  FsmStepResult as FsmStepResultBase,
   ResolvedShot,
   RimGeometry,
   ShotOutcome,
@@ -69,6 +69,51 @@ import type {
 export interface FrameSize {
   width: number;
   height: number;
+}
+
+/**
+ * Why the FSM did not need to — or declined to — arm on a given frame.
+ * DIAGNOSTIC VOCABULARY ONLY (acquisition-funnel telemetry): it is recorded
+ * alongside the existing arming decisions and never feeds one.
+ *
+ *  - 'live'      — a shot was live entering this frame (still SHOT_LIVE, or
+ *                  it resolved into COOLDOWN on this very frame). Arming is
+ *                  not applicable.
+ *  - 'armed'     — the FSM armed a new attempt THIS frame.
+ *  - 'no-ball'   — IDLE with no ball this frame (nothing to evaluate).
+ *  - 'lockout'   — canArm refused: multi-ball / rim-drift arm lockout
+ *                  (FsmFrameInput.armLockout).
+ *  - 'cooldown'  — waiting out the shot cooldown: the COOLDOWN phase frames
+ *                  after a resolve, or canArm's (redundant) cooldown guard.
+ *  - 'putback'   — canArm refused: inside the putback window after a
+ *                  rim-bounce resolve.
+ *  - 'resting'   — canArm refused: wedged/resting-ball suppression active.
+ *  - 'no-branch' — a ball was evaluated and NO arm branch
+ *                  (jump/layup/descend/release) fired. This is the "detected
+ *                  but never judged" counter the funnel quantifies.
+ */
+export type ArmRefusal =
+  | 'live'
+  | 'armed'
+  | 'no-ball'
+  | 'lockout'
+  | 'cooldown'
+  | 'putback'
+  | 'resting'
+  | 'no-branch';
+
+/**
+ * The step result with the additive arm-refusal telemetry field. Extends the
+ * shared {@link FsmStepResultBase} shape from types.ts, so every existing
+ * consumer typed against that base keeps compiling unchanged.
+ */
+export interface FsmStepResult extends FsmStepResultBase {
+  /**
+   * Diagnostic only — mirrors why canArm declined this frame (or that it was
+   * inapplicable/succeeded); never feeds state transitions. The arming logic
+   * itself is byte-identical with the recording removed.
+   */
+  armRefusal: ArmRefusal;
 }
 
 /** Why a live shot left SHOT_LIVE (internal). */
@@ -178,6 +223,14 @@ export class ShotFsm {
    * COOLDOWN just before the next attempt.
    */
   private lastReleaseEventT = -Infinity;
+
+  /**
+   * Scratch for the arm-refusal telemetry: canArm writes the reason for each
+   * early return / branch fall-through here, and step() reads it only on the
+   * frame canArm just returned null. RECORD-ONLY — nothing in the FSM ever
+   * branches on this value.
+   */
+  private lastRefusal: ArmRefusal = 'no-branch';
 
   // --- stationary-ball suppressor (wedged/resting ball) --------------------
   /** Arming suppressed until the resting ball leaves the layup zone. */
@@ -335,11 +388,19 @@ export class ShotFsm {
         this.layupLowStreak = 0;
       }
       if (ball !== null && !ball.predicted) this.pushPreArm(ball, t);
+      // Arm-refusal telemetry: same canArm/arm calls in the same order as
+      // before — only the reason is recorded on the side.
+      let armRefusal: ArmRefusal = 'no-ball';
       if (ball !== null) {
         const via = this.canArm(input, ball);
-        if (via !== null) this.arm(input, ball, via);
+        if (via !== null) {
+          this.arm(input, ball, via);
+          armRefusal = 'armed';
+        } else {
+          armRefusal = this.lastRefusal;
+        }
       }
-      return { phase: this.phase, liveTrajectory: this.trajectory, resolved: null };
+      return { phase: this.phase, liveTrajectory: this.trajectory, resolved: null, armRefusal };
     }
 
     if (this.phase === 'COOLDOWN') {
@@ -348,7 +409,12 @@ export class ShotFsm {
       // those samples the moment IDLE resumes.
       const ball = input.ball;
       if (ball !== null && !ball.predicted) this.pushPreArm(ball, t);
-      return { phase: 'COOLDOWN', liveTrajectory: this.trajectory, resolved: null };
+      return {
+        phase: 'COOLDOWN',
+        liveTrajectory: this.trajectory,
+        resolved: null,
+        armRefusal: 'cooldown',
+      };
     }
 
     // ---- SHOT_LIVE ----------------------------------------------------
@@ -433,10 +499,21 @@ export class ShotFsm {
 
     if (reason !== null) {
       const shot = this.resolve(t, reason);
-      return { phase: this.phase, liveTrajectory: this.trajectory, resolved: shot };
+      // 'live': the shot WAS live entering this frame — it resolved here.
+      return {
+        phase: this.phase,
+        liveTrajectory: this.trajectory,
+        resolved: shot,
+        armRefusal: 'live',
+      };
     }
 
-    return { phase: 'SHOT_LIVE', liveTrajectory: this.trajectory, resolved: null };
+    return {
+      phase: 'SHOT_LIVE',
+      liveTrajectory: this.trajectory,
+      resolved: null,
+      armRefusal: 'live',
+    };
   }
 
   // -------------------------------------------------------------------------
@@ -454,16 +531,28 @@ export class ShotFsm {
     return scaleFrameGate(nominal, this.meanStepDt, ABS_MIN_FIT_SAMPLES);
   }
 
+  /**
+   * NOTE on `lastRefusal` writes below: pure telemetry (see ArmRefusal).
+   * Every write sits immediately before an EXISTING return — no condition,
+   * ordering, or state write of the arming logic itself has changed.
+   */
   private canArm(input: FsmFrameInput, ball: TrackedBall): ArmVia | null {
     // Multi-ball / rim-drift hold: SUPPRESSION-ONLY. May refuse a NEW arm;
     // never touches a live attempt (step() only reaches here from IDLE) and
     // absent behaves exactly like false. See multiBallGuard.ts.
-    if (input.armLockout) return null;
+    if (input.armLockout) {
+      this.lastRefusal = 'lockout';
+      return null;
+    }
     // Shot cooldown (redundant with COOLDOWN phase gating, kept as a guard).
-    if (input.t < this.lastResolveT + SHOT_FSM.shotCooldownSec) return null;
+    if (input.t < this.lastResolveT + SHOT_FSM.shotCooldownSec) {
+      this.lastRefusal = 'cooldown';
+      return null;
+    }
     // Putback guard: after a rim-bounce resolve, hold arming a little longer
     // so a tip-in doesn't double-count off the first attempt's residue.
     if (input.t < this.lastBounceResolveT + SHOT_FSM.putbackWindowSec) {
+      this.lastRefusal = 'putback';
       return null;
     }
     // Wedged/resting ball: a ball that has sat still inside the layup zone
@@ -473,7 +562,10 @@ export class ShotFsm {
     // actually leaves the zone: the dislodging poke nudges it upward (a
     // "rising ball" the jump branch would happily arm) before dropping it
     // through the net, and that must not read as a fresh attempt either.
-    if (this.restingBallSuppressed) return null;
+    if (this.restingBallSuppressed) {
+      this.lastRefusal = 'resting';
+      return null;
+    }
     const rim = this.rim;
     // Jump shot: ball rising through the up-zone.
     if (ball.vy < 0 && pointInBox(rim.upZone, ball.cx, ball.cy)) return 'jump';
@@ -514,6 +606,8 @@ export class ShotFsm {
     // branch): the ReleaseDetector saw the shooter's release motion but the
     // ball was too faint for the paths above to fire.
     if (this.canArmRelease(input, ball)) return 'release';
+    // Every arm branch (jump/layup/descend/release) declined this ball.
+    this.lastRefusal = 'no-branch';
     return null;
   }
 

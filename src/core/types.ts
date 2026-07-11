@@ -154,11 +154,16 @@ export type ShotValue = 2 | 3;
  * Which estimator decided a shot's 2/3 value — the provenance the detection
  * receipt surfaces so the call is auditable, not a black box.
  *   'court'     — court-registration homography (corner-accurate, any placement)
+ *   'ftSeed'    — free-throw-anchored similarity transform (scale+direction
+ *                 from the user's declared FT shot), corner-aware but
+ *                 single-anchor (src/core/ftSeed.ts)
  *   'metric'    — pinhole real-meters estimator (courtGeometric)
  *   'heuristic' — rim-widths image-plane estimator (court.ts), the fallback
  *   'manual'    — the user's Settings court-range override
+ * PERSISTENCE CONTRACT: these literals persist in shots.valueSource (TEXT,
+ * db.ts) and are frozen forever — add new members, never rename existing ones.
  */
-export type ShotValueSource = 'court' | 'metric' | 'heuristic' | 'manual';
+export type ShotValueSource = 'court' | 'ftSeed' | 'metric' | 'heuristic' | 'manual';
 
 /** The three fused make/miss signals. null = signal unavailable that shot. */
 export interface ShotSignals {
@@ -237,9 +242,10 @@ export interface ResolvedShot {
    */
   valueConfidence?: number;
   /**
-   * Shooter's mapped court-plane position (meters, basket origin), present ONLY
-   * when court registration placed the shot — powers the placement map and the
-   * corner/arc receipt line. Undefined for the metric/heuristic paths.
+   * Shooter's mapped court-plane position (meters, basket origin), present
+   * when court registration OR the FT seed placed the shot (valueSource
+   * 'court' / 'ftSeed') — powers the placement map and the corner/arc receipt
+   * line. Still undefined for the metric/heuristic paths.
    */
   courtPos?: { x: number; y: number };
   /**

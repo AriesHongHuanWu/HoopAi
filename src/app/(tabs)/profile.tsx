@@ -14,11 +14,12 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useState, type ComponentProps, type ReactNode } from 'react';
 import { Modal, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
-import Animated, { FadeIn, FadeInDown, useReducedMotion } from 'react-native-reanimated';
+import Animated, { FadeIn, useReducedMotion } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { router } from 'expo-router';
 
+import { useCardStagger } from '@/components/motion';
 import { ChoiceCard, ChipSelect } from '@/components/profile/Choice';
 import { NumberSlider } from '@/components/profile/NumberSlider';
 import { SeasonCard } from '@/components/SeasonCard';
@@ -183,8 +184,9 @@ function EditorSheet({
 
 export default function ProfileScreen() {
   const reducedMotion = useReducedMotion();
-  const enter = (i: number) =>
-    reducedMotion ? FadeIn.duration(160) : FadeInDown.duration(360).delay(40 + i * 60);
+  // Canonical card stagger. Under reduced motion this renders still (undefined
+  // entering) instead of the old quick FadeIn — the standardized idiom.
+  const enter = useCardStagger({ baseDelayMs: 40, stepMs: 60 });
 
   const p = useProfile();
   const setP = p.set;

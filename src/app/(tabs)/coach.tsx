@@ -18,15 +18,16 @@ import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import React, { useEffect, useMemo, useState } from 'react';
 import { Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
-import Animated, { FadeInDown, useReducedMotion } from 'react-native-reanimated';
+import Animated from 'react-native-reanimated';
 
+import { useCardStagger, useStaggerAt } from '@/components/motion';
 import { shareCoachCard, shareWeekCard } from '@/components/ShareCard';
 import { ArcProfileCard } from '@/components/coach/ArcProfileCard';
 import { CoachTimelineCard } from '@/components/coach/CoachTimelineCard';
 import { FormReadinessCard } from '@/components/coach/FormReadinessCard';
 import { SeasonStrip } from '@/components/coach/SeasonStrip';
 import { Card, Chip, EmptyState, PillButton, Row, Screen, StatNumber } from '@/components/ui';
-import { color, font, radius, space, type } from '@/constants/tokens';
+import { color, font, motion, radius, space, type } from '@/constants/tokens';
 import {
   runCoach,
   weeklyPlan,
@@ -108,10 +109,12 @@ function trendVisual(trend: Trend): { icon: React.ComponentProps<typeof Ionicons
 // Finding card
 // ---------------------------------------------------------------------------
 
-function FindingCard({ finding, index, reducedMotion }: { finding: CoachFinding; index: number; reducedMotion: boolean }) {
+function FindingCard({ finding, index }: { finding: CoachFinding; index: number }) {
   const meta = SEVERITY_META[finding.severity];
   const trend = trendVisual(finding.trend);
-  const entering = reducedMotion ? undefined : FadeInDown.delay(index * 70).duration(360);
+  // Canonical stagger (reduced-motion gated inside the hook).
+  const enter = useCardStagger({ stepMs: 70 });
+  const entering = enter(index);
   return (
     <Animated.View
       entering={entering}
@@ -150,10 +153,10 @@ function FindingCard({ finding, index, reducedMotion }: { finding: CoachFinding;
 
 const ZONE_NAME: Record<ChartZone, string> = { left: 'Left', center: 'Middle', right: 'Right' };
 
-function WeeklyHero({ report, reducedMotion }: { report: WeeklyReport; reducedMotion: boolean }) {
+function WeeklyHero({ report }: { report: WeeklyReport }) {
   const fg = report.fgPct != null ? `${Math.round(report.fgPct * 100)}%` : '—';
-  const enter = (delayMs: number) =>
-    reducedMotion ? undefined : FadeInDown.duration(260).delay(delayMs);
+  // Absolute-delay stagger (reduced-motion gated inside the hook).
+  const enterAt = useStaggerAt({ durationMs: motion.standard });
 
   const delta = report.fgDeltaPtsVsPrior;
   const deltaText =
@@ -174,7 +177,7 @@ function WeeklyHero({ report, reducedMotion }: { report: WeeklyReport; reducedMo
         }`;
 
   return (
-    <Card entering={enter(0)}>
+    <Card entering={enterAt(0)}>
       <SectionEyebrow icon="calendar-outline">{`Week of ${report.label}`}</SectionEyebrow>
 
       {/* WSS badge + headline */}
@@ -499,7 +502,6 @@ function WeeklyPlanCard({
 }
 
 export default function CoachScreen() {
-  const reducedMotion = useReducedMotion();
   const { state: load, reload } = useCoachSessions();
   const [weekIndex, setWeekIndex] = useState(0);
 
@@ -594,7 +596,8 @@ export default function CoachScreen() {
     return m;
   }, [plan, drillResults]);
 
-  const cardEnter = (i: number) => (reducedMotion ? undefined : FadeInDown.delay(i * 70).duration(380));
+  // Canonical stagger for the insight-card ladder (reduced-motion gated inside).
+  const cardEnter = useCardStagger({ stepMs: 70, durationMs: 380 });
 
   return (
     <Screen scroll>
@@ -630,7 +633,7 @@ export default function CoachScreen() {
               onPick={setWeekIndex}
             />
 
-            <WeeklyHero report={report} reducedMotion={reducedMotion} />
+            <WeeklyHero report={report} />
 
             {/* Arc profile — the release-arc signature over recent sessions.
                 The card owns its own n<5 "charging" state, so it mounts from
@@ -713,7 +716,7 @@ export default function CoachScreen() {
               ) : (
                 <View style={styles.findingList}>
                   {findings.map((f, i) => (
-                    <FindingCard key={f.id} finding={f} index={i} reducedMotion={reducedMotion} />
+                    <FindingCard key={f.id} finding={f} index={i} />
                   ))}
                 </View>
               )}

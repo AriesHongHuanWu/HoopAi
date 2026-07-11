@@ -41,6 +41,19 @@ const CLEAR_NO_REVERSAL_SEC = 1.2;
 const MIN_REVERSAL_DEPTH_RIM_WIDTHS = 1;
 
 /**
+ * The latch ALSO clears on a REAL rising (vy < 0) sample within this many rim
+ * widths BELOW the rim plane. Exactly symmetric with
+ * {@link MIN_REVERSAL_DEPTH_RIM_WIDTHS}: reversals are only ever recorded at
+ * least one rim width below the plane, so a rising ball INSIDE that band is
+ * shot territory a dribble never reverses in. Waiting for a sample strictly
+ * ABOVE the plane (the (a) clear) blanked a dribble→quick shot whose
+ * above-rim detections drop out — the latch then outlived the whole flight.
+ * One-sided by construction: this can only clear EARLIER (draw more), never
+ * suppress more.
+ */
+const CLEAR_NEAR_PLANE_RIM_WIDTHS = 1;
+
+/**
  * Max stored reversal timestamps — a small ring so memory stays bounded no
  * matter how long the player dribbles; window pruning does the real work.
  */
@@ -74,8 +87,11 @@ export interface DribbleSample {
  * width BELOW the rim plane. Two reversals inside a rolling
  * {@link REVERSAL_WINDOW_SEC} window latch dribble mode ON; the latch clears
  * when a REAL sample rises above the rim plane (the actual shot must draw!),
- * when {@link CLEAR_NO_REVERSAL_SEC} pass with no new reversal, or on
- * reset().
+ * when a REAL rising sample appears within
+ * {@link CLEAR_NEAR_PLANE_RIM_WIDTHS} rim width(s) BELOW the plane (a
+ * dribble never reverses that high, so it is shot territory even when the
+ * above-rim detections drop out), when {@link CLEAR_NO_REVERSAL_SEC} pass
+ * with no new reversal, or on reset().
  *
  * Predicted (Kalman-coasted) samples are the tracker's OPINION, not evidence:
  * they neither create reversals nor clear the latch — only their timestamps
@@ -102,6 +118,25 @@ export class DribbleDetector {
     // (a) A REAL sample above the rim plane is shot-like — clear immediately
     // so the guide draws for the actual attempt.
     if (s.real && s.cy < rim.planeY) {
+      this.latched = false;
+      this.reversalTs.length = 0;
+      this.lastReversalT = -Infinity;
+      this.lastRealVy = s.vy;
+      return false;
+    }
+
+    // (a2) A REAL rising sample within CLEAR_NEAR_PLANE_RIM_WIDTHS rim
+    // width(s) BELOW the plane is shot territory too: reversals are only
+    // recorded at least one rim width below the plane (the same line,
+    // mirrored), so no dribble ever reverses inside this band. Clearing here
+    // instead of waiting for an above-plane sample keeps a dribble→quick
+    // shot drawing even when its above-rim detections drop out. Predicted
+    // samples stay inert — they neither clear nor create anything.
+    if (
+      s.real &&
+      s.vy < 0 &&
+      s.cy < rim.planeY + CLEAR_NEAR_PLANE_RIM_WIDTHS * rim.box.width
+    ) {
       this.latched = false;
       this.reversalTs.length = 0;
       this.lastReversalT = -Infinity;
@@ -170,17 +205,44 @@ export class DribbleDetector {
  * A real shot arcs well above the rim, so its apex clears the line easily; a
  * waist-high dribble fall fits a perfectly valid parabola whose apex never
  * gets near the rim, and fails. PERMISSIVE by contract: a null fit, a null
- * rim, a non-gravity fit (ya <= 0 has no finite apex), or a non-finite vertex
- * all return true — the gate must never suppress a real shot for lack of
- * information. Fit is y(t) = ya·t² + yb·t + yc in analysis px / seconds.
+ * rim, a non-gravity fit (ya <= 0 has no finite apex), a non-finite vertex,
+ * or — when the fit carries its observed window — a vertex whose time falls
+ * OUTSIDE [tMin, tMax] all return true. The gate must never suppress a real
+ * shot for lack of information, and an EXTRAPOLATED vertex is exactly that:
+ * an early-ascent fit of a real shot routinely projects a bogus low apex, so
+ * only an apex the samples actually straddled may suppress. Callers that do
+ * not pass tMin/tMax (or pass non-finite values) keep the legacy semantics
+ * unchanged. Fit is y(t) = ya·t² + yb·t + yc in analysis px / seconds, with
+ * [tMin, tMax] the observed sample window in the same absolute time.
  */
 export function apexAboveRim(
-  fit: { ya: number; yb: number; yc: number } | null,
+  fit: {
+    ya: number;
+    yb: number;
+    yc: number;
+    /** Observed fit window (e.g. ArcFit.tMin/tMax); optional, back-compat. */
+    tMin?: number;
+    tMax?: number;
+  } | null,
   rim: RimGeometry | null,
   marginRimWidths: number,
 ): boolean {
   if (!fit || !rim) return true;
   if (!(fit.ya > 0)) return true; // not gravity-shaped: no apex to judge
+  // Apex-straddle guard: with a known observed window, only an apex the
+  // samples actually bracketed may suppress. An ascending-only (tMax before
+  // the vertex) or descending-only (tMin after it) fit extrapolates its
+  // vertex — an opinion, not an observation — and returns true.
+  const { tMin, tMax } = fit;
+  if (
+    typeof tMin === 'number' &&
+    typeof tMax === 'number' &&
+    Number.isFinite(tMin) &&
+    Number.isFinite(tMax)
+  ) {
+    const vertexT = -fit.yb / (2 * fit.ya);
+    if (!(tMin <= vertexT && vertexT <= tMax)) return true;
+  }
   const vertexY = fit.yc - (fit.yb * fit.yb) / (4 * fit.ya);
   if (!Number.isFinite(vertexY)) return true;
   return vertexY < rim.planeY + marginRimWidths * rim.box.width;

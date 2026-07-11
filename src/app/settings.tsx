@@ -6,9 +6,7 @@
  */
 import { Ionicons } from '@expo/vector-icons';
 import { createAudioPlayer, type AudioPlayer } from 'expo-audio';
-import { FadeInDown, useReducedMotion } from 'react-native-reanimated';
 import Constants from 'expo-constants';
-import * as Haptics from 'expo-haptics';
 import { router } from 'expo-router';
 import { useEffect, useRef, useState, type ComponentProps } from 'react';
 import { Linking, Modal, Pressable, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
@@ -30,9 +28,8 @@ import {
   exportHardExamples,
 } from '@/data/hardExamples';
 import { runBackupExport, runBackupImport } from '@/data/backupRunner';
-
-/** Staggered card entrance (i = card index top-to-bottom). */
-const cardEnter = (i: number) => FadeInDown.delay(i * 70).duration(380);
+import { useCardStagger } from '@/components/motion';
+import { haptic } from '@/utils/haptics';
 import {
   CLIP_POST_ROLL_MAX,
   CLIP_POST_ROLL_MIN,
@@ -174,9 +171,9 @@ const PRESET_OPTIONS: {
   },
 ];
 
-/** Fires selection haptics when the user has them enabled. */
+/** Selection tick — the haptic util gates on the user's Haptics setting. */
 function tick() {
-  if (useSettings.getState().hapticsEnabled) void Haptics.selectionAsync();
+  haptic.selection();
 }
 
 /** Human copy for the measured device tier, from the last on-device benchmark. */
@@ -548,6 +545,7 @@ export default function SettingsScreen() {
   const replay3d = useSettings((s) => s.replay3d);
   const multiBallGuard = useSettings((s) => s.multiBallGuard);
   const rimGuard = useSettings((s) => s.rimGuard);
+  const trackerRescue = useSettings((s) => s.trackerRescue);
   const adaptiveThermal = useSettings((s) => s.adaptiveThermal);
   const lensCheck = useSettings((s) => s.lensCheck);
   const formAnalysis = useSettings((s) => s.formAnalysis);
@@ -561,9 +559,9 @@ export default function SettingsScreen() {
   const resolvedTier = resolvedTuning(deviceTierOverride, lastBenchmark?.ms ?? null).tier;
   const deviceName = Device.modelName ?? Device.deviceName ?? 'your phone';
 
-  // Respect the system Reduce Motion setting: cards appear in place.
-  const reducedMotion = useReducedMotion();
-  const enter = (i: number) => (reducedMotion ? undefined : cardEnter(i));
+  // Staggered card entrance (i = card index top-to-bottom). The hook returns
+  // undefined under Reduce Motion, so cards appear in place.
+  const enter = useCardStagger({ stepMs: 70, durationMs: 380 });
 
   // Derived tracking preset (never persisted — always reflects the live knobs).
   const activePreset = presetFromKnobs({
@@ -622,9 +620,7 @@ export default function SettingsScreen() {
   }, []);
 
   const restartTutorial = () => {
-    if (useSettings.getState().hapticsEnabled) {
-      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    }
+    haptic.success();
     resetTutorial();
     setTutorialNotice(true);
     if (tutorialNoticeTimer.current != null) clearTimeout(tutorialNoticeTimer.current);
@@ -678,9 +674,7 @@ export default function SettingsScreen() {
     setImportOpen(false);
     setImportDraft('');
     if (result.ok) {
-      if (useSettings.getState().hapticsEnabled) {
-        void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      }
+      haptic.success();
       showBackupNotice(`Imported ${result.imported}, skipped ${result.skipped}.`);
     } else {
       showBackupNotice(IMPORT_ERRORS[result.error] ?? 'Import failed.');
@@ -748,9 +742,10 @@ export default function SettingsScreen() {
             description="Gentle taps for buttons and milestones."
             value={hapticsEnabled}
             onValueChange={(v) => {
-              // Confirm with a tap only when turning haptics ON.
-              if (v) void Haptics.selectionAsync();
+              // Write first, then tick: the util gates on the store, so the
+              // confirmation tap fires only when haptics were just turned ON.
               set('hapticsEnabled', v);
+              haptic.selection();
             }}
           />
           <View style={styles.divider} />
@@ -1099,6 +1094,16 @@ export default function SettingsScreen() {
           />
           <View style={styles.divider} />
           <ToggleRow
+            label="Track rescue"
+            description="Recovers a ball the detector keeps seeing but the tracker won’t start on (raised-gate models only). Detection-side only — never changes make/miss judging."
+            value={trackerRescue}
+            onValueChange={(v) => {
+              tick();
+              set('trackerRescue', v);
+            }}
+          />
+          <View style={styles.divider} />
+          <ToggleRow
             label="Thermal auto-throttle"
             description="Ease off detection when the phone runs hot, instead of stuttering."
             value={adaptiveThermal}
@@ -1430,8 +1435,14 @@ export default function SettingsScreen() {
         <Card entering={enter(8)}>
           <SectionHeader icon="help-buoy">Help</SectionHeader>
           <ActionRow
+            label="How detection works"
+            description="The three signals, receipts and confidence tiers behind every call."
+            onPress={() => router.push('/how-it-works')}
+          />
+          <View style={styles.divider} />
+          <ActionRow
             label="Restart tutorial"
-            description="Replay the coach marks on Home, Live and Summary."
+            description="Replay the coach marks and first-time hints."
             onPress={restartTutorial}
           />
           {tutorialNotice && (

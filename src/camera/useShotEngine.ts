@@ -31,9 +31,10 @@ import {
 import { NitroModules } from 'react-native-nitro-modules';
 
 import { DETECTION } from '../core/config';
+import { EMPTY_FUNNEL, type FrameFunnel } from '../core/acquisitionFunnel';
 import { LENS, LensCheckAccumulator } from '../core/lensCheck';
 import { ThermalGovernor } from '../core/thermalGovernor';
-import type { Box, ResolvedShot, RimGeometry } from '../core/types';
+import type { BallSample, Box, ResolvedShot, RimGeometry } from '../core/types';
 import { createMockDetector } from '../ml/mockDetector';
 import { parseYoloOutput, nmsPerClass } from '../ml/yoloParser';
 import { parseMoveNet } from '../ml/poseParser';
@@ -44,6 +45,7 @@ import {
   ShotPipeline,
   type FramePayload,
   type FtCaptureOutcome,
+  type FtSeedFeedback,
 } from '../pipeline/shotPipeline';
 import { useSettings } from '../state/settingsStore';
 import { useCourtCalibration } from '../state/courtCalibrationStore';
@@ -178,6 +180,30 @@ export interface OverlayState {
    * src/core/lightProfile.ts by consumers (placement grade's low-light hint).
    */
   light: number;
+  /**
+   * Active cold-acquisition score floor this frame (the tracker's per-model /
+   * light-profile floor) — DetectionBoxes tiers ball boxes on it: at/above
+   * the floor renders solid, the band below renders faint. Diagnostic only.
+   * OPTIONAL by contract: the HUD surfaces (DetectionBoxes/DebugPanel) read
+   * it defensively so the wiring and the drawers can land in any order.
+   */
+  acqFloor?: number;
+  /**
+   * Flattened x,y (analysis px) of REAL tracker-history samples, published
+   * ONLY while phase is IDLE — the debug breadcrumb trail drawn by
+   * DetectionBoxes only. Empty during a live shot / cooldown. Optional like
+   * acqFloor (defensively read by the drawers).
+   */
+  crumbs?: number[];
+  /**
+   * Per-frame acquisition funnel (src/core/acquisitionFunnel.ts). Rides
+   * OverlayState — NOT EngineDebug — because the funnel is produced by the
+   * JS-thread onFrame publish (single writer here), while EngineDebug is
+   * rewritten wholesale by the frame worklet every frame; a JS-side write
+   * there would race and be clobbered. Diagnostic only; optional like
+   * acqFloor (DebugPanel null-guards it).
+   */
+  funnel?: FrameFunnel;
 }
 
 export const EMPTY_OVERLAY: OverlayState = {
@@ -195,6 +221,9 @@ export const EMPTY_OVERLAY: OverlayState = {
   predTraj: [],
   fullArc: [],
   light: 0,
+  acqFloor: 0.2,
+  crumbs: [],
+  funnel: EMPTY_FUNNEL,
 };
 
 /** Live diagnostics for the on-screen debug panel (helps fix on-device ML). */
@@ -329,6 +358,21 @@ export interface ShotEngine {
    * and never affects shot detection either way.
    */
   captureFtAnchor: () => Promise<FtCaptureOutcome>;
+  /**
+   * Arm the FT-seed derivation: the user's next resolved shot (3-attempt
+   * budget) derives a court transform from its own origin foot. Feedback
+   * arrives on {@link ShotEngine.ftSeedLast}. Value/position labeling only —
+   * never affects make/miss.
+   */
+  armFtSeed: () => void;
+  /** Cancel a pending FT-seed arm (any derived seed stays active). */
+  cancelFtSeed: () => void;
+  /**
+   * Latest FT-seed feedback from the pipeline (null until the first armed
+   * attempt resolves). A FRESH object per attempt — consumers key effects on
+   * the reference (FtSeedChip's feedback contract).
+   */
+  ftSeedLast: FtSeedFeedback | null;
 }
 
 export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotEngine {
@@ -614,6 +658,10 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
   const eventsRef = useRef(events);
   eventsRef.current = events;
 
+  // FT-seed feedback: pipeline events run on the JS thread (same as onShot),
+  // so a plain setState is the right seam. Each attempt emits a fresh object.
+  const [ftSeedLast, setFtSeedLast] = useState<FtSeedFeedback | null>(null);
+
   // Net ROI (analysis-frame px) published to the frame worklet so it can
   // compute the net-motion make/miss signal; previous samples live worklet-side.
   const netRoiSv = useSharedValue<Box | null>(null);
@@ -650,6 +698,9 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
       onShot: (s) => eventsRef.current.onShot?.(s),
       onRimLocked: (r) => eventsRef.current.onRimLocked?.(r),
       onRimDrift: () => eventsRef.current.onRimDrift?.(),
+      // setState is referentially stable across renders, so closing over it
+      // inside this once-only memo is safe (unlike the events above).
+      onFtSeed: (r) => setFtSeedLast(r),
       onFrame: (state) => {
         // Keep the worklet's net + hoop ROIs in sync with the locked rim.
         // VALUE compare, not reference: RimLock mutates its geometry (and the
@@ -685,6 +736,15 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
         // FSM phase for the ROI trigger (published every frame; the worklet
         // reads it one analysed frame late, which the net-motion arm covers).
         phaseSv.value = state.phase === 'SHOT_LIVE' ? 1 : state.phase === 'COOLDOWN' ? 2 : 0;
+        // Debug-only diagnostics (funnel/crumbs/acqFloor) are consumed solely
+        // by DetectionBoxes + DebugPanel, both mounted behind `debugMode`
+        // (live.tsx). Publishing them unconditionally made every non-debug
+        // user pay the per-frame crumb flatten allocations plus Reanimated's
+        // deep-copy of the ~16-field funnel across the JS→UI boundary at
+        // 30–60fps — so gate them here. getState() is a cheap synchronous
+        // read, and all consumers already read these OPTIONAL fields
+        // defensively (they degrade to "no funnel rows / no crumbs").
+        const debugOn = useSettings.getState().debugMode;
         overlay.value = {
           ball: state.ball
             ? {
@@ -721,6 +781,18 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
           predTraj: state.predictedPath,
           fullArc: state.fullFlightPath,
           light: lightSv.value,
+          // Acquisition-funnel diagnostics (JS-thread publish — see the
+          // OverlayState docs for why these must NOT ride EngineDebug).
+          // Debug-gated: undefined outside debugMode (fields are optional by
+          // contract and both drawers null-guard them).
+          acqFloor: debugOn ? state.funnel.floor : undefined,
+          funnel: debugOn ? state.funnel : undefined,
+          // IDLE-only breadcrumbs of REAL samples; trackHistory is a live
+          // view, so flatten it synchronously here (never retain it).
+          crumbs:
+            debugOn && state.phase === 'IDLE'
+              ? flattenRealCrumbs(state.trackHistory)
+              : undefined,
         };
       },
     });
@@ -814,6 +886,11 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
   useEffect(() => {
     pipeline.setRimGuard(rimGuard);
   }, [pipeline, rimGuard]);
+  // Persistence rescue (detection-side recall only — see BallTracker.setRescue).
+  const trackerRescue = useSettings((s) => s.trackerRescue);
+  useEffect(() => {
+    pipeline.setTrackerRescue(trackerRescue);
+  }, [pipeline, trackerRescue]);
   const metric23 = useSettings((s) => s.metric23);
   useEffect(() => {
     pipeline.setMetric23(metric23);
@@ -1768,9 +1845,52 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
         width: detInputSize,
         height: detInputSize,
       }),
-    reAim: () => pipeline.reAim(),
+    // Every FT-seed lifecycle boundary CLEARS the last feedback first: a
+    // re-mounted FtSeedChip keys its result effect on [feedback, stage], so a
+    // stale {ok:true} left over from a previous seed would replay the instant
+    // a fresh chip re-arms — falsely claiming "Court anchored" (and rewriting
+    // the persisted receipt) while the pipeline's new arm is still pending.
+    reAim: () => {
+      setFtSeedLast(null);
+      pipeline.reAim();
+    },
     captureFtAnchor: () => pipeline.captureFtAnchor(),
+    armFtSeed: () => {
+      setFtSeedLast(null);
+      pipeline.armFtSeed();
+    },
+    cancelFtSeed: () => {
+      setFtSeedLast(null);
+      pipeline.cancelFtSeed();
+    },
+    ftSeedLast,
   };
+}
+
+/** How many trailing REAL samples the IDLE breadcrumb trail keeps. */
+const CRUMB_MAX_SAMPLES = 24;
+
+/**
+ * Flatten the LAST {@link CRUMB_MAX_SAMPLES} REAL (predicted === false)
+ * tracker-history samples to [cx, cy, ...] in chronological order. Kalman
+ * coasts are excluded — a breadcrumb must mark where the ball was SEEN, never
+ * where it was merely guessed (honesty: drawing only what was detected).
+ */
+function flattenRealCrumbs(h: readonly BallSample[]): number[] {
+  const out: number[] = [];
+  // Walk backwards collecting the newest real samples, then reverse pairs.
+  for (let i = h.length - 1; i >= 0 && out.length < CRUMB_MAX_SAMPLES * 2; i--) {
+    const s = h[i]!;
+    if (s.predicted) continue;
+    out.push(s.cx, s.cy);
+  }
+  // out is newest-first pairs; flip to chronological order pair-by-pair.
+  const flat: number[] = new Array(out.length);
+  for (let i = 0; i < out.length; i += 2) {
+    flat[out.length - 2 - i] = out[i]!;
+    flat[out.length - 1 - i] = out[i + 1]!;
+  }
+  return flat;
 }
 
 function flattenTrajectory(traj: readonly { cx: number; cy: number }[]): number[] {

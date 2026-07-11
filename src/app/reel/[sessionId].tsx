@@ -22,7 +22,6 @@
  */
 import { Ionicons } from '@expo/vector-icons';
 import { useEvent, useEventListener } from 'expo';
-import * as Haptics from 'expo-haptics';
 import { useLocalSearchParams } from 'expo-router';
 import {
   useVideoPlayer,
@@ -73,6 +72,7 @@ import { buildReelSegments } from '@/media/reelExport';
 import * as videoStitcher from '@/media/videoStitcher';
 import { saveSessionVideo } from '@/data/videoLibrary';
 import { useSettings } from '@/state/settingsStore';
+import { haptic } from '@/utils/haptics';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -259,7 +259,7 @@ function ReelEndFrame({
 
   const onExport = () => {
     if (exportState === 'working' || !canExport) return;
-    void Haptics.selectionAsync();
+    haptic.selection();
     setExportState('working');
     void (async () => {
       try {
@@ -306,7 +306,7 @@ function ReelEndFrame({
   // (shareSessionCard never throws; a failure just shows a quiet chip).
   const onShare = () => {
     if (sharing) return;
-    void Haptics.selectionAsync();
+    haptic.selection();
     setSharing(true);
     setShareFailed(false);
     void shareSessionCard({
@@ -380,7 +380,7 @@ function ReelEndFrame({
           label="Replay reel"
           icon="refresh"
           onPress={() => {
-            void Haptics.selectionAsync();
+            haptic.selection();
             onReplay();
           }}
           style={{ marginTop: space.md, alignSelf: 'center' }}
@@ -608,7 +608,7 @@ function ReelPlayer({
 
   const togglePlay = () => {
     if (done) return;
-    void Haptics.selectionAsync();
+    haptic.selection();
     if (player.playing) player.pause();
     else player.play();
   };

@@ -13,7 +13,7 @@
 Repo:`AriesHongHuanWu/HoopAi`,本機 `C:\Users\aries\claude\claudeCode\hoop-ai`。
 
 **指令**:
-- 驗證:`npx tsc --noEmit && npx jest`(基準 1502 tests,全綠才能 commit)
+- 驗證:`npx tsc --noEmit && npx jest`(基準 1976 tests,全綠才能 commit)
 - iOS IPA:`gh workflow run ios-ipa.yml`(~16 分 → `ios-ipa-latest` release);Android:push main 自動(~37 分 → `android-latest`)
 - 模型驗證:`python tools/validate_model.py --model X.tflite --video <真實影片> --fps 6 --size 416|640 --compare <現役asset>`
 - 側載:Sideloadly + USB;使用者自己輸 Apple ID(AI 絕不碰帳密)
@@ -45,6 +45,17 @@ Repo:`AriesHongHuanWu/HoopAi`,本機 `C:\Users\aries\claude\claudeCode\hoop-ai`�
 ---
 
 ## §1 現況快照(2026-07-10,mega-upgrade 波次後)
+
+**2026-07-10 Round-2 mega-upgrade(13 偵察/設計 + 29 實作/整合 + 57 審查/驗證/修復;1976 tests 全綠):**
+- **FT-seed 場地定位(旗艦)**:`src/core/ftSeed.ts` — 開場罰球錨定(已知 FT 線距離反解 scale+yaw 修正)→ 任意鏡頭擺位的每球場上位置 + corner-accurate 2/3;provenance 新增 `ftSeed`(FT-anchored)層(court > ftSeed > metric > heuristic);信心上限 0.75 誠實封頂;live 的 `FtSeedChip` 儀式化引導;seed 亦回饋 shrink-only 球尺寸上限給 tracker。判定路徑零影響(只動 shotValue/位置)。rim 漂移/re-aim 會同步清 seed。
+- **追蹤斷鏈修復**:`acquisitionFunnel.ts` 漏斗遙測(raw→cull→gate→tracked→drawn + 最後拒絕原因,進 DebugPanel/COPY DIAG)、flag-gated 持續性救援(高分未收養球連續 N 幀→放行冷門檻,recall-only)、FSM `armRefusal` 記錄口徑、DetectionBoxes 雙層框(raw vs tracked)、dribbleGate 陳舊 latch/apex 跨界加固。
+- **模式分類 IA**:Train 分頁改 QUICK START/GAMES/CHALLENGES/TOOLS 分區 + 使用紀錄驅動的推薦 hero;全部 arm-then-route/deep-link/ghost picker 契約保留。
+- **Setup 一鍵開始**:頂部 StartHero(上次設定摘要 chip)+ 摺疊選項段 + sticky 底欄;settingsStore v7。
+- **動畫系統**:`src/components/motion/`(stagger/CountUp/MotionStat/SuccessBurst/AnimatedProgressBar/Shimmer/PressScale)+ gated haptics util;home/coach/history/trends/records/summary(PB 彩帶)/jump/profile/reel 全鋪;全部尊重 reduced-motion。
+- **3D v2**:視角預設(SIDE/FRONT/TOP)平滑 tween、自動環繞、手腕軌跡緞帶、release 幀場景內角度標註、兩球對比(誠實「estimated reconstruction」)、Stage3DStill 分享圖、首開導覽。
+- **教學層**:live 聚光燈 CoachMarks、HintChip 情境提示、校正指南 Skia 動畫場景、`/how-it-works` 偵測原理誠實說明頁、summary 誠實文案修正(改判不會訓練模型)。
+- 審查波抓到 13 個確認 bug 全修/處置(最重:stale FT-seed 回饋會假告「已錨定」+ rim 漂移不清 seed → 都修掉)。
+
 
 **2026-07-10 171-agent mega-upgrade(21 偵察/設計 + 45 實作/整合 + 101 審查/驗證/修復 + 4 收尾;1502 tests 全綠):**
 - **偵測**:多球熱身防護(suppression-only `multiBallGuard` + FSM `armLockout`,吃 per-model cold gate)、籃框撞歪 settle-boost 重鎖 + drift 期 arm 鎖(`rimGuard`)、推論延遲熱調速器(`thermalGovernor` L0-L3,model reload 會 reset)、鏡頭眩光/霧化自檢 advisory(`lensCheck`,HUD chip + DebugPanel lens/thermal 列)、追蹤走廊 capsule + 重力感知投影。淨 ROI 相位假爆發 bug(會鑄假 make)已在審查波抓到修掉(rect 移動時 diff 基線失效化)。

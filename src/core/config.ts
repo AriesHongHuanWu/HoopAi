@@ -206,6 +206,25 @@ export const TRACKER = {
    */
   maxSpeedDiametersPerSec: 40,
   /**
+   * Persistence rescue for the raised-cold-gate band (BallTracker's rescue
+   * path, flag-gated by settings.trackerRescue via setRescue). A ball det
+   * scoring in [DETECTION.ballScoreMin, activeColdFloor) may still START a
+   * track when it passes every NON-score gate and reappears coherently:
+   * at least `rescueFrames` sightings within `rescueWindowSec`, each moving
+   * at most `rescueMaxStepDiameters` ball diameters from the previous one,
+   * with net first→last travel of at least `rescueMinTravelDiameters`
+   * diameters (kills static phantoms — lights/rafters/background hoops hold
+   * still, a real ball travels). The band is EMPTY unless a per-model cold
+   * gate raised the floor above ballScoreMin (nano-v2's 0.35 today), so the
+   * feature is provably inert on default models — it bridges the
+   * "debug overlay draws the ball at 0.2 but the tracker demands 0.35"
+   * dead zone without loosening any model's chosen floor outright.
+   */
+  rescueFrames: 3,
+  rescueWindowSec: 0.25,
+  rescueMaxStepDiameters: 3,
+  rescueMinTravelDiameters: 0.75,
+  /**
    * Reject clearly non-round boxes (width * 1.4 < height) — likely a body
    * part or netting — unless the sample is flagged as a motion-blur streak.
    */

@@ -15,8 +15,8 @@ import { Canvas, Rect, RoundedRect } from '@shopify/react-native-skia';
 import { router, useFocusEffect } from 'expo-router';
 import React, { useCallback, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
-import { FadeInDown, useReducedMotion } from 'react-native-reanimated';
 
+import { MotionStat, useCardStagger } from '@/components/motion';
 import { BackPill } from '@/components/ShotList';
 import {
   AngleHistogram,
@@ -24,7 +24,7 @@ import {
 } from '@/components/charts/AngleHistogram';
 import { Sparkline } from '@/components/charts/Sparkline';
 import { CourtHeatmap } from '@/components/charts/CourtHeatmap';
-import { Card, EmptyState, Eyebrow, Row, Screen, StatNumber } from '@/components/ui';
+import { Card, EmptyState, Eyebrow, Row, Screen } from '@/components/ui';
 import { color, font, motion, radius, space, type } from '@/constants/tokens';
 import { fgTrend, listSessions, sessionShots, shotFromRow } from '@/data/db';
 import { monthlyProgress, type MonthlyProgress } from '@/core/progression';
@@ -34,8 +34,6 @@ type TrendPoint = Awaited<ReturnType<typeof fgTrend>>[number];
 
 const SPARK_H = 132;
 const BARS_H = 110;
-/** Cascade step between cards (ms). */
-const STAGGER_MS = 70;
 /** Recent tracked sessions aggregated into the court-zone heatmap. */
 const ZONE_SESSION_SCAN = 15;
 /** Min attempts before the zone map is worth showing. */
@@ -171,11 +169,9 @@ export default function TrendsScreen() {
   const [monthly, setMonthly] = useState<MonthlyProgress | null>(null);
   /** Aggregate court-zone heatmap across recent sessions (null = loading). */
   const [zones, setZones] = useState<Heatmap | null>(null);
-  const reducedMotion = useReducedMotion();
-  const enter = (i: number) =>
-    reducedMotion
-      ? undefined
-      : FadeInDown.duration(motion.standard).delay(i * STAGGER_MS);
+  // Canonical card cascade — this screen keeps its wider 70 ms step
+  // (undefined under reduced motion — cards render static).
+  const enter = useCardStagger({ stepMs: 70, durationMs: motion.standard });
 
   useFocusEffect(
     useCallback(() => {
@@ -327,26 +323,31 @@ export default function TrendsScreen() {
             <Eyebrow>{`Across ${points.length} sessions`}</Eyebrow>
             <View style={styles.statGrid}>
               <View style={styles.statCell}>
-                <StatNumber
-                  value={`${Math.round(avg * 100)}%`}
+                <MotionStat
+                  value={Math.round(avg * 100)}
+                  suffix="%"
                   size="medium"
                   label="avg FG"
+                  trigger={Math.round(avg * 100)}
                 />
               </View>
               <View style={styles.statDivider} />
               <View style={styles.statCell}>
-                <StatNumber
-                  value={`${Math.round(best * 100)}%`}
+                <MotionStat
+                  value={Math.round(best * 100)}
+                  suffix="%"
                   size="medium"
                   label="best"
+                  trigger={Math.round(best * 100)}
                 />
               </View>
               <View style={styles.statDivider} />
               <View style={styles.statCell}>
-                <StatNumber
-                  value={String(attempts)}
+                <MotionStat
+                  value={attempts}
                   size="medium"
                   label="attempts"
+                  trigger={attempts}
                 />
               </View>
             </View>
@@ -376,18 +377,20 @@ export default function TrendsScreen() {
               <Eyebrow>Lifetime</Eyebrow>
               <View style={styles.statGrid}>
                 <View style={styles.statCell}>
-                  <StatNumber
-                    value={String(lifetime.sessions)}
+                  <MotionStat
+                    value={lifetime.sessions}
                     size="medium"
                     label="sessions"
+                    trigger={lifetime.sessions}
                   />
                 </View>
                 <View style={styles.statDivider} />
                 <View style={styles.statCell}>
-                  <StatNumber
-                    value={String(lifetime.makes)}
+                  <MotionStat
+                    value={lifetime.makes}
                     size="medium"
                     label="total makes"
+                    trigger={lifetime.makes}
                   />
                 </View>
               </View>

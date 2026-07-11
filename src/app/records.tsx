@@ -11,20 +11,20 @@ import { Ionicons } from '@expo/vector-icons';
 import { router, useFocusEffect } from 'expo-router';
 import React, { useCallback, useEffect, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
-import Animated, { FadeInDown, useReducedMotion } from 'react-native-reanimated';
+import Animated from 'react-native-reanimated';
 
+import { MotionStat, useCardStagger } from '@/components/motion';
 import { AchievementRow } from '@/components/AchievementRow';
 import { ProBadge } from '@/components/ProBadge';
 import { BackPill } from '@/components/ShotList';
-import { Card, Chip, Eyebrow, PillButton, Row, Screen, StatNumber } from '@/components/ui';
+import { Card, Chip, Eyebrow, PillButton, Row, Screen } from '@/components/ui';
 import { color, motion, radius, space, type } from '@/constants/tokens';
 import { ACHIEVEMENTS, evaluate, type LifetimeTotals } from '@/core/achievements';
 import { computeDayStreak } from '@/core/streak';
 import { allSessionStartedAt, lifetimeTotals } from '@/data/db';
 import { useAchievementsSeen } from '@/state/achievementsSeenStore';
 
-/** Cascade step between badge rows (ms), capped so long boards stay snappy. */
-const STAGGER_MS = 40;
+/** Stagger index cap so long badge boards stay snappy. */
 const STAGGER_CAP = 8;
 
 /**
@@ -92,34 +92,23 @@ function BadgeList({
   /** Badge ids unlocked since the last visit — these rows get a "NEW" pip. */
   newIds?: readonly string[];
 }) {
-  const reducedMotion = useReducedMotion();
+  // Canonical row cascade (undefined under reduced motion — static render).
+  const enter = useCardStagger({ durationMs: motion.standard });
   return (
     <View style={styles.badgeList}>
-      {defs.map((def, i) =>
-        reducedMotion ? (
+      {defs.map((def, i) => (
+        <Animated.View
+          key={def.id}
+          entering={enter(Math.min(i, STAGGER_CAP))}
+        >
           <AchievementRow
-            key={def.id}
             def={def}
             totals={totals}
             unlocked={unlocked}
             isNew={newIds?.includes(def.id) ?? false}
           />
-        ) : (
-          <Animated.View
-            key={def.id}
-            entering={FadeInDown.duration(motion.standard).delay(
-              Math.min(i, STAGGER_CAP) * STAGGER_MS,
-            )}
-          >
-            <AchievementRow
-              def={def}
-              totals={totals}
-              unlocked={unlocked}
-              isNew={newIds?.includes(def.id) ?? false}
-            />
-          </Animated.View>
-        ),
-      )}
+        </Animated.View>
+      ))}
     </View>
   );
 }
@@ -200,11 +189,15 @@ export default function RecordsScreen() {
       <View style={styles.stack}>
         {/* Hero numerals */}
         <Card>
-          <StatNumber
-            value={String(totals.makes)}
+          {/* Career makes rolls in; trigger keyed on the value so a
+              newly-set record re-rolls on the next visit. Always a plain
+              integer (never '—'), so no static fallback branch needed. */}
+          <MotionStat
+            value={totals.makes}
             size="hero"
             label="career makes"
             tint={color.accent}
+            trigger={totals.makes}
           />
           <Row gap={space.sm} style={styles.heroRow}>
             <PbTile

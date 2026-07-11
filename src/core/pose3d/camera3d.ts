@@ -10,7 +10,7 @@
  * Every function is pure and returns new objects; nothing mutates its inputs.
  * Pure TypeScript: no I/O, no wall clock, no React/Skia imports.
  */
-import type { PoseKeypointName } from '../types';
+import type { PoseKeypointName, ShootingHand } from '../types';
 import type { Frame3D } from './lift';
 
 export interface OrbitCamera {
@@ -211,4 +211,78 @@ export function groundGrid(
     if (zA && zB) lines.push([zA, zB]);
   }
   return lines;
+}
+
+// ---------------------------------------------------------------------------
+// Camera presets, preset tweening, and auto-orbit
+// ---------------------------------------------------------------------------
+
+export type CameraPresetId = 'default' | 'front' | 'side' | 'top';
+
+/** Auto-orbit showcase rate: a slow spin, one full lap every 36 seconds. */
+export const AUTO_ORBIT_DEG_PER_SEC = 10;
+
+/**
+ * Named camera preset. Always returns a NEW object; every preset already
+ * satisfies the PITCH/DIST clamps (asserted in tests). `hand` only matters
+ * for 'side', which frames the shooting arm toward the viewer.
+ */
+export function presetCamera(id: CameraPresetId, hand: ShootingHand): OrbitCamera {
+  switch (id) {
+    case 'front':
+      return { yawDeg: 0, pitchDeg: -6, distance: 3.2, fovDeg: 40, targetY: -0.25 };
+    case 'side':
+      // Yaw sign rationale (mirror ambiguity): the lift copies image x, and
+      // a camera-facing right-handed shooter's right wrist sits at NEGATIVE
+      // world x; yaw -90 rotates that arm toward the viewer. The SIDE
+      // honesty-lock unit test in __tests__/camera3d.test.ts is the source
+      // of truth — if it ever fails, flip this ternary, not the test.
+      return {
+        yawDeg: hand === 'right' ? -90 : 90,
+        pitchDeg: -6,
+        distance: 3.0,
+        fovDeg: 40,
+        targetY: -0.25,
+      };
+    case 'top':
+      // pitch is exactly PITCH_MIN — the steepest look-down the stage allows.
+      return { yawDeg: 25, pitchDeg: -70, distance: 4.0, fovDeg: 40, targetY: -0.25 };
+    default:
+      return { ...DEFAULT_CAMERA };
+  }
+}
+
+/**
+ * Smoothstep tween between two cameras. `t` is clamped to [0, 1]; t >= 1
+ * returns an exact (deep-equal) copy of `to` so arrival is precise. Yaw
+ * travels the SHORTEST arc across the ±180 seam; every other field lerps
+ * linearly on the eased parameter. Returns a new object.
+ */
+export function tweenCamera(from: OrbitCamera, to: OrbitCamera, t: number): OrbitCamera {
+  const tc = clampNum(t, 0, 1);
+  if (tc >= 1) return { ...to };
+  const te = tc * tc * (3 - 2 * tc);
+  const lerp = (a: number, b: number): number => a + (b - a) * te;
+  return {
+    yawDeg: wrapDeg(from.yawDeg + wrapDeg(to.yawDeg - from.yawDeg) * te),
+    pitchDeg: lerp(from.pitchDeg, to.pitchDeg),
+    distance: lerp(from.distance, to.distance),
+    fovDeg: lerp(from.fovDeg, to.fovDeg),
+    targetY: lerp(from.targetY, to.targetY),
+  };
+}
+
+/**
+ * Advance the auto-orbit spin by one frame. `dtSec` is clamped to [0, 0.25]
+ * so an rAF hiccup (backgrounded tab, dropped frames) can never jump the
+ * camera. Pure: time comes from the caller, never a wall clock. Returns a
+ * new object.
+ */
+export function autoOrbitStep(
+  cam: OrbitCamera,
+  dtSec: number,
+  degPerSec: number = AUTO_ORBIT_DEG_PER_SEC,
+): OrbitCamera {
+  const dt = Math.min(Math.max(dtSec, 0), 0.25);
+  return { ...cam, yawDeg: wrapDeg(cam.yawDeg + dt * degPerSec) };
 }

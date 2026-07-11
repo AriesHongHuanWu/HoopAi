@@ -1,17 +1,22 @@
 import {
+  AUTO_ORBIT_DEG_PER_SEC,
   DEFAULT_CAMERA,
   DIST_MAX,
   DIST_MIN,
   PITCH_MAX,
   PITCH_MIN,
+  autoOrbitStep,
   groundGrid,
   orbitFromDrag,
   pinchZoom,
+  presetCamera,
   projectPoint,
   projectSkeleton,
   strokeWidthFor,
+  tweenCamera,
 } from '../camera3d';
-import type { OrbitCamera } from '../camera3d';
+import type { CameraPresetId, OrbitCamera } from '../camera3d';
+import type { ShootingHand } from '../../types';
 import type { Frame3D, Joint3D } from '../lift';
 
 const VP = { w: 300, h: 340 };
@@ -162,5 +167,125 @@ describe('camera3d', () => {
     expect(groundGrid(DEFAULT_CAMERA, VP, { y: 0.45 })).toEqual(
       groundGrid(DEFAULT_CAMERA, VP, { y: 0.45 }),
     );
+  });
+});
+
+describe('presetCamera', () => {
+  const IDS: readonly CameraPresetId[] = ['default', 'front', 'side', 'top'];
+  const HANDS: readonly ShootingHand[] = ['left', 'right'];
+
+  test('every preset x hand satisfies the pitch and distance clamps', () => {
+    for (const id of IDS) {
+      for (const hand of HANDS) {
+        const cam = presetCamera(id, hand);
+        expect(cam.pitchDeg).toBeGreaterThanOrEqual(PITCH_MIN);
+        expect(cam.pitchDeg).toBeLessThanOrEqual(PITCH_MAX);
+        expect(cam.distance).toBeGreaterThanOrEqual(DIST_MIN);
+        expect(cam.distance).toBeLessThanOrEqual(DIST_MAX);
+        // Yaw already lives in the wrapped range.
+        expect(cam.yawDeg).toBeGreaterThan(-180 - 1e-9);
+        expect(cam.yawDeg).toBeLessThanOrEqual(180);
+      }
+    }
+  });
+
+  test('default preset deep-equals DEFAULT_CAMERA but is a fresh object', () => {
+    const cam = presetCamera('default', 'right');
+    expect(cam).toEqual(DEFAULT_CAMERA);
+    expect(cam).not.toBe(DEFAULT_CAMERA);
+  });
+
+  test('SIDE honesty lock: the shooting-side wrist is nearer the camera', () => {
+    // Mirror-ambiguity source of truth. The lift copies image x, and a
+    // camera-facing right-handed shooter's right wrist sits at NEGATIVE
+    // world x (image-left). If this test fails, flip the ternary in
+    // presetCamera('side', ...) — do NOT change this test.
+    const vp = { w: 400, h: 400 };
+    const frame: Frame3D = {
+      right_wrist: joint(-0.2, -0.4, 0.05, 1),
+      left_wrist: joint(0.2, -0.4, 0.05, 1),
+    };
+    const rightCam = presetCamera('side', 'right');
+    expect(projectPoint(frame.right_wrist!, rightCam, vp)!.depth).toBeLessThan(
+      projectPoint(frame.left_wrist!, rightCam, vp)!.depth,
+    );
+    const leftCam = presetCamera('side', 'left');
+    expect(projectPoint(frame.left_wrist!, leftCam, vp)!.depth).toBeLessThan(
+      projectPoint(frame.right_wrist!, leftCam, vp)!.depth,
+    );
+  });
+});
+
+describe('tweenCamera', () => {
+  const FROM: OrbitCamera = { yawDeg: 0, pitchDeg: -8, distance: 3.2, fovDeg: 40, targetY: -0.25 };
+  const TO: OrbitCamera = { yawDeg: 90, pitchDeg: -30, distance: 2.0, fovDeg: 46, targetY: -0.1 };
+
+  test('t = 0 returns from; t >= 1 returns exact deep-equal arrival', () => {
+    expect(tweenCamera(FROM, TO, 0)).toEqual(FROM);
+    expect(tweenCamera(FROM, TO, 1)).toEqual(TO);
+    expect(tweenCamera(FROM, TO, 1)).not.toBe(TO); // new object, not the input
+    // t is clamped: overshoot and undershoot pin to the endpoints.
+    expect(tweenCamera(FROM, TO, 7)).toEqual(TO);
+    expect(tweenCamera(FROM, TO, -3)).toEqual(FROM);
+  });
+
+  test('midpoint uses smoothstep (te = 0.5 exactly at t = 0.5)', () => {
+    const mid = tweenCamera(FROM, TO, 0.5);
+    expect(mid.yawDeg).toBeCloseTo(45);
+    expect(mid.pitchDeg).toBeCloseTo(-19);
+    expect(mid.distance).toBeCloseTo(2.6);
+    expect(mid.fovDeg).toBeCloseTo(43);
+    expect(mid.targetY).toBeCloseTo(-0.175);
+  });
+
+  test('smoothstep eases: quarter progress travels less than linear', () => {
+    // te(0.25) = 0.25^2 * (3 - 0.5) = 0.15625.
+    const q = tweenCamera(FROM, TO, 0.25);
+    expect(q.yawDeg).toBeCloseTo(90 * 0.15625);
+    expect(q.yawDeg).toBeLessThan(90 * 0.25);
+  });
+
+  test('yaw takes the SHORTEST arc across the ±180 seam', () => {
+    const from = { ...FROM, yawDeg: 170 };
+    const to = { ...FROM, yawDeg: -170 };
+    const mid = tweenCamera(from, to, 0.5);
+    // Halfway across the seam lives in ±180 territory — never near 0.
+    expect(Math.abs(mid.yawDeg)).toBeGreaterThan(90);
+    expect(tweenCamera(from, to, 1).yawDeg).toBe(-170);
+  });
+
+  test('never mutates its inputs', () => {
+    const from = { ...FROM };
+    const to = { ...TO };
+    tweenCamera(from, to, 0.5);
+    expect(from).toEqual(FROM);
+    expect(to).toEqual(TO);
+  });
+});
+
+describe('autoOrbitStep', () => {
+  test('advances yaw by dt * rate and wraps across the seam', () => {
+    const cam: OrbitCamera = { ...DEFAULT_CAMERA, yawDeg: 179 };
+    expect(autoOrbitStep(cam, 0.2, 10).yawDeg).toBeCloseTo(-179);
+  });
+
+  test('clamps dt to [0, 0.25] — an rAF hiccup cannot jump the camera', () => {
+    const cam: OrbitCamera = { ...DEFAULT_CAMERA, yawDeg: 0 };
+    expect(autoOrbitStep(cam, 10, 10).yawDeg).toBeCloseTo(2.5);
+    expect(autoOrbitStep(cam, -5, 10).yawDeg).toBeCloseTo(0);
+  });
+
+  test('defaults to AUTO_ORBIT_DEG_PER_SEC and never mutates its input', () => {
+    const cam: OrbitCamera = { ...DEFAULT_CAMERA, yawDeg: 0 };
+    const before = { ...cam };
+    const out = autoOrbitStep(cam, 0.1);
+    expect(out.yawDeg).toBeCloseTo(0.1 * AUTO_ORBIT_DEG_PER_SEC);
+    expect(out).not.toBe(cam);
+    expect(cam).toEqual(before);
+    // Only yaw changes; the rest of the camera rides through untouched.
+    expect(out.pitchDeg).toBe(cam.pitchDeg);
+    expect(out.distance).toBe(cam.distance);
+    expect(out.fovDeg).toBe(cam.fovDeg);
+    expect(out.targetY).toBe(cam.targetY);
   });
 });

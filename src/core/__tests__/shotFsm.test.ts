@@ -1,9 +1,10 @@
 import { RIM } from '../config';
-import { ShotFsm } from '../shotFsm';
+// FsmStepResult here is shotFsm's EXTENDED shape (base + armRefusal), so the
+// run() helper exposes the telemetry to the armRefusal tests below.
+import { ShotFsm, type ArmRefusal, type FsmStepResult } from '../shotFsm';
 import type {
   Box,
   FsmFrameInput,
-  FsmStepResult,
   ResolvedShot,
   RimGeometry,
   TrackedBall,
@@ -908,6 +909,322 @@ describe('ShotFsm', () => {
 // must carry the reason (signals.illusion). The veto is bread-ball-safe: it can
 // ONLY remove a make, never mint one.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Regression signatures — full phase/resolve sequences (see the regression
+// describe at the bottom of this file). The signature pins EVERY frame's
+// phase plus every resolved shot's identity/outcome/signals/geometry, so any
+// behavioral drift in arming or resolution shows up as a one-line diff.
+// ---------------------------------------------------------------------------
+
+/** Compact, deterministic signature of a run: RLE phases | resolved shots. */
+function signature(res: RunResult): string {
+  const parts: string[] = [];
+  let cur = '';
+  let n = 0;
+  for (const r of res.results) {
+    if (r.phase === cur) {
+      n++;
+    } else {
+      if (n > 0) parts.push(`${cur}x${n}`);
+      cur = r.phase;
+      n = 1;
+    }
+  }
+  if (n > 0) parts.push(`${cur}x${n}`);
+  const shots = res.resolved.map((s) =>
+    [
+      s.id,
+      s.outcome,
+      s.tStart.toFixed(3),
+      s.tResolved.toFixed(3),
+      String(s.signals.geo),
+      String(s.signals.net),
+      String(s.signals.cls),
+      String(s.rimBounce),
+      s.xCross === null ? 'null' : s.xCross.toFixed(2),
+      s.entryAngleDeg === null ? 'null' : s.entryAngleDeg.toFixed(2),
+      s.trajectory.length,
+    ].join('/'),
+  );
+  return `${parts.join(',')}|${shots.join(';')}`;
+}
+
+/** Fixture builders reused by the regression pins (all deterministic). */
+const REGRESSION_FIXTURES: Record<string, () => FsmFrameInput[]> = {
+  swishMake: () => arcFrames({ x0: X0_CENTER, net: swishNet }),
+  frontRimBrick: () => arcFrames({ x0: 290 - VX * T_CROSS_DOWN }),
+  rimRattlerMake: () => {
+    const seq: Array<[number, number, number, number, number]> = [
+      [0 / 30, 320, 180, -100, 0],
+      [1 / 30, 320, 178, -50, 0],
+      [2 / 30, 318, 190, 150, 0],
+      [3 / 30, 315, 205, 200, 0],
+      [4 / 30, 316, 195, -250, 0],
+      [5 / 30, 318, 185, -100, 0],
+      [6 / 30, 319, 190, 100, 0],
+      [7 / 30, 320, 202, 250, 0],
+      [8 / 30, 321, 215, 350, 0.6],
+      [9 / 30, 322, 232, 400, 0.6],
+    ];
+    return seq.map(([t, cx, cy, vy, net]) =>
+      fin(t, tb(cx, cy, t, vy), { netMotionScore: net }),
+    );
+  },
+  airballNeverArms: () => {
+    const frames: FsmFrameInput[] = [];
+    for (let i = 0; i < 30; i++) {
+      const t = i / FPS;
+      frames.push(fin(t, tb(200 + 3 * i, 250 + 4 * i, t, 120, { vx: 90 })));
+    }
+    return frames;
+  },
+  occludedLayupClsMake: () => {
+    const person: Box = { x: 280, y: 180, width: 60, height: 120 };
+    const frames: FsmFrameInput[] = [
+      fin(0 / 30, tb(310, 190, 0 / 30, 80), { personBox: person }),
+      fin(1 / 30, tb(312, 193, 1 / 30, 80), { personBox: person }),
+      fin(2 / 30, tb(313, 196, 2 / 30, 80, { predicted: true, score: 0 }), {
+        personBox: person,
+      }),
+    ];
+    for (let i = 3; i <= 50; i++) {
+      frames.push(
+        fin(i / FPS, null, {
+          personBox: person,
+          ballInBasketScore: i <= 6 ? 0.5 : 0,
+        }),
+      );
+    }
+    return frames;
+  },
+  wedgedBallTimeout: () => {
+    const frames: FsmFrameInput[] = [];
+    for (let i = 0; i < 300; i++) {
+      const t = i / FPS;
+      frames.push(fin(t, tb(320, 195, t, 0)));
+    }
+    return frames;
+  },
+  floaterDescendMake: () => {
+    const VYF = -734.8;
+    const XF0 = 178.3;
+    const VXF = 110;
+    const netF = (t: number): number => (t >= 1.28 && t <= 1.36 ? 0.6 : 0);
+    const frames: FsmFrameInput[] = [];
+    for (let i = 0; i <= 42; i++) {
+      const t = i / FPS;
+      const cy = Y0 + VYF * t + 0.5 * G * t * t;
+      frames.push(
+        fin(t, tb(XF0 + VXF * t, cy, t, VYF + G * t, { vx: VXF }), {
+          netMotionScore: netF(t),
+        }),
+      );
+    }
+    return frames;
+  },
+  releaseArmedFloater: () => {
+    const VYF = -734.8;
+    const XF0 = 178.3;
+    const VXF = 110;
+    const netF = (t: number): number => (t >= 1.28 && t <= 1.36 ? 0.6 : 0);
+    const frames: FsmFrameInput[] = [];
+    for (let i = 0; i <= 42; i++) {
+      const t = i / FPS;
+      const cy = Y0 + VYF * t + 0.5 * G * t * t;
+      frames.push(
+        fin(t, tb(XF0 + VXF * t, cy, t, VYF + G * t, { vx: VXF }), {
+          netMotionScore: netF(t),
+          ...(i === 0 ? { releaseEventT: 0 } : {}),
+        }),
+      );
+    }
+    return frames;
+  },
+  doubleShotBasketCooldown: () => {
+    // Deterministic: the probe run computes the first resolve time exactly
+    // as test (6b) does, then the second attempt is appended to ONE stream.
+    const probe = run(newFsm(), arcFrames({ x0: X0_CENTER, net: swishNet }));
+    const t1 = probe.resolved[0].tResolved;
+    const a = t1 + 1.6;
+    return [
+      ...arcFrames({ x0: X0_CENTER, net: swishNet }),
+      fin(a, tb(320, 180, a, -100)),
+      fin(a + 1 / 30, tb(320, 195, a + 1 / 30, 300)),
+      fin(a + 2 / 30, tb(320, 210, a + 2 / 30, 400), { netMotionScore: 0.7 }),
+      fin(a + 3 / 30, tb(320, 232, a + 3 / 30, 450), { netMotionScore: 0.7 }),
+    ];
+  },
+  occludedSwishVirtualCross: () => {
+    const lostT = T_CROSS_DOWN - 0.15;
+    const frames = arcFrames({
+      x0: X0_CENTER,
+      frames: Math.floor(lostT * FPS),
+      net: (t) => (t >= T_CROSS_DOWN - 0.02 && t <= T_CROSS_DOWN + 0.1 ? 0.6 : 0),
+    });
+    for (let i = Math.floor(lostT * FPS); i <= Math.floor((lostT + 1.6) * FPS); i++) {
+      const t = i / FPS;
+      frames.push(
+        fin(t, null, {
+          netMotionScore:
+            t >= T_CROSS_DOWN - 0.02 && t <= T_CROSS_DOWN + 0.1 ? 0.6 : 0,
+        }),
+      );
+    }
+    return frames;
+  },
+};
+
+/**
+ * Signatures captured by running the fixtures against the PRE-TELEMETRY
+ * implementation (repo HEAD ef76e13, before armRefusal was added). The
+ * telemetry is contractually record-only, so every per-frame phase and every
+ * resolved shot must reproduce these byte-for-byte.
+ */
+const BASELINE: Record<string, string> = {
+  swishMake:
+    'IDLEx12,SHOT_LIVEx26,COOLDOWNx8|1/make/0.400/1.267/true/true/false/false/319.98/80.67/27',
+  frontRimBrick:
+    'IDLEx12,SHOT_LIVEx26,COOLDOWNx8|1/miss/0.400/1.267/false/null/false/false/289.98/80.67/27',
+  rimRattlerMake:
+    'SHOT_LIVEx9,COOLDOWNx1|1/make/0.000/0.300/true/true/false/true/319.83/85.24/10',
+  airballNeverArms: 'IDLEx30|',
+  occludedLayupClsMake:
+    'SHOT_LIVEx47,COOLDOWNx4|1/make/0.000/1.567/null/null/true/false/null/null/3',
+  wedgedBallTimeout:
+    'SHOT_LIVEx121,COOLDOWNx45,IDLEx134|1/unsure/0.000/4.033/null/null/false/false/null/null/48',
+  floaterDescendMake:
+    'IDLEx38,SHOT_LIVEx3,COOLDOWNx2|1/make/1.267/1.367/true/true/false/false/319.92/75.33/34',
+  releaseArmedFloater:
+    'IDLEx1,SHOT_LIVEx40,COOLDOWNx2|1/make/0.033/1.367/true/true/false/false/319.92/75.33/42',
+  doubleShotBasketCooldown:
+    'IDLEx12,SHOT_LIVEx26,COOLDOWNx8,SHOT_LIVEx3,COOLDOWNx1|1/make/0.400/1.267/true/true/false/false/319.98/80.67/27;2/unsure/2.867/2.967/true/true/false/false/320.00/90.00/4',
+  occludedSwishVirtualCross:
+    'IDLEx12,SHOT_LIVEx62,COOLDOWNx5|1/make/0.400/2.467/true/true/false/false/null/null/18',
+};
+
+describe('ShotFsm — regression pins (arming behavior identical to pre-telemetry HEAD)', () => {
+  for (const [name, mk] of Object.entries(REGRESSION_FIXTURES)) {
+    test(`${name}: full phase/resolve sequence unchanged`, () => {
+      expect(signature(run(newFsm(), mk()))).toBe(BASELINE[name]);
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// armRefusal telemetry — one case per vocabulary value. RECORD-ONLY contract:
+// every scenario also asserts the phase/arming behavior is what it was before
+// the field existed (the regression pins above cover the sequences wholesale).
+// ---------------------------------------------------------------------------
+
+describe('ShotFsm — armRefusal telemetry (record-only)', () => {
+  test("'no-ball': IDLE frame with no ball", () => {
+    const r = newFsm().step(fin(0, null));
+    expect(r.phase).toBe('IDLE');
+    expect(r.armRefusal).toBe('no-ball');
+  });
+
+  test("'no-branch': slow descending ball outside every arm zone, score < 0.3", () => {
+    // cx=100 sits outside upZone (x 240..400), layupZone (x 245..395) and
+    // hoopRoi (x 270..370); vy=50 (descending) rules out the jump branch;
+    // no release event. All four branches decline → 'no-branch'.
+    const r = newFsm().step(fin(0, tb(100, 190, 0, 50, { score: 0.25 })));
+    expect(r.phase).toBe('IDLE');
+    expect(r.armRefusal).toBe('no-branch');
+  });
+
+  test("'lockout': armLockout suppresses an otherwise-armable ball — and only records", () => {
+    const fsm = newFsm();
+    // Rising through the up-zone: would arm via 'jump' without the lockout.
+    const held = fsm.step(fin(0, tb(320, 180, 0, -100), { armLockout: true }));
+    expect(held.phase).toBe('IDLE');
+    expect(held.armRefusal).toBe('lockout');
+    // Lockout released next frame: the same ball arms — proving the refusal
+    // came from the input flag, not from any new internal state.
+    const armed = fsm.step(fin(1 / 30, tb(320, 181, 1 / 30, -100)));
+    expect(armed.phase).toBe('SHOT_LIVE');
+    expect(armed.armRefusal).toBe('armed');
+  });
+
+  test("'armed' on the arming frame, 'live' through resolve, 'cooldown' after", () => {
+    const { results } = run(newFsm(), arcFrames({ x0: X0_CENTER, net: swishNet }));
+    // Pre-arm approach: ball present every frame but no branch fires yet.
+    const armedIdx = results.findIndex((r) => r.phase === 'SHOT_LIVE');
+    expect(armedIdx).toBeGreaterThan(0);
+    for (let i = 0; i < armedIdx; i++) {
+      expect(results[i].armRefusal).toBe('no-branch');
+    }
+    expect(results[armedIdx].armRefusal).toBe('armed');
+    // Live frames — including the resolve frame itself — report 'live'.
+    const resolveIdx = results.findIndex((r) => r.resolved !== null);
+    expect(resolveIdx).toBeGreaterThan(armedIdx);
+    for (let i = armedIdx + 1; i <= resolveIdx; i++) {
+      expect(results[i].armRefusal).toBe('live');
+    }
+    // Post-resolve COOLDOWN frames report 'cooldown'.
+    for (let i = resolveIdx + 1; i < results.length; i++) {
+      expect(results[i].phase).toBe('COOLDOWN');
+      expect(results[i].armRefusal).toBe('cooldown');
+    }
+    const seen = new Set<ArmRefusal>(results.map((r) => r.armRefusal));
+    expect(seen).toEqual(new Set(['no-branch', 'armed', 'live', 'cooldown']));
+  });
+
+  test("'cooldown': ball fed inside the shot cooldown after a resolve (both paths)", () => {
+    const fsm = newFsm();
+    const first = run(fsm, arcFrames({ x0: X0_CENTER, net: swishNet }));
+    expect(first.resolved).toHaveLength(1);
+    const t1 = first.resolved[0].tResolved;
+    // Path 1 — COOLDOWN phase: a perfectly armable ball 0.5 s after resolve.
+    const rCd = fsm.step(fin(t1 + 0.5, tb(320, 180, t1 + 0.5, -100)));
+    expect(rCd.phase).toBe('COOLDOWN');
+    expect(rCd.resolved).toBeNull();
+    expect(rCd.armRefusal).toBe('cooldown');
+    // Cooldown lapses; empty IDLE frame.
+    const rIdle = fsm.step(fin(t1 + 1.6, null));
+    expect(rIdle.phase).toBe('IDLE');
+    expect(rIdle.armRefusal).toBe('no-ball');
+    // Path 2 — canArm's redundant guard: an out-of-order timestamp back
+    // inside the window reaches IDLE processing and is refused there. The
+    // FSM is pure and never assumes monotonic time, so this is the one way
+    // the guard is observable; it must record, not just return.
+    const rGuard = fsm.step(fin(t1 + 1.4, tb(320, 180, t1 + 1.4, -100)));
+    expect(rGuard.phase).toBe('IDLE');
+    expect(rGuard.armRefusal).toBe('cooldown');
+  });
+
+  test("'putback': inside the putback window after a rim-bounce resolve, then arms again", () => {
+    const fsm = newFsm();
+    const { resolved } = run(fsm, REGRESSION_FIXTURES.rimRattlerMake());
+    expect(resolved).toHaveLength(1);
+    expect(resolved[0].rimBounce).toBe(true);
+    const t1 = resolved[0].tResolved;
+    // Past the 1.5 s shot cooldown (phase is IDLE again) but still inside
+    // the 2.0 s putback window: refused, and the reason says why.
+    const held = fsm.step(fin(t1 + 1.7, tb(320, 180, t1 + 1.7, -100)));
+    expect(held.phase).toBe('IDLE');
+    expect(held.armRefusal).toBe('putback');
+    // Once the window closes the identical ball arms — recording only.
+    const armed = fsm.step(fin(t1 + 2.4, tb(320, 180, t1 + 2.4, -100)));
+    expect(armed.phase).toBe('SHOT_LIVE');
+    expect(armed.armRefusal).toBe('armed');
+  });
+
+  test("'resting': wedged-ball suppression frames report the suppressor", () => {
+    const { results } = run(newFsm(), REGRESSION_FIXTURES.wedgedBallTimeout());
+    // Baseline sequence: SHOT_LIVE x121 (arm at 0), COOLDOWN x45 (resolve at
+    // idx 121), IDLE x134 (suppressed still ball). See BASELINE pin.
+    expect(results[0].armRefusal).toBe('armed');
+    const resolveIdx = results.findIndex((r) => r.resolved !== null);
+    expect(results[resolveIdx].armRefusal).toBe('live');
+    const idleStart = results.findIndex((r, i) => i > resolveIdx && r.phase === 'IDLE');
+    expect(idleStart).toBeGreaterThan(resolveIdx);
+    for (let i = idleStart; i < results.length; i++) {
+      expect(results[i].phase).toBe('IDLE');
+      expect(results[i].armRefusal).toBe('resting');
+    }
+  });
+});
 
 describe('ShotFsm — depth-illusion (parallax) veto', () => {
   // Rim width 92px clears the gate's ~40px enablement floor and matches the

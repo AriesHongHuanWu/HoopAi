@@ -134,7 +134,7 @@ export const CLIP_POST_ROLL_MIN = 1;
 export const CLIP_POST_ROLL_MAX = 5;
 
 /** Screens with an in-app coach-marks walkthrough. */
-export type TutorialScreen = 'home' | 'live' | 'summary';
+export type TutorialScreen = 'home' | 'live' | 'liveHud' | 'summary' | 'formstudio3d';
 
 /** Has the walkthrough for each screen been seen (and dismissed) once? */
 export type TutorialSeen = Record<TutorialScreen, boolean>;
@@ -142,7 +142,23 @@ export type TutorialSeen = Record<TutorialScreen, boolean>;
 const TUTORIAL_SEEN_DEFAULT: TutorialSeen = {
   home: false,
   live: false,
+  liveHud: false,
   summary: false,
+  formstudio3d: false,
+};
+
+/**
+ * One-shot contextual hint chips (components/hud/HintChip.tsx). Keys are
+ * persistence contracts — stable forever, never renamed.
+ */
+export type HintKey = 'unsureLive' | 'unsureSummary';
+
+/** Has each one-shot contextual hint been dismissed/acted on once? */
+export type HintSeen = Record<HintKey, boolean>;
+
+const HINT_SEEN_DEFAULT: HintSeen = {
+  unsureLive: false,
+  unsureSummary: false,
 };
 
 export interface SettingsState {
@@ -286,6 +302,10 @@ export interface SettingsState {
   deviceTuned: boolean;
   /** Last session orientation — powers the Home quick-start (skip setup). */
   lastOrient: 'portrait' | 'landscape';
+  /** Last-used Timed Challenge duration (seconds) — seeds setup's pre-flight chips. */
+  lastDurationSec: number;
+  /** Last-used Spot Shooting makes-per-spot target — seeds setup's pre-flight chips. */
+  lastMakesPerSpot: number;
   /**
    * Run the pose model for shooting-form analysis + coaching. Default off — it
    * runs a second model per frame, best on recent phones. See formAnalysis.ts.
@@ -318,6 +338,10 @@ export interface SettingsState {
    * Same pattern as tutorialSeen — consumed/written only by FirstBallRitual.
    */
   receiptTourSeen: boolean;
+  /** One-shot contextual hint flags — consumed by HintChip; reset by resetTutorial. */
+  hintSeen: HintSeen;
+  /** One-shot: the /how-it-works explainer has been opened at least once. */
+  detectionExplainerSeen: boolean;
   /**
    * 3D replay viewer master switch. Pure-Skia projection is visual-only but
    * costs GPU on entry phones — this is the escape hatch.
@@ -339,6 +363,12 @@ export interface SettingsState {
    * lock is drift-stale.
    */
   rimGuard: boolean;
+  /**
+   * Persistence rescue: adopt a ball the detector keeps seeing in the
+   * raised-gate band but the tracker never starts on. DETECTION-side recall
+   * only — never touches arming or make/miss.
+   */
+  trackerRescue: boolean;
   /**
    * Inference-time-based thermal governor: sheds ROI/pose and caps frame
    * rate when the chip is hot.
@@ -374,9 +404,11 @@ export interface SettingsState {
   setDeviceTier: (override: 'auto' | DeviceTier) => void;
   /** Mark one screen's walkthrough as seen (called on finish/skip). */
   markTutorialSeen: (screen: TutorialScreen) => void;
+  /** Mark one contextual hint as seen (called by HintChip on dismiss/action). */
+  markHintSeen: (key: HintKey) => void;
   /**
-   * Clear all tutorial-seen flags so every walkthrough re-triggers.
-   * onboardingDone is left untouched — only the in-app coach marks reset.
+   * Clear the coach marks, contextual hints and the first-ball receipt tour
+   * so every walkthrough re-triggers. onboardingDone is left untouched.
    * Exposed for Settings > "Restart tutorial".
    */
   resetTutorial: () => void;
@@ -420,6 +452,8 @@ export const useSettings = create<SettingsState>()(
       detectedTier: null,
       deviceTuned: false,
       lastOrient: 'portrait',
+      lastDurationSec: 60,
+      lastMakesPerSpot: 5,
       formAnalysis: false,
       tutorialSeen: TUTORIAL_SEEN_DEFAULT,
       dailyGoalMakes: 0,
@@ -427,9 +461,12 @@ export const useSettings = create<SettingsState>()(
       lastFtCalSummary: null,
       calGuideSeen: false,
       receiptTourSeen: false,
+      hintSeen: { ...HINT_SEEN_DEFAULT },
+      detectionExplainerSeen: false,
       replay3d: true,
       multiBallGuard: true,
       rimGuard: true,
+      trackerRescue: true,
       adaptiveThermal: true,
       lensCheck: true,
       set: (key, value) => set({ [key]: value } as Pick<SettingsState, typeof key>),
@@ -470,7 +507,13 @@ export const useSettings = create<SettingsState>()(
         }),
       markTutorialSeen: (screen) =>
         set((s) => ({ tutorialSeen: { ...s.tutorialSeen, [screen]: true } })),
-      resetTutorial: () => set({ tutorialSeen: { ...TUTORIAL_SEEN_DEFAULT } }),
+      markHintSeen: (key) => set((s) => ({ hintSeen: { ...s.hintSeen, [key]: true } })),
+      resetTutorial: () =>
+        set({
+          tutorialSeen: { ...TUTORIAL_SEEN_DEFAULT },
+          hintSeen: { ...HINT_SEEN_DEFAULT },
+          receiptTourSeen: false,
+        }),
     }),
     {
       name: 'hoopai-settings',
@@ -482,7 +525,7 @@ export const useSettings = create<SettingsState>()(
       // "from version N" to branch on instead of relying on zustand's default
       // shallow-merge rehydration, which silently keeps stale/renamed keys
       // around forever.
-      version: 6,
+      version: 7,
       migrate: (persisted, version) => {
         const s = persisted as SettingsState;
         // v2: YOLOX (Apache-2.0, GPU-correct) becomes the default detector. Move
@@ -524,6 +567,31 @@ export const useSettings = create<SettingsState>()(
         // plain additive keys whose creator defaults merge cleanly on
         // rehydrate, so replay3d is the only backfill this version needs.
         if (version < 6 && s.replay3d == null) s.replay3d = true;
+        // v7 (round-2 mega-upgrade — bumped exactly ONCE for every sibling
+        // feature landing together):
+        // - tutorials/form3d: 'liveHud' + 'formstudio3d' walkthroughs added.
+        //   tutorialSeen is a NESTED record — zustand's shallow rehydrate
+        //   keeps the old persisted object wholesale, so the new keys must be
+        //   backfilled explicitly (unlike top-level additive keys).
+        //   Re-spreading the defaults UNDER the persisted flags preserves
+        //   every seen=true while filling the new screens with false.
+        // - tutorials: contextual-hint ledger + explainer one-shot, backfilled
+        //   so rehydrated stores carry every key (shallow-merge would
+        //   otherwise leave the nested hintSeen undefined forever).
+        // - tracking-gap: trackerRescue defaults ON (detection-side recall
+        //   only; provably inert unless a per-model cold gate raised the
+        //   acquisition floor — it can never touch make/miss judging).
+        // - setup-flow: the pre-flight screen remembers per-user defaults.
+        //   Additive keys — backfill creator defaults so seeded chips never
+        //   read undefined.
+        if (version < 7) {
+          s.tutorialSeen = { ...TUTORIAL_SEEN_DEFAULT, ...(s.tutorialSeen ?? {}) };
+          s.hintSeen = { ...HINT_SEEN_DEFAULT };
+          s.detectionExplainerSeen = false;
+          if (s.trackerRescue == null) s.trackerRescue = true;
+          if (s.lastDurationSec == null) s.lastDurationSec = 60;
+          if (s.lastMakesPerSpot == null) s.lastMakesPerSpot = 5;
+        }
         return s;
       },
     },

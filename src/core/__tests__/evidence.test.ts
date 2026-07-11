@@ -142,7 +142,18 @@ describe('confidence language (one shared scale)', () => {
 });
 
 describe('2/3 value provenance labels', () => {
-  const sources: ShotValueSource[] = ['court', 'metric', 'heuristic', 'manual'];
+  // Exhaustive over ShotValueSource BY CONSTRUCTION: Record<ShotValueSource,
+  // true> fails to compile when the union grows (or a member is typo'd), so
+  // "every source" below really means every source — the old hand-listed
+  // array silently skipped 'ftSeed' when the union widened.
+  const sourceCoverage: Record<ShotValueSource, true> = {
+    court: true,
+    ftSeed: true,
+    metric: true,
+    heuristic: true,
+    manual: true,
+  };
+  const sources = Object.keys(sourceCoverage) as ShotValueSource[];
 
   test('every source has a non-empty label and phrase', () => {
     for (const s of sources) {
@@ -154,6 +165,14 @@ describe('2/3 value provenance labels', () => {
   test('court reads as the corner-accurate registered source', () => {
     expect(valueSourceLabel('court')).toBe('Court-registered');
     expect(valueSourcePhrase('court')).toMatch(/corner-accurate/);
+  });
+
+  test("ftSeed reads as FT-anchored (calibrationGuide's ladder pins this literal)", () => {
+    // calibrationGuide.test.ts pins the guide-side ladder label 'FT-anchored'
+    // verbatim; this cross-pin keeps shot receipts and the calibration-guide
+    // ladder from drifting apart silently.
+    expect(valueSourceLabel('ftSeed')).toBe('FT-anchored');
+    expect(valueSourcePhrase('ftSeed')).toMatch(/free-throw anchor/);
   });
 });
 

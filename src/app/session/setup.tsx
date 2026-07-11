@@ -1,173 +1,157 @@
 /**
- * Session setup — the pre-flight checklist before opening the camera.
- * No camera renders here; we only check permissions and session options.
+ * Session setup — instant-start hero + collapsible options; the camera never
+ * renders here.
+ *
+ * Layout: [header] → [StartHero: GO CTA + summary chips + tips strip] →
+ * [Options header] → five CollapsibleSections (mode / camera / recording /
+ * court & ball / calibration) → StickyStartBar (appears once the hero CTA
+ * scrolls off-screen, with hysteresis so it never flickers at the boundary).
+ *
+ * All section bodies live in @/components/setup/SetupSections (pure
+ * presentation); this screen owns every store read/write and the scroll
+ * choreography. Seeds orientation/duration/makes-per-spot from the persisted
+ * last-used values so repeat sessions are one tap.
  */
-import React, { useState } from 'react';
-import { Linking, Pressable, StyleSheet, Switch, Text, View } from 'react-native';
-import { router } from 'expo-router';
+import React, { useCallback, useRef, useState } from 'react';
+import {
+  Linking,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+  type NativeScrollEvent,
+  type NativeSyntheticEvent,
+} from 'react-native';
+import { router, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import Animated, {
-  FadeInDown,
-  useAnimatedStyle,
-  useReducedMotion,
-  useSharedValue,
-  withSpring,
-} from 'react-native-reanimated';
+import Animated, { useReducedMotion } from 'react-native-reanimated';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   useCameraPermission,
   useMicrophonePermission,
 } from 'react-native-vision-camera';
 
 import { BackPill } from '@/components/ShotList';
-import { CalibrationHealthCard } from '@/components/CalibrationHealthCard';
-import { ModeMark } from '@/components/modes/modeIdentity';
-import { Card, Chip, Eyebrow, PillButton, Row, Screen } from '@/components/ui';
-import { color, font, motion, radius, space, touch, type } from '@/constants/tokens';
+import { useCardStagger } from '@/components/motion';
+import { CollapsibleSection } from '@/components/setup/CollapsibleSection';
+import {
+  CalibrationSectionBody,
+  CameraSectionBody,
+  CourtBallSectionBody,
+  ModeSectionBody,
+  RecordingSectionBody,
+} from '@/components/setup/SetupSections';
+import { StartHero, type StartHeroChip } from '@/components/setup/StartHero';
+import { StickyStartBar } from '@/components/setup/StickyStartBar';
+import {
+  HERO_CHIP_DEFS,
+  SETUP_SECTION_ORDER,
+  defaultExpanded,
+  cameraSubtitle,
+  courtBallSubtitle,
+  modeSubtitle,
+  recordingSubtitle,
+  startSummaryLine,
+  type SetupSectionId,
+} from '@/components/setup/setupDefaults';
+import { Eyebrow, Row } from '@/components/ui';
+import { color, motion, space, type } from '@/constants/tokens';
 import { getModeDef } from '@/core/gameModes';
 import { useMode } from '@/state/modeStore';
 import { useSession } from '@/state/sessionStore';
-import { useSettings, type KeepMode } from '@/state/settingsStore';
+import { useSettings } from '@/state/settingsStore';
 
+/** Pre-flight config choices — passed to ModeSectionBody as chip values. */
 const TIMED_DURATIONS = [30, 60, 90, 120] as const;
 const SPOT_MAKE_TARGETS = [3, 5, 7, 10] as const;
 
-const CHECKLIST = [
-  {
-    title: 'Rim fully visible',
-    body: 'Frame the whole hoop — rim, net and a bit of backboard.',
-  },
-  {
-    title: '15–30 ft side view',
-    body: 'Place the phone 15–30 ft away, 30–60° off the backboard. Straight-on views hide makes.',
-  },
-  {
-    title: 'Phone stable',
-    body: 'Use a tripod, or lean the phone against a bag or bottle — portrait or landscape both work. A bumped camera pauses tracking.',
-  },
-  {
-    title: 'Good light',
-    body: 'Bright, even light keeps the ball easy to track. Dim gyms cut the frame rate.',
-  },
-] as const;
-
-const KEEP_OPTIONS: { mode: KeepMode; label: string }[] = [
-  { mode: 'makes', label: 'Makes only' },
-  { mode: 'decided', label: 'Makes + misses' },
-  { mode: 'all', label: 'Every shot' },
-  { mode: 'none', label: 'No clips' },
-];
-
-/** Last-glance placement reminders next to the GO button — copy only. */
-const PLACEMENT_TIPS: { icon: React.ComponentProps<typeof Ionicons>['name']; label: string }[] = [
-  { icon: 'footsteps-outline', label: '15–30 FT SIDE VIEW' },
-  { icon: 'scan-outline', label: 'WHOLE RIM VISIBLE' },
-  { icon: 'lock-closed-outline', label: 'STEADY PROP' },
-];
+/** Collapsed-header titles for the five option sections. */
+const SECTION_TITLES: Record<SetupSectionId, string> = {
+  mode: 'Game mode',
+  camera: 'Camera & placement',
+  recording: 'Recording',
+  courtBall: 'Court & ball',
+  calibration: 'Calibration',
+};
 
 /**
- * Tiny viewfinder diagram for the orientation cards: a phone silhouette
- * framing a minimal court sketch (floor, backboard, rim, ball). Pure Views —
- * decorative only, the card label carries the accessible name.
+ * Sticky-bar hysteresis half-width (px): the bar flips ON only once the
+ * scroll offset passes heroBottom + 8 and OFF only below heroBottom - 8, so
+ * a finger resting exactly at the boundary can't strobe the bar.
  */
-function OrientDiagram({
-  orient,
-  selected,
-}: {
-  orient: 'portrait' | 'landscape';
-  selected: boolean;
-}) {
-  return (
-    <View style={styles.orientDiagram}>
-      <View
-        style={[
-          styles.phoneFrame,
-          orient === 'portrait' ? styles.phonePortrait : styles.phoneLandscape,
-          selected && styles.phoneFrameSelected,
-        ]}
-      >
-        {/* Front camera dot — sells the phone silhouette. */}
-        <View
-          style={[
-            styles.camDot,
-            orient === 'portrait' ? styles.camDotPortrait : styles.camDotLandscape,
-          ]}
-        />
-        {/* Court sketch inside the frame: what the camera should see. */}
-        <View style={styles.sketchFloor} />
-        <View style={styles.sketchBoard} />
-        <View style={[styles.sketchRim, selected && styles.sketchRimSelected]} />
-        <View style={styles.sketchBall} />
-      </View>
-    </View>
-  );
-}
-
-const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
-
-/**
- * The broadcast GO moment — one oversized live-style button. Same press
- * spring as PillButton, same disabled semantics as the old CTA.
- */
-function GoCta({ onPress, disabled }: { onPress: () => void; disabled: boolean }) {
-  const scale = useSharedValue(1);
-  const animStyle = useAnimatedStyle(() => ({ transform: [{ scale: scale.value }] }));
-  return (
-    <AnimatedPressable
-      onPress={onPress}
-      disabled={disabled}
-      onPressIn={() => {
-        scale.value = withSpring(0.97, { damping: 20, stiffness: 400 });
-      }}
-      onPressOut={() => {
-        scale.value = withSpring(1, { damping: 16, stiffness: 300 });
-      }}
-      accessibilityRole="button"
-      accessibilityLabel="Start session — open the camera"
-      accessibilityState={{ disabled }}
-      style={[styles.go, disabled && styles.goDisabled, animStyle]}
-    >
-      <View style={styles.goIcon}>
-        <Ionicons name="videocam" size={22} color={color.onAccent} />
-      </View>
-      <View style={styles.goBody}>
-        <Text style={styles.goLabel}>START SESSION</Text>
-        <Text style={styles.goSub}>Opens the camera — tracking starts with your first shot</Text>
-      </View>
-    </AnimatedPressable>
-  );
-}
+const STICKY_HYSTERESIS_PX = 8;
 
 export default function SessionSetupScreen() {
+  const insets = useSafeAreaInsets();
   const camera = useCameraPermission();
   const mic = useMicrophonePermission();
   const recordVideo = useSettings((s) => s.recordVideo);
   const keepMode = useSettings((s) => s.keepMode);
+  const rimHeightM = useSettings((s) => s.rimHeightM);
+  const ballSize = useSettings((s) => s.ballSize);
+  const courtRange = useSettings((s) => s.courtRange);
   const set = useSettings((s) => s.set);
   const beginSetup = useSession((s) => s.beginSetup);
   const activeMode = useMode((s) => s.activeMode);
   const selectMode = useMode((s) => s.selectMode);
   const modeDef = activeMode != null ? getModeDef(activeMode.modeId) : null;
+  const drillArmed = activeMode?.config?.drill != null;
 
+  // Orientation the live session LOCKS to (chosen here). Locking it in
+  // live.tsx means the camera never rotates mid-session, so the detection
+  // overlay can't dislocate on a portrait/landscape flip. Seeded from the
+  // last session's choice — Home's quick-start reads the same key.
+  const [orient, setOrient] = useState<'portrait' | 'landscape'>(
+    () => useSettings.getState().lastOrient,
+  );
   // Pre-flight config for the modes that need it — duration for Timed
-  // Challenge, makes-per-spot for Spot Shooting. Re-inits the active mode's
-  // running state (fresh clock/spots) whenever the player changes the value,
-  // so this must happen before the camera opens (initMode is a full reset).
-  const [durationSec, setDurationSec] = useState(activeMode?.config?.durationSec ?? 60);
-  const [makesPerSpot, setMakesPerSpot] = useState(activeMode?.config?.makesPerSpot ?? 5);
-  // Orientation the live session LOCKS to (chosen here). Locking it in live.tsx
-  // means the camera never rotates mid-session, so the detection overlay can't
-  // dislocate on a portrait/landscape flip. Defaults to portrait.
-  const [orient, setOrient] = useState<'portrait' | 'landscape'>('portrait');
+  // Challenge, makes-per-spot for Spot Shooting. Seeded from the armed mode's
+  // config first (a fresh selectMode already carries the value), then from
+  // the persisted last-used value so repeat players keep their number.
+  const [durationSec, setDurationSec] = useState(
+    () => useMode.getState().activeMode?.config?.durationSec ?? useSettings.getState().lastDurationSec,
+  );
+  const [makesPerSpot, setMakesPerSpot] = useState(
+    () => useMode.getState().activeMode?.config?.makesPerSpot ?? useSettings.getState().lastMakesPerSpot,
+  );
+  // Session-local expand/collapse state, computed ONCE at mount (deliberately
+  // not reactive to later permission grants — the section stays open).
+  const [expanded, setExpanded] = useState<Record<SetupSectionId, boolean>>(() =>
+    defaultExpanded({
+      modeArmed: useMode.getState().activeMode != null,
+      cameraGranted: camera.hasPermission,
+    }),
+  );
 
-  // Entrance stagger — cards drop in one after another; off under reduced motion.
+  // Scroll choreography: each section wrapper records its content-container Y
+  // so hero chips can scroll straight to it; the hero reports its bottom edge
+  // for the sticky bar's appear boundary.
+  const scrollRef = useRef<ScrollView>(null);
+  const sectionY = useRef<Partial<Record<SetupSectionId, number>>>({});
+  const heroBottomY = useRef(0);
+  const [stickyOn, setStickyOn] = useState(false);
+
   const reducedMotion = useReducedMotion();
-  const enter = (i: number) =>
-    reducedMotion ? undefined : FadeInDown.duration(motion.standard).delay(i * 70);
+  const enter = useCardStagger({ stepMs: 70, durationMs: motion.standard });
+
+  // Double-tap guard: exactly one /session/live push per screen visit. Reset
+  // on focus so backing out of live re-arms the START CTA.
+  const openingRef = useRef(false);
+  useFocusEffect(
+    useCallback(() => {
+      openingRef.current = false;
+    }, []),
+  );
 
   const openCamera = async () => {
+    if (openingRef.current) return;
+    openingRef.current = true;
     if (!camera.hasPermission && camera.canRequestPermission) {
       const granted = await camera.requestPermission();
-      if (!granted) return;
+      if (!granted) {
+        openingRef.current = false;
+        return;
+      }
     }
     if (recordVideo && !mic.hasPermission && mic.canRequestPermission) {
       // Best effort — recording works without game audio if declined.
@@ -179,305 +163,250 @@ export default function SessionSetupScreen() {
     router.push(`/session/live?orient=${orient}`);
   };
 
-  return (
-    <Screen scroll>
-      <Row style={styles.backRow}>
-        <BackPill />
-      </Row>
-      <Animated.View entering={enter(0)}>
-        <Eyebrow>New session</Eyebrow>
-        <Text style={styles.title} accessibilityRole="header">
-          Get the hoop in frame
-        </Text>
-        <Text style={styles.lede}>
-          One minute of setup keeps make/miss calls accurate all session.
-        </Text>
-      </Animated.View>
+  const onScroll = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const y = e.nativeEvent.contentOffset.y;
+    // Hysteresis: ON only above hero bottom + 8, OFF only below hero bottom
+    // - 8. The functional update bails out when the value is unchanged, so
+    // steady scrolling doesn't re-render the screen.
+    setStickyOn((prev) => {
+      const boundary = heroBottomY.current;
+      return prev
+        ? y > boundary - STICKY_HYSTERESIS_PX
+        : y > boundary + STICKY_HYSTERESIS_PX;
+    });
+  };
 
-      {/* Chosen game mode (or Free Play when none picked) */}
-      <Card entering={enter(1)} style={styles.card}>
-        <Row style={styles.modeRow} gap={space.md}>
-          {/* The mode's Ionicons identity mark (shared ModeMark) — the picker,
-              banner and complete sheet all draw this same glyph-on-tint, so
-              the setup card must not fall back to the legacy catalog emoji. */}
-          <ModeMark modeId={activeMode?.modeId ?? 'free'} size={48} />
-          <View style={styles.checkBody}>
-            <Eyebrow>Game mode</Eyebrow>
-            <Text style={styles.itemTitle}>{modeDef?.name ?? 'Free Play'}</Text>
-            <Text style={styles.itemBody}>
-              {modeDef?.tagline ?? 'Just shoot — every make counts.'}
-            </Text>
-          </View>
-          <PillButton
-            label={modeDef != null ? 'Change' : 'Choose'}
-            variant="ghost"
-            onPress={() => router.push('/modes')}
-            style={styles.modeChange}
+  const onChipPress = (id: SetupSectionId) => {
+    setExpanded((e) => ({ ...e, [id]: true }));
+    scrollRef.current?.scrollTo({
+      y: (sectionY.current[id] ?? 0) - space.md,
+      animated: !reducedMotion,
+    });
+  };
+
+  // Re-selecting the mode re-inits its running state (fresh clock/spots), so
+  // this must only ever happen pre-camera — initMode is a full reset. The
+  // persisted last-used value seeds the next session's chips.
+  const onPickDuration = (sec: number) => {
+    setDurationSec(sec);
+    selectMode('timed', { durationSec: sec });
+    set('lastDurationSec', sec);
+  };
+  const onPickMakes = (n: number) => {
+    setMakesPerSpot(n);
+    selectMode('spotShooting', { makesPerSpot: n });
+    set('lastMakesPerSpot', n);
+  };
+
+  const startDisabled = !camera.hasPermission && !camera.canRequestPermission;
+  const summary = startSummaryLine({
+    modeName: modeDef?.name ?? null,
+    orient,
+    recordVideo,
+    keepMode,
+  });
+
+  const modeSub = modeSubtitle({
+    modeId: activeMode?.modeId ?? null,
+    drillId: activeMode?.config?.drill?.id ?? null,
+    durationSec,
+    makesPerSpot,
+  });
+  const recordingSub = recordingSubtitle({ recordVideo, keepMode });
+
+  // Hero summary chips — labels mirror the section subtitles they open.
+  const chips: StartHeroChip[] = HERO_CHIP_DEFS.map((d) => ({
+    id: d.id,
+    icon: d.icon as StartHeroChip['icon'],
+    label:
+      d.id === 'mode'
+        ? modeSub
+        : d.id === 'camera'
+          ? orient === 'portrait'
+            ? 'Portrait'
+            : 'Landscape'
+          : recordingSub,
+  }));
+
+  const sectionSubtitle = (id: SetupSectionId): string | undefined => {
+    switch (id) {
+      case 'mode':
+        return modeSub;
+      case 'camera':
+        return cameraSubtitle({ granted: camera.hasPermission, orient });
+      case 'recording':
+        return recordingSub;
+      case 'courtBall':
+        return courtBallSubtitle({ rimHeightM, ballSize, courtRange });
+      case 'calibration':
+        return undefined;
+    }
+  };
+
+  const sectionBody = (id: SetupSectionId): React.ReactNode => {
+    switch (id) {
+      case 'mode':
+        return (
+          <ModeSectionBody
+            modeName={modeDef?.name ?? null}
+            modeTagline={modeDef?.tagline ?? null}
+            modeId={activeMode?.modeId ?? 'free'}
+            drillArmed={drillArmed}
+            needsTimer={modeDef?.needsTimer ?? false}
+            isSpotShooting={modeDef?.id === 'spotShooting'}
+            durationSec={durationSec}
+            makesPerSpot={makesPerSpot}
+            onPickDuration={onPickDuration}
+            onPickMakes={onPickMakes}
+            onChangeMode={() => router.push('/modes')}
+            timedDurations={TIMED_DURATIONS}
+            spotTargets={SPOT_MAKE_TARGETS}
           />
-        </Row>
-
-        {modeDef?.needsTimer && (
-          <View style={styles.configBlock}>
-            <Eyebrow>Duration</Eyebrow>
-            <View style={styles.keepWrap}>
-              {TIMED_DURATIONS.map((sec) => {
-                const selected = durationSec === sec;
-                return (
-                  <Pressable
-                    key={sec}
-                    accessibilityRole="button"
-                    accessibilityLabel={`${sec} seconds`}
-                    accessibilityState={{ selected }}
-                    onPress={() => {
-                      setDurationSec(sec);
-                      selectMode('timed', { durationSec: sec });
-                    }}
-                    style={({ pressed }) => [
-                      styles.keepChip,
-                      selected && styles.keepChipSelected,
-                      pressed && styles.keepChipPressed,
-                    ]}
-                  >
-                    <Text style={[styles.keepChipLabel, selected && styles.keepChipLabelSelected]}>
-                      {sec}s
-                    </Text>
-                  </Pressable>
-                );
-              })}
-            </View>
-          </View>
-        )}
-
-        {modeDef?.id === 'spotShooting' && (
-          <View style={styles.configBlock}>
-            <Eyebrow>Makes per spot</Eyebrow>
-            <View style={styles.keepWrap}>
-              {SPOT_MAKE_TARGETS.map((n) => {
-                const selected = makesPerSpot === n;
-                return (
-                  <Pressable
-                    key={n}
-                    accessibilityRole="button"
-                    accessibilityLabel={`${n} makes per spot`}
-                    accessibilityState={{ selected }}
-                    onPress={() => {
-                      setMakesPerSpot(n);
-                      selectMode('spotShooting', { makesPerSpot: n });
-                    }}
-                    style={({ pressed }) => [
-                      styles.keepChip,
-                      selected && styles.keepChipSelected,
-                      pressed && styles.keepChipPressed,
-                    ]}
-                  >
-                    <Text style={[styles.keepChipLabel, selected && styles.keepChipLabelSelected]}>
-                      {n}
-                    </Text>
-                  </Pressable>
-                );
-              })}
-            </View>
-          </View>
-        )}
-      </Card>
-
-      {/* Placement checklist — check-circle rail from step to step. */}
-      <Card entering={enter(2)} style={styles.card}>
-        <Eyebrow>Placement checklist</Eyebrow>
-        {CHECKLIST.map((item, i) => (
-          <Row key={item.title} style={styles.checkRow} gap={space.md}>
-            <View style={styles.checkRail}>
-              <View style={styles.badge}>
-                <Ionicons name="checkmark" size={16} color={color.accent} />
-              </View>
-              {i < CHECKLIST.length - 1 && <View style={styles.railLine} />}
-            </View>
-            <View style={[styles.checkBody, i < CHECKLIST.length - 1 && styles.checkBodyGap]}>
-              <Text style={styles.itemTitle}>{item.title}</Text>
-              <Text style={styles.itemBody}>{item.body}</Text>
-            </View>
-          </Row>
-        ))}
-      </Card>
-
-      {/* Calibration health — receipts for the three rituals + guide entry.
-          The component renders its own Card (no style prop), so a plain View
-          carries the between-card margin; the entering animation lives on the
-          inner Card. Duplicate stagger index is fine (Home precedent). */}
-      <View style={styles.card}>
-        <CalibrationHealthCard
-          variant="setup"
-          entering={enter(3)}
-          onOpenGuide={() => router.push('/calibration-guide')}
-        />
-      </View>
-
-      <Card entering={enter(3)} style={styles.card}>
-        <Row style={styles.optionRow} gap={space.md}>
-          <View style={styles.checkBody}>
-            <Text style={styles.itemTitle}>Record video</Text>
-            <Text style={styles.itemBody}>Save the session so makes become replay clips.</Text>
-          </View>
-          <Switch
-            value={recordVideo}
-            onValueChange={(v) => set('recordVideo', v)}
-            trackColor={{ false: color.surfaceRaised, true: color.accentTint }}
-            thumbColor={recordVideo ? color.accent : color.textFaint}
-            accessibilityLabel="Record video"
-          />
-        </Row>
-        {recordVideo && (
-          <View style={styles.keepBlock}>
-            <Eyebrow>Keep clips</Eyebrow>
-            <View style={styles.keepWrap}>
-              {KEEP_OPTIONS.map((opt) => {
-                const selected = keepMode === opt.mode;
-                return (
-                  <Pressable
-                    key={opt.mode}
-                    accessibilityRole="button"
-                    accessibilityLabel={`Keep clips: ${opt.label}`}
-                    accessibilityState={{ selected }}
-                    onPress={() => set('keepMode', opt.mode)}
-                    style={({ pressed }) => [
-                      styles.keepChip,
-                      selected && styles.keepChipSelected,
-                      pressed && styles.keepChipPressed,
-                    ]}
-                  >
-                    <Text style={[styles.keepChipLabel, selected && styles.keepChipLabelSelected]}>
-                      {opt.label}
-                    </Text>
-                  </Pressable>
-                );
-              })}
-            </View>
-          </View>
-        )}
-      </Card>
-
-      <Card entering={enter(4)} style={styles.card}>
-        <Row style={styles.optionRow} gap={space.md}>
-          <View
-            style={[
-              styles.permBadge,
-              { backgroundColor: camera.hasPermission ? color.makeTint : color.accentTint },
-            ]}
-          >
-            <Ionicons
-              name={camera.hasPermission ? 'videocam' : 'videocam-outline'}
-              size={20}
-              color={camera.hasPermission ? color.make : color.accent}
+        );
+      case 'camera':
+        return (
+          <View>
+            <CameraSectionBody
+              orient={orient}
+              onSetOrient={setOrient}
+              cameraGranted={camera.hasPermission}
+              canRequest={camera.canRequestPermission}
+              onRequestPermission={() => void camera.requestPermission()}
+              onOpenSystemSettings={() => void Linking.openSettings()}
+              showMicNote={recordVideo && !mic.hasPermission}
             />
-          </View>
-          <View style={styles.checkBody}>
-            <Text style={styles.itemTitle}>Camera access</Text>
-            <Text style={styles.itemBody}>
-              {camera.hasPermission
-                ? 'Granted — the live view is ready to go.'
-                : camera.canRequestPermission
-                  ? 'Needed to watch the rim and track shots. Nothing is uploaded.'
-                  : 'Camera access is off. Turn it on in system settings to track shots.'}
-            </Text>
-          </View>
-          {camera.hasPermission && <Chip label="Ready" tone="make" />}
-        </Row>
-        {!camera.hasPermission && (
-          <PillButton
-            label={camera.canRequestPermission ? 'Allow camera access' : 'Open settings'}
-            variant="ghost"
-            style={styles.permissionButton}
-            onPress={() => {
-              if (camera.canRequestPermission) void camera.requestPermission();
-              else void Linking.openSettings();
-            }}
-          />
-        )}
-        {recordVideo && !mic.hasPermission && (
-          <Row gap={space.xs} style={styles.micNoteRow}>
-            <Ionicons name="mic-outline" size={13} color={color.textFaint} />
-            <Text style={styles.micNote}>
-              The microphone is only used for game audio in recordings.
-            </Text>
-          </Row>
-        )}
-      </Card>
-
-      {/* Orientation — two rich cards with mini viewfinder diagrams. */}
-      <Card entering={enter(5)} style={styles.card}>
-        <Eyebrow>Orientation</Eyebrow>
-        <Text style={styles.itemBody}>
-          Lock the camera to how you'll prop your phone — it won't rotate mid-session.
-        </Text>
-        <Row gap={space.md} style={styles.orientRow}>
-          {(['portrait', 'landscape'] as const).map((o) => {
-            const selected = orient === o;
-            return (
-              <Pressable
-                key={o}
-                accessibilityRole="button"
-                accessibilityLabel={
-                  o === 'portrait'
-                    ? 'Portrait — phone propped upright'
-                    : 'Landscape — phone propped on its side'
-                }
-                accessibilityState={{ selected }}
-                onPress={() => setOrient(o)}
-                style={({ pressed }) => [
-                  styles.orientCard,
-                  selected && styles.orientCardSelected,
-                  pressed && styles.orientCardPressed,
-                ]}
-              >
-                <OrientDiagram orient={o} selected={selected} />
-                <Text style={[styles.orientLabel, selected && styles.orientLabelSelected]}>
-                  {o === 'portrait' ? 'Portrait' : 'Landscape'}
-                </Text>
-                <Text style={styles.orientHint}>
-                  {o === 'portrait' ? 'Propped upright' : 'Propped sideways'}
-                </Text>
-                {selected && (
-                  <View style={styles.orientCheck}>
-                    <Ionicons name="checkmark-circle" size={20} color={color.accent} />
-                  </View>
-                )}
-              </Pressable>
-            );
-          })}
-        </Row>
-      </Card>
-
-      {/* Final glance: placement tips strip, then the GO moment. */}
-      <Animated.View entering={enter(6)} style={styles.ctaBlock}>
-        <View style={styles.tipsStrip}>
-          {PLACEMENT_TIPS.map((tip, i) => (
-            <React.Fragment key={tip.label}>
-              {i > 0 && (
-                <Text
-                  style={styles.tipDivider}
-                  accessible={false}
-                  importantForAccessibility="no"
-                >
-                  ·
-                </Text>
-              )}
-              <View style={styles.tipItem}>
-                <Ionicons name={tip.icon} size={12} color={color.accent} />
-                <Text style={styles.tipLabel}>{tip.label}</Text>
+            {/* FT-seed ritual entry (ft-position) — one non-interactive tip
+                row after the placement checklist. Lives here because the
+                checklist body is a finished shared component. */}
+            <Row style={styles.ftTipRow} gap={space.md}>
+              <View style={styles.ftTipRail}>
+                <View style={styles.ftTipBadge}>
+                  <Ionicons name="checkmark" size={16} color={color.accent} />
+                </View>
               </View>
-            </React.Fragment>
-          ))}
-        </View>
-        <GoCta
-          onPress={() => void openCamera()}
-          disabled={!camera.hasPermission && !camera.canRequestPermission}
+              <View style={styles.ftTipBody}>
+                <Text style={styles.ftTipText}>
+                  Optional: shoot your first shot from the free-throw line — it
+                  calibrates real distances.
+                </Text>
+              </View>
+            </Row>
+          </View>
+        );
+      case 'recording':
+        return (
+          <RecordingSectionBody
+            recordVideo={recordVideo}
+            keepMode={keepMode}
+            onToggleRecord={(v) => set('recordVideo', v)}
+            onSetKeepMode={(m) => set('keepMode', m)}
+          />
+        );
+      case 'courtBall':
+        return (
+          <CourtBallSectionBody
+            rimHeightM={rimHeightM}
+            ballSize={ballSize}
+            courtRange={courtRange}
+            onSetRimHeight={(m) => set('rimHeightM', m)}
+            onSetBallSize={(s) => set('ballSize', s)}
+            onSetCourtRange={(r) => set('courtRange', r)}
+          />
+        );
+      case 'calibration':
+        // CalibrationSectionBody draws its own Card; the section renders
+        // plainBody and owns the entrance, so no entering is passed here.
+        return <CalibrationSectionBody onOpenGuide={() => router.push('/calibration-guide')} />;
+    }
+  };
+
+  return (
+    <View style={styles.root}>
+      <ScrollView
+        ref={scrollRef}
+        scrollEventThrottle={16}
+        onScroll={onScroll}
+        contentContainerStyle={[
+          // Screen-equivalent padding (ui.tsx Screen scroll) + clearance for
+          // the absolute StickyStartBar (~96px) so the last card clears it.
+          { paddingTop: insets.top, paddingBottom: insets.bottom + space.xxl + 96 },
+          { paddingHorizontal: space.lg },
+        ]}
+        showsVerticalScrollIndicator={false}
+      >
+        <Row style={styles.backRow}>
+          <BackPill />
+        </Row>
+
+        <Animated.View entering={enter(0)}>
+          <Eyebrow>New session</Eyebrow>
+          <Text style={styles.title} accessibilityRole="header">
+            Ready to shoot
+          </Text>
+          <Text style={styles.lede}>
+            Start now, or open a section below to tweak the session first.
+          </Text>
+        </Animated.View>
+
+        {/* Instant-start hero — GO CTA, summary chips, placement tips. Must
+            stay a DIRECT child of the content container so its reported
+            bottom edge shares the scroll offset's coordinate space. */}
+        <StartHero
+          entering={enter(1)}
+          summary={summary}
+          chips={chips}
+          disabled={startDisabled}
+          onStart={() => void openCamera()}
+          onChipPress={onChipPress}
+          onLayoutBottom={(y) => {
+            heroBottomY.current = y;
+          }}
         />
-      </Animated.View>
-    </Screen>
+
+        <Animated.View entering={enter(2)} style={styles.optionsHeader}>
+          <Eyebrow>Options</Eyebrow>
+        </Animated.View>
+
+        {SETUP_SECTION_ORDER.map((id, idx) => (
+          <View
+            key={id}
+            onLayout={(e) => {
+              sectionY.current[id] = e.nativeEvent.layout.y;
+            }}
+          >
+            <CollapsibleSection
+              title={SECTION_TITLES[id]}
+              subtitle={sectionSubtitle(id)}
+              expanded={expanded[id]}
+              onToggle={() => setExpanded((e) => ({ ...e, [id]: !e[id] }))}
+              entering={enter(3 + idx)}
+              plainBody={id === 'calibration'}
+            >
+              {sectionBody(id)}
+            </CollapsibleSection>
+          </View>
+        ))}
+      </ScrollView>
+
+      {/* Sticky fallback START — sibling of the ScrollView so it floats over
+          the content; visibility owned here (hysteresis in onScroll). */}
+      <StickyStartBar
+        visible={stickyOn}
+        disabled={startDisabled}
+        summary={summary}
+        onStart={() => void openCamera()}
+      />
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
+  root: {
+    flex: 1,
+    // Same token ui.tsx styles.screen uses — this local ScrollView replicates
+    // Screen's scroll chrome so the sticky bar can live outside it.
+    backgroundColor: color.bg,
+  },
   backRow: {
     marginBottom: space.md,
   },
@@ -491,33 +420,21 @@ const styles = StyleSheet.create({
     marginTop: space.xs,
     marginBottom: space.xl,
   },
-  card: {
-    marginBottom: space.lg,
+  optionsHeader: {
+    marginTop: space.xl,
+    marginBottom: space.md,
   },
-  modeRow: {
-    alignItems: 'center',
-  },
-  configBlock: {
+  // FT-seed tip row — mirrors SetupSections' checklist row styles (rail badge
+  // + body text) so it reads as a fifth checklist item.
+  ftTipRow: {
+    alignItems: 'stretch',
     marginTop: space.lg,
   },
-  modeChange: {
-    paddingHorizontal: space.lg,
-  },
-  checkRow: {
-    alignItems: 'stretch',
-  },
-  checkRail: {
+  ftTipRail: {
     width: 28,
     alignItems: 'center',
   },
-  railLine: {
-    flex: 1,
-    width: 1.5,
-    borderRadius: 1,
-    backgroundColor: color.border,
-    marginTop: space.xs,
-  },
-  badge: {
+  ftTipBadge: {
     width: 28,
     height: 28,
     borderRadius: 14,
@@ -525,250 +442,12 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
-  checkBody: {
+  ftTipBody: {
     flex: 1,
   },
-  checkBodyGap: {
-    paddingBottom: space.lg,
-  },
-  itemTitle: {
-    ...type.heading,
-    color: color.text,
-  },
-  itemBody: {
+  ftTipText: {
     ...type.body,
     color: color.textDim,
-    marginTop: 2,
-  },
-  optionRow: {
-    alignItems: 'center',
-  },
-  keepBlock: {
-    marginTop: space.lg,
-  },
-  keepWrap: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: space.sm,
-  },
-  keepChip: {
-    minHeight: touch.minTarget,
-    justifyContent: 'center',
-    paddingHorizontal: space.lg,
-    borderRadius: radius.pill,
-    borderWidth: 1,
-    borderColor: color.border,
-  },
-  keepChipSelected: {
-    borderColor: color.accent,
-    backgroundColor: color.accentTint,
-  },
-  keepChipPressed: {
-    backgroundColor: color.surfaceRaised,
-  },
-  keepChipLabel: {
-    ...type.bodyMedium,
-    color: color.textDim,
-  },
-  keepChipLabelSelected: {
-    color: color.accent,
-  },
-  permBadge: {
-    width: 40,
-    height: 40,
-    borderRadius: radius.md,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  permissionButton: {
-    marginTop: space.md,
-  },
-  micNoteRow: {
-    marginTop: space.md,
-    alignItems: 'flex-start',
-  },
-  micNote: {
-    ...type.caption,
-    color: color.textFaint,
-    flex: 1,
-  },
-  // --- Orientation cards ------------------------------------------------
-  orientRow: {
-    marginTop: space.md,
-    alignItems: 'stretch',
-  },
-  orientCard: {
-    flex: 1,
-    alignItems: 'center',
-    borderWidth: 1.5,
-    borderColor: color.border,
-    borderRadius: radius.md,
-    paddingVertical: space.md,
-    paddingHorizontal: space.sm,
-  },
-  orientCardSelected: {
-    borderColor: color.accent,
-    backgroundColor: color.accentTint,
-  },
-  orientCardPressed: {
-    backgroundColor: color.surfaceRaised,
-  },
-  orientCheck: {
-    position: 'absolute',
-    top: space.sm,
-    right: space.sm,
-  },
-  orientDiagram: {
-    height: 64,
-    justifyContent: 'center',
-    marginBottom: space.sm,
-  },
-  phoneFrame: {
-    borderWidth: 1.5,
-    borderColor: color.textDim,
-    borderRadius: 6,
-    overflow: 'hidden',
-    alignSelf: 'center',
-  },
-  phoneFrameSelected: {
-    borderColor: color.accent,
-  },
-  phonePortrait: {
-    width: 34,
-    height: 56,
-  },
-  phoneLandscape: {
-    width: 56,
-    height: 34,
-  },
-  camDot: {
-    position: 'absolute',
-    width: 3,
-    height: 3,
-    borderRadius: 1.5,
-    backgroundColor: color.textFaint,
-  },
-  camDotPortrait: {
-    top: 3,
-    alignSelf: 'center',
-  },
-  camDotLandscape: {
-    left: 3,
-    top: '50%',
-    marginTop: -1.5,
-  },
-  sketchFloor: {
-    position: 'absolute',
-    left: '8%',
-    right: '8%',
-    bottom: '10%',
-    height: 1.5,
-    backgroundColor: color.border,
-  },
-  sketchBoard: {
-    position: 'absolute',
-    right: '16%',
-    top: '22%',
-    width: 2,
-    height: '32%',
-    borderRadius: 1,
-    backgroundColor: color.textDim,
-  },
-  sketchRim: {
-    position: 'absolute',
-    right: '26%',
-    top: '44%',
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    borderWidth: 1.5,
-    borderColor: color.textDim,
-  },
-  sketchRimSelected: {
-    borderColor: color.accent,
-  },
-  sketchBall: {
-    position: 'absolute',
-    left: '18%',
-    bottom: '18%',
-    width: 5,
-    height: 5,
-    borderRadius: 2.5,
-    backgroundColor: color.accent,
-  },
-  orientLabel: {
-    ...type.heading,
-    color: color.text,
-  },
-  orientLabelSelected: {
-    color: color.accent,
-  },
-  orientHint: {
-    ...type.caption,
-    color: color.textFaint,
-    marginTop: 2,
-  },
-  // --- Tips strip + GO CTA ----------------------------------------------
-  ctaBlock: {
-    marginTop: space.sm,
-    marginBottom: space.xl,
-  },
-  tipsStrip: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: space.sm,
-    marginBottom: space.md,
-  },
-  tipItem: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: space.xs,
-  },
-  tipLabel: {
-    ...type.micro,
-    color: color.textFaint,
-  },
-  tipDivider: {
-    ...type.micro,
-    color: color.textFaint,
-  },
-  go: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: space.md,
-    minHeight: 72,
-    backgroundColor: color.accent,
-    borderRadius: radius.lg,
-    paddingVertical: space.lg,
-    paddingHorizontal: space.lg,
-  },
-  goDisabled: {
-    opacity: 0.4,
-  },
-  goIcon: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: 'rgba(20, 10, 5, 0.18)',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  goBody: {
-    flex: 1,
-  },
-  goLabel: {
-    fontFamily: font.display,
-    fontSize: 24,
-    lineHeight: 26,
-    letterSpacing: 1,
-    color: color.onAccent,
-  },
-  goSub: {
-    ...type.caption,
-    color: color.onAccent,
-    opacity: 0.7,
     marginTop: 2,
   },
 });

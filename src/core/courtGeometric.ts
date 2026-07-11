@@ -61,6 +61,12 @@ export interface MetricShotEstimate {
   zRimM: number;
   zFeetM: number;
   camHeightM: number;
+  /**
+   * Shooter lateral offset from the rim in the camera-ground frame, meters,
+   * +right. Raw geometry like zRimM/zFeetM — never touched by calibration.
+   * Note distanceM (uncalibrated) === hypot(zFeetM − zRimM, lateralM).
+   */
+  lateralM: number;
 }
 
 /** Regulation rim center height above the floor, meters — the default ruler. */
@@ -129,5 +135,6 @@ export function estimateShotValueMetric(input: MetricShotInput): MetricShotEstim
     zRimM: zRim,
     zFeetM: zFeet,
     camHeightM: camH,
+    lateralM: xFeet - xRim,
   };
 }

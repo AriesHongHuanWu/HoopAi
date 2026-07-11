@@ -15,10 +15,18 @@
  * session store and renders store state. No per-frame React updates.
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Dimensions, Linking, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
+import {
+  Dimensions,
+  Linking,
+  Pressable,
+  StyleSheet,
+  Text,
+  View,
+  useWindowDimensions,
+  type LayoutRectangle,
+} from 'react-native';
 import { router, useLocalSearchParams, useNavigation } from 'expo-router';
 import * as ScreenOrientation from 'expo-screen-orientation';
-import * as Haptics from 'expo-haptics';
 import { useKeepAwake } from 'expo-keep-awake';
 import { Canvas, Path, Skia } from '@shopify/react-native-skia';
 import Animated, {
@@ -41,6 +49,9 @@ import { useCourtCalibration } from '../../state/courtCalibrationStore';
 import { playSound, useShotSounds } from '../../camera/useShotSounds';
 import { useVoiceAnnouncements } from '../../camera/useVoiceAnnouncements';
 import { CoachMarks, useCoachMarks, type CoachStep } from '../../components/coach/CoachMarks';
+import { ghostAimRect } from '../../components/coach/liveTourRects';
+import { FtSeedChip, type FtSeedFeedback } from '../../components/hud/FtSeedChip';
+import { HintChip } from '../../components/hud/HintChip';
 import { HudChip } from '../../components/hud/HudChip';
 import {
   GHOST_RIM_ASPECT,
@@ -71,13 +82,10 @@ import type { FtCaptureOutcome } from '../../pipeline/shotPipeline';
 import { useMode } from '../../state/modeStore';
 import { useSession } from '../../state/sessionStore';
 import { useSettings } from '../../state/settingsStore';
+import { haptic } from '@/utils/haptics';
 
 const DRIFT_BANNER_MS = 4000;
 const PAUSED_CHIP_MS = 4000;
-/** How long the one-time FT-calibration offer lingers after rim lock. */
-const FT_OFFER_MS = 20000;
-/** How long the calibration success/failure chip stays up. */
-const FT_RESULT_MS = 2500;
 /** Width of the docked HUD column in landscape (compact, rim stays clear). */
 const LANDSCAPE_HUD_WIDTH = 300;
 /**
@@ -93,30 +101,6 @@ const LANDSCAPE_HUD_MIN_WIDTH = 220;
  * floats clear of the End / Re-aim buttons (their ~44pt touch target + gap).
  */
 const BOTTOM_BAR_CLEARANCE = 56;
-
-/**
- * First-run HUD intro — shown once before the rim locks on, teaching the
- * physical setup and what's about to happen. Centered cards (no camera UI
- * exists yet to anchor to); always dismissible via Skip.
- */
-const LIVE_STEPS: CoachStep[] = [
-  {
-    title: 'Prop your phone',
-    text: 'Set it on a tripod, a bench or a water bottle 15–30 feet to the side of the court, low enough that the whole rim is visible in frame.',
-  },
-  {
-    title: 'The rim locks automatically',
-    text: 'Hold the camera steady on the hoop. A bracket reticle will lock onto the rim by itself — that\'s your cue everything is tracking.',
-  },
-  {
-    title: 'Your HUD',
-    text: 'Once locked, the strip up top shows points, FG% and your current streak, updated live after every shot.',
-  },
-  {
-    title: 'Sounds tell the story',
-    text: 'A make, a miss and a streak each get their own sound. If a call looks wrong, you can fix it with one tap on the summary screen after.',
-  },
-];
 
 /** RN 0.86 dropped StyleSheet.absoluteFillObject — local equivalent. */
 const absoluteFill = {
@@ -170,11 +154,76 @@ function LiveSessionScreen() {
   const [pausedChip, setPausedChip] = useState(false);
   // Last resolved shot for the micro-replay toast (ShotToast times itself).
   const [toastShot, setToastShot] = useState<ResolvedShot | null>(null);
+  // One-shot contextual hint after the first UNSURE call — HintChip renders
+  // null once its persisted flag is set, so no teardown logic is needed.
+  const [showUnsureHint, setShowUnsureHint] = useState(false);
 
-  // First-run HUD intro — teaches setup before the rim locks. Independent of
-  // the camera permission flow (it renders in the same tree either way, and
-  // only actually shows once permission is granted and the camera mounts).
-  const liveCoach = useCoachMarks('live', LIVE_STEPS);
+  // First-run intro — teaches physical setup before the rim locks. The second
+  // step spotlights the ghost-rim aiming box (same geometry the AimingOverlay
+  // draws, via ghostAimRect). Independent of the camera permission flow (it
+  // renders in the same tree either way, and only actually shows once
+  // permission is granted and the camera mounts).
+  const liveSteps = useMemo<CoachStep[]>(
+    () => [
+      {
+        title: 'Prop your phone',
+        text: 'Set it on a tripod, a bench or a water bottle 15–30 feet to the side of the court, low enough that the whole rim is visible in frame.',
+      },
+      {
+        title: 'Aim here',
+        text: 'Line the hoop up with this box — whole rim in frame, upper third, held steady. The reticle locks on by itself.',
+        targetRect: ghostAimRect(width, height),
+      },
+    ],
+    [width, height],
+  );
+  const liveCoach = useCoachMarks('live', liveSteps);
+
+  // Post-lock HUD tour — two spotlit steps (stat strip, bottom bar) measured
+  // in window coordinates, the same space CoachMarks positions in. Measure
+  // inside rAF (Home's measured-rect precedent) so layout has settled; an
+  // undefined rect just centers the card, so a missed measure degrades safely.
+  const statStripWrapRef = useRef<View>(null);
+  const bottomBarRef = useRef<View>(null);
+  const [statRect, setStatRect] = useState<LayoutRectangle | undefined>();
+  const [barRect, setBarRect] = useState<LayoutRectangle | undefined>();
+  // Only measure while the tour is actually pending/visible — for the >99% of
+  // sessions where the liveHud tour is already seen, an always-on measure
+  // re-rendered the WHOLE screen on every StatStrip layout change (every shot,
+  // every expand/collapse tap) for rects nobody would ever read. The equality
+  // check keeps settled layouts from re-rendering the screen either way
+  // (measureInWindow hands back a fresh callback per layout pass, so the
+  // setState below would otherwise always see a new object).
+  const measureRef =
+    (ref: React.RefObject<View | null>, setRect: React.Dispatch<React.SetStateAction<LayoutRectangle | undefined>>) => () => {
+      requestAnimationFrame(() =>
+        ref.current?.measureInWindow((x, y, w, h) => {
+          if (w > 0 && h > 0)
+            setRect((prev) =>
+              prev != null && prev.x === x && prev.y === y && prev.width === w && prev.height === h
+                ? prev
+                : { x, y, width: w, height: h },
+            );
+        }),
+      );
+    };
+  const hudSteps = useMemo<CoachStep[]>(
+    () => [
+      {
+        title: 'Your live stat line',
+        text: 'Points, FG% and streak, updated after every shot. Tap the strip any time to expand it.',
+        targetRect: statRect,
+      },
+      {
+        title: 'Session controls',
+        text: "Re-aim if the camera moves, Calibrate for corner-accurate 3s, End when you're done. Now go shoot.",
+        targetRect: barRect,
+        placement: 'above',
+      },
+    ],
+    [statRect, barRect],
+  );
+  const hudCoach = useCoachMarks('liveHud', hudSteps);
 
   const engineRef = useRef<ShotEngine | null>(null);
   const cameraRef = useRef<React.ComponentRef<typeof Camera>>(null);
@@ -224,19 +273,20 @@ function LiveSessionScreen() {
   const onShot = useCallback((shot: ResolvedShot) => {
     useSession.getState().addShot(shot);
     setToastShot(shot); // feeds the last-shot micro-replay toast
+    // First UNSURE call arms the one-shot honesty hint under the toast.
+    if (shot.outcome === 'unsure') setShowUnsureHint(true);
     // Fold the same resolved shot into the active game mode (no-op when none).
     // Use the wall clock (seconds) so the timed-mode countdown shares one clock
     // with the tick loop below — shot.tResolved is camera-frame time, a
     // different origin that would desync the timer.
     useMode.getState().applyShot(shot, Date.now() / 1000);
-    if (useSettings.getState().hapticsEnabled) {
-      const feedback =
-        shot.outcome === 'make'
-          ? Haptics.NotificationFeedbackType.Success
-          : shot.outcome === 'miss'
-            ? Haptics.NotificationFeedbackType.Error
-            : Haptics.NotificationFeedbackType.Warning;
-      void Haptics.notificationAsync(feedback);
+    // haptic.* gates on the Settings toggle internally.
+    if (shot.outcome === 'make') {
+      haptic.success();
+    } else if (shot.outcome === 'miss') {
+      haptic.error();
+    } else {
+      haptic.warning();
     }
   }, []);
 
@@ -278,9 +328,8 @@ function LiveSessionScreen() {
     }
     // Success haptic at the lock moment — the tactile half of the green-lock
     // beat (the aiming overlay's ghost/countdown have just read fully green).
-    if (useSettings.getState().hapticsEnabled) {
-      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    }
+    // Settings-gated inside the util.
+    haptic.success();
 
     const { recordVideo, keepMode } = useSettings.getState();
     void (async () => {
@@ -315,6 +364,17 @@ function LiveSessionScreen() {
   }, []);
 
   const engine = useShotEngine('auto', { onShot, onRimLocked, onRimDrift });
+  // FT-seed engine seam — armFtSeed/cancelFtSeed/ftSeedLast ship with the
+  // ft-position useShotEngine work (concurrent integrator). The structural
+  // widening keeps this file compiling in either merge order (optional-call
+  // no-ops until the handle exports them); drop the cast once the engine
+  // handle carries the members directly. The pipeline's FtSeedFeedback is a
+  // structural superset of the chip's, so the payload flows through as-is.
+  const seedEngine = engine as ShotEngine & {
+    armFtSeed?: () => void;
+    cancelFtSeed?: () => void;
+    ftSeedLast?: FtSeedFeedback | null;
+  };
   const debugMode = useSettings((s) => s.debugMode);
   useEffect(() => {
     engineRef.current = engine;
@@ -359,7 +419,7 @@ function LiveSessionScreen() {
           { responsiveness: 'steady', adaptiveness: 'locked', autoResetAfter: null },
         )
         .catch(() => {});
-      void Haptics.selectionAsync();
+      haptic.selection();
     },
     [width, height],
   );
@@ -378,7 +438,7 @@ function LiveSessionScreen() {
     if (!m.ok) return;
     setCalMapping(m);
     beginCal();
-    void Haptics.selectionAsync();
+    haptic.selection();
   }, [width, height, beginCal]);
 
   // FT-line calibration capture — hands the chip a stable callback into the
@@ -399,7 +459,7 @@ function LiveSessionScreen() {
     // solved for the OLD pose. Clear it so a stale court can't mis-score 2/3.
     useCourtCalibration.getState().clear();
     setCalMapping(null);
-    void Haptics.selectionAsync();
+    haptic.selection();
   }, []);
   useEffect(() => () => {
     if (driftTimer.current) clearTimeout(driftTimer.current);
@@ -595,6 +655,7 @@ function LiveSessionScreen() {
 
       {!rimLocked && liveCoach.visible && (
         <CoachMarks
+          tapToAdvance
           steps={liveCoach.steps}
           onFinish={liveCoach.finish}
           onSkip={liveCoach.finish}
@@ -635,7 +696,18 @@ function LiveSessionScreen() {
         {engine.activeMode === 'camera' && (
           <DetectionHealthPanel debug={engine.debug} overlay={engine.overlay} drift={drift} />
         )}
-        {rimLocked && <StatStrip compact={isLandscape} />}
+        {rimLocked && (
+          // Plain measured wrapper inside the box-none column — StatStrip's
+          // own expand/collapse Pressable keeps working; collapsable={false}
+          // guarantees a real native view for measureInWindow (HUD tour rect).
+          <View
+            ref={statStripWrapRef}
+            onLayout={hudCoach.visible ? measureRef(statStripWrapRef, setStatRect) : undefined}
+            collapsable={false}
+          >
+            <StatStrip compact={isLandscape} />
+          </View>
+        )}
         {rimLocked && activeMode == null && <GoalChip />}
         {rimLocked && activeMode != null && (
           <View style={styles.modeBanner}>
@@ -643,16 +715,35 @@ function LiveSessionScreen() {
           </View>
         )}
         <ShotToast shot={toastShot} streak={streak} />
+        {/* One-shot honesty hint after the first UNSURE call. HintChip claims
+            only its own small tap target inside this box-none column (rim
+            tap-to-set only exists pre-lock, so no camera-tap conflict) and
+            renders null once the persisted flag is set. */}
+        {showUnsureHint && (
+          <HintChip
+            hintKey="unsureLive"
+            text="UNSURE stays unsure — no guessing. Swipe it in the summary to correct; corrections are labeled and never re-judge."
+            style={styles.unsureHint}
+          />
+        )}
         <FormCueToast shot={toastShot} streak={streak} />
         {engine.activeMode === 'camera' && <FirstBallRitual overlay={engine.overlay} />}
-        {/* One-time FT-line calibration offer (optional 2/3 refinement).
+        {/* One-time FT-seed offer (optional 2/3 refinement): shoot your first
+            shot from the FT line and the pipeline derives scale + heading from
+            it; the legacy stand-and-hold capture stays as the secondary path.
             Mounts fresh at each rim lock (rimLocked flips false on re-aim),
-            self-hides after FT_OFFER_MS, and renders nothing once done.
-            NEVER mounts during a clock mode (Timed countdown / Ghost race):
-            the ritual asks the player to stand still at the FT line, which
-            would burn live game clock — offer it only when no mode is active
-            or the active mode has no running clock. */}
-        {rimLocked && !isTickDrivenMode && <FtCalibrationChip capture={captureFt} />}
+            self-hides after FtSeedChip's own offer window, and renders nothing
+            once done. NEVER mounts during a clock mode (Timed countdown /
+            Ghost race): the ritual would burn live game clock — offer it only
+            when no mode is active or the active mode has no running clock. */}
+        {rimLocked && !isTickDrivenMode && (
+          <FtSeedChip
+            armSeed={() => seedEngine.armFtSeed?.()}
+            cancelSeed={() => seedEngine.cancelFtSeed?.()}
+            captureStandStill={captureFt}
+            feedback={seedEngine.ftSeedLast ?? null}
+          />
+        )}
         {engine.activeMode === 'demo' && (
           <View style={styles.topCenter}>
             <Chip label="DEMO MODE — scripted scene" tone="accent" />
@@ -705,6 +796,9 @@ function LiveSessionScreen() {
       {/* Bottom bar — inset on all edges so the End button stays reachable on
           notched devices in either orientation. */}
       <View
+        ref={bottomBarRef}
+        onLayout={hudCoach.visible ? measureRef(bottomBarRef, setBarRect) : undefined}
+        collapsable={false}
         style={[
           styles.bottomBar,
           {
@@ -741,6 +835,24 @@ function LiveSessionScreen() {
           style={[styles.endButton, styles.endSessionButton]}
         />
       </View>
+
+      {/* Post-lock HUD tour — two spotlit steps over the stat strip and the
+          bottom bar. The !isTickDrivenMode gate is load-bearing: a scrimmed
+          tour must never sit over a draining Timed/Ghost clock (same reasoning
+          as the FtSeedChip gate above). Also steps aside for the end-confirm
+          sheet and the court-calibration ritual, which own the screen. */}
+      {rimLocked &&
+        !isTickDrivenMode &&
+        !confirmEnd &&
+        calMapping == null &&
+        hudCoach.visible && (
+          <CoachMarks
+            tapToAdvance
+            steps={hudCoach.steps}
+            onFinish={hudCoach.finish}
+            onSkip={hudCoach.finish}
+          />
+        )}
 
       {/* Mode-complete celebration sheet */}
       {activeMode != null && modeDone && !confirmEnd && !ending && (
@@ -792,135 +904,6 @@ function LiveSessionScreen() {
 // ---------------------------------------------------------------------------
 // Aiming guidance — shown until the rim locks.
 // ---------------------------------------------------------------------------
-
-/**
- * FT-line calibration chip — the one-time, entirely OPTIONAL offer to sharpen
- * 2/3-point calls: stand at the free-throw line, tap, hold still through a
- * 3-2-1 countdown while the engine medians the shooter's foot. Success and
- * failure are equally quiet — skipping (or failing) leaves the default
- * rim-width ruler untouched. Per-session only; nothing is persisted.
- */
-function FtCalibrationChip({ capture }: { capture: () => Promise<FtCaptureOutcome> }) {
-  const [stage, setStage] = useState<
-    'offer' | 'countdown' | 'capturing' | 'done' | 'failed' | 'hidden'
-  >('offer');
-  const [count, setCount] = useState(3);
-
-  // Untouched offer self-hides — calibration must never nag or feel required.
-  useEffect(() => {
-    if (stage !== 'offer') return;
-    const id = setTimeout(() => setStage('hidden'), FT_OFFER_MS);
-    return () => clearTimeout(id);
-  }, [stage]);
-
-  // 3-2-1 hold-still countdown, then fire the capture.
-  useEffect(() => {
-    if (stage !== 'countdown') return;
-    if (count <= 0) {
-      setStage('capturing');
-      return;
-    }
-    const id = setTimeout(() => setCount((c) => c - 1), 1000);
-    return () => clearTimeout(id);
-  }, [stage, count]);
-
-  useEffect(() => {
-    if (stage !== 'capturing') return;
-    let alive = true;
-    capture()
-      .then((r) => {
-        if (r.ok) {
-          // Persisted FT-cal receipt for the calibration health card
-          // (setup/settings surfaces).
-          useSettings.getState().set('lastFtCalSummary', { ts: Date.now() });
-        }
-        if (alive) setStage(r.ok ? 'done' : 'failed');
-      })
-      .catch(() => {
-        if (alive) setStage('failed');
-      });
-    return () => {
-      alive = false;
-    };
-  }, [stage, capture]);
-
-  // Brief result beat, then gone for the rest of the session.
-  useEffect(() => {
-    if (stage !== 'done' && stage !== 'failed') return;
-    const id = setTimeout(() => setStage('hidden'), FT_RESULT_MS);
-    return () => clearTimeout(id);
-  }, [stage]);
-
-  if (stage === 'hidden') return null;
-
-  if (stage === 'offer') {
-    return (
-      <View style={styles.topCenter}>
-        {/* The chip + row stretch to the HUD column and the copy Pressable is
-            the ONLY shrinking region (flex:1 + minWidth:0, Text flexShrink +
-            2 lines). RN Text in a row defaults to flexShrink 0, so the long
-            copy used to push the ✕ dismiss outside the chip where HudChip's
-            overflow:hidden clipped it away — worst in the landscape docked
-            column (300px, floor 220px). The ✕ sits after the shrink region
-            at its intrinsic width, so it can never be squeezed out. */}
-        <HudChip style={styles.ftChip}>
-          <Row gap={space.sm} style={styles.ftRow}>
-            <Pressable
-              onPress={() => {
-                setCount(3);
-                setStage('countdown');
-                void Haptics.selectionAsync();
-              }}
-              accessibilityRole="button"
-              accessibilityLabel="Boost 2 and 3 point accuracy. Stand at the free-throw line, then tap to calibrate."
-              hitSlop={8}
-              style={styles.ftTextPress}
-            >
-              <Text style={styles.ftText} numberOfLines={2}>
-                Boost 2/3 accuracy — tap to calibrate at the FT line
-              </Text>
-            </Pressable>
-            <Pressable
-              onPress={() => setStage('hidden')}
-              accessibilityRole="button"
-              accessibilityLabel="Dismiss calibration tip"
-              hitSlop={8}
-            >
-              <Text style={styles.ftDismiss}>✕</Text>
-            </Pressable>
-          </Row>
-        </HudChip>
-      </View>
-    );
-  }
-
-  const label =
-    stage === 'countdown'
-      ? `Hold still at the line… ${count}`
-      : stage === 'capturing'
-        ? 'Hold still at the line…'
-        : stage === 'done'
-          ? 'Calibrated ✓'
-          : 'Couldn’t calibrate — skipped';
-  return (
-    <View style={styles.topCenter} pointerEvents="none">
-      <HudChip>
-        <Text
-          style={
-            stage === 'done'
-              ? styles.ftDoneText
-              : stage === 'failed'
-                ? styles.ftFailText
-                : styles.ftText
-          }
-          accessibilityLiveRegion="polite"
-        >
-          {label}
-        </Text>
-      </HudChip>
-    </View>
-  );
-}
 
 function AimingOverlay({
   countdown,
@@ -1134,36 +1117,11 @@ const styles = StyleSheet.create({
     ...type.bodyMedium,
     color: color.text,
   },
-  /** Offer chip spans the HUD column so the flex:1 copy region has real
-   *  width to fill (an auto-width chip would collapse a flex-basis-0 child). */
-  ftChip: {
-    alignSelf: 'stretch',
-  },
-  /** HudChip centers children; stretch the row so it owns the full width. */
-  ftRow: {
-    alignSelf: 'stretch',
-  },
-  /** The one shrinking region — minWidth:0 lets the Text actually wrap. */
-  ftTextPress: {
-    flex: 1,
-    minWidth: 0,
-  },
-  ftText: {
-    ...type.bodyMedium,
-    color: color.text,
-    flexShrink: 1,
-  },
-  ftDoneText: {
-    ...type.bodyMedium,
-    color: color.make,
-  },
-  ftFailText: {
-    ...type.bodyMedium,
-    color: color.textDim,
-  },
-  ftDismiss: {
-    ...type.bodyMedium,
-    color: color.textDim,
+  /** One-shot UNSURE honesty hint — centered under the shot toast. */
+  unsureHint: {
+    alignSelf: 'center',
+    marginTop: space.sm,
+    maxWidth: 340,
   },
   bottomBar: {
     position: 'absolute',

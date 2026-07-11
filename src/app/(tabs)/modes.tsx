@@ -1,39 +1,42 @@
 /**
- * Mode picker — choose how you want to play before opening the camera.
+ * Mode picker — the Train tab, laid out as a sectioned catalog.
  *
- * Every mode reads like a game cartridge: its Ionicons mark in an accent-tinted
- * badge, name, tagline inked in the mode's own hue, two-line rules, a
- * rules-at-a-glance chip row and a bold START affordance (the whole card is the
- * button). Cards rise in with a reduced-motion-aware stagger. Picking one arms
- * the mode store and routes to /session/setup; the previously picked mode wears
- * a solid PICKED tag + accent border so it is unmistakable.
+ * Sections render in MODE_SECTIONS order (copy lives in core, not here):
+ *   1. QUICK START — a recommendation hero (recommendFromSessions over the
+ *      same listSessions(50) rows the ghost picker already fetches) plus Free
+ *      Play, always one tap away.
+ *   2. GAMES — the seven non-free modes as compact ModeCatalogCard rows;
+ *      collapsible.
+ *   3. DRILLS — the drill catalog, same card anatomy; collapsible. A coach
+ *      deep link always re-expands this section so a prescription is visible.
+ *   4. TRAINING TOOLS — the nav tiles (Scoreboard / Jump Lab / Form Studio /
+ *      Video Check).
+ *   5. PRO — the "what does Pro unlock?" disclosure.
  *
- * Ghost Challenge is the one cartridge that needs a source: tapping it expands
- * an inline picker of the last five sessions with enough makes to race
+ * Picking any card arms the mode store and routes to /session/setup. Ghost
+ * Challenge is the one cartridge that needs a source: tapping it expands an
+ * inline picker of the last five sessions with enough makes to race
  * (GHOST_MIN_MAKES); choosing one derives the ghost timeline from that
  * session's persisted shots and starts the mode. With no eligible session the
- * card is disabled with the reason inked where the rules normally sit.
+ * card is disabled with the reason inked where the tagline normally sits.
  */
 import { router, useLocalSearchParams } from 'expo-router';
-import * as Haptics from 'expo-haptics';
 import { Ionicons } from '@expo/vector-icons';
 import React, { useEffect, useRef, useState, type ComponentProps } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
-import Animated, {
-  FadeIn,
-  FadeInDown,
-  ReduceMotion,
-  useReducedMotion,
-} from 'react-native-reanimated';
+import Animated, { FadeIn, ReduceMotion } from 'react-native-reanimated';
 
 import { NavTileRow } from '@/components/NavTiles';
 import { ProBadge } from '@/components/ProBadge';
+import { ModeCatalogCard } from '@/components/modes/ModeCatalogCard';
+import { ModeSectionHeader } from '@/components/modes/ModeSectionHeader';
+import { RecommendedHero } from '@/components/modes/RecommendedHero';
 import {
   DRILL_IDENTITY,
   MODE_IDENTITY,
-  type DrillIdentity,
   type ModeIdentity,
 } from '@/components/modes/modeIdentity';
+import { useCardStagger } from '@/components/motion';
 import { Card, Eyebrow, Row, Screen } from '@/components/ui';
 import { color, motion, radius, space, touch, type } from '@/constants/tokens';
 import { levelOfGoals, type DrillLevel } from '@/core/drillProgression';
@@ -45,13 +48,32 @@ import {
   type GameModeDef,
   type GhostConfig,
 } from '@/core/gameModes';
+import { MODE_SECTIONS, gameSectionModes } from '@/core/modeCatalogSections';
+import {
+  recommendFromSessions,
+  recommendationReason,
+  type ModeRecommendation,
+} from '@/core/modeRecommendation';
 import { PRO_FEATURES } from '@/core/premium';
 import { listSessions, sessionShots, type SessionSummaryRow } from '@/data/db';
 import { useMode } from '@/state/modeStore';
-import { useSettings } from '@/state/settingsStore';
+import { haptic } from '@/utils/haptics';
 
 /** How many recent raceable sessions the ghost card offers. */
 const GHOST_SOURCE_LIMIT = 5;
+
+// Section copy lives in core (modeCatalogSections.ts) so the taxonomy is
+// testable pure TS; this screen only renders it.
+const quickStartSection = MODE_SECTIONS.find((s) => s.id === 'quickStart')!;
+const gamesSection = MODE_SECTIONS.find((s) => s.id === 'games')!;
+const drillsSection = MODE_SECTIONS.find((s) => s.id === 'drills')!;
+const toolsSection = MODE_SECTIONS.find((s) => s.id === 'tools')!;
+
+/** The Games section catalog: every mode except 'free', catalog order. */
+const GAME_SECTION_MODES = gameSectionModes();
+
+/** Free Play — GAME_MODES[0] by catalog contract; lives in Quick start. */
+const FREE_DEF = GAME_MODES[0];
 
 /** Player-facing name for a ghost source session: its tag, else its date. */
 function ghostSourceTitle(row: SessionSummaryRow): string {
@@ -70,10 +92,17 @@ export default function ModePickerScreen() {
   const activeMode = useMode((s) => s.activeMode);
   /** The active drill id when a drill is the picked mode (else undefined). */
   const activeDrillId = activeMode?.config?.drill?.id;
-  const hapticsEnabled = useSettings((s) => s.hapticsEnabled);
-  const reducedMotion = useReducedMotion();
   const [proOpen, setProOpen] = useState(false);
   const hasProModes = GAME_MODES.some((m) => m.id !== 'free');
+
+  // Collapse state is in-memory ONLY — deliberately not persisted; persisting
+  // it would require a settingsStore version bump for a preference nobody
+  // asked to keep across launches.
+  const [collapsed, setCollapsed] = useState<{ games: boolean; drills: boolean }>({
+    games: false,
+    drills: false,
+  });
+  const [reco, setReco] = useState<ModeRecommendation | null>(null);
 
   // Deep-link preselect from Coach's Corner ("Practice at level N"): arm the
   // drill at the prescribed level once per param value. The ref guard keeps
@@ -91,10 +120,14 @@ export default function ModePickerScreen() {
     const n = Number(params.level);
     const level: DrillLevel = n === 2 || n === 3 ? (n as DrillLevel) : 1;
     selectDrill(id as DrillId, level);
+    // A coach prescription must always be visible — re-expand Drills.
+    setCollapsed((s) => ({ ...s, drills: false }));
   }, [params.drill, params.level, selectDrill]);
 
-  // Ghost Challenge sources: the last few sessions with enough makes to race.
-  // null = still loading (the card stays tappable and shows a loading row).
+  // One eager listSessions(50) feeds BOTH the ghost picker and the Quick-start
+  // recommendation (SessionSummaryRow structurally satisfies
+  // RecommendationInputRow — startedAt/modeId/modeResultJson are all present).
+  // null = still loading (the ghost card stays tappable, shows a loading row).
   const [ghostSources, setGhostSources] = useState<SessionSummaryRow[] | null>(null);
   useEffect(() => {
     let alive = true;
@@ -103,6 +136,7 @@ export default function ModePickerScreen() {
       setGhostSources(
         rows.filter((r) => (r.makes ?? 0) >= GHOST_MIN_MAKES).slice(0, GHOST_SOURCE_LIMIT),
       );
+      setReco(recommendFromSessions(rows, Date.now()));
     });
     return () => {
       alive = false;
@@ -110,26 +144,25 @@ export default function ModePickerScreen() {
   }, []);
 
   const startGhost = (cfg: GhostConfig) => {
-    if (hapticsEnabled) void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    haptic.impactLight();
     selectMode('ghost', { ghost: cfg });
     router.push('/session/setup');
   };
 
-  // Entrance stagger: header first, then cards rise one by one. Under reduced
-  // motion the delays collapse so nothing appears to lag.
-  const enter = (i: number) =>
-    FadeInDown.delay(reducedMotion ? 0 : 60 + i * 50)
-      .duration(motion.standard)
-      .reduceMotion(ReduceMotion.System);
+  // Entrance stagger: i is the LOCAL index within each section, capped at 8 so
+  // long lists don't lag their tails. useCardStagger returns undefined under
+  // reduced motion (cards render still — Card's optional entering contract).
+  const stagger = useCardStagger({ baseDelayMs: 60, stepMs: 50, durationMs: motion.standard });
+  const enter = (i: number) => stagger(Math.min(i, 8));
 
   const pick = (id: GameModeDef['id']) => {
-    if (hapticsEnabled) void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    haptic.impactLight();
     selectMode(id);
     router.push('/session/setup');
   };
 
   const pickDrill = (drill: Drill) => {
-    if (hapticsEnabled) void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    haptic.impactLight();
     // Preserve an armed level: the coach deep link above arms the drill at a
     // prescribed level, and the start tap lands here — re-selecting without it
     // would silently downgrade the prescription to Level 1. The level is
@@ -140,6 +173,65 @@ export default function ModePickerScreen() {
     selectDrill(drill.id, armedGoals != null ? levelOfGoals(drill.id, armedGoals) : undefined);
     router.push('/session/setup');
   };
+
+  /** Arm the recommended mode/drill and route to setup — one tap. */
+  const startReco = () => {
+    if (reco == null) return;
+    haptic.impactLight();
+    if (reco.kind === 'mode') {
+      selectMode(reco.modeId);
+    } else {
+      selectDrill(
+        reco.drillId,
+        reco.goals != null ? levelOfGoals(reco.drillId, reco.goals) : undefined,
+      );
+    }
+    router.push('/session/setup');
+  };
+
+  const toggleSection = (id: 'games' | 'drills') => {
+    haptic.selection();
+    setCollapsed((s) => ({ ...s, [id]: !s[id] }));
+  };
+
+  // Resolve the recommendation to its catalog identity/copy. The recommender
+  // only ever returns catalog ids (unknown ids are filtered inside), so the
+  // finds cannot miss.
+  let hero: {
+    icon: ComponentProps<typeof Ionicons>['name'];
+    name: string;
+    tagline: string;
+    accent: string;
+    tint: string;
+    selected: boolean;
+  } | null = null;
+  if (reco != null) {
+    if (reco.kind === 'mode') {
+      const def = GAME_MODES.find((m) => m.id === reco.modeId)!;
+      const identity = MODE_IDENTITY[reco.modeId];
+      hero = {
+        icon: identity.icon,
+        name: def.name,
+        tagline: def.tagline,
+        accent: identity.accent,
+        tint: identity.tint,
+        // Armed-mode check mirrors the Games cards: a drill armed on top of
+        // spotShooting must not light a plain-mode hero as PICKED.
+        selected: activeMode?.modeId === reco.modeId && activeMode?.config?.drill == null,
+      };
+    } else {
+      const drill = DRILLS.find((d) => d.id === reco.drillId)!;
+      const identity = DRILL_IDENTITY[reco.drillId];
+      hero = {
+        icon: drill.icon as ComponentProps<typeof Ionicons>['name'],
+        name: drill.title,
+        tagline: drill.tagline,
+        accent: identity.accent,
+        tint: identity.tint,
+        selected: activeDrillId === reco.drillId,
+      };
+    }
+  }
 
   return (
     <Screen scroll>
@@ -154,86 +246,163 @@ export default function ModePickerScreen() {
         </Text>
       </Animated.View>
 
-      <View style={styles.tools}>
-        <NavTileRow
-          eyebrow="TRAINING TOOLS"
-          tiles={[
-            {
-              icon: 'basketball-outline',
-              label: 'Scoreboard',
-              hint: 'Track a live head-to-head score',
-              onPress: () => router.push('/scoreboard'),
-            },
-            {
-              icon: 'fitness',
-              label: 'Jump Lab',
-              hint: 'Measure and train your vertical',
-              onPress: () => router.push('/jump'),
-            },
-          ]}
-        />
-        <NavTileRow
-          tiles={[
-            {
-              icon: 'body',
-              label: 'Form Studio',
-              hint: 'Compare your shooting form to NBA archetypes',
-              onPress: () => router.push('/formstudio'),
-            },
-            {
-              icon: 'scan-outline',
-              label: 'Video Check',
-              hint: 'Run the detector on a video from your library',
-              onPress: () => router.push('/session/analyze'),
-            },
-          ]}
-        />
-      </View>
-
-      <View style={styles.list}>
-        {GAME_MODES.map((mode, i) => (
-          <Animated.View key={mode.id} entering={enter(i)}>
-            {mode.id === 'ghost' ? (
-              <GhostModeCard
-                mode={mode}
-                identity={MODE_IDENTITY[mode.id]}
-                selected={activeMode?.modeId === mode.id}
-                sources={ghostSources}
-                hapticsEnabled={hapticsEnabled}
-                onStart={startGhost}
-              />
-            ) : (
-              <ModeCard
-                mode={mode}
-                identity={MODE_IDENTITY[mode.id]}
-                selected={activeMode?.modeId === mode.id}
-                onPress={() => pick(mode.id)}
-              />
-            )}
+      {/* QUICK START — recommendation hero (when history supports one) + Free
+          Play, always one tap away. */}
+      <ModeSectionHeader title={quickStartSection.title} />
+      <View style={styles.sectionList}>
+        {hero != null && reco != null && (
+          <Animated.View entering={enter(0)}>
+            <RecommendedHero
+              icon={hero.icon}
+              name={hero.name}
+              tagline={hero.tagline}
+              accent={hero.accent}
+              tint={hero.tint}
+              reason={recommendationReason(reco)}
+              selected={hero.selected}
+              onPress={startReco}
+            />
           </Animated.View>
-        ))}
+        )}
+        <Animated.View entering={enter(hero != null ? 1 : 0)}>
+          <ModeCatalogCard
+            icon={MODE_IDENTITY.free.icon}
+            name={FREE_DEF.name}
+            tagline={FREE_DEF.tagline}
+            accent={MODE_IDENTITY.free.accent}
+            tint={MODE_IDENTITY.free.tint}
+            glance={MODE_IDENTITY.free.glance}
+            showProBadge={false}
+            selected={activeMode?.modeId === 'free'}
+            accessibilityHint={FREE_DEF.rules}
+            onPress={() => pick('free')}
+          />
+        </Animated.View>
       </View>
 
-      {/* DRILLS — structured HomeCourt-style workouts. They run as spot shooting
-          under the hood but read as their own cartridges here. */}
-      <View style={styles.drillSection}>
-        <Eyebrow>Drills</Eyebrow>
-        <Text style={styles.sectionTitle}>Structured shooting workouts</Text>
-        <Text style={styles.sectionLede}>
-          Guided spot-by-spot routines with make goals — the live view maps your next spot as
-          you go.
-        </Text>
-        <View style={styles.list}>
-          {DRILLS.map((drill, i) => (
-            <Animated.View key={drill.id} entering={enter(GAME_MODES.length + i)}>
-              <DrillCard
-                drill={drill}
-                identity={DRILL_IDENTITY[drill.id]}
-                selected={activeDrillId === drill.id}
-                onPress={() => pickDrill(drill)}
-              />
-            </Animated.View>
-          ))}
+      {/* GAMES — the seven non-free modes; collapsible. */}
+      <View style={styles.sectionGap}>
+        <ModeSectionHeader
+          title={gamesSection.title}
+          count={GAME_SECTION_MODES.length}
+          lede={gamesSection.lede}
+          collapsed={collapsed.games}
+          onToggle={() => toggleSection('games')}
+        />
+        {!collapsed.games && (
+          <Animated.View
+            entering={FadeIn.duration(motion.quick).reduceMotion(ReduceMotion.System)}
+            style={styles.sectionList}
+          >
+            {GAME_SECTION_MODES.map((m, i) => {
+              // PICKED guard: drills run as modeId 'spotShooting', so an armed
+              // DRILL must not also light the Spot Shooting card as PICKED.
+              const isSelected =
+                activeMode?.modeId === m.id &&
+                (m.id !== 'spotShooting' || activeMode?.config?.drill == null);
+              return (
+                <Animated.View key={m.id} entering={enter(i)}>
+                  {m.id === 'ghost' ? (
+                    <GhostCatalogCard
+                      mode={m}
+                      identity={MODE_IDENTITY[m.id]}
+                      selected={isSelected}
+                      sources={ghostSources}
+                      onStart={startGhost}
+                    />
+                  ) : (
+                    <ModeCatalogCard
+                      icon={MODE_IDENTITY[m.id].icon}
+                      name={m.name}
+                      tagline={m.tagline}
+                      accent={MODE_IDENTITY[m.id].accent}
+                      tint={MODE_IDENTITY[m.id].tint}
+                      glance={MODE_IDENTITY[m.id].glance}
+                      showProBadge
+                      selected={isSelected}
+                      accessibilityHint={m.rules}
+                      onPress={() => pick(m.id)}
+                    />
+                  )}
+                </Animated.View>
+              );
+            })}
+          </Animated.View>
+        )}
+      </View>
+
+      {/* DRILLS — structured HomeCourt-style workouts. They run as spot
+          shooting under the hood but read as their own cartridges here. */}
+      <View style={styles.sectionGap}>
+        <ModeSectionHeader
+          title={drillsSection.title}
+          count={DRILLS.length}
+          lede={drillsSection.lede}
+          collapsed={collapsed.drills}
+          onToggle={() => toggleSection('drills')}
+        />
+        {!collapsed.drills && (
+          <Animated.View
+            entering={FadeIn.duration(motion.quick).reduceMotion(ReduceMotion.System)}
+            style={styles.sectionList}
+          >
+            {DRILLS.map((drill, i) => (
+              <Animated.View key={drill.id} entering={enter(i)}>
+                <ModeCatalogCard
+                  icon={drill.icon as ComponentProps<typeof Ionicons>['name']}
+                  name={drill.title}
+                  tagline={drill.tagline}
+                  accent={DRILL_IDENTITY[drill.id].accent}
+                  tint={DRILL_IDENTITY[drill.id].tint}
+                  glance={DRILL_IDENTITY[drill.id].glance}
+                  showProBadge
+                  selected={activeDrillId === drill.id}
+                  accessibilityHint={drill.rules}
+                  onPress={() => pickDrill(drill)}
+                />
+              </Animated.View>
+            ))}
+          </Animated.View>
+        )}
+      </View>
+
+      {/* TRAINING TOOLS — nav tiles; the section header supplies the eyebrow
+          the first NavTileRow used to carry. */}
+      <View style={styles.sectionGap}>
+        <ModeSectionHeader title={toolsSection.title} />
+        <View style={styles.sectionList}>
+          <NavTileRow
+            tiles={[
+              {
+                icon: 'basketball-outline',
+                label: 'Scoreboard',
+                hint: 'Track a live head-to-head score',
+                onPress: () => router.push('/scoreboard'),
+              },
+              {
+                icon: 'fitness',
+                label: 'Jump Lab',
+                hint: 'Measure and train your vertical',
+                onPress: () => router.push('/jump'),
+              },
+            ]}
+          />
+          <NavTileRow
+            tiles={[
+              {
+                icon: 'body',
+                label: 'Form Studio',
+                hint: 'Compare your shooting form to NBA archetypes',
+                onPress: () => router.push('/formstudio'),
+              },
+              {
+                icon: 'scan-outline',
+                label: 'Video Check',
+                hint: 'Run the detector on a video from your library',
+                onPress: () => router.push('/session/analyze'),
+              },
+            ]}
+          />
         </View>
       </View>
 
@@ -244,7 +413,7 @@ export default function ModePickerScreen() {
             accessibilityLabel={proOpen ? 'Hide what Pro unlocks' : 'What does Pro unlock?'}
             accessibilityState={{ expanded: proOpen }}
             onPress={() => {
-              if (hapticsEnabled) void Haptics.selectionAsync();
+              haptic.selection();
               setProOpen((v) => !v);
             }}
             style={({ pressed }) => [styles.proLink, pressed && { opacity: 0.7 }]}
@@ -279,172 +448,18 @@ export default function ModePickerScreen() {
   );
 }
 
-function ModeCard({
-  mode,
-  identity,
-  selected,
-  onPress,
-}: {
-  mode: GameModeDef;
-  identity: ModeIdentity;
-  selected: boolean;
-  onPress: () => void;
-}) {
-  return (
-    <Pressable
-      onPress={onPress}
-      accessibilityRole="button"
-      accessibilityLabel={`${mode.name}. ${mode.tagline}`}
-      accessibilityHint={mode.rules}
-      accessibilityState={{ selected }}
-      style={({ pressed }) => [
-        styles.card,
-        selected && [styles.cardSelected, { borderColor: identity.accent }],
-        pressed && styles.cardPressed,
-        pressed && { transform: [{ scale: 0.985 }] },
-      ]}
-    >
-      {/* The mode's mark — glyph on its own accent-tinted badge. */}
-      <View
-        style={[
-          styles.iconBadge,
-          { borderColor: identity.accent, backgroundColor: identity.tint },
-        ]}
-      >
-        <Ionicons name={identity.icon} size={24} color={identity.accent} />
-      </View>
-
-      <View style={styles.cardBody}>
-        <Row style={styles.cardHead} gap={space.sm}>
-          <Text style={styles.name} numberOfLines={1}>
-            {mode.name}
-          </Text>
-          <Row gap={space.xs}>
-            {mode.id !== 'free' && <ProBadge />}
-            {selected && (
-              <View style={[styles.selectedTag, { backgroundColor: identity.accent }]}>
-                <Text style={styles.selectedTagText}>✓ PICKED</Text>
-              </View>
-            )}
-          </Row>
-        </Row>
-        <Text style={[styles.tagline, { color: identity.accent }]}>{mode.tagline}</Text>
-        <Text style={styles.rules} numberOfLines={2}>
-          {mode.rules}
-        </Text>
-
-        {/* Rules at a glance + bold Start (the whole card is the button). */}
-        <Row gap={space.sm} style={styles.footRow}>
-          <Row gap={space.xs} style={styles.glanceRow}>
-            {identity.glance.map((g) => (
-              <View key={g} style={styles.glanceChip}>
-                <Text style={styles.glanceText}>{g.toUpperCase()}</Text>
-              </View>
-            ))}
-          </Row>
-          <View style={[styles.startPill, { backgroundColor: identity.accent }]}>
-            <Ionicons name="play" size={11} color={color.onAccent} />
-            <Text style={styles.startText}>START</Text>
-          </View>
-        </Row>
-      </View>
-    </Pressable>
-  );
-}
-
 /**
- * Drill cartridge — same card anatomy as {@link ModeCard} (icon badge, name,
- * tagline, two-line rules, glance chips + START), but drawn from the drill
- * catalog + {@link DRILL_IDENTITY}. Tapping starts the drill (which runs as the
- * spotShooting mode) and routes to setup.
+ * Ghost Challenge as a compact catalog card. Same anatomy as every other
+ * ModeCatalogCard row, but the card press expands an inline picker of raceable
+ * past sessions instead of starting immediately — a ghost needs a source run.
+ * Disabled (with the reason inked in place of the tagline, and read in full by
+ * the accessibility hint) when no past session has enough makes.
  */
-function DrillCard({
-  drill,
-  identity,
-  selected,
-  onPress,
-}: {
-  drill: Drill;
-  identity: DrillIdentity;
-  selected: boolean;
-  onPress: () => void;
-}) {
-  return (
-    <Pressable
-      onPress={onPress}
-      accessibilityRole="button"
-      accessibilityLabel={`${drill.title} drill. ${drill.tagline}`}
-      accessibilityHint={drill.rules}
-      accessibilityState={{ selected }}
-      style={({ pressed }) => [
-        styles.card,
-        selected && [styles.cardSelected, { borderColor: identity.accent }],
-        pressed && styles.cardPressed,
-        pressed && { transform: [{ scale: 0.985 }] },
-      ]}
-    >
-      <View
-        style={[
-          styles.iconBadge,
-          { borderColor: identity.accent, backgroundColor: identity.tint },
-        ]}
-      >
-        <Ionicons
-          name={drill.icon as ComponentProps<typeof Ionicons>['name']}
-          size={24}
-          color={identity.accent}
-        />
-      </View>
-
-      <View style={styles.cardBody}>
-        <Row style={styles.cardHead} gap={space.sm}>
-          <Text style={styles.name} numberOfLines={1}>
-            {drill.title}
-          </Text>
-          <Row gap={space.xs}>
-            <ProBadge />
-            {selected && (
-              <View style={[styles.selectedTag, { backgroundColor: identity.accent }]}>
-                <Text style={styles.selectedTagText}>✓ PICKED</Text>
-              </View>
-            )}
-          </Row>
-        </Row>
-        <Text style={[styles.tagline, { color: identity.accent }]}>{drill.tagline}</Text>
-        <Text style={styles.rules} numberOfLines={2}>
-          {drill.rules}
-        </Text>
-
-        <Row gap={space.sm} style={styles.footRow}>
-          <Row gap={space.xs} style={styles.glanceRow}>
-            {identity.glance.map((g) => (
-              <View key={g} style={styles.glanceChip}>
-                <Text style={styles.glanceText}>{g.toUpperCase()}</Text>
-              </View>
-            ))}
-          </Row>
-          <View style={[styles.startPill, { backgroundColor: identity.accent }]}>
-            <Ionicons name="play" size={11} color={color.onAccent} />
-            <Text style={styles.startText}>START</Text>
-          </View>
-        </Row>
-      </View>
-    </Pressable>
-  );
-}
-
-/**
- * Ghost Challenge cartridge. Same card anatomy as {@link ModeCard}, but the
- * card press expands an inline picker of raceable past sessions instead of
- * starting immediately — a ghost needs a source run. Disabled (with the reason
- * inked in place of the rules) when no past session has enough makes.
- */
-function GhostModeCard({
+function GhostCatalogCard({
   mode,
   identity,
   selected,
   sources,
-  hapticsEnabled,
   onStart,
 }: {
   mode: GameModeDef;
@@ -452,7 +467,6 @@ function GhostModeCard({
   selected: boolean;
   /** Eligible source sessions; null while loading. */
   sources: SessionSummaryRow[] | null;
-  hapticsEnabled: boolean;
   onStart: (cfg: GhostConfig) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -463,7 +477,7 @@ function GhostModeCard({
 
   const toggle = () => {
     if (disabled) return;
-    if (hapticsEnabled) void Haptics.selectionAsync();
+    haptic.selection();
     setOpen((v) => !v);
   };
 
@@ -485,118 +499,73 @@ function GhostModeCard({
   };
 
   return (
-    <Pressable
-      onPress={toggle}
+    <ModeCatalogCard
+      icon={identity.icon}
+      name={mode.name}
+      tagline={disabled ? disabledReason : mode.tagline}
+      accent={identity.accent}
+      tint={identity.tint}
+      selected={selected}
+      showProBadge
       disabled={disabled}
-      accessibilityRole="button"
-      accessibilityLabel={`${mode.name}. ${mode.tagline}`}
-      accessibilityHint={disabled ? disabledReason : `${mode.rules} Opens a list of past sessions to race.`}
-      accessibilityState={{ selected, disabled, expanded: open }}
-      style={({ pressed }) => [
-        styles.card,
-        selected && [styles.cardSelected, { borderColor: identity.accent }],
-        pressed && !disabled && styles.cardPressed,
-        pressed && !disabled && { transform: [{ scale: 0.985 }] },
-        disabled && styles.cardDisabled,
-      ]}
+      glance={identity.glance}
+      rightIcon={open ? 'chevron-up' : 'chevron-down'}
+      accessibilityHint={
+        disabled ? disabledReason : `${mode.rules} Opens a list of past sessions to race.`
+      }
+      onPress={toggle}
     >
-      <View
-        style={[
-          styles.iconBadge,
-          { borderColor: identity.accent, backgroundColor: identity.tint },
-        ]}
-      >
-        <Ionicons name={identity.icon} size={24} color={identity.accent} />
-      </View>
-
-      <View style={styles.cardBody}>
-        <Row style={styles.cardHead} gap={space.sm}>
-          <Text style={styles.name} numberOfLines={1}>
-            {mode.name}
-          </Text>
-          <Row gap={space.xs}>
-            <ProBadge />
-            {selected && (
-              <View style={[styles.selectedTag, { backgroundColor: identity.accent }]}>
-                <Text style={styles.selectedTagText}>✓ PICKED</Text>
-              </View>
-            )}
-          </Row>
-        </Row>
-        <Text style={[styles.tagline, { color: identity.accent }]}>{mode.tagline}</Text>
-        <Text style={styles.rules} numberOfLines={disabled ? 3 : 2}>
-          {disabled ? disabledReason : mode.rules}
-        </Text>
-
-        {/* Rules at a glance + the pick affordance (the card expands). */}
-        <Row gap={space.sm} style={styles.footRow}>
-          <Row gap={space.xs} style={styles.glanceRow}>
-            {identity.glance.map((g) => (
-              <View key={g} style={styles.glanceChip}>
-                <Text style={styles.glanceText}>{g.toUpperCase()}</Text>
-              </View>
-            ))}
-          </Row>
-          {!disabled && (
-            <View style={[styles.startPill, { backgroundColor: identity.accent }]}>
-              <Ionicons name={open ? 'chevron-up' : 'play'} size={11} color={color.onAccent} />
-              <Text style={styles.startText}>{open ? 'HIDE RUNS' : 'PICK A RUN'}</Text>
-            </View>
+      {/* Inline source picker: the last few raceable sessions. */}
+      {open && !disabled && (
+        <View style={styles.ghostList}>
+          {sources == null ? (
+            <Text style={styles.ghostLoading}>Loading recent sessions…</Text>
+          ) : (
+            sources.map((s) => {
+              const title = ghostSourceTitle(s);
+              const fgPct = Math.round(s.fgPct * 100);
+              return (
+                <Pressable
+                  key={s.id}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Race ${title}: ${s.makes} makes, ${fgPct} percent field goals`}
+                  accessibilityState={{ busy: busyId === s.id }}
+                  disabled={busyId != null}
+                  onPress={() => void start(s)}
+                  style={({ pressed }) => [
+                    styles.ghostRow,
+                    pressed && styles.ghostRowPressed,
+                    busyId === s.id && { borderColor: identity.accent },
+                  ]}
+                >
+                  <View style={styles.ghostRowBody}>
+                    <Text style={styles.ghostRowTitle} numberOfLines={1}>
+                      {title}
+                    </Text>
+                    <Text style={styles.ghostRowSub} numberOfLines={1}>
+                      {s.makes} makes · {fgPct}% FG
+                    </Text>
+                  </View>
+                  {busyId === s.id ? (
+                    <Text style={[styles.ghostRowGo, { color: identity.accent }]}>LOADING…</Text>
+                  ) : (
+                    <Row gap={space.xs}>
+                      <Text style={[styles.ghostRowGo, { color: identity.accent }]}>RACE</Text>
+                      <Ionicons name="chevron-forward" size={13} color={identity.accent} />
+                    </Row>
+                  )}
+                </Pressable>
+              );
+            })
           )}
-        </Row>
-
-        {/* Inline source picker: the last few raceable sessions. */}
-        {open && !disabled && (
-          <View style={styles.ghostList}>
-            {sources == null ? (
-              <Text style={styles.ghostLoading}>Loading recent sessions…</Text>
-            ) : (
-              sources.map((s) => {
-                const title = ghostSourceTitle(s);
-                const fgPct = Math.round(s.fgPct * 100);
-                return (
-                  <Pressable
-                    key={s.id}
-                    accessibilityRole="button"
-                    accessibilityLabel={`Race ${title}: ${s.makes} makes, ${fgPct} percent field goals`}
-                    accessibilityState={{ busy: busyId === s.id }}
-                    disabled={busyId != null}
-                    onPress={() => void start(s)}
-                    style={({ pressed }) => [
-                      styles.ghostRow,
-                      pressed && styles.ghostRowPressed,
-                      busyId === s.id && { borderColor: identity.accent },
-                    ]}
-                  >
-                    <View style={styles.ghostRowBody}>
-                      <Text style={styles.ghostRowTitle} numberOfLines={1}>
-                        {title}
-                      </Text>
-                      <Text style={styles.ghostRowSub} numberOfLines={1}>
-                        {s.makes} makes · {fgPct}% FG
-                      </Text>
-                    </View>
-                    {busyId === s.id ? (
-                      <Text style={[styles.ghostRowGo, { color: identity.accent }]}>LOADING…</Text>
-                    ) : (
-                      <Row gap={space.xs}>
-                        <Text style={[styles.ghostRowGo, { color: identity.accent }]}>RACE</Text>
-                        <Ionicons name="chevron-forward" size={13} color={identity.accent} />
-                      </Row>
-                    )}
-                  </Pressable>
-                );
-              })
-            )}
-            {rowError != null && (
-              <Text accessibilityLiveRegion="polite" style={styles.ghostError}>
-                {rowError}
-              </Text>
-            )}
-          </View>
-        )}
-      </View>
-    </Pressable>
+          {rowError != null && (
+            <Text accessibilityLiveRegion="polite" style={styles.ghostError}>
+              {rowError}
+            </Text>
+          )}
+        </View>
+      )}
+    </ModeCatalogCard>
   );
 }
 
@@ -611,101 +580,14 @@ const styles = StyleSheet.create({
     marginTop: space.xs,
     marginBottom: space.xl,
   },
-  list: {
-    gap: space.md,
+  /** Space between sections. */
+  sectionGap: {
+    marginTop: space.xl,
   },
-  tools: {
-    gap: space.md,
-    marginTop: space.lg,
-    marginBottom: space.xl,
-  },
-  card: {
-    flexDirection: 'row',
-    gap: space.lg,
-    backgroundColor: color.surface,
-    borderRadius: radius.lg,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: color.border,
-    padding: space.lg,
-  },
-  cardSelected: {
-    borderWidth: 1.5,
-    backgroundColor: color.surfaceRaised,
-  },
-  cardPressed: {
-    backgroundColor: color.surfaceRaised,
-  },
-  cardDisabled: {
-    opacity: 0.55,
-  },
-  iconBadge: {
-    width: 52,
-    height: 52,
-    borderRadius: radius.md,
-    borderWidth: 1.5,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  cardBody: {
-    flex: 1,
-    minWidth: 0,
-  },
-  cardHead: {
-    justifyContent: 'space-between',
-  },
-  name: {
-    ...type.heading,
-    color: color.text,
-    flexShrink: 1,
-  },
-  selectedTag: {
-    borderRadius: radius.pill,
-    paddingHorizontal: space.sm,
-    paddingVertical: 3,
-  },
-  selectedTagText: {
-    ...type.micro,
-    color: color.onAccent,
-  },
-  tagline: {
-    ...type.bodyMedium,
-    marginTop: 2,
-  },
-  rules: {
-    ...type.body,
-    color: color.textDim,
-    marginTop: space.xs,
-  },
-  footRow: {
+  /** Space between a section header and its cards, and between cards. */
+  sectionList: {
     marginTop: space.md,
-    justifyContent: 'space-between',
-  },
-  glanceRow: {
-    flexShrink: 1,
-    flexWrap: 'wrap',
-  },
-  glanceChip: {
-    borderRadius: radius.pill,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: color.border,
-    paddingHorizontal: space.sm + 2,
-    paddingVertical: 3,
-  },
-  glanceText: {
-    ...type.micro,
-    color: color.textFaint,
-  },
-  startPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: space.xs,
-    borderRadius: radius.pill,
-    paddingHorizontal: space.md,
-    paddingVertical: 5,
-  },
-  startText: {
-    ...type.micro,
-    color: color.onAccent,
+    gap: space.md,
   },
   // --- Ghost source picker (inline, inside the ghost cartridge) -----------
   ghostList: {
@@ -751,20 +633,6 @@ const styles = StyleSheet.create({
     ...type.caption,
     color: color.miss,
   },
-  drillSection: {
-    marginTop: space.xl,
-  },
-  sectionTitle: {
-    ...type.heading,
-    color: color.text,
-    marginTop: space.xs,
-  },
-  sectionLede: {
-    ...type.body,
-    color: color.textDim,
-    marginTop: space.xs,
-    marginBottom: space.lg,
-  },
   proSection: {
     marginTop: space.xl,
   },
@@ -787,16 +655,16 @@ const styles = StyleSheet.create({
   proCard: {
     marginTop: space.md,
   },
-  proCardNote: {
-    ...type.body,
-    color: color.textDim,
-    marginBottom: space.md,
-  },
   proFeatureList: {
     gap: space.md,
   },
   proFeatureRow: {
     gap: 2,
+  },
+  proCardNote: {
+    ...type.body,
+    color: color.textDim,
+    marginBottom: space.md,
   },
   proFeatureName: {
     ...type.bodyMedium,

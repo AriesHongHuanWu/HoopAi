@@ -10,8 +10,9 @@ import { Canvas, Circle, DashPathEffect, Line, Path, vec } from '@shopify/react-
 import { router, useFocusEffect } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
-import Animated, { FadeInDown, useReducedMotion } from 'react-native-reanimated';
+import Animated from 'react-native-reanimated';
 
+import { useCardStagger } from '@/components/motion';
 import {
   PipRow,
   formatSessionDate,
@@ -93,12 +94,12 @@ function EmptyArc() {
   );
 }
 
-/** Cascade step between session cards (ms), capped so long lists stay snappy. */
-const STAGGER_MS = 40;
+/** Stagger index cap so long histories don't tail-lag. */
 const STAGGER_CAP = 8;
 
 export default function HistoryScreen() {
-  const reducedMotion = useReducedMotion();
+  // Canonical card cascade (undefined under reduced motion — static render).
+  const enter = useCardStagger({ durationMs: motion.standard });
   const [items, setItems] = useState<HistoryItem[] | null>(null);
   /** Selected tag chip filter; null = show every session (no filter active). */
   const [tagFilter, setTagFilter] = useState<string | null>(null);
@@ -373,14 +374,10 @@ export default function HistoryScreen() {
                 </Card>
               </Pressable>
             );
-            return reducedMotion ? (
-              <View key={row.id}>{card}</View>
-            ) : (
+            return (
               <Animated.View
                 key={row.id}
-                entering={FadeInDown.duration(motion.standard).delay(
-                  Math.min(index, STAGGER_CAP) * STAGGER_MS,
-                )}
+                entering={enter(Math.min(index, STAGGER_CAP))}
               >
                 {card}
               </Animated.View>

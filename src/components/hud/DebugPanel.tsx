@@ -4,6 +4,13 @@
  * processed, output tensor shape/layout, max score, detection count, input
  * range) right on the live view so we can pinpoint an on-device ML bug.
  *
+ * It also renders the ACQUISITION FUNNEL (ball gate / rej / track / arm /
+ * dribble rows + the `gates:`/`arm:` COPY DIAG lines): "ball seen" vs "ball
+ * tracked" vs "shot armed" were previously indistinguishable in the field, so
+ * a ball could be drawn by the debug overlay yet silently never produce a
+ * trail or a judged shot. Strictly read-only telemetry — nothing here feeds
+ * back into tracking or judgment.
+ *
  * Reads the engine's debug SharedValue by polling on the JS thread at ~4 Hz
  * (cheap; avoids a per-frame React re-render).
  *
@@ -21,9 +28,19 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { EngineDebug, OverlayState } from '../../camera/useShotEngine';
 import { resolvedTuning } from '../../camera/deviceTuning';
 import { color, radius, space, type } from '../../constants/tokens';
+import { formatFunnelDiag, funnelChanged, type FrameFunnel } from '../../core/acquisitionFunnel';
 import { classifyLight } from '../../core/lightProfile';
 import { tierLabel } from '../../core/deviceProfile';
 import { useSettings } from '../../state/settingsStore';
+
+/**
+ * Integration contract: the engine publishes the per-frame acquisition funnel
+ * on OverlayState (written once per frame by the JS-thread onFrame publish —
+ * NOT on EngineDebug, whose worklet writes would race a JS write). Read
+ * defensively so this file typechecks and behaves identically (no funnel rows)
+ * before the wiring lands.
+ */
+type FunnelOverlay = OverlayState & { funnel?: FrameFunnel | null };
 
 /**
  * Build a compact, paste-able diagnostics dump so a tester can send back the
@@ -31,8 +48,11 @@ import { useSettings } from '../../state/settingsStore';
  * detection health) — the ground truth that turns "I think the XR does X"
  * into a real number to tune the device tiers against.
  */
-function buildDiagnostics(d: EngineDebug, rimAsp: number): string {
+export function buildDiagnostics(d: EngineDebug, rimAsp: number, f: FrameFunnel | null): string {
   const s = useSettings.getState();
+  // trackerRescue ships with the settings v7 wiring — read defensively with
+  // the store's default (true) so this line is honest before AND after.
+  const rescue = (s as typeof s & { trackerRescue?: boolean }).trackerRescue !== false;
   const { tier, detected } = resolvedTuning(s.deviceTierOverride, s.lastBenchmark?.ms ?? null);
   const dev = Device.modelName ?? Device.deviceName ?? 'unknown';
   const model = Device.modelId ?? '?';
@@ -55,6 +75,11 @@ function buildDiagnostics(d: EngineDebug, rimAsp: number): string {
     `lens: ${d.lens === '' ? 'ok' : d.lens} · thermal L${d.thermalLevel}`,
     `rim aspect: ${rimAsp > 0 ? rimAsp.toFixed(2) : '--'}`,
     `roi: ${d.roiFrames > 0 ? `${d.roiHits}/${d.roiFrames} · ${d.roiAvgMs}ms` : 'idle'}`,
+    // Acquisition-funnel `gates:`/`arm:` lines — the one paste that pinpoints
+    // which gate is silently killing a ball. Skipped before the engine
+    // publishes a funnel.
+    ...(f == null ? [] : formatFunnelDiag(f)),
+    `cfg: rescue ${rescue ? 'on' : 'off'} · multiBall ${s.multiBallGuard ? 'on' : 'off'} · rimGuard ${s.rimGuard ? 'on' : 'off'}`,
     `frames ${d.frames} · dropped ${d.dropped}`,
     d.modelError ? `error: ${d.modelError}` : '',
   ]
@@ -90,6 +115,52 @@ function debugChanged(a: EngineDebug, b: EngineDebug): boolean {
   );
 }
 
+/**
+ * Acquisition-funnel display rows — the on-screen answer to "the box is drawn,
+ * why is there no trail/shot?". Pure derivation so tests pin the exact strings
+ * and colors:
+ *  - 'ball gate' — the ACTIVE cold floor + which gate ate the best candidate.
+ *  - 'rej'       — per-frame reject counters (s=score a=aspect j=jump z=size);
+ *                  red only when something was rejected AND no track exists.
+ *  - 'track'     — none/real/coast ('·R' = persistence-rescued acquisition).
+ *  - 'arm'       — why the FSM refused to arm (diagnostic mirror, never logic).
+ *  - 'dribble'   — dribble latch / apex-hold visual suppression state.
+ * All values abbreviated to fit the panel's fixed 92px value column.
+ */
+export function funnelRows(f: FrameFunnel): Array<{ k: string; v: string; vc?: string }> {
+  const anyRej = f.rejScore > 0 || f.rejAspect > 0 || f.rejJump > 0 || f.rejSize > 0;
+  return [
+    { k: 'ball gate', v: `${f.floor.toFixed(2)} ${f.gate}` },
+    {
+      k: 'rej',
+      v: `s${f.rejScore} a${f.rejAspect} j${f.rejJump} z${f.rejSize}`,
+      // Rejections only matter when they leave us with NO track — that is the
+      // "detected but untracked" silent death this panel exists to expose.
+      vc: anyRej && f.track === 'none' ? color.miss : color.textDim,
+    },
+    {
+      k: 'track',
+      v: f.track + (f.rescued ? ' ·R' : ''),
+      vc: f.track === 'real' ? color.make : f.track === 'coast' ? color.unsure : color.miss,
+    },
+    {
+      k: 'arm',
+      v: f.armRefusal,
+      vc:
+        f.armRefusal === 'armed' || f.armRefusal === 'live'
+          ? color.make
+          : f.armRefusal === 'no-rim'
+            ? color.miss
+            : color.unsure,
+    },
+    {
+      k: 'dribble',
+      v: f.dribbleLatch ? 'latched' : f.arcSuppressed ? 'apex-hold' : '--',
+      vc: f.dribbleLatch || f.arcSuppressed ? color.unsure : color.textFaint,
+    },
+  ];
+}
+
 export function DebugPanel({
   debug,
   overlay,
@@ -101,6 +172,8 @@ export function DebugPanel({
   const [d, setD] = useState<EngineDebug>(debug.value);
   // Rim box aspect (width/height) — a rough camera-angle read. 0 = no rim yet.
   const [rimAsp, setRimAsp] = useState(0);
+  // Latest acquisition funnel (null until the engine publishes one).
+  const [f, setF] = useState<FrameFunnel | null>(null);
   const insets = useSafeAreaInsets();
   const { width, height } = useWindowDimensions();
   const isLandscape = width > height;
@@ -111,6 +184,18 @@ export function DebugPanel({
       const r = overlay?.value.rim;
       const a = r != null && r.height > 0 ? r.width / r.height : 0;
       setRimAsp((prev) => (Math.abs(prev - a) > 0.05 ? a : prev));
+      // Funnel: adopt the new snapshot only when a DISPLAYED field changed
+      // (funnelChanged) — a static frame shouldn't re-render the panel 4x/s.
+      const nf = (overlay?.value as FunnelOverlay | undefined)?.funnel ?? null;
+      setF((prev) =>
+        prev == null || nf == null
+          ? prev === nf
+            ? prev
+            : nf
+          : funnelChanged(prev, nf)
+            ? nf
+            : prev,
+      );
     }, 250);
     return () => clearInterval(id);
   }, [debug, overlay]);
@@ -126,7 +211,7 @@ export function DebugPanel({
 
   const onCopyDiag = () => {
     void Haptics.selectionAsync();
-    void Share.share({ message: buildDiagnostics(d, rimAsp) }).catch(() => {});
+    void Share.share({ message: buildDiagnostics(d, rimAsp, f) }).catch(() => {});
   };
 
   return (
@@ -151,6 +236,9 @@ export function DebugPanel({
       <Row k="output" v={`${d.outputLen} · ${d.layout}`} />
       <Row k="maxScore" v={d.maxScore.toFixed(3)} vc={scoreColor} />
       <Row k="dets" v={String(d.detCount)} vc={d.detCount > 0 ? color.make : color.textDim} />
+      {/* Acquisition funnel: seen → tracked → armed, one row per stage. Rows
+          only exist once the engine publishes a funnel (integration wiring). */}
+      {f != null && funnelRows(f).map((r) => <Row key={r.k} k={r.k} v={r.v} vc={r.vc} />)}
       <Row k="rim asp" v={rimAsp > 0 ? rimAsp.toFixed(2) : '--'} vc={rimAsp > 0 ? color.text : color.textFaint} />
       <Row k="input" v={`${d.inputMin.toFixed(2)}..${d.inputMax.toFixed(2)}`} vc={inputOk ? color.text : color.miss} />
       <Row k="pixels" v={`${d.nonZeroPct}% nz`} vc={d.nonZeroPct > 5 ? color.make : color.miss} />

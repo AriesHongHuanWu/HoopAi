@@ -106,6 +106,8 @@ export function valueSourceLabel(source: ShotValueSource): string {
   switch (source) {
     case 'court':
       return 'Court-registered';
+    case 'ftSeed':
+      return 'FT-anchored';
     case 'metric':
       return 'Measured';
     case 'heuristic':
@@ -120,6 +122,8 @@ export function valueSourcePhrase(source: ShotValueSource): string {
   switch (source) {
     case 'court':
       return 'mapped to your calibrated court — corner-accurate';
+    case 'ftSeed':
+      return 'placed from your free-throw anchor — scale and direction from one shot';
     case 'metric':
       return 'real-distance estimate from rim geometry';
     case 'heuristic':

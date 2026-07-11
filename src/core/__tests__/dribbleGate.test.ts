@@ -146,6 +146,44 @@ describe('DribbleDetector', () => {
     expect(det.active).toBe(false);
   });
 
+  test('near-plane clear: a REAL rising sample within one rim width BELOW the plane clears the latch (above-rim detections dropped out)', () => {
+    const det = new DribbleDetector();
+    for (const s of bounceTrain(0, 2, 0.4)) det.update(s, HOOP);
+    expect(det.active).toBe(true); // last reversal at t ≈ 0.4667
+
+    // The quick shot rises but its above-rim detections vanish: the highest
+    // REAL sample sits at planeY + 0.5 rim widths = 220 — BELOW the plane
+    // (200), so the (a) above-plane clear never fires. Well inside the 1.2 s
+    // timeout (t = 0.9), so only the near-plane rule can clear here.
+    expect(det.update(ds(0.9, 220, -500), HOOP)).toBe(false);
+    expect(det.active).toBe(false);
+  });
+
+  test('near-plane clear needs a RISING sample: a falling real sample in the band does not clear', () => {
+    const det = new DribbleDetector();
+    for (const s of bounceTrain(0, 2, 0.4)) det.update(s, HOOP);
+    expect(det.active).toBe(true);
+
+    // Falling (vy > 0) at cy=220: below the plane, inside the band, but not
+    // shot-like — the latch holds (one-sided: the fix only clears EARLIER).
+    expect(det.update(ds(0.9, 220, 500), HOOP)).toBe(true);
+    expect(det.active).toBe(true);
+  });
+
+  test('near-plane clear ignores predicted samples: a Kalman ghost rising in the band does not clear', () => {
+    const det = new DribbleDetector();
+    for (const s of bounceTrain(0, 2, 0.4)) det.update(s, HOOP);
+    expect(det.active).toBe(true);
+
+    // Same position/velocity as the clearing sample, but predicted — the
+    // tracker's opinion, not evidence. Clock-only; the latch holds.
+    expect(det.update(ds(0.9, 220, -500, false), HOOP)).toBe(true);
+    expect(det.active).toBe(true);
+    // A REAL sample in the band still clears right after.
+    expect(det.update(ds(0.9 + DT, 218, -500), HOOP)).toBe(false);
+    expect(det.active).toBe(false);
+  });
+
   test('rim == null: update never reports active — no rim, no suppression', () => {
     const det = new DribbleDetector();
     for (const s of bounceTrain(0, 3, 0.5)) {
@@ -200,5 +238,54 @@ describe('apexAboveRim', () => {
   test('a non-gravity fit (ya <= 0) is permissive — no finite apex to judge', () => {
     expect(apexAboveRim({ ya: -450, yb: 0, yc: 450 }, HOOP, 2)).toBe(true);
     expect(apexAboveRim({ ya: 0, yb: 100, yc: 450 }, HOOP, 2)).toBe(true);
+  });
+
+  // Apex-straddle guard: only an OBSERVED apex may suppress. All fits below
+  // share vertexT = 0 and vertexY = 320 — three rim widths below the plane
+  // (200), far past the margin-2 limit of 280, i.e. deep enough to suppress
+  // whenever the vertex counts as observed.
+  const DEEP_VERTEX = { ya: 450, yb: 0, yc: 320 };
+
+  test('an ascending-only window (tMax before the vertex) never suppresses — the vertex is extrapolated', () => {
+    expect(
+      apexAboveRim({ ...DEEP_VERTEX, tMin: -1, tMax: -0.2 }, HOOP, 2),
+    ).toBe(true);
+  });
+
+  test('a descending-only window (tMin after the vertex) never suppresses either', () => {
+    expect(
+      apexAboveRim({ ...DEEP_VERTEX, tMin: 0.2, tMax: 1 }, HOOP, 2),
+    ).toBe(true);
+  });
+
+  test('a straddling window with a deep vertex suppresses — the apex was actually observed', () => {
+    expect(
+      apexAboveRim({ ...DEEP_VERTEX, tMin: -0.5, tMax: 0.5 }, HOOP, 2),
+    ).toBe(false);
+  });
+
+  test('a straddling window with a high apex still passes — the straddle guard only widens, never narrows', () => {
+    // Vertex at y = 260, inside margin 2 (limit 280): true with or without
+    // the window.
+    expect(
+      apexAboveRim({ ya: 450, yb: 0, yc: 260, tMin: -0.5, tMax: 0.5 }, HOOP, 2),
+    ).toBe(true);
+  });
+
+  test('missing tMin/tMax keeps legacy semantics: a deep vertex suppresses', () => {
+    expect(apexAboveRim(DEEP_VERTEX, HOOP, 2)).toBe(false);
+  });
+
+  test('non-finite tMin/tMax are treated as missing (legacy semantics)', () => {
+    expect(
+      apexAboveRim({ ...DEEP_VERTEX, tMin: Number.NaN, tMax: 1 }, HOOP, 2),
+    ).toBe(false);
+    expect(
+      apexAboveRim(
+        { ...DEEP_VERTEX, tMin: -Infinity, tMax: Infinity },
+        HOOP,
+        2,
+      ),
+    ).toBe(false);
   });
 });

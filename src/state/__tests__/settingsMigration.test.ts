@@ -36,12 +36,13 @@ const opts: any = persistApi.getOptions();
 describe('useSettings persist options', () => {
   test('persist version + storage key pin', () => {
     expect(opts.name).toBe('hoopai-settings');
-    // v6: mega-upgrade — bumped exactly once for all sibling features
-    // (replay3d backfill; the other v6 keys are plain additive defaults).
-    expect(opts.version).toBe(6);
+    // v7: round-2 mega-upgrade — bumped exactly once for all sibling features
+    // (tutorialSeen re-spread for liveHud/formstudio3d, hintSeen ledger,
+    // detectionExplainerSeen, trackerRescue, setup pre-flight defaults).
+    expect(opts.version).toBe(7);
   });
 
-  test('migrate from v1 backfills engine/perf defaults (full chain to v6)', () => {
+  test('migrate from v1 backfills engine/perf defaults (full chain to v7)', () => {
     const out: any = opts.migrate({}, 1);
     expect(out.detectorEngine).toBe('yolox'); // v2: YOLOX becomes default
     expect(out.perfMode).toBe('speed'); // v3: 416 becomes default
@@ -49,6 +50,18 @@ describe('useSettings persist options', () => {
     expect(out.deviceTuned).toBe(true); // v4: pre-existing installs own knobs
     expect(out.useFlightArc).toBe(true); // v5: flight arc on
     expect(out.replay3d).toBe(true); // v6: 3D replay on
+    expect(out.trackerRescue).toBe(true); // v7: track rescue on
+    expect(out.hintSeen).toEqual({ unsureLive: false, unsureSummary: false }); // v7
+    expect(out.detectionExplainerSeen).toBe(false); // v7
+    expect(out.lastDurationSec).toBe(60); // v7: setup pre-flight defaults
+    expect(out.lastMakesPerSpot).toBe(5); // v7
+    expect(out.tutorialSeen).toEqual({
+      home: false,
+      live: false,
+      liveHud: false,
+      summary: false,
+      formstudio3d: false,
+    }); // v7: nested record fully backfilled
   });
 
   test('migrate from v3 backfills rim height and freezes manual tuning', () => {
@@ -80,6 +93,53 @@ describe('useSettings persist options', () => {
     // ...but never stomps an explicit opt-out persisted under v6+ shapes.
     const optedOut: any = opts.migrate({ replay3d: false }, 5);
     expect(optedOut.replay3d).toBe(false);
+  });
+
+  test('migrate from v6 backfills every v7 key', () => {
+    // trackerRescue: a v6 blob predates the key entirely — default ON.
+    const out: any = opts.migrate({}, 6);
+    expect(out.trackerRescue).toBe(true);
+    expect(out.hintSeen).toEqual({ unsureLive: false, unsureSummary: false });
+    expect(out.detectionExplainerSeen).toBe(false);
+    expect(out.lastDurationSec).toBe(60);
+    expect(out.lastMakesPerSpot).toBe(5);
+  });
+
+  test('migrate from v6 re-spreads tutorialSeen UNDER the persisted flags', () => {
+    // tutorialSeen is a NESTED record: zustand's shallow rehydrate keeps the
+    // old persisted object wholesale, so migrate must backfill the new screen
+    // keys while preserving every seen=true the user already earned.
+    const out: any = opts.migrate(
+      { tutorialSeen: { home: true, live: true, summary: false } },
+      6,
+    );
+    expect(out.tutorialSeen).toEqual({
+      home: true,
+      live: true,
+      liveHud: false,
+      summary: false,
+      formstudio3d: false,
+    });
+    // A blob missing the record entirely (defensive) gets the full default.
+    const bare: any = opts.migrate({}, 6);
+    expect(bare.tutorialSeen).toEqual({
+      home: false,
+      live: false,
+      liveHud: false,
+      summary: false,
+      formstudio3d: false,
+    });
+  });
+
+  test('migrate at v7 preserves an explicit trackerRescue opt-out', () => {
+    // A v7 blob with trackerRescue:false must pass through untouched — the
+    // v<7 branch does not fire at the current version.
+    const out: any = opts.migrate({ trackerRescue: false }, 7);
+    expect(out.trackerRescue).toBe(false);
+    // Same for the setup pre-flight defaults: user-chosen values survive.
+    const chips: any = opts.migrate({ lastDurationSec: 120, lastMakesPerSpot: 3 }, 7);
+    expect(chips.lastDurationSec).toBe(120);
+    expect(chips.lastMakesPerSpot).toBe(3);
   });
 
   test('migrate is idempotent at current version', () => {
