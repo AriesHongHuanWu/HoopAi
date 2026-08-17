@@ -529,13 +529,21 @@ export const SHOT_FSM = {
    * through adoptRim into the FSM opts exactly like depthVeto/reappearance.
    *
    * When ON, a geo+net make with an OBSERVED rim-plane crossing is demoted to
-   * 'unsure' if the ball was SEEN exiting deep below the rim but NOT via a
-   * clean in-span drop through the hoop (geoExitObserved) — the rim-rattle /
-   * front-lip carom-OUT signature that a net brush would otherwise mint as a
-   * phantom make. Bread-ball-safe: it can only turn a make into 'unsure' (never
-   * a fabricated miss), it never touches occluded makes (no observed crossing,
-   * or the ball vanished into the net before a deep sample), and a corroborated
-   * ball_in_basket (cls) is exempt.
+   * 'unsure' when a REAL post-crossing sample PROVES the ball left the rim
+   * cylinder (shotFsm.caromOutObserved: deep and out of span, or a re-ascent
+   * above the plane after the deepest deep sample) — the rim-rattle / front-lip
+   * carom-OUT signature that a net brush would otherwise mint as a phantom
+   * make. Bread-ball-safe: it can only turn a make into 'unsure' (never a
+   * fabricated miss), it never touches occluded makes (no observed crossing),
+   * and a corroborated ball_in_basket (cls) is exempt.
+   *
+   * The trigger asks for POSITIVE carom evidence on purpose. It originally
+   * demoted on the ABSENCE of a proven clean exit (!geoExitObserved), which —
+   * because the belowRim resolve fires on the same `cy > belowY` threshold the
+   * "seen deep" precondition tested — collapsed into "a make now REQUIRES a
+   * clean geometric exit", the very lever rejected for costing real makes. One
+   * non-monotone cy inside the net was enough to kill a swish. See the guard's
+   * WHY block in shotFsm.resolve().
    */
   useRattleGuard: false,
   /**
@@ -545,14 +553,25 @@ export const SHOT_FSM = {
    * byte-identical. The LIVE app defaults it ON via settingsStore, threaded
    * through adoptRim into the FSM opts exactly like useRattleGuard.
    *
-   * When ON, the FSM does NOT resolve the instant the ball first drops past
-   * belowY; it keeps the shot live for `settleWindowSec`, so a LATE rim
-   * bounce-out (ball dips below the rim, then pops back up over it and out) is
-   * observed rather than frozen on the first below-rim sample. The rattle-out
-   * guard / geoExitObserved then judge the fuller trajectory, and a re-ascent
-   * above the rim plane demotes the would-be make. Bread-ball-safe: make ->
-   * 'unsure' only (never a fabricated miss); a clean or net-swallowed swish
-   * never re-ascends above the plane, so it is untouched.
+   * When ON, a shot that has TOUCHED THE RIM does not resolve the instant the
+   * ball first drops past belowY; it stays live for `settleWindowSec`, so a LATE
+   * rim bounce-out (ball dips below the rim, then pops back up over it and out)
+   * is observed rather than frozen on the first below-rim sample. A re-ascent
+   * above the rim plane AT the hoop demotes the would-be make. Bread-ball-safe:
+   * make -> 'unsure' only (never a fabricated miss); a clean or net-swallowed
+   * swish never re-ascends above the plane at the hoop, so it is untouched.
+   *
+   * Three scope limits keep the window from costing makes, all of them
+   * narrowings learned from probes against the real FSM:
+   *  - rim contact required (nothing to bounce off ⇒ nothing to wait for), so a
+   *    clean swish resolves with zero added latency;
+   *  - the exit evidence the rattle-out guard judges is FROZEN at the first
+   *    below-rim sample — the window's extra frames are the noisiest boxes of
+   *    the shot (ball inside/behind the net) and exist only to feed the explicit
+   *    re-ascent detector, not to be re-litigated as exit geometry;
+   *  - a below-rim resolve already pending when maxLiveSec expires keeps the
+   *    'belowRim' reason, so the clock cannot relabel a fully-evidenced decision
+   *    into the blanket-'unsure' timeout.
    */
   useSettleWindow: false,
   /**

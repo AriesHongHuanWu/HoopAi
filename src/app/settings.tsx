@@ -827,6 +827,30 @@ export default function SettingsScreen() {
             ))}
           </View>
           <View style={styles.divider} />
+          {/* The two make-suppressing guards live OUTSIDE the debug block on
+              purpose. They can only hold a make back, so when one misfires the
+              symptom is "my shot wasn't counted" — the user must be able to
+              reach the off switch without first discovering Debug mode. */}
+          <ToggleRow
+            label="Rattle-out guard"
+            description="If you SEE the ball carom back out of the rim — landing outside the hoop, or popping back up above it — hold that shot as 'unsure' instead of counting a make. It now needs to actually see the ball leave the rim; it no longer holds a shot back just because the drop-through was hidden by the net. It can only downgrade a make to unsure, never invent a miss. Turn it off if makes still go uncounted."
+            value={rattleGuard}
+            onValueChange={(v) => {
+              tick();
+              set('rattleGuard', v);
+            }}
+          />
+          <View style={styles.divider} />
+          <ToggleRow
+            label="Late bounce-out check"
+            description="After a shot that TOUCHED the rim drops below it, wait a few frames (~0.13s) to catch a late bounce-out — the ball dips in, then pops back over the rim and out. A clean swish no longer waits, so makes register immediately. Like the guard above, it can only downgrade a make to unsure."
+            value={settleWindow}
+            onValueChange={(v) => {
+              tick();
+              set('settleWindow', v);
+            }}
+          />
+          <View style={styles.divider} />
           {/* Debug mode is the ONE switch that reveals every advanced knob —
               the settings stay a 30-second read for everyone else. */}
           <ToggleRow
@@ -1047,26 +1071,6 @@ export default function SettingsScreen() {
             onValueChange={(v) => {
               tick();
               set('reappearance', v);
-            }}
-          />
-          <View style={styles.divider} />
-          <ToggleRow
-            label="Rattle-out guard (stricter makes)"
-            description="When the ball crosses the rim line and the net twitches, but you then SEE it bounce or carom back out instead of dropping through, hold the shot as 'unsure' rather than counting a make. Cleans up rim rattles and front-rim caroms a net brush would miscount. Bread-ball-safe: it can only downgrade a make to unsure, never invent a miss, and never touches a clean swish or one the net swallows. ON by default. Takes effect at the next rim lock."
-            value={rattleGuard}
-            onValueChange={(v) => {
-              tick();
-              set('rattleGuard', v);
-            }}
-          />
-          <View style={styles.divider} />
-          <ToggleRow
-            label="Settle window (late bounce-out)"
-            description="Wait a few frames (~0.13s) after the ball drops below the rim before scoring a make, so a LATE rim bounce-out — the ball dips in then pops back up over the rim and out — is caught and held as 'unsure' instead of counted. Pairs with the rattle-out guard. Bread-ball-safe: it can only downgrade a make to unsure, never invent a miss, and a clean swish or one the net swallows is untouched. ON by default. Takes effect at the next rim lock."
-            value={settleWindow}
-            onValueChange={(v) => {
-              tick();
-              set('settleWindow', v);
             }}
           />
           <View style={styles.divider} />

@@ -185,6 +185,36 @@ export interface ShotSignals {
   illusion?: 'front' | 'behind';
 }
 
+/**
+ * Which demotion held a shot back from the outcome its fused signals asked
+ * for. DIAGNOSTIC VOCABULARY ONLY — recorded alongside the existing demotion
+ * decisions and never feeding one (same contract as {@link ArmRefusal} in
+ * shotFsm.ts). It exists because the two stricter-make levers shipped in
+ * ed80a08 silently ate genuine makes for a whole release: with no record of
+ * WHICH guard fired, the only way to find out was to re-derive the state
+ * machine by hand. Every future regression of this class is now one field
+ * lookup away.
+ *
+ *  - 'depthVeto'      — the depth-ratio parallax gate flipped geo true->false.
+ *  - 'timeout'        — the shot hit maxLiveSec with nothing pending; forced unsure.
+ *  - 'basketCooldown' — a decided outcome landed inside basketCooldownSec of
+ *                       the previous make (double-count guard).
+ *  - 'passThrough'    — a geo-ONLY make on a ball-at-hoop / release arm (no net
+ *                       or cls corroboration): the pass-through signature.
+ *  - 'rattleOut'      — POSITIVE carom evidence after the crossing (see
+ *                       caromOutObserved): the ball was seen leaving the rim
+ *                       cylinder instead of dropping through it.
+ *  - 'settleReascend' — during the settle window a real sample climbed back
+ *                       above the rim plane AT the hoop (bounce-out).
+ */
+export type ShotHold =
+  | 'depthVeto'
+  | 'timeout'
+  | 'basketCooldown'
+  | 'passThrough'
+  | 'rattleOut'
+  | 'settleReascend';
+
 export interface ResolvedShot {
   /** Monotonic per-session shot number, starting at 1. */
   id: number;
@@ -288,6 +318,14 @@ export interface ResolvedShot {
    * lack it. VISUAL-ONLY — see {@link PersistedFlightArc}.
    */
   flightArc?: PersistedFlightArc;
+  /**
+   * Demotion telemetry: every guard that held this shot back from the outcome
+   * its fused signals asked for, in the order they fired. Absent when nothing
+   * demoted the shot (the common case), so it costs nothing on a clean make.
+   * RECORD-ONLY — see {@link ShotHold}; the FSM never branches on this value
+   * and the resolve path is byte-identical with the recording removed.
+   */
+  holds?: readonly ShotHold[];
 }
 
 /** Pose-based form metrics + prioritized coaching cues for one shot. */

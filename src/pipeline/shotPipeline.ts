@@ -425,15 +425,22 @@ export class ShotPipeline {
     this.reappearance = enabled;
   }
 
-  /** Rattle-out make guard (from Settings). Takes effect at rim lock. */
+  /**
+   * Rattle-out make guard (from Settings). Takes effect IMMEDIATELY — the FSM
+   * is built once per rim lock and lives for the session, so forwarding to the
+   * live instance is what makes this an actual escape hatch rather than a
+   * setting that appears to do nothing.
+   */
   setRattleGuard(enabled: boolean): void {
     this.rattleGuard = enabled;
+    this.fsm?.setRattleGuard(enabled);
   }
 
   /** Settle window before the belowRim resolve (from Settings). Takes effect
-   *  at rim lock. */
+   *  immediately, for the same reason as setRattleGuard. */
   setSettleWindow(enabled: boolean): void {
     this.settleWindow = enabled;
+    this.fsm?.setSettleWindow(enabled);
   }
 
   /**
@@ -566,6 +573,15 @@ export class ShotPipeline {
       // it stale. Resetting errs in the permissive direction: an inactive
       // detector suppresses nothing, so a re-lock can never blank a real shot.
       this.dribble.reset();
+    } else if (rim && this.rimLock.consumeGeometryMoved()) {
+      // CONTINUOUS TRACKING: the lock also nudges the rim toward fresh accepted
+      // detections between hard re-locks, and adoptRim's reference check can
+      // never see it (RimLock mutates the geometry object IN PLACE). Without
+      // this push the FSM judged with a HYBRID rim — live planeY/span/belowY
+      // against zones (rimInflated / hoopRoiLowerHalf / layupZone) frozen at
+      // the original lock — so touchedRim, the layup zone and the crossing test
+      // disagreed about where the rim was after any camera nudge.
+      this.fsm?.setRim(rim);
     }
 
     if (this.rimLock.driftDetected && !this.wasDrifted) {

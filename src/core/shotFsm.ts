@@ -57,6 +57,7 @@ import type {
   FsmStepResult as FsmStepResultBase,
   ResolvedShot,
   RimGeometry,
+  ShotHold,
   ShotOutcome,
   ShotPhase,
   TrackedBall,
@@ -201,10 +202,17 @@ export class ShotFsm {
   private readonly useDepthVeto: boolean;
   /** Kill-switch: gap-crossing reappearance corroborator. */
   private readonly useReappearance: boolean;
-  /** Kill-switch: rattle-out make guard (see resolve() + SHOT_FSM.useRattleGuard). */
-  private readonly useRattleGuard: boolean;
-  /** Kill-switch: settle window before the belowRim resolve (see step() + SHOT_FSM.useSettleWindow). */
-  private readonly useSettleWindow: boolean;
+  /**
+   * Kill-switch: rattle-out make guard (see resolve() + SHOT_FSM.useRattleGuard).
+   * MUTABLE so the Settings toggle is real: the FSM is constructed once per rim
+   * lock and lives for the whole session, so a constructor-only flag left the
+   * escape hatch inert exactly when a user needed it (the ed80a08 levers ate
+   * genuine makes and turning them off did nothing until a pipeline reset).
+   */
+  private useRattleGuard: boolean;
+  /** Kill-switch: settle window before the belowRim resolve (see step() +
+   *  SHOT_FSM.useSettleWindow). Mutable for the same reason as useRattleGuard. */
+  private useSettleWindow: boolean;
   private ballSize: BallSizeSetting = 7;
   private viewBand: ViewBandName = 'side_wing';
   private readonly reapp = new ReappearanceTest();
@@ -278,16 +286,36 @@ export class ShotFsm {
   private wasAbovePlane = false;
   /**
    * Settle window (flagged): timestamp of the FIRST below-belowY sample while
-   * the belowRim resolve is deferred, or null when no resolve is pending.
+   * the belowRim resolve is deferred, or null when no resolve is pending (which
+   * includes every shot that never touched the rim — see the arming site).
    * Keeping the shot live a few frames past this lets a LATE rim bounce-out be
    * observed instead of freezing the make/miss call on the first below-rim
-   * sample. Reset per shot in resolve().
+   * sample. Doubles as the "a belowRim resolve is pending" flag the maxLiveSec
+   * force-resolve reads, so the clock cannot relabel that decision 'timeout'.
+   * Reset per shot in resolve().
    */
   private belowRimFirstT: number | null = null;
   /**
+   * Settle window (flagged): `trajectory.length` frozen at the instant the
+   * window armed, i.e. the trajectory PREFIX that ends on the first below-rim
+   * sample. null when no resolve is pending.
+   *
+   * WHY: the settle frames are the noisiest boxes of the entire shot — the ball
+   * is inside/behind the net, its detection box centroid drifting on billowing
+   * mesh — and appending them to the trajectory that the exit test then judges
+   * is what turned the rattle-out guard into a make-eater (one non-monotone cy
+   * killed a swish). Those frames exist to feed the EXPLICIT re-ascent detector
+   * (settleReascended), which is a rim-diameter-scale test that noise cannot
+   * fake; the exit evidence is frozen here so they cannot poison it. Fusion
+   * (geo/net/cls) deliberately keeps reading the FULL trajectory — freezing is
+   * a narrowing of one demotion, not a change to the evidence.
+   */
+  private belowRimTrajLen: number | null = null;
+  /**
    * Settle window (flagged): a REAL sample climbed back above the rim PLANE
-   * (moving up) AFTER the ball had already dropped below the rim bottom — an
-   * unambiguous carom / bounce-out. Consumed by resolve() to demote the make.
+   * (moving up) AT THE HOOP, AFTER the ball had already dropped below the rim
+   * bottom — an unambiguous carom / bounce-out. Consumed by resolve() to demote
+   * the make.
    */
   private settleReascended = false;
 
@@ -317,6 +345,23 @@ export class ShotFsm {
   /** Ball-size setting (7/6/5) feeding the depth-ratio gate. */
   setBallSize(size: BallSizeSetting): void {
     this.ballSize = size;
+  }
+
+  /**
+   * Live escape hatches for the two make-suppressing levers. Both take effect
+   * on the NEXT resolve, so a user who suspects a guard is eating their makes
+   * can turn it off mid-session and see the difference on the very next shot.
+   * Turning either OFF only removes a demotion — it can never mint a make.
+   */
+  setRattleGuard(enabled: boolean): void {
+    this.useRattleGuard = enabled;
+  }
+
+  setSettleWindow(enabled: boolean): void {
+    this.useSettleWindow = enabled;
+    // A pending settle must not outlive its flag: without this a shot already
+    // waiting would stall until maxLiveSec after the window was switched off.
+    if (!enabled) this.belowRimFirstT = null;
   }
 
   /** View band from the placement classifier (default 'side_wing'). */
@@ -467,7 +512,18 @@ export class ShotFsm {
       // well under this, but a stuck/occluded shot that times out at maxLiveSec
       // could otherwise draw a very long, messy comet. Keep only the most recent
       // samples (the visible arc); the oldest drops off the tail.
-      if (this.trajectory.length > MAX_TRAJ_SAMPLES) this.trajectory.shift();
+      if (this.trajectory.length > MAX_TRAJ_SAMPLES) {
+        this.trajectory.shift();
+        // Keep the frozen exit prefix (belowRimTrajLen) pointing at the SAME
+        // sample after the oldest one is dropped: it is an index from the head,
+        // so a shift slides every sample down by one. Without this the prefix
+        // would silently grow to include settle frames — exactly the poisoning
+        // the freeze exists to prevent — on a long shot that hits the cap
+        // during the window.
+        if (this.belowRimTrajLen !== null && this.belowRimTrajLen > 0) {
+          this.belowRimTrajLen--;
+        }
+      }
       // "前後幀" gap smoothing: the ball just REAPPEARED after a dropout —
       // rewrite the straight-line Kalman coast between the two real sides with
       // the physics-true two-sided parabola. Improves the drawn comet AND the
@@ -509,32 +565,53 @@ export class ShotFsm {
         ball.cy > this.rim.belowY &&
         (this.wasAbovePlane || ball.vy > 0)
       ) {
-        if (this.useSettleWindow) {
+        if (this.useSettleWindow && this.touchedRim) {
           // Settle window (flagged): arm the DEFERRED belowRim resolve on the
           // first below-rim sample instead of resolving here. Staying live a
           // few frames lets a LATE bounce-out (ball dips below the rim, then
-          // pops back up over it and out) be observed — the rattle-out guard
-          // and geoExitObserved in resolve() then see the re-ascent instead of
-          // freezing the call on this first below-rim sample. The window-elapsed
-          // check further down performs the actual resolve, capping latency.
-          if (this.belowRimFirstT === null) this.belowRimFirstT = t;
+          // pops back up over it and out) be observed by the explicit
+          // re-ascent detector below, instead of freezing the call on this
+          // first below-rim sample. The window-elapsed check further down
+          // performs the actual resolve, capping latency.
+          //
+          // ONLY after rim contact: a bounce-out needs something to bounce off.
+          // A ball that reached the rim bottom without ever sampling inside the
+          // rim region (a clean drop-through, and at low fps a swish whose
+          // samples straddle the whole rim band) has no carom to wait for, so
+          // waiting buys nothing and costs the user settleWindowSec of make
+          // latency plus settleWindowSec of exposure to the noisiest boxes of
+          // the shot. Strictly a narrowing: with no window armed, this resolves
+          // exactly as the flag-OFF baseline does.
+          if (this.belowRimFirstT === null) {
+            this.belowRimFirstT = t;
+            // Freeze the exit evidence at THIS sample (see belowRimTrajLen).
+            this.belowRimTrajLen = this.trajectory.length;
+          }
         } else {
           reason = 'belowRim';
         }
       }
       // Settle-window bounce-out detector (flagged): a REAL sample back above
-      // the rim PLANE, moving UP, AFTER the ball already dropped below the rim
-      // bottom — an unambiguous carom / bounce-out (a clean make's cy only keeps
-      // increasing once it clears belowY). Testing against the PLANE (not merely
-      // the rim bottom) makes this a rim-diameter-scale excursion, so a few px
-      // of net-occlusion jitter at the rim bottom can never trip it. Consumed by
-      // resolve() to demote the would-be make.
+      // the rim PLANE, moving UP, AT THE HOOP, AFTER the ball already dropped
+      // below the rim bottom — an unambiguous carom / bounce-out (a clean make's
+      // cy only keeps increasing once it clears belowY). Testing against the
+      // PLANE (not merely the rim bottom) makes this a rim-diameter-scale
+      // excursion, so a few px of net-occlusion jitter at the rim bottom can
+      // never trip it. Consumed by resolve() to demote the would-be make.
+      //
+      // The hoopRoi gate is what makes "re-ascent" mean the BALL bouncing out
+      // rather than "some box moved up somewhere in the frame": a physical
+      // bounce-out is AT the rim on the frame it re-ascends. Without it a
+      // tracker switch to any blob in the upper frame (a head, a second ball,
+      // a re-acquired track across the court) demoted a genuine make — proven
+      // by probe: a blob at cx=100,cy=150 killed a swish. Strictly a narrowing.
       if (
         this.useSettleWindow &&
         this.belowRimFirstT !== null &&
         !ball.predicted &&
         ball.cy < this.rim.planeY &&
-        ball.vy < 0
+        ball.vy < 0 &&
+        pointInBox(this.rim.hoopRoi, ball.cx, ball.cy)
       ) {
         this.settleReascended = true;
       }
@@ -562,7 +639,18 @@ export class ShotFsm {
     }
 
     if (reason === null && t - this.tStart > SHOT_FSM.maxLiveSec) {
-      reason = 'timeout';
+      // A below-rim resolve already PENDING when the clock runs out is a
+      // decision made with full evidence in hand — the crossing, the net window
+      // and the deep drop have all been observed; only the settle window's few
+      // extra frames are outstanding. `reason === 'timeout'` is blanket-forced
+      // to 'unsure' below, so letting the clock relabel that decision erased
+      // genuine makes for every shot whose below-rim moment happened to land
+      // within settleWindowSec of maxLiveSec (a stuck/occluded track that
+      // finally dropped through). Keep the reason the ball earned.
+      //
+      // belowRimFirstT is only ever non-null while useSettleWindow is ON, so
+      // the flag-OFF baseline (recheck replay + pinned tables) is untouched.
+      reason = this.belowRimFirstT !== null ? 'belowRim' : 'timeout';
     }
 
     if (reason !== null) {
@@ -949,6 +1037,25 @@ export class ShotFsm {
   private resolve(t: number, reason: ResolveReason): ResolvedShot {
     const rim = this.rim;
     const traj = this.trajectory;
+    /**
+     * Demotion telemetry (see {@link ShotHold}). RECORD-ONLY: appended next to
+     * each demotion that already existed, never read by any condition here.
+     */
+    const holds: ShotHold[] = [];
+
+    /**
+     * The trajectory PREFIX the exit test is allowed to judge: everything up to
+     * and including the first below-rim sample when the settle window armed
+     * (see belowRimTrajLen), the full trajectory otherwise. Fusion below reads
+     * `traj` (the full buffer) exactly as before — only the carom test is
+     * frozen, because the settle frames it would otherwise judge are net-noise
+     * by construction. Indices align: the prefix shares the head of `traj`, so
+     * crossIdx below indexes both.
+     */
+    const exitTraj =
+      this.belowRimTrajLen !== null && this.belowRimTrajLen < traj.length
+        ? traj.slice(0, this.belowRimTrajLen)
+        : traj;
 
     // --- geo: FINAL descending crossing of the rim plane -----------------
     // Prefer the final crossing whose BOTH samples are real detections (not
@@ -1016,7 +1123,10 @@ export class ShotFsm {
         decision: gate.decision,
         ...(gate.disableReason ? { disableReason: gate.disableReason } : {}),
       };
-      if (gate.decision !== 'silent') geo = false;
+      if (gate.decision !== 'silent') {
+        geo = false;
+        holds.push('depthVeto');
+      }
     }
 
     // --- virtual crossing (occlusion inference) ---------------------------
@@ -1103,7 +1213,10 @@ export class ShotFsm {
 
     // --- fusion -------------------------------------------------------------
     let outcome = fuse(geo, net, cls, occluded);
-    if (reason === 'timeout') outcome = 'unsure';
+    if (reason === 'timeout') {
+      outcome = 'unsure';
+      holds.push('timeout');
+    }
     // Double-count guard: ANY decided resolve too soon after the previous
     // make ⇒ unsure. Residual net/ball motion trailing a real make can still
     // produce a geo/net-agreeing 'miss' classification for a phantom second
@@ -1115,6 +1228,7 @@ export class ShotFsm {
       t < this.lastMakeT + SHOT_FSM.basketCooldownSec
     ) {
       outcome = 'unsure';
+      holds.push('basketCooldown');
     }
     // Pass-through guard: the ball-at-hoop branches (layup AND descending
     // entry) can be armed by a pass or lob whose 2D path merely CROSSES the
@@ -1133,28 +1247,41 @@ export class ShotFsm {
     // house rule is to never mint a make without corroboration.
     if (outcome === 'make' && this.armedVia !== 'jump' && net !== true && !cls) {
       outcome = 'unsure';
+      holds.push('passThrough');
     }
     // Rattle-out make guard (flagged; constructor default FALSE, ON live via
     // settingsStore). A geo+net make with an OBSERVED rim-plane crossing can
     // still be a rim-rattle / front-lip carom that bounced OUT: the ball
     // crossed the 2D plane in-span, brushed the net (a sub-swish burst read as
-    // net===true), then exited the rim WITHOUT dropping cleanly through the
-    // hoop. geoExitObserved is the make CONFIRMER — a genuine make continues
-    // DEEP below the rim bottom, in-span, descending, with no re-ascent. So
-    // when the ball was SEEN exiting deep below the rim (a real sample past
-    // belowY) but that exit was NOT the clean in-span drop geoExitObserved
-    // proves, the "make" is the carom-out signature; demote to unsure. This is
-    // bread-ball-safe by construction and never costs a clean/occluded swish:
+    // net===true), then exited the rim WITHOUT dropping through the hoop.
+    //
+    // WHY THIS ASKS FOR POSITIVE EVIDENCE NOW. The original trigger was
+    // "the ball was seen deep (a real sample past belowY) AND
+    // geoExitObserved() is false" — the ABSENCE of a proven clean exit. That
+    // degenerates: the belowRim RESOLVE TRIGGER uses the SAME `cy > belowY`
+    // threshold, so "seen deep" is true for essentially every shot that
+    // resolves on a real below-rim sample, leaving "a make now REQUIRES
+    // geoExitObserved" — precisely the clean-exit-required lever that was
+    // rejected for costing real makes. And geoExitObserved is deliberately
+    // strict: its descending test compares only the IMMEDIATELY PRECEDING real
+    // sample, so ONE non-monotone cy (net occlusion shifting the box centroid,
+    // motion blur, a re-acquired track) flips it false and kills a swish. It is
+    // a make CONFIRMER — sound for upgrading geo null->true, unsound inverted
+    // into a make DESTROYER, because "not proven clean" is not "proven out".
+    // So the guard now demotes only on caromOutObserved: a REAL post-crossing
+    // sample that PROVES the ball left the rim cylinder (deep and out of span,
+    // or a re-ascent above the plane after the deepest deep sample).
+    //
+    // Strictly a narrowing of an existing demotion, and bread-ball-safe by
+    // construction — this branch cannot mint an outcome, it can only take a
+    // make away:
     //   - unsure, never a fabricated miss (the safe failure direction);
     //   - cls exempt: a corroborated ball_in_basket keeps the make;
     //   - crossIdx >= 0 required: occluded makes upgraded via the virtual /
     //     geoExit / reappearance corroborators (no observed crossing) are
     //     untouched, so the net-swallowed swish stays a make (test 13);
-    //   - it fires ONLY when the ball was actually observed exiting deep, so a
-    //     swish that vanished into the net before any deep sample is untouched;
-    //   - a real make crosses in-span and continues in-span below the rim, so
-    //     geoExitObserved is true for it — only a carom that drifts OUT of span
-    //     (or re-ascends) below the rim satisfies observed-deep && !clean-exit.
+    //   - it judges the FROZEN prefix (exitTraj), so the settle window's
+    //     net-noise frames can no longer manufacture the evidence.
     // Depth-blind by nature: a carom falling straight DOWN in front of the rim
     // stays in-span and looks identical to a swish in 2D — that residual case
     // is the depth-ratio veto's job, not this geometric guard's.
@@ -1163,17 +1290,10 @@ export class ShotFsm {
       outcome === 'make' &&
       !cls &&
       crossIdx >= 0 &&
-      !geoExitObserved(traj, rim)
+      caromOutObserved(exitTraj, rim, crossIdx)
     ) {
-      let observedDeepExit = false;
-      for (let i = 0; i < traj.length; i++) {
-        const s = traj[i]!;
-        if (!s.predicted && s.cy > rim.belowY) {
-          observedDeepExit = true;
-          break;
-        }
-      }
-      if (observedDeepExit) outcome = 'unsure';
+      outcome = 'unsure';
+      holds.push('rattleOut');
     }
     // Settle-window bounce-out demotion (flagged; constructor default FALSE, ON
     // live via settingsStore). The ball was SEEN climbing back above the rim
@@ -1193,6 +1313,7 @@ export class ShotFsm {
       !cls
     ) {
       outcome = 'unsure';
+      holds.push('settleReascend');
     }
     if (outcome === 'make') this.lastMakeT = t;
 
@@ -1260,6 +1381,9 @@ export class ShotFsm {
       ...(geoDepth ? { geoDepth } : {}),
       ...(virtual ? { virtualCross: virtual } : {}),
       ...(releaseToRimSec !== null ? { releaseToRimSec } : {}),
+      // Diagnostic only (see ShotHold): omitted entirely when nothing demoted
+      // the shot, so a clean make carries no extra payload.
+      ...(holds.length > 0 ? { holds } : {}),
     };
 
     // --- reset to COOLDOWN ---------------------------------------------------
@@ -1276,6 +1400,7 @@ export class ShotFsm {
     this.rimBounce = false;
     this.wasAbovePlane = false;
     this.belowRimFirstT = null;
+    this.belowRimTrajLen = null;
     this.settleReascended = false;
     this.armedVia = null;
     this.originX = null;
@@ -1387,6 +1512,67 @@ export function fuse(
  * inherits fuse()'s guarantees. Exported for unit testing — this geometric
  * discriminator is the crux of the rim-roll fix.
  */
+/**
+ * Whether the trajectory PROVES the ball left the rim cylinder after crossing
+ * the plane — the carom-OUT observation the rattle-out make guard demotes on.
+ *
+ * WHY THIS EXISTS SEPARATELY FROM geoExitObserved. geoExitObserved answers
+ * "was a clean drop-through PROVEN?"; its negation is not "was a carom-out
+ * proven?", because an unproven exit is the normal state of a ball that is
+ * occluded by rim and net at exactly the moment it passes through. Inverting a
+ * confirmer into a destroyer is what made the guard eat genuine makes (one
+ * non-monotone cy inside the net was enough). This helper only ever answers
+ * with POSITIVE evidence, so a noisy or incomplete observation yields false —
+ * i.e. hands the make back, never takes one away on ignorance.
+ *
+ * True iff a REAL (never Kalman-predicted) sample AFTER the scored crossing
+ * shows either:
+ *   (a) a re-ascent back above `rim.planeY` following the DEEPEST post-crossing
+ *       sample, that deepest sample itself being past `rim.belowY` — the ball
+ *       went down through the rim band and came back up over it. A
+ *       rim-diameter-scale excursion, far beyond net-occlusion jitter; or
+ *   (b) a sample past `rim.belowY` sitting OUTSIDE [spanLeft, spanRight] — at
+ *       the rim's bottom the ball is somewhere it could not be had it gone
+ *       through the hoop.
+ *
+ * `crossIdx` is the first index of the scored crossing pair, exactly as
+ * resolve() computes it (traj[crossIdx].cy <= planeY < traj[crossIdx+1].cy);
+ * pass -1 for "no crossing", which yields false. Scoping the scan to
+ * POST-crossing samples is load-bearing, not tidiness: a release-armed attempt
+ * is seeded at the shooter's HANDS, which are both far below belowY and usually
+ * far outside the span, so a whole-trajectory scan would read every genuine
+ * release-armed make as a carom.
+ *
+ * The caller applies it in one direction only — make -> 'unsure' — so it can
+ * never fabricate a make or a miss. Exported for unit testing.
+ */
+export function caromOutObserved(
+  traj: readonly BallSample[],
+  rim: RimGeometry,
+  crossIdx: number,
+): boolean {
+  if (crossIdx < 0) return false;
+  // Deepest REAL post-crossing sample, and (b) checked on the way past.
+  let deepIdx = -1;
+  for (let i = crossIdx + 1; i < traj.length; i++) {
+    const s = traj[i]!;
+    if (s.predicted) continue;
+    if (s.cy > rim.belowY && (s.cx < rim.spanLeft || s.cx > rim.spanRight)) {
+      return true; // (b) past the rim bottom, outside the span
+    }
+    if (deepIdx < 0 || s.cy > traj[deepIdx]!.cy) deepIdx = i;
+  }
+  // (a) needs the ball to have actually reached BELOW the rim bottom first:
+  // without that, a would-be "re-ascent" is just a ball still inside the rim
+  // band, which no observation here can separate from a detection wobble.
+  if (deepIdx < 0 || traj[deepIdx]!.cy <= rim.belowY) return false;
+  for (let k = deepIdx + 1; k < traj.length; k++) {
+    const s = traj[k]!;
+    if (!s.predicted && s.cy < rim.planeY) return true;
+  }
+  return false;
+}
+
 export function geoExitObserved(
   traj: readonly BallSample[],
   rim: RimGeometry,
