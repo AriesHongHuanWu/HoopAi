@@ -14,24 +14,39 @@
  * video/[id], reel/[sessionId], and the standalone tools like trends, records,
  * scoreboard, jump, formstudio, shotlab, settings, storage, legal) live in the
  * ROOT Stack and push full-bleed OVER this bar — see app/_layout.tsx.
+ *
+ * BROADCAST IDENTITY (v2): the focused tab sits in an accent pill — the exact
+ * accentTint-fill-on-accentEdge-hairline selection pair SegmentedTabs and the
+ * Coach week chips already wear — with the icon swapping outline → filled.
+ * Focus is a STATIC style swap on purpose (no Reanimated, zero worklet risk);
+ * the existing motion.tab cross-fade carries all the movement. Each switch
+ * ticks the settings-gated selection haptic via src/utils/haptics.ts.
  */
 import { Ionicons } from '@expo/vector-icons';
 import { Tabs } from 'expo-router';
-import { StyleSheet } from 'react-native';
+import { StyleSheet, View } from 'react-native';
 
-import { color, motion, type } from '@/constants/tokens';
+import { color, motion, radius, space, type } from '@/constants/tokens';
+import { haptic } from '@/utils/haptics';
 
-/** One place to declare the tabs so the icons + titles stay in sync. */
+/**
+ * One place to declare the tabs so the icons + titles stay in sync. The
+ * name/title strings are pinned by tabIaCategorisation.test.tsx (tab word ==
+ * screen H1) — change them there deliberately or not at all.
+ */
 const TABS: {
   name: string;
   title: string;
+  /** Filled glyph — shown inside the pill when focused. */
   icon: React.ComponentProps<typeof Ionicons>['name'];
+  /** Outline sibling — the resting state. */
+  iconOutline: React.ComponentProps<typeof Ionicons>['name'];
 }[] = [
-  { name: 'index', title: 'Home', icon: 'home' },
-  { name: 'modes', title: 'Train', icon: 'basketball' },
-  { name: 'history', title: 'Data', icon: 'stats-chart' },
-  { name: 'coach', title: 'Coach', icon: 'school' },
-  { name: 'profile', title: 'You', icon: 'person-circle' },
+  { name: 'index', title: 'Home', icon: 'home', iconOutline: 'home-outline' },
+  { name: 'modes', title: 'Train', icon: 'basketball', iconOutline: 'basketball-outline' },
+  { name: 'history', title: 'Data', icon: 'stats-chart', iconOutline: 'stats-chart-outline' },
+  { name: 'coach', title: 'Coach', icon: 'school', iconOutline: 'school-outline' },
+  { name: 'profile', title: 'You', icon: 'person-circle', iconOutline: 'person-circle-outline' },
 ];
 
 export default function TabsLayout() {
@@ -54,6 +69,7 @@ export default function TabsLayout() {
           backgroundColor: color.surface,
           borderTopColor: color.border,
           borderTopWidth: StyleSheet.hairlineWidth,
+          paddingTop: space.xs,
         },
         tabBarLabelStyle: styles.label,
       }}
@@ -62,10 +78,15 @@ export default function TabsLayout() {
         <Tabs.Screen
           key={t.name}
           name={t.name}
+          // Gated selection tick on every switch — the gateway checks the
+          // Settings > Haptics toggle, never raw expo-haptics here.
+          listeners={{ tabPress: () => haptic.selection() }}
           options={{
             title: t.title,
-            tabBarIcon: ({ color: c, size }) => (
-              <Ionicons name={t.icon} size={size} color={c} />
+            tabBarIcon: ({ color: c, size, focused }) => (
+              <View style={[styles.pill, focused && styles.pillFocused]}>
+                <Ionicons name={focused ? t.icon : t.iconOutline} size={size} color={c} />
+              </View>
             ),
           }}
         />
@@ -77,5 +98,22 @@ export default function TabsLayout() {
 const styles = StyleSheet.create({
   label: {
     ...type.micro,
+  },
+  /**
+   * Fixed footprint whether focused or not (transparent border included) so
+   * gaining the pill never nudges the icon by a hairline.
+   */
+  pill: {
+    width: 56,
+    height: 30,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderRadius: radius.pill,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'transparent',
+  },
+  pillFocused: {
+    backgroundColor: color.accentTint,
+    borderColor: color.accentEdge,
   },
 });

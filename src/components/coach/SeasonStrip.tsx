@@ -17,21 +17,10 @@ import { Ionicons } from '@expo/vector-icons';
 import type { ComponentProps } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
+import { SectionEyebrow } from '@/components/ScreenHeader';
 import { Card, Row, StatNumber } from '@/components/ui';
 import { color, space, type } from '@/constants/tokens';
 import type { SeasonComparison } from '@/core/coachInsights';
-
-type IconName = ComponentProps<typeof Ionicons>['name'];
-
-/** Local replica of coach.tsx's SectionEyebrow (the screen doesn't export it). */
-function SectionEyebrow({ icon, children }: { icon: IconName; children: string }) {
-  return (
-    <Row gap={6} style={styles.eyebrowRow}>
-      <Ionicons name={icon} size={12} color={color.accent} />
-      <Text style={styles.eyebrowText}>{children.toUpperCase()}</Text>
-    </Row>
-  );
-}
 
 type DeltaVisual = { text: string; fg: string; spoken: string };
 
@@ -89,7 +78,10 @@ export function SeasonStrip({
 
   return (
     <Card entering={entering}>
-      <SectionEyebrow icon={hasPrior ? 'swap-horizontal-outline' : 'calendar-outline'}>
+      <SectionEyebrow
+        icon={hasPrior ? 'swap-horizontal-outline' : 'calendar-outline'}
+        style={styles.eyebrow}
+      >
         {hasPrior ? 'Last 4 weeks vs the 4 before' : 'Last 4 weeks'}
       </SectionEyebrow>
 
@@ -127,13 +119,9 @@ export function SeasonStrip({
 }
 
 const styles = StyleSheet.create({
-  eyebrowRow: {
+  // Shared SectionEyebrow leaves margins to the call site (screens own rhythm).
+  eyebrow: {
     marginBottom: space.sm,
-  },
-  eyebrowText: {
-    ...type.caption,
-    color: color.textFaint,
-    letterSpacing: 1,
   },
 
   // Box-score strip (same shape as coach.tsx's WeeklyHero strip).

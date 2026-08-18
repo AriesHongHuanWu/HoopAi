@@ -6,25 +6,13 @@
  * start back through onPickWeek so the screen can move its week selector.
  * No store reads, no router — the integrator wires those in coach.tsx.
  */
-import { Ionicons } from '@expo/vector-icons';
 import type { ComponentProps } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
+import { SectionEyebrow } from '@/components/ScreenHeader';
 import { Card, Row } from '@/components/ui';
-import { color, font, radius, space, type } from '@/constants/tokens';
+import { color, radius, space, type } from '@/constants/tokens';
 import type { TimelineWeek } from '@/core/coachInsights';
-
-type IconName = ComponentProps<typeof Ionicons>['name'];
-
-/** Local replica of coach.tsx's SectionEyebrow (the screen doesn't export it). */
-function SectionEyebrow({ icon, children }: { icon: IconName; children: string }) {
-  return (
-    <Row gap={6} style={styles.eyebrowRow}>
-      <Ionicons name={icon} size={12} color={color.accent} />
-      <Text style={styles.eyebrowText}>{children.toUpperCase()}</Text>
-    </Row>
-  );
-}
 
 /** Fixed bar-track height; WSS (0–100) maps directly onto it as a % fill. */
 const TRACK_HEIGHT = 72;
@@ -49,7 +37,9 @@ export function CoachTimelineCard({
 }) {
   return (
     <Card entering={entering}>
-      <SectionEyebrow icon="stats-chart-outline">Past 4 weeks</SectionEyebrow>
+      <SectionEyebrow icon="stats-chart-outline" style={styles.eyebrow}>
+        Past 4 weeks
+      </SectionEyebrow>
 
       <Row gap={space.sm} style={styles.bars}>
         {weeks.map((w) => {
@@ -109,13 +99,9 @@ export function CoachTimelineCard({
 }
 
 const styles = StyleSheet.create({
-  eyebrowRow: {
+  // Shared SectionEyebrow leaves margins to the call site (screens own rhythm).
+  eyebrow: {
     marginBottom: space.sm,
-  },
-  eyebrowText: {
-    ...type.caption,
-    color: color.textFaint,
-    letterSpacing: 1,
   },
   bars: {
     alignItems: 'flex-end',
@@ -141,9 +127,11 @@ const styles = StyleSheet.create({
     width: '100%',
   },
   wss: {
-    fontFamily: font.display,
-    fontSize: 18,
-    lineHeight: 20,
+    // The dense-grid numeral step from the shared ladder — was a hand-rolled
+    // font.display 18/20. Four 22px tabular columns hold on a 320pt device:
+    // 320 − screen padding (2·16) − card padding (2·16) − 3 gaps (3·8) = 232,
+    // i.e. 58pt per flex column vs ~40pt for a three-digit WSS numeral.
+    ...type.statSmall,
     color: color.text,
     fontVariant: ['tabular-nums'],
     textAlign: 'center',

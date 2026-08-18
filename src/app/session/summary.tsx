@@ -1,8 +1,10 @@
 /**
- * Post-session summary — the broadcast box-score moment: SummaryHero strip
- * (MAKES | FG% | PTS + one-shot celebration chip) up top, replay/reel media
- * row, the full SessionRecap under a "Box score" eyebrow, and a grouped
- * action stack (analysis / share / primary Done).
+ * Post-session summary — the broadcast box-score moment: the arc-crowned
+ * SummaryHero strip (MAKES | FG% | PTS + one-shot celebration chip) up top,
+ * ONE ranked honors block (personal bests, milestone, daily goal) directly
+ * under it, replay/reel media row, the SessionRecap under a "Box score"
+ * eyebrow (hero={false} — SummaryHero is this screen's one arc), and a Next
+ * up stack led by the Run-it-back entry card with Done as the lone primary.
  *
  * Motion: top-level sections enter with the canonical card stagger
  * (useCardStagger — returns undefined under system reduced-motion, so Views
@@ -20,7 +22,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import { router, useLocalSearchParams } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { StyleSheet, Text, View, type LayoutRectangle } from 'react-native';
+import { Pressable, StyleSheet, Text, View, type LayoutRectangle } from 'react-native';
 import Animated from 'react-native-reanimated';
 
 import { ReelEntryButton } from '@/components/ReelEntryButton';
@@ -47,11 +49,20 @@ import { buildHeatmap } from '@/core/heatmap';
 import { FIBA_COURT } from '@/core/courtModel';
 import { SessionFormReport } from '@/components/SessionFormReport';
 import { SummaryHero, isPerfectSession } from '@/components/SummaryHero';
-import { Card, Chip, Eyebrow, PillButton, Row, Screen } from '@/components/ui';
+import {
+  Chip,
+  EmptyState,
+  Eyebrow,
+  PillButton,
+  Row,
+  Screen,
+  SkeletonCard,
+} from '@/components/ui';
 import { color, radius, space, type } from '@/constants/tokens';
 import { detectNewBests, type CareerBests } from '@/core/achievements';
-import { levelOfGoals } from '@/core/drillProgression';
-import type { ModeState } from '@/core/gameModes';
+import { LEVEL_LABEL, levelOfGoals } from '@/core/drillProgression';
+import { getDrill } from '@/core/drills';
+import { getModeDef, type ModeState } from '@/core/gameModes';
 import { todayMakes } from '@/core/goals';
 import { detectMilestones, type Milestone } from '@/core/milestones';
 import type { ResolvedShot, ShotOutcome, ShotValue } from '@/core/types';
@@ -289,6 +300,30 @@ export default function SessionSummaryScreen() {
     router.replace(`/session/live?orient=${useSettings.getState().lastOrient}`);
   }, [prevMode, resetToIdle]);
 
+  // One honest line for the Run-it-back entry card: EXACTLY what runItBack
+  // will re-arm, mirroring its branch order — drill at the recovered level,
+  // then a non-ghost mode by name, else free play (a stale drill id or a
+  // stripped ghost timeline both degrade the restart to free play, so the
+  // card never promises a setup the restart won't deliver).
+  const runBackSummary = useMemo(() => {
+    const drill = prevMode?.config?.drill;
+    if (drill != null) {
+      try {
+        return `${getDrill(drill.id).title} · ${LEVEL_LABEL[levelOfGoals(drill.id, drill.goals)]}`;
+      } catch {
+        return 'Free play';
+      }
+    }
+    if (prevMode != null && prevMode.config?.ghost == null) {
+      try {
+        return getModeDef(prevMode.modeId).name;
+      } catch {
+        return 'Free play';
+      }
+    }
+    return 'Free play';
+  }, [prevMode]);
+
   // Share-card generation: disabled while the snapshot renders; failure shows
   // a quiet chip (shareSessionCard itself never throws).
   const [sharing, setSharing] = useState(false);
@@ -390,21 +425,20 @@ export default function SessionSummaryScreen() {
     <Screen scroll>
       <Eyebrow>Session complete</Eyebrow>
       {loading ? (
-        <Card>
-          <Text style={styles.dim}>Loading session…</Text>
-        </Card>
+        // One loading language: the hero strip + first card as Shimmer
+        // skeletons (SkeletonCard announces itself as a progressbar), so the
+        // summary arrives into the space it was always going to occupy.
+        <View>
+          <SkeletonCard hero lines={1} />
+          <SkeletonCard lines={3} style={styles.loadingCard} />
+        </View>
       ) : empty ? (
-        <Card>
-          <Text style={styles.heading}>No session to show</Text>
-          <Text style={[styles.dim, { marginTop: space.xs }]}>
-            Track a session and your summary will land here.
-          </Text>
-          <PillButton
-            label="Done"
-            onPress={onDone}
-            style={{ marginTop: space.lg }}
-          />
-        </Card>
+        <EmptyState
+          title="No session to show"
+          body="Track a session and your summary will land here."
+          actionLabel="Done"
+          onAction={onDone}
+        />
       ) : (
         <>
           <View style={styles.titleBlock}>
@@ -425,51 +459,59 @@ export default function SessionSummaryScreen() {
           <Animated.View entering={enter(0)}>
             <SummaryHero stats={stats} style={styles.hero} />
           </Animated.View>
-          {/* Block 1 — goal line + milestone share one stagger slot. The PB
-              banner below stays unwrapped: it carries its own hero-synced
-              entrance (and is the reduced-motion carrier for the confetti). */}
-          {storeMode && dailyGoal > 0 && goalMade != null && (
-            <Animated.View
-              entering={enter(1)}
-              style={styles.goalLineWrap}
-              accessibilityLabel={`Daily goal: ${goalMade} of ${dailyGoal} makes today`}
-            >
-              {goalMade >= dailyGoal ? (
-                <Chip
-                  label={`Daily goal hit — ${goalMade}/${dailyGoal} makes today`}
-                  tone="make"
-                />
-              ) : (
-                <Text style={styles.goalLine}>
-                  {`Daily goal · ${goalMade}/${dailyGoal} — ${dailyGoal - goalMade} to go`}
-                </Text>
+          {/* Block 1 — the HONORS block: every celebration the session earned,
+              ranked in ONE card directly under the hero. Personal bests first
+              (gold), then the career milestone, then the daily-goal line. One
+              shared entrance and one hero tuck-up replace the three
+              separately tucked banners; PersonalBestBanner stays the top row
+              (it carries its own hero-synced entrance and remains the
+              reduced-motion carrier for the confetti — wiring untouched). */}
+          {(newBests.length > 0 ||
+            milestones.length > 0 ||
+            (storeMode && dailyGoal > 0 && goalMade != null)) && (
+            <Animated.View entering={enter(1)} style={styles.honorsBlock}>
+              {newBests.length > 0 && (
+                <PersonalBestBanner bests={newBests} />
+              )}
+              {milestones.length > 0 && (
+                <View style={styles.milestoneBanner}>
+                  <View style={styles.milestoneIcon}>
+                    <Ionicons
+                      name={milestones[0]!.icon as React.ComponentProps<typeof Ionicons>['name']}
+                      size={20}
+                      color={color.threePt}
+                    />
+                  </View>
+                  <View style={styles.milestoneText}>
+                    <Text style={styles.milestoneEyebrow}>MILESTONE UNLOCKED</Text>
+                    <Text style={styles.milestoneBlurb}>{milestones[0]!.blurb}</Text>
+                    {milestones.length > 1 && (
+                      <Text style={styles.milestoneMore}>
+                        {`+${milestones.length - 1} more milestone${
+                          milestones.length - 1 === 1 ? '' : 's'
+                        } this session`}
+                      </Text>
+                    )}
+                  </View>
+                </View>
+              )}
+              {storeMode && dailyGoal > 0 && goalMade != null && (
+                <View
+                  accessibilityLabel={`Daily goal: ${goalMade} of ${dailyGoal} makes today`}
+                >
+                  {goalMade >= dailyGoal ? (
+                    <Chip
+                      label={`Daily goal hit — ${goalMade}/${dailyGoal} makes today`}
+                      tone="make"
+                    />
+                  ) : (
+                    <Text style={styles.goalLine}>
+                      {`Daily goal · ${goalMade}/${dailyGoal} — ${dailyGoal - goalMade} to go`}
+                    </Text>
+                  )}
+                </View>
               )}
             </Animated.View>
-          )}
-          {milestones.length > 0 && (
-            <Animated.View entering={enter(1)} style={styles.milestoneBanner}>
-              <View style={styles.milestoneIcon}>
-                <Ionicons
-                  name={milestones[0]!.icon as React.ComponentProps<typeof Ionicons>['name']}
-                  size={20}
-                  color={color.threePt}
-                />
-              </View>
-              <View style={styles.milestoneText}>
-                <Text style={styles.milestoneEyebrow}>MILESTONE UNLOCKED</Text>
-                <Text style={styles.milestoneBlurb}>{milestones[0]!.blurb}</Text>
-                {milestones.length > 1 && (
-                  <Text style={styles.milestoneMore}>
-                    {`+${milestones.length - 1} more milestone${
-                      milestones.length - 1 === 1 ? '' : 's'
-                    } this session`}
-                  </Text>
-                )}
-              </View>
-            </Animated.View>
-          )}
-          {newBests.length > 0 && (
-            <PersonalBestBanner bests={newBests} style={styles.pbBanner} />
           )}
           {videoPath != null && sessionId != null && (
             <Animated.View entering={enter(2)} style={styles.mediaSection}>
@@ -518,6 +560,18 @@ export default function SessionSummaryScreen() {
                   style={{ marginTop: space.md }}
                 />
               )}
+              {/* Trust bridge at the moment of doubt: the SAME detector, run
+                  over a clip the user already trusts. Lives INSIDE this
+                  section so no stagger slot shifts. */}
+              {unsureCount > 0 && (
+                <PillButton
+                  variant="ghost"
+                  label="Doubt a call? Test the detector on your own clip"
+                  icon="videocam-outline"
+                  onPress={() => router.push('/session/analyze')}
+                  style={{ marginTop: space.md }}
+                />
+              )}
             </Animated.View>
           )}
           {heatmap.totalAttempts >= 4 && (
@@ -542,6 +596,9 @@ export default function SessionSummaryScreen() {
           <SessionFormReport shots={shots} entering={enter(5)} />
           <Animated.View entering={enter(5)}>
             <Eyebrow>Box score</Eyebrow>
+            {/* hero={false}: SummaryHero up top is this screen's ONE
+                arc-crowned hero — the recap's own HeroArcStat + pip row would
+                duplicate it. History detail keeps the default (true). */}
             <SessionRecap
               shots={shots}
               stats={stats}
@@ -549,6 +606,7 @@ export default function SessionSummaryScreen() {
               onCorrectValue={onCorrectValue}
               videoPath={videoPath}
               keepMode={keepMode}
+              hero={false}
             />
           </Animated.View>
           {shareFailed && (
@@ -575,14 +633,47 @@ export default function SessionSummaryScreen() {
                 />
               </>
             )}
+            {/* Run it back — the rich accent-edged entry: one tap restarts
+                the SAME setup, and the sub-line states exactly which setup
+                that is (see runBackSummary — never a promise the restart
+                can't keep). */}
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`Run it back — ${runBackSummary}`}
+              accessibilityHint="Restarts a session with the same setup"
+              onPress={runItBack}
+              style={({ pressed }) => [styles.runBackCard, pressed && { opacity: 0.85 }]}
+            >
+              <View style={styles.runBackIcon}>
+                <Ionicons name="refresh" size={20} color={color.accent} />
+              </View>
+              <View style={styles.runBackBody}>
+                <Text style={styles.runBackTitle}>Run it back</Text>
+                {/* StartHero's chip language: small accent glyph + caption. */}
+                <Row gap={space.xs} style={styles.runBackSubRow}>
+                  <Ionicons name="basketball-outline" size={13} color={color.accent} />
+                  <Text style={styles.runBackSub} numberOfLines={1}>
+                    {runBackSummary}
+                  </Text>
+                </Row>
+              </View>
+            </Pressable>
             <PillButton
-              variant="ghost"
-              label="Shot Lab — deep analysis"
-              icon="flask"
-              onPress={() => router.push('/shotlab')}
-              disabled={shots.length === 0}
+              label="Done"
+              icon="checkmark"
+              onPress={onDone}
+              style={{ marginTop: space.md }}
             />
+            {/* Secondary tools collapse into one compact ghost row. */}
             <Row gap={space.md} style={{ marginTop: space.md }}>
+              <PillButton
+                variant="ghost"
+                label="Shot Lab"
+                icon="flask"
+                onPress={() => router.push('/shotlab')}
+                disabled={shots.length === 0}
+                style={{ flex: 1 }}
+              />
               <PillButton
                 variant="ghost"
                 label={sharing ? 'Preparing…' : 'Share card'}
@@ -593,7 +684,7 @@ export default function SessionSummaryScreen() {
               />
               <PillButton
                 variant="ghost"
-                label="View history"
+                label="History"
                 icon="time-outline"
                 // dismissTo, NOT push: this screen is a ROOT-STACK route that
                 // sits ABOVE the Tabs navigator, so push() stacks a SECOND tabs
@@ -604,19 +695,6 @@ export default function SessionSummaryScreen() {
                 style={{ flex: 1 }}
               />
             </Row>
-            <PillButton
-              variant="ghost"
-              label="Run it back"
-              icon="refresh"
-              onPress={runItBack}
-              style={{ marginTop: space.md }}
-            />
-            <PillButton
-              label="Done"
-              icon="checkmark"
-              onPress={onDone}
-              style={{ marginTop: space.md }}
-            />
           </Animated.View>
         </>
       )}
@@ -690,32 +768,27 @@ const styles = StyleSheet.create({
     marginBottom: space.xl,
   },
   /**
-   * PB banner tucks up toward the hero it celebrates (hero already carries a
-   * full section gap below), then restores the section gap before media.
+   * The honors block tucks up toward the hero it celebrates (hero already
+   * carries a full section gap below), then restores the section gap before
+   * media — ONE tuck-up for every celebration instead of three.
    */
-  pbBanner: {
+  honorsBlock: {
     marginTop: -space.md,
     marginBottom: space.xl,
-  },
-  /** Daily-goal result line: same tuck-up rhythm as pbBanner under the hero. */
-  goalLineWrap: {
-    marginTop: -space.md,
-    marginBottom: space.xl,
+    gap: space.md,
   },
   goalLine: {
     ...type.caption,
     color: color.textDim,
   },
-  // Career-milestone banner: a gold "moment" tucked under the hero, above PBs.
+  // Career-milestone banner row: gold "moment" inside the honors block.
   milestoneBanner: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: space.md,
-    marginTop: -space.md,
-    marginBottom: space.xl,
     paddingVertical: space.md,
     paddingHorizontal: space.lg,
-    borderRadius: 14,
+    borderRadius: radius.lg,
     backgroundColor: color.threePtTint,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: color.threePt,
@@ -773,6 +846,45 @@ const styles = StyleSheet.create({
   explainerButton: {
     marginBottom: space.md,
   },
+  /** Run it back — the rich accent-edged entry card leading Next up. */
+  runBackCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: space.md,
+    backgroundColor: color.surface,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: color.accentEdge,
+    padding: space.lg,
+  },
+  runBackIcon: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: color.accentTint,
+  },
+  runBackBody: {
+    flex: 1,
+    minWidth: 0,
+  },
+  runBackTitle: {
+    ...type.heading,
+    color: color.text,
+  },
+  runBackSubRow: {
+    marginTop: 2,
+  },
+  runBackSub: {
+    ...type.caption,
+    color: color.textDim,
+    flexShrink: 1,
+  },
+  /** Second skeleton card while a persisted session loads. */
+  loadingCard: {
+    marginTop: space.xl,
+  },
   /** Full-screen confetti overlay (RN 0.86 has no absoluteFillObject). */
   confetti: {
     position: 'absolute',
@@ -780,13 +892,5 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     bottom: 0,
-  },
-  heading: {
-    ...type.heading,
-    color: color.text,
-  },
-  dim: {
-    ...type.body,
-    color: color.textDim,
   },
 });

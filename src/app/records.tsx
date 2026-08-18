@@ -13,11 +13,11 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import Animated from 'react-native-reanimated';
 
-import { MotionStat, useCardStagger } from '@/components/motion';
+import { AnimatedProgressBar, ArcReveal, MotionStat, useCardStagger } from '@/components/motion';
 import { AchievementRow } from '@/components/AchievementRow';
 import { ProBadge } from '@/components/ProBadge';
 import { BackPill } from '@/components/ShotList';
-import { Card, Chip, Eyebrow, PillButton, Row, Screen } from '@/components/ui';
+import { Card, Chip, Eyebrow, PillButton, Row, Screen, SkeletonCard } from '@/components/ui';
 import { color, layout, motion, radius, space, type } from '@/constants/tokens';
 import { ACHIEVEMENTS, evaluate, type LifetimeTotals } from '@/core/achievements';
 import { computeDayStreak } from '@/core/streak';
@@ -49,6 +49,12 @@ function useAchievementsSeenHydrated(): boolean {
 
 /** Icon circle diameter on a personal-best tile, px. */
 const PB_ICON_SIZE = 28;
+
+/**
+ * Height of the signature-arc canvas behind the career-makes hero. Covers the
+ * scoreboard numeral plus its label so the arc reads as the number's backdrop.
+ */
+const HERO_ARC_H = 112;
 
 /**
  * Personal-best tile — one lifetime number with a real identity: an Ionicons
@@ -121,6 +127,8 @@ export default function RecordsScreen() {
   // Longest career day-streak (consecutive calendar days shot) — computed from
   // all session dates, distinct from totals.bestStreak (consecutive makes).
   const [longestDayStreak, setLongestDayStreak] = useState(0);
+  // Measured width of the hero card's inner stage, for the arc canvas.
+  const [heroWidth, setHeroWidth] = useState(0);
   const seenHydrated = useAchievementsSeenHydrated();
 
   useFocusEffect(
@@ -160,9 +168,8 @@ export default function RecordsScreen() {
         </Row>
         <Eyebrow>Records</Eyebrow>
         <Text style={styles.title}>Lifetime</Text>
-        <Card>
-          <Text style={styles.dim}>Loading your records…</Text>
-        </Card>
+        {/* One loading language: the shape of the hero card that is arriving. */}
+        <SkeletonCard hero lines={3} />
       </Screen>
     );
   }
@@ -189,16 +196,33 @@ export default function RecordsScreen() {
       <View style={styles.stack}>
         {/* Hero numerals */}
         <Card>
-          {/* Career makes rolls in; trigger keyed on the value so a
-              newly-set record re-rolls on the next visit. Always a plain
-              integer (never '—'), so no static fallback branch needed. */}
-          <MotionStat
-            value={totals.makes}
-            size="hero"
-            label="career makes"
-            tint={color.accent}
-            trigger={totals.makes}
-          />
+          <View
+            onLayout={(e) => setHeroWidth(e.nativeEvent.layout.width)}
+            style={styles.heroStage}
+          >
+            {/* The signature arc as the career number's backdrop — static
+                (no draw-in): Records is a ledger, not a celebration. It sits
+                BEHIND the MotionStat and stays decorative. */}
+            {heroWidth > 0 && (
+              <View
+                style={StyleSheet.absoluteFill}
+                pointerEvents="none"
+                importantForAccessibility="no-hide-descendants"
+              >
+                <ArcReveal width={heroWidth} height={HERO_ARC_H} animate={false} />
+              </View>
+            )}
+            {/* Career makes rolls in; trigger keyed on the value so a
+                newly-set record re-rolls on the next visit. Always a plain
+                integer (never '—'), so no static fallback branch needed. */}
+            <MotionStat
+              value={totals.makes}
+              size="hero"
+              label="career makes"
+              tint={color.accent}
+              trigger={totals.makes}
+            />
+          </View>
           <Row gap={space.sm} style={styles.heroRow}>
             <PbTile
               icon="basketball-outline"
@@ -272,13 +296,13 @@ export default function RecordsScreen() {
               </View>
               <Chip label={`${unlocked.length} of ${ACHIEVEMENTS.length}`} tone="accent" />
             </Row>
-            {/* Board completion — decorative; the chip above carries the count. */}
-            <View style={styles.boardTrack} importantForAccessibility="no-hide-descendants">
-              <View
-                style={[
-                  styles.boardFill,
-                  { width: `${Math.round((unlocked.length / ACHIEVEMENTS.length) * 100)}%` },
-                ]}
+            {/* Board completion — decorative; the chip above carries the count
+                (same a11y stance as the old hand-rolled track, which hid
+                itself). The fill animates to its width via the shared bar. */}
+            <View importantForAccessibility="no-hide-descendants" style={styles.boardBar}>
+              <AnimatedProgressBar
+                progress={unlocked.length / ACHIEVEMENTS.length}
+                height={3}
               />
             </View>
             <BadgeList defs={unlocked} totals={totals} unlocked newIds={newIds} />
@@ -343,17 +367,13 @@ const styles = StyleSheet.create({
     ...type.micro,
     color: color.textFaint,
   },
-  boardTrack: {
-    height: 3,
-    borderRadius: radius.pill,
-    backgroundColor: color.surfaceRaised,
-    overflow: 'hidden',
-    marginBottom: space.md,
+  /** Anchors the arc canvas behind the career-makes numeral. */
+  heroStage: {
+    minHeight: HERO_ARC_H,
+    justifyContent: 'center',
   },
-  boardFill: {
-    height: '100%',
-    borderRadius: radius.pill,
-    backgroundColor: color.accent,
+  boardBar: {
+    marginBottom: space.md,
   },
   sectionHeader: {
     justifyContent: 'space-between',

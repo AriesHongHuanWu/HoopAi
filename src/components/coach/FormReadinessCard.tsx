@@ -12,21 +12,13 @@ import { Ionicons } from '@expo/vector-icons';
 import type { ComponentProps } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
-import { Card, PillButton, Row } from '@/components/ui';
-import { color, radius, space, type } from '@/constants/tokens';
+import { AnimatedProgressBar } from '@/components/motion';
+import { SectionEyebrow } from '@/components/ScreenHeader';
+import { Card, PillButton } from '@/components/ui';
+import { color, space, type } from '@/constants/tokens';
 import type { FormReadiness } from '@/core/coachInsights';
 
 type IconName = ComponentProps<typeof Ionicons>['name'];
-
-/** Local replica of coach.tsx's SectionEyebrow (the screen doesn't export it). */
-function SectionEyebrow({ icon, children }: { icon: IconName; children: string }) {
-  return (
-    <Row gap={6} style={styles.eyebrowRow}>
-      <Ionicons name={icon} size={12} color={color.accent} />
-      <Text style={styles.eyebrowText}>{children.toUpperCase()}</Text>
-    </Row>
-  );
-}
 
 type LevelContent = {
   fill: string;
@@ -87,21 +79,20 @@ export function FormReadinessCard({
 
   return (
     <Card entering={entering}>
-      <SectionEyebrow icon="body-outline">Form coaching readiness</SectionEyebrow>
+      <SectionEyebrow icon="body-outline" style={styles.eyebrow}>
+        Form coaching readiness
+      </SectionEyebrow>
 
       {/* Meter + copy read as one a11y block; the CTA stays focusable below. */}
       <View accessible accessibilityLabel={`Form coaching readiness: ${coverage}. ${content.body}`}>
-        <View style={styles.track}>
-          <View
-            style={[
-              styles.fill,
-              {
-                width: `${Math.round(readiness.posePct * 100)}%`,
-                backgroundColor: content.fill,
-              },
-            ]}
-          />
-        </View>
+        {/* Shared determinate meter — one loading/progress language app-wide.
+            Fill color stays the level's own (off/sparse/ready). */}
+        <AnimatedProgressBar
+          progress={readiness.posePct}
+          height={8}
+          fillColor={content.fill}
+          style={styles.meter}
+        />
         <Text style={styles.coverage}>{coverage}</Text>
         <Text style={styles.body}>{content.body}</Text>
       </View>
@@ -118,24 +109,12 @@ export function FormReadinessCard({
 }
 
 const styles = StyleSheet.create({
-  eyebrowRow: {
+  // Shared SectionEyebrow leaves margins to the call site (screens own rhythm).
+  eyebrow: {
     marginBottom: space.sm,
   },
-  eyebrowText: {
-    ...type.caption,
-    color: color.textFaint,
-    letterSpacing: 1,
-  },
-  track: {
-    height: 8,
-    borderRadius: radius.pill,
-    backgroundColor: color.surfaceRaised,
-    overflow: 'hidden',
+  meter: {
     marginTop: space.xs,
-  },
-  fill: {
-    height: '100%',
-    borderRadius: radius.pill,
   },
   coverage: {
     ...type.caption,

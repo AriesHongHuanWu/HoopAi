@@ -57,6 +57,15 @@ jest.mock('@/components/motion', () => ({
   __esModule: true,
   useCardStagger: jest.fn(() => mockEnter),
   useStaggerAt: jest.fn(() => () => undefined),
+  // The hero rolls its numerals with MotionStat (a CountUp TextInput — its
+  // value is invisible to textOf anyway) and the loading state is Shimmer
+  // blocks; both are presentation, so they stub to null here. The headline
+  // itself stays plain Text in coach.tsx — HERO_HEADLINE below depends on it.
+  MotionStat: jest.fn(() => null),
+  Shimmer: jest.fn(() => null),
+  // arcMotif is pure geometry the WSS ring calls at render — take the REAL
+  // one so the screen never math-crashes on a stub.
+  arcMotif: jest.requireActual('@/components/motion/ArcReveal').arcMotif,
 }));
 
 jest.mock('@/utils/haptics', () => ({
@@ -71,6 +80,25 @@ jest.mock('@/utils/haptics', () => ({
 }));
 
 jest.mock('@expo/vector-icons', () => ({ Ionicons: () => null }));
+
+// Skia is ESM-only under jest; the WSS ring on this screen is decorative
+// (static JS-built paths) so the whole surface stubs out.
+jest.mock('@shopify/react-native-skia', () => ({
+  __esModule: true,
+  BlurMask: () => null,
+  Canvas: () => null,
+  Circle: () => null,
+  DashPathEffect: () => null,
+  Line: () => null,
+  Path: () => null,
+  vec: (x: number, y: number) => ({ x, y }),
+  Skia: {
+    Path: {
+      Make: () => ({ addCircle() {}, addArc() {}, moveTo() {}, lineTo() {}, quadTo() {} }),
+    },
+    XYWHRect: (x: number, y: number, w: number, h: number) => ({ x, y, width: w, height: h }),
+  },
+}));
 
 jest.mock('expo-router', () => ({
   router: { push: jest.fn(), replace: jest.fn(), dismissTo: jest.fn() },
@@ -316,7 +344,11 @@ const FORM_CARDS = [
   'BODY_DIRECTION_CARD',
   'ARC_PROFILE_CARD',
   'TWIN_PLAYER',
-  'See your shooting form in 3D',
+  // Re-pinned: the promo used to say 'See your shooting form in 3D' but
+  // pushed /formstudio — the 2D theater that disclaims exactly that. The card
+  // is now two honest entry rows; the 3D row names its estimate and routes to
+  // /formstudio3d, so THAT copy is the pin.
+  'Orbit your shot in 3D',
   'FORM_READINESS_CARD',
 ];
 const PLAN_CARDS = ['PLANNED_DRILL', 'GO DEEPER'];

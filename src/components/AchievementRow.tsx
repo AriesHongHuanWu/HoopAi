@@ -13,24 +13,28 @@
  * the row stays dumb and testable logic stays in src/core/achievements.ts.
  */
 import { Ionicons } from '@expo/vector-icons';
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
+import { useReducedMotion } from 'react-native-reanimated';
 
-import { color, font, radius, space, touch, type } from '@/constants/tokens';
+import { Shimmer } from '@/components/motion';
+import { color, font, iconSize, palette, radius, space, touch, type } from '@/constants/tokens';
 import type { AchievementDef, BadgeTier, LifetimeTotals } from '@/core/achievements';
 
 const MEDAL_SIZE = 44;
 const BAR_HEIGHT = 4;
 
 /**
- * Tier crest colors. Gold rides the existing downtown-gold token; silver the
- * dimmed-chalk token; bronze has no token sibling, so a warmed leather-brown
- * literal (kept here, next to its only use).
+ * One sweep of the medal shimmer (ms) — Shimmer's SWEEP_MS, which it keeps
+ * private. The celebration mounts the loop for exactly one pass, then stops.
  */
+const MEDAL_SWEEP_MS = 1200;
+
+/** Tier crest colors — the tokens tier-metal ladder (one bronze app-wide). */
 const TIER_COLOR: Record<BadgeTier, string> = {
-  bronze: '#C08552',
-  silver: color.textDim,
-  gold: color.threePt,
+  bronze: palette.tierBronze,
+  silver: palette.tierSilver,
+  gold: palette.tierGold,
 };
 
 export function AchievementRow({
@@ -51,6 +55,18 @@ export function AchievementRow({
     ? `${def.name}, ${def.tier} badge unlocked${isNew ? ', new' : ''}. ${def.blurb}`
     : `${def.name}, in progress, ${caption}. ${def.blurb}`;
 
+  // Unlock celebration for a NEW row: ONE shimmer sweep under the medal
+  // emoji on first render, then gone. Skipped under reduced motion (the NEW
+  // pip alone carries the meaning there — Shimmer's static-rect fallback
+  // would just gray the medal out).
+  const reducedMotion = useReducedMotion();
+  const [sweeping, setSweeping] = useState(isNew && !reducedMotion);
+  useEffect(() => {
+    if (!sweeping) return;
+    const id = setTimeout(() => setSweeping(false), MEDAL_SWEEP_MS);
+    return () => clearTimeout(id);
+  }, [sweeping]);
+
   return (
     <View
       accessible
@@ -58,6 +74,11 @@ export function AchievementRow({
       style={[styles.row, unlocked ? styles.rowUnlocked : styles.rowLocked]}
     >
       <View style={[styles.medal, unlocked ? styles.medalUnlocked : styles.medalLocked]}>
+        {sweeping && (
+          <View style={styles.medalSweep} pointerEvents="none">
+            <Shimmer width={MEDAL_SIZE} height={MEDAL_SIZE} radius={MEDAL_SIZE / 2} />
+          </View>
+        )}
         <Text style={[styles.emoji, !unlocked && styles.emojiLocked]}>{def.emoji}</Text>
       </View>
       <View style={styles.body}>
@@ -91,7 +112,7 @@ export function AchievementRow({
           // def.icon is a plain string in core (no UI imports there); every
           // board entry is a valid Ionicons glyph name.
           name={def.icon as React.ComponentProps<typeof Ionicons>['name']}
-          size={16}
+          size={iconSize.md}
           color={TIER_COLOR[def.tier]}
         />
       )}
@@ -129,6 +150,12 @@ const styles = StyleSheet.create({
   },
   medalLocked: {
     backgroundColor: color.surfaceRaised,
+  },
+  /** The one-sweep celebration sits under the emoji, filling the circle. */
+  medalSweep: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
   },
   emoji: {
     fontSize: 22,

@@ -560,6 +560,19 @@ function LiveSessionScreen() {
     router.replace('/session/summary');
   }, []);
 
+  // End-confirm scoreline — a SNAPSHOT read from the store at the moment the
+  // sheet opens (keyed on confirmEnd), not a live subscription: the sheet
+  // states what will be saved, and that claim shouldn't tick while it's open.
+  // Pre-lock (no goLive yet, startedAtMs unset) there is no scoreline and the
+  // generic sentence stays. Real store numbers only — never projected.
+  const endScoreline = useMemo(() => {
+    if (!confirmEnd) return null;
+    const s = useSession.getState();
+    if (s.startedAtMs == null) return null;
+    const min = Math.max(1, Math.round((Date.now() - s.startedAtMs) / 60_000));
+    return `${s.stats.points} PTS · ${s.stats.makes}/${s.stats.attempts} · ${min} min`;
+  }, [confirmEnd]);
+
   // Restart the just-finished mode for another run without leaving the session:
   // re-init the same mode (fresh clock/score) and keep shooting.
   const replayMode = useCallback(() => {
@@ -875,9 +888,13 @@ function LiveSessionScreen() {
           <Card style={styles.confirmCard}>
             <Text style={styles.confirmTitle}>End this session?</Text>
             <Text style={styles.confirmBody}>
-              {isRecording
-                ? 'Your stats and video will be saved to the summary.'
-                : 'Your stats will be saved to the summary.'}
+              {endScoreline != null
+                ? isRecording
+                  ? `${endScoreline} and your video will be saved to the summary.`
+                  : `${endScoreline} will be saved to the summary.`
+                : isRecording
+                  ? 'Your stats and video will be saved to the summary.'
+                  : 'Your stats will be saved to the summary.'}
             </Text>
             <Row style={styles.confirmActions} gap={space.md}>
               <PillButton
@@ -1175,11 +1192,9 @@ const styles = StyleSheet.create({
   aimContent: {
     alignItems: 'center',
   },
+  /** Pre-lock 3-2-1 numeral — the statLarge broadcast step, lock-green. */
   countdownNum: {
-    ...type.title,
-    fontSize: 56,
-    lineHeight: 60,
-    fontWeight: '800',
+    ...type.statLarge,
     color: color.make,
     fontVariant: ['tabular-nums'],
     marginBottom: space.md,
@@ -1201,7 +1216,9 @@ const styles = StyleSheet.create({
   },
   confirmScrim: {
     ...absoluteFill,
-    backgroundColor: color.hudGlass,
+    // Deep glass: the end-of-game decision deserves a real dimming layer,
+    // not the chip-weight glass the HUD wears.
+    backgroundColor: color.hudGlassDeep,
     alignItems: 'center',
     justifyContent: 'center',
     padding: space.xl,

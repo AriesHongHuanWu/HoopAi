@@ -8,35 +8,78 @@
  * QuickLinks so the affordance is familiar, just no longer buried at the
  * bottom of one long scroll. `onPress` (not an href) keeps callers passing
  * typed router literals, which is required with app.json `typedRoutes`.
+ *
+ * PRESS FEEDBACK — deliberately NOT PressScale. The pinned IA suites
+ * (tabIaCategorisation, leaderboard) count these controls by finding the ONE
+ * node carrying both `accessibilityLabel` and `onPress`; any wrapper
+ * component receiving those props is a second matching node, so wrapping in
+ * PressScale double-counts every tile (verified empirically). The tile keeps
+ * its flat pressed background swap and fires the settings-gated selection
+ * haptic through src/utils/haptics.ts — never raw expo-haptics.
  */
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { color, radius, space, touch, type } from '@/constants/tokens';
+import { haptic } from '@/utils/haptics';
 
 export interface NavTileSpec {
   icon: React.ComponentProps<typeof Ionicons>['name'];
   label: string;
   hint: string;
+  /**
+   * Optional visible second line for RICH rows (see NavTileRow `variant`).
+   * Compact rows ignore it — three-across tiles cannot fit a sentence.
+   */
+  description?: string;
   onPress: () => void;
 }
 
-export function NavTile({ icon, label, hint, onPress }: NavTileSpec) {
+export function NavTile({
+  icon,
+  label,
+  hint,
+  description,
+  onPress,
+  rich = false,
+}: NavTileSpec & {
+  /**
+   * Row-driven, never set per-tile: NavTileRow's `variant` decides whether a
+   * whole row renders descriptions, so siblings always match.
+   */
+  rich?: boolean;
+}) {
+  const showDescription = rich && description != null;
+  const press = () => {
+    haptic.selection();
+    onPress();
+  };
   return (
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={label}
       accessibilityHint={hint}
-      onPress={onPress}
-      style={({ pressed }) => [styles.tile, pressed && styles.tilePressed]}
+      onPress={press}
+      style={({ pressed }) => [
+        styles.tile,
+        showDescription && styles.tileRich,
+        pressed && styles.tilePressed,
+      ]}
     >
-      <View style={styles.iconChip}>
-        <Ionicons name={icon} size={15} color={color.accent} />
+      <View style={styles.tileHead}>
+        <View style={styles.iconChip}>
+          <Ionicons name={icon} size={15} color={color.accent} />
+        </View>
+        <Text style={styles.label} numberOfLines={1}>
+          {label}
+        </Text>
       </View>
-      <Text style={styles.label} numberOfLines={1}>
-        {label}
-      </Text>
+      {showDescription && (
+        <Text style={styles.description} numberOfLines={1}>
+          {description}
+        </Text>
+      )}
     </Pressable>
   );
 }
@@ -70,20 +113,27 @@ export const LEADERBOARD_TILE: NavTileSpec = {
  *
  * Renders exactly the tiles it is given, in the given order — `eyebrow` is
  * presentation only and never selects content.
+ *
+ * `variant`: 'compact' (default) is the classic single-line tile; 'rich'
+ * renders each tile's `description` as a visible second line. The variant is
+ * a ROW decision on purpose — a 3-across row cannot fit descriptions, and a
+ * row where only some tiles carry a second line reads as broken.
  */
 export function NavTileRow({
   eyebrow,
   tiles,
+  variant = 'compact',
 }: {
   eyebrow?: string;
   tiles: NavTileSpec[];
+  variant?: 'compact' | 'rich';
 }) {
   return (
     <View style={styles.stack}>
       {eyebrow ? <Text style={styles.eyebrow}>{eyebrow}</Text> : null}
       <View style={styles.row}>
         {tiles.map((t) => (
-          <NavTile key={t.label} {...t} />
+          <NavTile key={t.label} {...t} rich={variant === 'rich'} />
         ))}
       </View>
     </View>
@@ -105,10 +155,8 @@ const styles = StyleSheet.create({
   tile: {
     flex: 1,
     minHeight: touch.minTarget,
-    flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: space.sm,
     borderRadius: radius.md,
     backgroundColor: color.surface,
     borderWidth: StyleSheet.hairlineWidth,
@@ -116,8 +164,21 @@ const styles = StyleSheet.create({
     paddingHorizontal: space.sm,
     paddingVertical: space.md,
   },
+  /** Rich tiles left-align so the second line hangs from the label. */
+  tileRich: {
+    alignItems: 'flex-start',
+    paddingHorizontal: space.md,
+    gap: space.xs,
+  },
   tilePressed: {
     backgroundColor: color.surfaceRaised,
+  },
+  /** The classic chip + label line — the whole tile in compact rows. */
+  tileHead: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: space.sm,
   },
   iconChip: {
     width: 26,
@@ -131,5 +192,9 @@ const styles = StyleSheet.create({
     ...type.bodyMedium,
     color: color.text,
     flexShrink: 1,
+  },
+  description: {
+    ...type.caption,
+    color: color.textFaint,
   },
 });

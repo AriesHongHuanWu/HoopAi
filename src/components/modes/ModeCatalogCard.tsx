@@ -1,11 +1,19 @@
 /**
- * ModeCatalogCard — ONE compact catalog row card for the mode picker.
+ * ModeCatalogCard — ONE compact catalog card for the mode picker, two shapes.
  *
- * Replaces the near-duplicate ModeCard/DrillCard cartridges with a single
- * glanceable row: 40px identity badge, name, one-line tagline, optional
- * rules-at-a-glance micro chips, and a right cluster (ProBadge / PICKED tag /
- * chevron). The FULL rules text moves into accessibilityHint — screen readers
- * still hear it here, and sighted players see it again on the setup screen.
+ * variant="row" (default) replaces the near-duplicate ModeCard/DrillCard
+ * cartridges with a single glanceable row: 40px identity badge, name, one-line
+ * tagline, optional rules-at-a-glance micro chips, and a right cluster
+ * (ProBadge / PICKED tag / chevron). The FULL rules text moves into
+ * accessibilityHint — screen readers still hear it here, and sighted players
+ * see it again on the setup screen.
+ *
+ * variant="tile" is the 2-column cartridge for the GAMES grid: the same 40px
+ * badge on top, the name, and the single STRONGEST glance chip (glance[0]).
+ * The tagline stays audible (it lives in the accessibilityLabel) but not
+ * visible — the grid trades the one-liner for section height. PICKED keeps the
+ * same accent border + tag treatment as the row. Ghost stays a full-width row
+ * (its inline source picker needs the width), so tiles never take `children`.
  *
  * Fully prop-driven: no store reads, no self-animation (entrance is owned by
  * the parent's Animated.View wrapper; the only motion is the pressed-state
@@ -27,7 +35,7 @@ export interface ModeCatalogCardProps {
   icon: ComponentProps<typeof Ionicons>['name'];
   /** Display name, e.g. 'Around the World'. */
   name: string;
-  /** One-liner, rendered on a single line. */
+  /** One-liner, rendered on a single line (row) / a11y-only (tile). */
   tagline: string;
   /** Identity accent (token-derived). */
   accent: string;
@@ -37,15 +45,17 @@ export interface ModeCatalogCardProps {
   selected: boolean;
   showProBadge: boolean;
   onPress: () => void;
+  /** 'row' (default) = full-width shelf row; 'tile' = 2-column grid cartridge. */
+  variant?: 'row' | 'tile';
   /** Ghost with no eligible sources. */
   disabled?: boolean;
-  /** Rules-at-a-glance chips, ≤2, uppercased micro chips. */
+  /** Rules-at-a-glance chips, ≤2, uppercased micro chips (tile shows [0]). */
   glance?: readonly string[];
   /** FULL rules text lives here — the visible card stays compact. */
   accessibilityHint?: string;
   /** Defaults to 'chevron-forward'; ghost passes 'chevron-up'/'chevron-down'. */
   rightIcon?: ComponentProps<typeof Ionicons>['name'];
-  /** Ghost source list renders below the row, inside the card. */
+  /** Ghost source list renders below the row, inside the card. Row only. */
   children?: ReactNode;
 }
 
@@ -58,12 +68,63 @@ export function ModeCatalogCard({
   selected,
   showProBadge,
   onPress,
+  variant = 'row',
   disabled,
   glance,
   accessibilityHint,
   rightIcon,
   children,
 }: ModeCatalogCardProps): React.JSX.Element {
+  const pickedTag = selected && (
+    <View style={[styles.pickedTag, { backgroundColor: accent }]}>
+      <Text style={styles.pickedText}>✓ PICKED</Text>
+    </View>
+  );
+  const badge = (
+    <View style={[styles.iconBadge, { borderColor: accent, backgroundColor: tint }]}>
+      <Ionicons name={icon} size={20} color={accent} />
+    </View>
+  );
+  const glanceChip = (g: string) => (
+    <View key={g} style={styles.glanceChip}>
+      <Text style={styles.glanceText}>{g.toUpperCase()}</Text>
+    </View>
+  );
+
+  if (variant === 'tile') {
+    return (
+      <Pressable
+        onPress={onPress}
+        disabled={disabled}
+        accessibilityRole="button"
+        accessibilityLabel={`${name}. ${tagline}`}
+        accessibilityHint={accessibilityHint}
+        accessibilityState={{ selected, disabled: !!disabled }}
+        style={({ pressed }) => [
+          styles.card,
+          styles.tileCard,
+          selected && [styles.cardSelected, { borderColor: accent }],
+          pressed && !disabled && styles.cardPressed,
+          disabled && styles.cardDisabled,
+        ]}
+      >
+        <View style={styles.tileHead}>
+          {badge}
+          <View style={styles.cluster}>
+            {showProBadge && <ProBadge />}
+            {pickedTag}
+          </View>
+        </View>
+        <Text style={styles.tileName} numberOfLines={1}>
+          {name}
+        </Text>
+        {glance != null && glance.length > 0 && (
+          <View style={styles.glanceRow}>{glanceChip(glance[0])}</View>
+        )}
+      </Pressable>
+    );
+  }
+
   return (
     <Pressable
       onPress={onPress}
@@ -81,9 +142,7 @@ export function ModeCatalogCard({
     >
       <View style={styles.row}>
         {/* The identity mark — glyph on its accent-tinted badge. */}
-        <View style={[styles.iconBadge, { borderColor: accent, backgroundColor: tint }]}>
-          <Ionicons name={icon} size={20} color={accent} />
-        </View>
+        {badge}
 
         <View style={styles.body}>
           <View style={styles.head}>
@@ -92,11 +151,7 @@ export function ModeCatalogCard({
             </Text>
             <View style={styles.cluster}>
               {showProBadge && <ProBadge />}
-              {selected && (
-                <View style={[styles.pickedTag, { backgroundColor: accent }]}>
-                  <Text style={styles.pickedText}>✓ PICKED</Text>
-                </View>
-              )}
+              {pickedTag}
               <Ionicons name={rightIcon ?? 'chevron-forward'} size={16} color={accent} />
             </View>
           </View>
@@ -104,13 +159,7 @@ export function ModeCatalogCard({
             {tagline}
           </Text>
           {glance != null && glance.length > 0 && (
-            <View style={styles.glanceRow}>
-              {glance.map((g) => (
-                <View key={g} style={styles.glanceChip}>
-                  <Text style={styles.glanceText}>{g.toUpperCase()}</Text>
-                </View>
-              ))}
-            </View>
+            <View style={styles.glanceRow}>{glance.map(glanceChip)}</View>
           )}
         </View>
       </View>
@@ -204,5 +253,22 @@ const styles = StyleSheet.create({
   glanceText: {
     ...type.micro,
     color: color.textFaint,
+  },
+  // --- Tile (2-column GAMES grid cartridge) --------------------------------
+  tileCard: {
+    // Cell width comes from the grid row (each tile flexes to half); the tile
+    // only owns its internal stack.
+    flex: 1,
+  },
+  tileHead: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: space.sm,
+  },
+  tileName: {
+    ...type.bodyMedium,
+    color: color.text,
+    marginTop: space.sm,
   },
 });

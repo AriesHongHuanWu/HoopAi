@@ -35,12 +35,25 @@ jest.mock('react-native-reanimated', () => ({
 // Icons are decorative here; skip the font machinery.
 jest.mock('@expo/vector-icons', () => ({ Ionicons: () => null }));
 
-// The motion module is owned by WI-A and may not have landed yet — mock it
-// virtually against the agreed API. The spy records every props object so the
-// tests can pin exactly which numbers reach the count-up.
+// The motion module is mocked virtually against the agreed API. The spy
+// records every props object so the tests can pin exactly which numbers reach
+// the count-up. ArcReveal/arcMotif back the decorative arc band behind the
+// strip — stubs only (the band renders after onLayout, which react-test-
+// renderer never fires, so it stays out of these trees either way).
 jest.mock(
   '@/components/motion',
-  () => ({ __esModule: true, MotionStat: jest.fn(() => null) }),
+  () => ({
+    __esModule: true,
+    MotionStat: jest.fn(() => null),
+    ArcReveal: jest.fn(() => null),
+    arcMotif: jest.fn((width: number, height: number) => ({
+      p0: { x: -24, y: height + 24 },
+      c: { x: width * 0.36, y: -height * 0.6 },
+      p1: { x: width - 44, y: height * 0.42 },
+      path: '',
+      pointAt: () => ({ x: 0, y: 0 }),
+    })),
+  }),
   { virtual: true },
 );
 

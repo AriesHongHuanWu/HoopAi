@@ -32,9 +32,10 @@ import * as ImagePicker from 'expo-image-picker';
 import * as VideoThumbnails from 'expo-video-thumbnails';
 
 import { ErrorBoundary } from '../../components/ErrorBoundary';
+import { AnimatedProgressBar, Shimmer } from '../../components/motion';
 import { BackPill } from '../../components/ShotList';
 import { Card, Eyebrow, EmptyState, PillButton, Row, Screen } from '../../components/ui';
-import { color, radius, space, touch, type } from '../../constants/tokens';
+import { color, radius, space, type } from '../../constants/tokens';
 import {
   loadDetector,
   detectImageToBoxes,
@@ -103,6 +104,7 @@ export default function AnalyzeScreenBoundary() {
 function AnalyzeScreen() {
   const [phase, setPhase] = useState<Phase>({ kind: 'idle' });
   const [index, setIndex] = useState(0);
+  const { width } = useWindowDimensions();
 
   // The detector is loaded once and reused across every analysis run. It's held
   // in a ref (loading is a side effect, not render state) with an in-flight
@@ -331,7 +333,21 @@ function AnalyzeScreen() {
               </Text>
             </View>
           </Row>
-          <ProgressBar value={phase.done} max={phase.total} />
+          <AnimatedProgressBar
+            progress={phase.total > 0 ? phase.done / phase.total : 0}
+            style={styles.progressBar}
+          />
+          {/* Skeleton filmstrip — the SAME 72 px thumb geometry the results
+              scrubber renders into, so frames arrive into the exact space
+              they will occupy. Clipped row, JS-thread sizing only. */}
+          <View style={styles.skeletonStrip}>
+            {Array.from(
+              { length: Math.max(3, Math.floor((width - space.lg * 4) / (72 + space.sm))) },
+              (_, i) => (
+                <Shimmer key={i} width={72} height={72} radius={radius.sm} />
+              ),
+            )}
+          </View>
         </Card>
       )}
 
@@ -454,7 +470,8 @@ function ResultsView({
 
       {/* Play through the sampled frames like a video (loops). */}
       <PillButton
-        label={playing ? '❙❙  Pause' : '▶  Play through clip'}
+        label={playing ? 'Pause' : 'Play through clip'}
+        icon={playing ? 'pause' : 'play'}
         onPress={() => setPlaying((p) => !p)}
         style={styles.cta}
       />
@@ -574,15 +591,6 @@ function FramePreview({
 // Small pieces
 // ---------------------------------------------------------------------------
 
-function ProgressBar({ value, max }: { value: number; max: number }) {
-  const pct = max > 0 ? Math.max(0, Math.min(1, value / max)) : 0;
-  return (
-    <View style={styles.progressTrack} accessibilityRole="progressbar">
-      <View style={[styles.progressFill, { width: `${pct * 100}%` }]} />
-    </View>
-  );
-}
-
 function StatPill({ label, value, tint }: { label: string; value: string; tint: string }) {
   return (
     <View style={styles.statPill}>
@@ -662,17 +670,15 @@ const styles = StyleSheet.create({
     fontVariant: ['tabular-nums'],
     marginTop: 2,
   },
-  progressTrack: {
-    height: 6,
-    borderRadius: radius.pill,
-    backgroundColor: color.surfaceRaised,
+  progressBar: {
+    marginTop: space.lg,
+  },
+  /** Skeleton filmstrip under the progress bar — mirrors the results strip. */
+  skeletonStrip: {
+    flexDirection: 'row',
+    gap: space.sm,
     marginTop: space.lg,
     overflow: 'hidden',
-  },
-  progressFill: {
-    height: '100%',
-    borderRadius: radius.pill,
-    backgroundColor: color.accent,
   },
   cta: {
     marginTop: space.sm,

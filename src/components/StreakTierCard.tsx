@@ -6,24 +6,36 @@
  *
  * Pure presentational: tiers come from streakStanding() in src/core/streak.ts.
  * Render only when a streak exists (current >= 1) — the parent guards that.
+ *
+ * `embedded` drops the card chrome (surface, border, padding) so the block
+ * can sit inside another card — Home's TODAY shelf hosts it beside the goal
+ * ring. Default false keeps the standalone row byte-identical.
  */
 import { Ionicons } from '@expo/vector-icons';
 import { StyleSheet, Text, View } from 'react-native';
 
-import { color, radius, space, type } from '@/constants/tokens';
+import { color, palette, radius, space, type } from '@/constants/tokens';
 import { streakStanding, type StreakResult } from '@/core/streak';
 
-/** Medal colors. Gold/Legend/Spark come from the palette; Bronze/Silver are
- *  semantic metallic tones with no palette equivalent. */
+/** Medal colors. Bronze/Silver/Gold are the shared tier metals from
+ *  tokens.ts (palette.tierBronze/tierSilver/tierGold — one medal ladder
+ *  app-wide); Spark and Legend stay semantic accents. */
 const TIER_COLOR: Record<string, string> = {
   Spark: color.accent,
-  Bronze: '#C8823C',
-  Silver: '#C2CAD2',
-  Gold: color.threePt,
+  Bronze: palette.tierBronze,
+  Silver: palette.tierSilver,
+  Gold: palette.tierGold,
   Legend: color.ghost,
 };
 
-export function StreakTierCard({ streak }: { streak: StreakResult }) {
+export function StreakTierCard({
+  streak,
+  embedded = false,
+}: {
+  streak: StreakResult;
+  /** Render without card chrome, for hosting inside another card. */
+  embedded?: boolean;
+}) {
   const { current, longest, shotToday } = streak;
   const standing = streakStanding(current);
   const tierColor = standing.tier ? (TIER_COLOR[standing.tier.label] ?? color.accent) : color.accent;
@@ -45,7 +57,7 @@ export function StreakTierCard({ streak }: { streak: StreakResult }) {
       : '. Shoot today to keep it going.');
 
   return (
-    <View style={styles.row} accessible accessibilityLabel={a11y}>
+    <View style={[styles.row, embedded && styles.rowEmbedded]} accessible accessibilityLabel={a11y}>
       <View style={styles.flame}>
         <Ionicons name="flame" size={18} color={tierColor} />
       </View>
@@ -90,6 +102,14 @@ const styles = StyleSheet.create({
     borderColor: color.border,
     paddingVertical: space.md,
     paddingHorizontal: space.lg,
+  },
+  // Embedded in a host card: the host owns surface, border and padding.
+  rowEmbedded: {
+    backgroundColor: 'transparent',
+    borderWidth: 0,
+    borderRadius: 0,
+    paddingVertical: 0,
+    paddingHorizontal: 0,
   },
   flame: {
     width: 34,

@@ -47,10 +47,13 @@ jest.mock('react-native-reanimated', () => ({
 }));
 
 // enter() returns undefined (the reduced-motion idiom) so cards render static.
+// Shimmer is the QUICK START / ghost-picker loading skeleton (Skia-backed —
+// stubbed to nothing; these are IA tests, not loading-state tests).
 jest.mock('@/components/motion', () => ({
   __esModule: true,
   useCardStagger: jest.fn(() => () => undefined),
   useStaggerAt: jest.fn(() => () => undefined),
+  Shimmer: () => null,
 }));
 
 jest.mock('@/utils/haptics', () => ({
@@ -198,6 +201,21 @@ describe('Tab roots title themselves with the tab word', () => {
     expect(copy).toContain('Train');
     // Demoted, not deleted — the voice survives one level down.
     expect(copy).toContain('How do you want to play?');
+    await unmount(r);
+  });
+
+  it('Train: a new player gets the START HERE hero, never a fabricated recommendation', async () => {
+    // ADDED with the hero-slot upgrade: with no session history (listSessions
+    // → []), Free Play is promoted into the QUICK START hero as the 'starter'
+    // variant. The eyebrow must say START HERE — and the provenance line
+    // ("from your session history") must NOT render, because there is no
+    // history to cite and inventing one breaks the honesty contract.
+    const ModePickerScreen = require('../../app/(tabs)/modes').default;
+    const r = await render(<ModePickerScreen />);
+    const copy = textOf(r.toJSON());
+
+    expect(copy).toContain('START HERE');
+    expect(copy).not.toContain('from your session history');
     await unmount(r);
   });
 

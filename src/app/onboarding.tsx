@@ -8,10 +8,11 @@
  * this phone (see profileStore.ts). We collect it to personalize coaching and
  * make peer comparisons fair, nothing more; no health/BMI claims are made.
  *
- * Flow (welcome + primer + done are non-data; the rest write profileStore or,
- * for the two existing settings keys, useSettings):
+ * Flow (welcome + primer + honesty + done are non-data; the rest write
+ * profileStore or, for the two existing settings keys, useSettings):
  *   welcome → nickname → height → weight → birth year → experience →
- *   plays/week → position → goal → hand + ball size → camera primer → done
+ *   plays/week → position → goal → hand + ball size → camera primer →
+ *   honest-data promise → done
  *
  * CONTRACT: index.tsx redirects here with <Redirect href="/onboarding" /> when
  * settings.onboardingDone is false, and _layout registers this screen with a
@@ -34,10 +35,18 @@ import Animated, {
 } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { SuccessBurst } from '@/components/motion';
 import { ChoiceCard, ChipSelect } from '@/components/profile/Choice';
 import { NumberSlider } from '@/components/profile/NumberSlider';
-import { PillButton, Row, Screen } from '@/components/ui';
-import { color, motion, radius, space, touch, type } from '@/constants/tokens';
+import { Chip, PillButton, Row, Screen } from '@/components/ui';
+import { color, iconSize, motion, radius, space, touch, type } from '@/constants/tokens';
+import { EXPLAINER } from '@/core/detectionExplainer';
+import {
+  EVIDENCE_CHANNELS,
+  evidenceGlyph,
+  evidenceSummary,
+  evidenceTone,
+} from '@/core/evidence';
 import {
   DEFAULT_HEIGHT_CM,
   DEFAULT_WEIGHT_KG,
@@ -176,7 +185,7 @@ export default function OnboardingScreen() {
         body: 'A few quick questions tailor your coaching and keep comparisons fair. Every one is optional, and your answers stay on this phone — nothing is uploaded.',
         content: (
           <Row gap={space.sm} style={styles.primer}>
-            <Ionicons name="lock-closed" size={16} color={color.make} />
+            <Ionicons name="lock-closed" size={iconSize.md} color={color.make} />
             <Text style={styles.primerText}>
               On-device only. You can skip anything, and change it all later in your profile.
             </Text>
@@ -409,7 +418,7 @@ export default function OnboardingScreen() {
         body: 'When you start a session, we ask for camera access. Every frame is analyzed right here on your phone — no video ever leaves the device unless you choose to share a clip.',
         content: (
           <Row gap={space.sm} style={styles.primer}>
-            <Ionicons name="shield-checkmark-outline" size={16} color={color.make} />
+            <Ionicons name="shield-checkmark-outline" size={iconSize.md} color={color.make} />
             <Text style={styles.primerText}>
               We ask for the camera on the setup screen, right before your first session — not now.
             </Text>
@@ -417,13 +426,50 @@ export default function OnboardingScreen() {
         ),
         isDataStep: false,
       },
-      // 11 — Done celebration
+      // 11 — The honest-data promise (non-data). The sample receipt renders
+      // through the REAL evidence.ts helpers over the same EXPLAINER demo the
+      // how-it-works screen uses, so this step can never over-promise: it can
+      // only show exactly what a shot-list receipt will actually say.
+      {
+        eyebrow: 'Step 11 · Honest data',
+        title: 'Every call shows its work',
+        body: EXPLAINER.lede,
+        content: (
+          <View style={styles.receiptBlock}>
+            <View
+              style={styles.receiptRow}
+              accessible
+              accessibilityLabel={evidenceSummary(
+                EXPLAINER.receiptDemo.signals,
+                EXPLAINER.receiptDemo.rimBounce,
+              )}
+            >
+              {EVIDENCE_CHANNELS.map((c) => (
+                <Chip
+                  key={c.key}
+                  label={`${evidenceGlyph(EXPLAINER.receiptDemo.signals[c.key])} ${c.label}`}
+                  tone={evidenceTone(EXPLAINER.receiptDemo.signals[c.key])}
+                  compact
+                />
+              ))}
+            </View>
+            <Text style={styles.receiptLine}>
+              Every call carries a receipt. When we're not sure, we say unsure.
+            </Text>
+          </View>
+        ),
+        isDataStep: false,
+      },
+      // 12 — Done celebration
       {
         eyebrow: "You're set",
         title: nickDraft.trim() ? `Let's hoop, ${nickDraft.trim()}.` : "Let's hoop.",
         body: 'Your player card is ready. Prop your phone up, start a session, and every shot gets tracked.',
         content: (
           <View style={styles.doneMark} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
+            {/* One-shot burst behind the ball. Reduced motion renders null —
+                the static basketball mark carries the meaning on that path. */}
+            <SuccessBurst trigger="onboarding-done" />
             <Ionicons name="basketball" size={64} color={color.accent} />
           </View>
         ),
@@ -501,7 +547,7 @@ export default function OnboardingScreen() {
             hitSlop={space.sm}
             style={({ pressed }) => [styles.topBtn, pressed && styles.topBtnPressed]}
           >
-            <Ionicons name="chevron-back" size={18} color={color.textDim} />
+            <Ionicons name="chevron-back" size={iconSize.lg} color={color.textDim} />
             <Text style={styles.backLabel}>Back</Text>
           </Pressable>
         ) : (
@@ -593,9 +639,8 @@ const styles = StyleSheet.create({
     gap: space.md,
   },
   eyebrow: {
-    ...type.caption,
+    ...type.eyebrow,
     color: color.accent,
-    letterSpacing: 1.2,
   },
   title: {
     ...type.title,
@@ -621,7 +666,8 @@ const styles = StyleSheet.create({
     gap: space.md,
   },
   groupLabel: {
-    ...type.caption,
+    // UPPERCASE kicker above each control group — the eyebrow step.
+    ...type.eyebrow,
     color: color.textFaint,
   },
   input: {
@@ -645,6 +691,24 @@ const styles = StyleSheet.create({
     color: color.textDim,
     flex: 1,
     lineHeight: 17,
+  },
+  // ---- Honest-data promise step ----
+  receiptBlock: {
+    gap: space.md,
+    backgroundColor: color.surface,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: color.border,
+    borderRadius: radius.md,
+    padding: space.md,
+  },
+  receiptRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: space.xs,
+  },
+  receiptLine: {
+    ...type.caption,
+    color: color.textDim,
   },
   doneMark: {
     alignItems: 'center',

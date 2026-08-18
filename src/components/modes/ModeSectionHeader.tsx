@@ -87,10 +87,11 @@ const styles = StyleSheet.create({
     alignItems: 'baseline',
     gap: space.xs,
   },
+  // The system eyebrow style (type.eyebrow: 12/16, tracking 1.2) — replaces
+  // the hand-rolled caption + letterSpacing 1 dialect.
   title: {
-    ...type.caption,
+    ...type.eyebrow,
     color: color.textFaint,
-    letterSpacing: 1,
   },
   count: {
     ...type.caption,

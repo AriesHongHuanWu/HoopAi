@@ -1,17 +1,25 @@
 /**
  * WI-C contract tests — data screens on the canonical motion module.
  *
- * Pins the seams this work item changed:
+ * Pins the seams this work item (and the data package's story-first pass)
+ * changed:
  * - History list: stagger comes from useCardStagger and the index is CAPPED
- *   at 8 so long histories don't tail-lag.
- * - Session detail: top-level blocks get a full entrance cascade (this screen
- *   had zero motion before), and the tag pill's haptic tick routes through
- *   the gated '@/utils/haptics' gateway — never expo-haptics directly.
- * - Trends: useCardStagger keeps the screen's 70 ms step, and the stat
- *   grids roll in via MotionStat with the SAME numbers StatNumber showed
- *   (presentation only — Math.round(x * 100) + '%' suffix, no reformatting).
- * - Records: hero career-makes becomes a MotionStat keyed on its value;
- *   '—' placeholder tiles still render; badge rows cap their stagger at 8.
+ *   at 8 so long histories don't tail-lag; sessions load through
+ *   listVisibleSessions (the free-tier retention enforcement point) with
+ *   incremental paging; unsure counts surface as chips derived from the pips
+ *   the screen already fetched.
+ * - Session detail: top-level blocks cascade in the story-first visual order
+ *   (header → recap → actions → re-check → mode → compare → angles), the
+ *   unsure integrity line renders above the recap regardless of videoPath,
+ *   and the tag pill's haptic tick routes through the gated '@/utils/haptics'
+ *   gateway — never expo-haptics directly.
+ * - Trends: useCardStagger keeps the screen's 70 ms step, ONE merged hero
+ *   card owns the chart slot, and the stat grids roll in via MotionStat with
+ *   the SAME numbers StatNumber showed (presentation only —
+ *   Math.round(x * 100) + '%' suffix, no reformatting).
+ * - Records: hero career-makes stays a MotionStat keyed on its value (the
+ *   arc canvas behind it is additive); '—' placeholder tiles still render;
+ *   badge rows cap their stagger at 8.
  */
 import React from 'react';
 import TestRenderer, { act, type ReactTestRenderer } from 'react-test-renderer';
@@ -23,6 +31,8 @@ import { emptyTotals } from '@/core/achievements';
 // Mocks
 
 // Reanimated's worklets runtime can't load under jest without native modules.
+// useDerivedValue / withRepeat / cancelAnimation / Easing exist for the Skia
+// shimmer inside SkeletonCard (loading states now render it on first paint).
 jest.mock('react-native-reanimated', () => ({
   __esModule: true,
   default: {
@@ -35,8 +45,16 @@ jest.mock('react-native-reanimated', () => ({
   useReducedMotion: () => true,
   useSharedValue: (value: unknown) => ({ value }),
   useAnimatedStyle: () => ({}),
+  useDerivedValue: (fn: () => unknown) => ({ value: fn() }),
   withSpring: (value: unknown) => value,
   withTiming: (value: unknown) => value,
+  withRepeat: (value: unknown) => value,
+  cancelAnimation: () => {},
+  Easing: {
+    linear: (t: number) => t,
+    cubic: (t: number) => t,
+    out: (fn: unknown) => fn,
+  },
 }));
 
 // The motion module under integration: capture how screens drive it. The
@@ -53,6 +71,14 @@ jest.mock('@/components/motion', () => {
       ({ value, suffix = '', label }: { value: number; suffix?: string; label?: string }) =>
         ReactLocal.createElement(Text, null, `${value}${suffix}${label != null ? ` ${label}` : ''}`),
     ),
+    // Trends' hero numeral rolls via CountUp — deliberately NOT MotionStat,
+    // so the MotionStat call-list pins below stay exact.
+    CountUp: jest.fn(({ to, suffix = '' }: { to: number; suffix?: string }) =>
+      ReactLocal.createElement(Text, null, `${to}${suffix}`),
+    ),
+    // Records draws these behind/under real numerals; decorative here.
+    ArcReveal: jest.fn(() => null),
+    AnimatedProgressBar: jest.fn(() => null),
   };
 });
 const mockEnter = jest.fn((_i: number): undefined => undefined);
@@ -81,15 +107,20 @@ jest.mock('expo-router', () => {
   };
 });
 
-// Skia canvases are decorative on these screens.
+// Skia canvases are decorative on these screens. Group/LinearGradient and the
+// rect/rrect factories are consumed by the SkeletonCard shimmer.
 jest.mock('@shopify/react-native-skia', () => ({
   Canvas: () => null,
   Circle: () => null,
   DashPathEffect: () => null,
+  Group: () => null,
   Line: () => null,
+  LinearGradient: () => null,
   Path: () => null,
   Rect: () => null,
   RoundedRect: () => null,
+  rect: (x: number, y: number, width: number, height: number) => ({ x, y, width, height }),
+  rrect: (r: unknown) => ({ rect: r }),
   vec: (x: number, y: number) => ({ x, y }),
 }));
 
@@ -136,6 +167,10 @@ jest.mock('@/data/videoLibrary', () => ({ deleteLocalVideo: jest.fn(async () => 
 
 jest.mock('@/data/db', () => ({
   listSessions: jest.fn(async () => []),
+  // History's reader: the free-tier retention enforcement point (identical to
+  // listSessions during beta). Mocked separately so the suite can pin that
+  // History goes through it and not the raw query.
+  listVisibleSessions: jest.fn(async () => []),
   sessionShots: jest.fn(async () => []),
   deleteSession: jest.fn(async () => {}),
   fgTrend: jest.fn(async () => []),
@@ -217,6 +252,7 @@ beforeEach(() => {
   Object.values(hapticsMod.haptic).forEach((fn) => fn.mockClear());
   Object.values(db).forEach((fn) => fn.mockClear());
   db.listSessions.mockResolvedValue([]);
+  db.listVisibleSessions.mockResolvedValue([]);
   db.sessionShots.mockResolvedValue([]);
   db.fgTrend.mockResolvedValue([]);
   db.allSessionStartedAt.mockResolvedValue([]);
@@ -228,17 +264,47 @@ beforeEach(() => {
 describe('History list', () => {
   it('staggers session cards via useCardStagger with the index capped at 8', async () => {
     const rows = Array.from({ length: 12 }, (_, i) => sessionRow(i + 1));
-    db.listSessions.mockResolvedValue(rows);
+    db.listVisibleSessions.mockResolvedValue(rows);
 
     const HistoryScreen = require('../../app/(tabs)/history').default;
     const r = await render(<HistoryScreen />);
 
     expect(motionMod.useCardStagger).toHaveBeenCalledWith({ durationMs: motion.standard });
+    // Sessions load through the retention enforcement point, first page = 30.
+    expect(db.listVisibleSessions).toHaveBeenCalledWith(30);
     // One enter() per card, and no index ever exceeds the cap.
     const indexes = mockEnter.mock.calls.map(([i]) => i);
     expect(indexes).toHaveLength(12);
     expect(indexes.slice(0, 9)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8]);
     expect(Math.max(...indexes)).toBe(8);
+    r.unmount();
+  });
+
+  it('surfaces unsure counts as a chip and in the card label, from the pips already fetched', async () => {
+    db.listVisibleSessions.mockResolvedValue([sessionRow(1)]);
+    db.sessionShots.mockResolvedValue([
+      { outcome: 'make' },
+      { outcome: 'unsure' },
+      { outcome: 'unsure' },
+      { outcome: 'miss' },
+    ]);
+
+    const HistoryScreen = require('../../app/(tabs)/history').default;
+    const r = await render(<HistoryScreen />);
+
+    // The chip copy is on screen…
+    expect(textOf(r.toJSON())).toContain('2 unsure');
+    // …and the card's accessibility label carries the same honest count.
+    const card = r.root.findAll(
+      (n) =>
+        typeof n.props.onPress === 'function' &&
+        typeof n.props.accessibilityLabel === 'string' &&
+        n.props.accessibilityLabel.startsWith('Session on '),
+    )[0];
+    expect(card).toBeDefined();
+    expect(card.props.accessibilityLabel).toContain(', 2 unsure');
+    // Derived from the outcomes the screen already loads — no extra query.
+    expect(db.sessionShots).toHaveBeenCalledTimes(1);
     r.unmount();
   });
 });
@@ -264,11 +330,14 @@ describe('Session detail', () => {
     const SessionDetailScreen = require('../../app/history/[id]').default;
     const r = await render(<SessionDetailScreen />);
 
-    // No video / mode / previous session: blocks 2, 3 and 5 are skipped but
-    // the ladder stays in visual order (re-renders may repeat the pass).
+    // RE-PINNED for the story-first reorder (score before tools): the ladder
+    // is now header(0) → integrity+recap(1) → compact actions(2) →
+    // re-check(3) → mode(4) → compare(5) → angles(6). With no video / mode /
+    // previous session, blocks 3–5 are skipped but the ladder stays in
+    // visual order (re-renders may repeat the pass).
     const indexes = mockEnter.mock.calls.map(([i]) => i);
-    expect(indexes.slice(0, 4)).toEqual([0, 1, 4, 6]);
-    expect([...new Set(indexes)].sort((a, b) => a - b)).toEqual([0, 1, 4, 6]);
+    expect(indexes.slice(0, 4)).toEqual([0, 1, 2, 6]);
+    expect([...new Set(indexes)].sort((a, b) => a - b)).toEqual([0, 1, 2, 6]);
     r.unmount();
   });
 
@@ -293,8 +362,31 @@ describe('Session detail', () => {
     const r = await render(<SessionDetailScreen />);
 
     const indexes = mockEnter.mock.calls.map(([i]) => i);
-    // Full ladder: header, actions, re-check, mode, recap, compare, angles.
+    // Full ladder: header, recap, actions, re-check, mode, compare, angles.
     expect(indexes).toEqual(expect.arrayContaining([0, 1, 2, 3, 4, 5, 6]));
+    r.unmount();
+  });
+
+  it('renders the unsure integrity line above the recap even with no video', async () => {
+    // videoPath stays null: the integrity line must NOT be video-gated (the
+    // re-check panel is, and it used to be the only top-line unsure surface).
+    mockRecord({
+      stats: { attempts: 10, makes: 5, misses: 3, unsure: 2, fgPct: 5 / 8 },
+    });
+    const SessionDetailScreen = require('../../app/history/[id]').default;
+    const r = await render(<SessionDetailScreen />);
+
+    // Copy byte-identical to the summary hero's (summaryHeroMotion pin).
+    expect(textOf(r.toJSON())).toContain('2 shots unsure — not counted either way');
+    r.unmount();
+  });
+
+  it('omits the integrity line when nothing was unsure', async () => {
+    mockRecord();
+    const SessionDetailScreen = require('../../app/history/[id]').default;
+    const r = await render(<SessionDetailScreen />);
+
+    expect(textOf(r.toJSON())).not.toContain('unsure — not counted either way');
     r.unmount();
   });
 
@@ -341,6 +433,13 @@ describe('Trends', () => {
       stepMs: 70,
       durationMs: motion.standard,
     });
+
+    // RE-PINNED for the one-hero merge: the sparkline and bars cards drew the
+    // same points[] twice and are now ONE hero card, so the ladder is
+    // hero(0) → stat grid(1) → angles(2) → lifetime(4); court zones hold 3
+    // when present (not in this fixture — no shots land in the heatmap).
+    const indexes = mockEnter.mock.calls.map(([i]) => i);
+    expect([...new Set(indexes)].sort((a, b) => a - b)).toEqual([0, 1, 2, 4]);
 
     const statCalls = motionMod.MotionStat.mock.calls.map(([p]) => p);
     // avg = mean(0.4, 0.5, 0.6) = 0.5 → 50%; best = 60%; attempts = 30.

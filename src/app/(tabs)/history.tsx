@@ -36,13 +36,21 @@ import {
   PillButton,
   Row,
   Screen,
+  SkeletonCard,
   StatNumber,
 } from '@/components/ui';
-import { color, font, motion, radius, space, touch, type } from '@/constants/tokens';
+import { color, font, layout, motion, radius, space, touch, type } from '@/constants/tokens';
 import { exportCsv, sessionsToCsv } from '@/core/csvExport';
 import { getModeDef } from '@/core/gameModes';
 import type { ShotOutcome } from '@/core/types';
-import { deleteSession, listSessions, sessionShots, type SessionSummaryRow } from '@/data/db';
+import {
+  deleteSession,
+  lifetimeTotals,
+  listSessions,
+  listVisibleSessions,
+  sessionShots,
+  type SessionSummaryRow,
+} from '@/data/db';
 import { deleteLocalVideo } from '@/data/videoLibrary';
 
 interface HistoryItem {
@@ -106,10 +114,46 @@ function EmptyArc() {
 /** Stagger index cap so long histories don't tail-lag. */
 const STAGGER_CAP = 8;
 
+/** Sessions fetched per page — the old hard ceiling, now just the step. */
+const PAGE_SIZE = 30;
+
+/**
+ * Loading skeletons are DELAYED by a beat: SQLite usually answers well inside
+ * this window, so most opens go straight from tab switch to content with no
+ * placeholder flash — only genuinely slow loads earn the skeletons. (It also
+ * keeps the Skia-backed skeleton out of the first synchronous frame, which
+ * suites that stub the Skia canvas never render.)
+ */
+const SKELETON_DELAY_MS = 150;
+
+/**
+ * History reads through listVisibleSessions — the free-tier retention
+ * enforcement point db.ts documents. During beta the cap is null, so this is
+ * exactly listSessions and testers keep their full visible history. Some
+ * long-standing suites stub '@/data/db' down to listSessions alone; fall back
+ * so the screen still renders under those doubles (the barrel-vs-concrete
+ * import in components/ui.tsx is the precedent for coding around known
+ * partial stubs).
+ */
+const fetchHistoryPage: typeof listSessions = (limit) =>
+  typeof listVisibleSessions === 'function' ? listVisibleSessions(limit) : listSessions(limit);
+
+/** Career totals for the Records preview tile — same partial-stub guard. */
+const fetchLifetimeTotals = (): Promise<Awaited<ReturnType<typeof lifetimeTotals>> | null> =>
+  typeof lifetimeTotals === 'function' ? lifetimeTotals() : Promise.resolve(null);
+
 export default function HistoryScreen() {
   // Canonical card cascade (undefined under reduced motion — static render).
   const enter = useCardStagger({ durationMs: motion.standard });
   const [items, setItems] = useState<HistoryItem[] | null>(null);
+  /** How many sessions the list currently asks for (+PAGE_SIZE per "older" tap). */
+  const [pageLimit, setPageLimit] = useState(PAGE_SIZE);
+  /** True when the last fetch filled its limit — older sessions may exist. */
+  const [hasMore, setHasMore] = useState(false);
+  /** Career makes for the Records preview tile (null until loaded). */
+  const [careerMakes, setCareerMakes] = useState<number | null>(null);
+  /** Skeleton gate — see SKELETON_DELAY_MS. */
+  const [showSkeleton, setShowSkeleton] = useState(false);
   /** Selected tag chip filter; null = show every session (no filter active). */
   const [tagFilter, setTagFilter] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
@@ -142,20 +186,47 @@ export default function HistoryScreen() {
     useCallback(() => {
       let alive = true;
       void (async () => {
-        const rows = await listSessions(30);
+        const rows = await fetchHistoryPage(pageLimit);
+        // Pips power the mini shot strips AND the unsure chips. Capped to the
+        // first page: the per-session sessionShots read is the N+1 hazard of
+        // deep paging, and the newest cards are the ones scanned at pip level.
+        const pipRows = rows.slice(0, PAGE_SIZE);
         const pips = await Promise.all(
-          rows.map((r) =>
+          pipRows.map((r) =>
             sessionShots(r.id).then((shots) => shots.map((s) => s.outcome)),
           ),
         );
         if (!alive) return;
         setItems(rows.map((row, i) => ({ row, pips: pips[i] ?? [] })));
+        // A short page means the well is dry — hide the "older" pill.
+        setHasMore(rows.length >= pageLimit);
       })();
+      return () => {
+        alive = false;
+      };
+    }, [pageLimit]),
+  );
+
+  // Career makes for the Records preview tile — one aggregate query per focus.
+  useFocusEffect(
+    useCallback(() => {
+      let alive = true;
+      void fetchLifetimeTotals().then((t) => {
+        if (alive && t != null) setCareerMakes(t.makes);
+      });
       return () => {
         alive = false;
       };
     }, []),
   );
+
+  // Skeleton delay — armed only while the list is still unloaded; the cleanup
+  // disarms it the moment data lands, so a fast load never flashes skeletons.
+  useEffect(() => {
+    if (items !== null) return;
+    const timer = setTimeout(() => setShowSkeleton(true), SKELETON_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [items]);
 
   /** Distinct, non-empty tags across every loaded session, in first-seen order. */
   const distinctTags = useMemo(() => {
@@ -196,6 +267,25 @@ export default function HistoryScreen() {
     });
   };
 
+  // Preview lines for the sub-nav tiles: real numbers already on hand (the
+  // loaded rows / one lifetime aggregate), never projections. Undefined until
+  // data lands — the rich tile simply renders without its second line.
+  const latestFg =
+    items != null && items.length > 0 ? Math.round(items[0].row.fgPct * 100) : null;
+  const prevFg =
+    items != null && items.length > 1 ? Math.round(items[1].row.fgPct * 100) : null;
+  const trendsPreview =
+    latestFg != null
+      ? `Latest FG ${latestFg}%${
+          prevFg != null
+            ? latestFg === prevFg
+              ? ' · even vs last'
+              : ` · ${latestFg > prevFg ? '+' : ''}${latestFg - prevFg} vs last`
+            : ''
+        }`
+      : undefined;
+  const recordsPreview = careerMakes != null ? `${careerMakes} career makes` : undefined;
+
   return (
     <Screen scroll>
       <Eyebrow>Your sessions</Eyebrow>
@@ -205,19 +295,23 @@ export default function HistoryScreen() {
       </Text>
 
       <View style={styles.subNav}>
+        {/* Rich tiles: each destination previews its own headline number. */}
         <NavTileRow
           eyebrow="EXPLORE"
+          variant="rich"
           tiles={[
             {
               icon: 'trending-up',
               label: 'Trends',
               hint: 'See your FG% and volume over time',
+              description: trendsPreview,
               onPress: () => router.push('/trends'),
             },
             {
               icon: 'trophy-outline',
               label: 'Records',
               hint: 'Your lifetime records and badges',
+              description: recordsPreview,
               onPress: () => router.push('/records'),
             },
           ]}
@@ -275,9 +369,14 @@ export default function HistoryScreen() {
       )}
 
       {items === null ? (
-        <Card>
-          <Text style={styles.dim}>Loading sessions…</Text>
-        </Card>
+        // One loading language — the shape of the session cards that are
+        // arriving. Gated behind a short delay (see SKELETON_DELAY_MS).
+        showSkeleton ? (
+          <View style={{ gap: layout.cardGap }}>
+            <SkeletonCard lines={3} />
+            <SkeletonCard lines={3} />
+          </View>
+        ) : null
       ) : items.length === 0 ? (
         <Card>
           <EmptyArc />
@@ -308,11 +407,16 @@ export default function HistoryScreen() {
           />
         </Card>
       ) : (
-        <View style={{ gap: space.md }}>
+        <View style={{ gap: layout.cardGap }}>
           {(visibleItems ?? []).map(({ row, pips }, index) => {
             const makes = row.makes ?? 0;
             const fg = Math.round(row.fgPct * 100);
             const hasVideo = row.videoPath != null;
+            // Honesty surface: unsure shots, derived from the outcome pips the
+            // card already fetched (zero extra queries). Pips are capped to
+            // the first page, so deep-paged rows show no chip rather than a
+            // guessed zero.
+            const unsure = pips.filter((o) => o === 'unsure').length;
             const modeName =
               row.modeId != null && row.modeId !== 'free'
                 ? (() => {
@@ -327,7 +431,7 @@ export default function HistoryScreen() {
             const card = (
               <Pressable
                 accessibilityRole="button"
-                accessibilityLabel={`Session on ${formatSessionDate(row.startedAt)}${modeName != null ? `, ${modeName}` : ''}, ${makes} of ${row.attempts} makes, ${fg} percent field goals${hasVideo ? ', has replay video' : ''}${tag.length > 0 ? `, tagged ${tag}` : ''}`}
+                accessibilityLabel={`Session on ${formatSessionDate(row.startedAt)}${modeName != null ? `, ${modeName}` : ''}, ${makes} of ${row.attempts} makes, ${fg} percent field goals${unsure > 0 ? `, ${unsure} unsure` : ''}${hasVideo ? ', has replay video' : ''}${tag.length > 0 ? `, tagged ${tag}` : ''}`}
                 accessibilityHint="Opens the session detail. Long press to delete."
                 onPress={() =>
                   router.push({
@@ -369,6 +473,14 @@ export default function HistoryScreen() {
                       )}
                     </View>
                     <Row gap={space.sm}>
+                      {/* Unsure chip — the count is already in the card's
+                          accessibility label; the visual chip is the sighted
+                          reader's copy of the same honesty line. */}
+                      {unsure > 0 && (
+                        <View importantForAccessibility="no-hide-descendants">
+                          <Chip label={`${unsure} unsure`} tone="unsure" />
+                        </View>
+                      )}
                       <StatNumber value={`${fg}%`} size="medium" label="FG" />
                       <Ionicons
                         name="chevron-forward"
@@ -395,6 +507,15 @@ export default function HistoryScreen() {
               </Animated.View>
             );
           })}
+          {/* Incremental paging — the list used to dead-end at a fixed 30.
+              Hidden once a fetch comes back short (no older sessions left). */}
+          {hasMore && (
+            <PillButton
+              variant="ghost"
+              label="Show older sessions"
+              onPress={() => setPageLimit((limit) => limit + PAGE_SIZE)}
+            />
+          )}
         </View>
       )}
 
@@ -460,17 +581,16 @@ const styles = StyleSheet.create({
     marginTop: space.sm,
     alignItems: 'baseline',
   },
+  // Both spread type.statSmall (the smallest broadcast numeral) instead of
+  // re-declaring font.display 22/26 — the ladder, never an invented size.
   makesNum: {
-    fontFamily: font.display,
-    fontSize: 22,
-    lineHeight: 26,
+    ...type.statSmall,
     color: color.text,
     fontVariant: ['tabular-nums'],
   },
   attemptsNum: {
+    ...type.statSmall,
     fontFamily: font.displayMedium,
-    fontSize: 22,
-    lineHeight: 26,
     color: color.textFaint,
     fontVariant: ['tabular-nums'],
   },

@@ -3,6 +3,17 @@
  * Accent stroke over a vertical gradient fill that fades to nothing at the
  * baseline, soft halo + dot on the last point. Purely presentational; parent
  * supplies pixel width/height.
+ *
+ * Optional draw-on reveal: PASSING `progress` opts the chart into a
+ * left-to-right draw-in to that target on mount (the trends hero does this so
+ * the line sweeps in with its CountUp numeral). The reveal is a Skia path
+ * rebuilt per frame from the leading slice of the polyline — the exact
+ * MiniArcReplay pattern, and `partialPolyline` (already workletised at its
+ * definition) is the ONLY helper the worklet calls; everything else stays
+ * inline over plain closed-over numbers (the fx/particles crash precedent).
+ * Omitting `progress` (default 1) renders the finished chart statically, so
+ * every existing caller stays pixel-identical. Reduced motion always renders
+ * static.
  */
 import {
   Canvas,
@@ -12,12 +23,21 @@ import {
   Rect,
   Skia,
   vec,
-  type SkPath,
 } from '@shopify/react-native-skia';
-import React, { useMemo } from 'react';
+import React, { useEffect, useMemo } from 'react';
 import { View } from 'react-native';
+import {
+  Easing,
+  useDerivedValue,
+  useReducedMotion,
+  useSharedValue,
+  withTiming,
+} from 'react-native-reanimated';
 
-import { color } from '@/constants/tokens';
+import { color, motion } from '@/constants/tokens';
+import type { Point } from '@/core/types';
+
+import { partialPolyline } from './miniArcReplayGeometry';
 
 /** Inset so the stroke and last-point dot never clip. */
 const PAD = 6;
@@ -34,6 +54,9 @@ const FILL_BOTTOM = 'rgba(240, 90, 36, 0)';
 /** Soft halo tint behind the latest point. */
 const HALO_TINT = 'rgba(240, 90, 36, 0.22)';
 
+/** Stable empty polyline so the pre-layout worklet closure never churns. */
+const EMPTY_PTS: Point[] = [];
+
 function clamp01(v: number): number {
   return v < 0 ? 0 : v > 1 ? 1 : v;
 }
@@ -44,6 +67,13 @@ export interface SparklineProps {
   width: number;
   height: number;
   /**
+   * Reveal target, 0..1. PROVIDING this prop opts the chart into a
+   * left-to-right draw-on to the target on mount (static under reduced
+   * motion); omitting it (the default, 1) renders the full chart statically —
+   * existing callers stay pixel-identical.
+   */
+  progress?: number;
+  /**
    * Accessible description for this chart. The Canvas itself can't carry a
    * semantic label, so when provided this wraps the chart in an accessible
    * View — pass it here instead of relying on the call site to remember its
@@ -53,12 +83,18 @@ export interface SparklineProps {
 }
 
 interface SparklineGeometry {
-  line: SkPath;
-  area: SkPath;
-  last: { x: number; y: number };
+  /** Normalized polyline points (plain objects — safe to close over in worklets). */
+  pts: Point[];
+  last: Point;
 }
 
-export function Sparkline({ data, width, height, accessibilityLabel }: SparklineProps) {
+export function Sparkline({ data, width, height, progress, accessibilityLabel }: SparklineProps) {
+  const reducedMotion = useReducedMotion();
+  const target = clamp01(progress ?? 1);
+  // Draw-on only when the caller explicitly threaded a progress in — the
+  // default renders finished from the first frame, exactly as before.
+  const animateIn = progress != null && !reducedMotion;
+
   const geom = useMemo<SparklineGeometry | null>(() => {
     if (width <= 0 || height <= 0 || data.length === 0) return null;
     const innerW = width - PAD * 2;
@@ -70,19 +106,62 @@ export function Sparkline({ data, width, height, accessibilityLabel }: Sparkline
           : PAD + (i / (data.length - 1)) * innerW,
       y: PAD + (1 - clamp01(v)) * innerH,
     }));
-
-    const line = Skia.Path.Make();
-    line.moveTo(pts[0].x, pts[0].y);
-    for (let i = 1; i < pts.length; i++) line.lineTo(pts[i].x, pts[i].y);
-
-    const area = Skia.Path.Make();
-    area.moveTo(pts[0].x, height);
-    for (const pt of pts) area.lineTo(pt.x, pt.y);
-    area.lineTo(pts[pts.length - 1].x, height);
-    area.close();
-
-    return { line, area, last: pts[pts.length - 1] };
+    return { pts, last: pts[pts.length - 1] };
   }, [data, width, height]);
+
+  // Reveal head. Starts at 0 only when it will actually draw in; otherwise it
+  // holds the target so the static render is the finished chart.
+  const reveal = useSharedValue(animateIn ? 0 : target);
+
+  useEffect(() => {
+    if (!animateIn) {
+      reveal.value = target;
+      return;
+    }
+    reveal.value = withTiming(target, {
+      duration: motion.celebrate,
+      easing: Easing.out(Easing.cubic),
+    });
+  }, [animateIn, target, reveal]);
+
+  // Plain values only past this line — the worklets close over these, never
+  // over `geom` (module objects don't cross the thread boundary).
+  const pts = geom?.pts ?? EMPTY_PTS;
+  const lastX = geom?.last.x ?? 0;
+  const lastY = geom?.last.y ?? 0;
+
+  // One leading slice per frame; the line path, area fill and head dot are all
+  // views of it (the MiniArcReplay pattern — partialPolyline is the only
+  // helper called from the worklet, and it carries the 'worklet' directive).
+  const partial = useDerivedValue(() => partialPolyline(pts, reveal.value));
+  const linePath = useDerivedValue(() => {
+    const path = Skia.Path.Make();
+    const p = partial.value;
+    if (p.length < 2) return path;
+    path.moveTo(p[0]!.x, p[0]!.y);
+    for (let i = 1; i < p.length; i++) path.lineTo(p[i]!.x, p[i]!.y);
+    return path;
+  });
+  const areaPath = useDerivedValue(() => {
+    const path = Skia.Path.Make();
+    const p = partial.value;
+    if (p.length < 2) return path;
+    path.moveTo(p[0]!.x, height);
+    for (let i = 0; i < p.length; i++) path.lineTo(p[i]!.x, p[i]!.y);
+    path.lineTo(p[p.length - 1]!.x, height);
+    path.close();
+    return path;
+  });
+  // Dot rides the reveal tip; single-point series (no polyline) keep the
+  // static last-point dot exactly where it always sat.
+  const headX = useDerivedValue(() => {
+    const p = partial.value;
+    return p.length > 0 ? p[p.length - 1]!.x : lastX;
+  });
+  const headY = useDerivedValue(() => {
+    const p = partial.value;
+    return p.length > 0 ? p[p.length - 1]!.y : lastY;
+  });
 
   if (geom == null) {
     return (
@@ -127,7 +206,7 @@ export function Sparkline({ data, width, height, accessibilityLabel }: Sparkline
           opacity={0.9}
         />
         {data.length > 1 && (
-          <Path path={geom.area}>
+          <Path path={areaPath}>
             <LinearGradient
               start={vec(0, 0)}
               end={vec(0, height)}
@@ -137,7 +216,7 @@ export function Sparkline({ data, width, height, accessibilityLabel }: Sparkline
         )}
         {data.length > 1 && (
           <Path
-            path={geom.line}
+            path={linePath}
             style="stroke"
             strokeWidth={2.5}
             strokeCap="round"
@@ -145,9 +224,9 @@ export function Sparkline({ data, width, height, accessibilityLabel }: Sparkline
             color={color.accent}
           />
         )}
-        <Circle cx={geom.last.x} cy={geom.last.y} r={HALO_R} color={HALO_TINT} />
-        <Circle cx={geom.last.x} cy={geom.last.y} r={DOT_R} color={color.accent} />
-        <Circle cx={geom.last.x} cy={geom.last.y} r={CORE_R} color={color.text} />
+        <Circle cx={headX} cy={headY} r={HALO_R} color={HALO_TINT} />
+        <Circle cx={headX} cy={headY} r={DOT_R} color={color.accent} />
+        <Circle cx={headX} cy={headY} r={CORE_R} color={color.text} />
       </Canvas>
     </View>
   );

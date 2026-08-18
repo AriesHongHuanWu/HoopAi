@@ -4,6 +4,12 @@
  * entrance, plus a one-shot celebration chip when the session earned one
  * (perfect night or a 5+ make heater).
  *
+ * The signature arc: the canonical arcMotif quadratic (motion barrel) drawn
+ * as a static band BEHIND the strip — Home's double-stroke treatment via
+ * ArcReveal, translated so the arc's apex sits under the FG% column. Pure
+ * decoration: pointerEvents none, no a11y node, and the geometry is computed
+ * once per layout on the JS thread (never in a worklet).
+ *
  * Visual-only: everything renders from the SessionStats already loaded by
  * the summary screen — no queries, no store writes. All motion is one-shot
  * and fully disabled under system reduced-motion.
@@ -36,13 +42,15 @@ import Animated, {
   withTiming,
 } from 'react-native-reanimated';
 
-import { MotionStat } from '@/components/motion';
+import { ArcReveal, arcMotif, MotionStat } from '@/components/motion';
 import { StatNumber } from '@/components/ui';
 import { color, font, motion, radius, space, type } from '@/constants/tokens';
 import type { SessionStats } from '@/core/types';
 
 /** Width of the moving shimmer band inside the celebration chip. */
 const SHIMMER_WIDTH = 42;
+/** Height of the signature-arc band drawn behind the box-score strip. */
+const ARC_BAND_HEIGHT = 72;
 /** Chip entrance waits for the box-score columns to land first. */
 const CELEBRATION_DELAY_MS = 420;
 /** Perfect-session celebration needs a non-trivial sample. */
@@ -155,6 +163,7 @@ export function SummaryHero({
 }) {
   const reducedMotion = useReducedMotion();
   const fgValue = stats.attempts > 0 ? `${Math.round(stats.fgPct * 100)}%` : '—';
+  const [stripW, setStripW] = useState(0);
 
   // Celebration — derived purely from stats already on screen. A perfect
   // session (every shot decided AND made) outranks the heater; tiny perfect
@@ -170,9 +179,33 @@ export function SummaryHero({
       ? `Box score. ${fgValue} field goals. ${stats.makes} of ${stats.attempts} makes. ${stats.points} points.`
       : 'Box score. No shots recorded this session.';
 
+  // Slide the canonical arc so its APEX sits under the center (FG%) column.
+  // Apex t solves dy/dt = 0 for the quadratic — plain JS-thread arithmetic
+  // over the motif's own points, so the band tracks any future motif change.
+  let apexShift = 0;
+  if (stripW > 0) {
+    const motif = arcMotif(stripW, ARC_BAND_HEIGHT);
+    const denom = motif.p0.y - 2 * motif.c.y + motif.p1.y;
+    const tApex = denom !== 0 ? (motif.p0.y - motif.c.y) / denom : 0.5;
+    apexShift = stripW / 2 - motif.pointAt(tApex).x;
+  }
+
   return (
     <View style={style}>
-      <View style={styles.strip} accessible accessibilityLabel={a11yLabel}>
+      <View
+        style={styles.stripWrap}
+        onLayout={(e: LayoutChangeEvent) => setStripW(e.nativeEvent.layout.width)}
+      >
+        {stripW > 0 && (
+          <View pointerEvents="none" style={styles.arcBand}>
+            <View style={{ transform: [{ translateX: apexShift }] }}>
+              {/* Static (animate={false}): the summary is a finished box
+                  score, so the arc is the finished frame — no draw-in. */}
+              <ArcReveal width={stripW} height={ARC_BAND_HEIGHT} animate={false} />
+            </View>
+          </View>
+        )}
+        <View style={styles.strip} accessible accessibilityLabel={a11yLabel}>
         <Animated.View entering={enter(90)} style={styles.col}>
           {/* Compound "12/20" can't roll honestly — stays static. */}
           <StatNumber
@@ -203,6 +236,7 @@ export function SummaryHero({
             trigger={stats.points}
           />
         </Animated.View>
+        </View>
       </View>
       {(perfect || heater) && (
         <View style={styles.chipRow}>
@@ -241,6 +275,19 @@ export function SummaryHero({
 }
 
 const styles = StyleSheet.create({
+  /** Hosts the absolute arc band behind the strip. */
+  stripWrap: {
+    position: 'relative',
+  },
+  /** The signature-arc band: decorative, clipped, never a touch target. */
+  arcBand: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: ARC_BAND_HEIGHT,
+    overflow: 'hidden',
+  },
   strip: {
     flexDirection: 'row',
     alignItems: 'flex-end',

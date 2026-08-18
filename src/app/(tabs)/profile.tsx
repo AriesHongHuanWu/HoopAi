@@ -1,32 +1,44 @@
 /**
  * My Profile — the player's identity card and editor.
  *
- * A broadcast header (nickname, experience chip, and an age/height/weight stat
- * strip) sits over an editable list of every profile field. Each row opens the
- * same picker the first-run wizard used, as a bottom sheet modal, so editing
- * later feels identical to setting it the first time. A "Complete your profile"
- * progress chip appears while tracked fields are still empty, and a collapsed
- * "Why we ask" explainer states plainly that this all stays on the phone and
- * powers coaching + fair comparisons — no health or BMI claims.
+ * A broadcast header (nickname, experience chip, an age/height/weight stat
+ * strip that rolls in via MotionStat, and the signature shot arc traced
+ * faintly behind it) sits over an editable list of every profile field. Each
+ * row opens the same picker the first-run wizard used, as a bottom sheet
+ * modal, so editing later feels identical to setting it the first time. A
+ * trophy-case card previews the latest Records medals; a "Complete your
+ * profile" progress chip appears while tracked fields are still empty, and a
+ * collapsed "Why we ask" explainer states plainly that this all stays on the
+ * phone and powers coaching + fair comparisons — no health or BMI claims.
  *
  * Everything remains optional: any field can be cleared back to "Add".
  */
 import { Ionicons } from '@expo/vector-icons';
-import { useState, type ComponentProps, type ReactNode } from 'react';
+import { useCallback, useState, type ComponentProps, type ReactNode } from 'react';
 import { Modal, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import Animated, { FadeIn, useReducedMotion } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { router } from 'expo-router';
+import { router, useFocusEffect } from 'expo-router';
 
 import { DayStreakShelf } from '@/components/DayStreakShelf';
-import { useCardStagger } from '@/components/motion';
+import { ArcReveal, MotionStat, useCardStagger, type EnteringProp } from '@/components/motion';
 import { ChoiceCard, ChipSelect } from '@/components/profile/Choice';
 import { NumberSlider } from '@/components/profile/NumberSlider';
 import { SeasonCard } from '@/components/SeasonCard';
-import { Card, Chip, PillButton, Row, Screen, StatNumber } from '@/components/ui';
-import { color, layout, radius, space, touch, type } from '@/constants/tokens';
+import { SectionEyebrow } from '@/components/ScreenHeader';
+import { Card, Chip, PillButton, PressableCard, Row, Screen, StatNumber } from '@/components/ui';
+import { color, font, iconSize, layout, palette, radius, space, touch, type } from '@/constants/tokens';
+import {
+  ACHIEVEMENTS,
+  evaluate,
+  type AchievementDef,
+  type BadgeTier,
+  type LifetimeTotals,
+} from '@/core/achievements';
 import type { ShootingHand } from '@/core/types';
+import { lifetimeTotals } from '@/data/db';
+import { useAchievementsSeen } from '@/state/achievementsSeenStore';
 import {
   ageFromBirthYear,
   DEFAULT_HEIGHT_CM,
@@ -124,14 +136,14 @@ function FieldRow({
       style={({ pressed }) => [styles.row, pressed && styles.rowPressed]}
     >
       <View style={styles.rowIcon}>
-        <Ionicons name={icon} size={15} color={color.accent} />
+        <Ionicons name={icon} size={iconSize.sm} color={color.accent} />
       </View>
       <Text style={styles.rowLabel}>{label}</Text>
       <View style={styles.rowRight}>
         <Text style={[styles.rowValue, !filled && styles.rowValueEmpty]} numberOfLines={1}>
           {filled ? value : 'Add'}
         </Text>
-        <Ionicons name="chevron-forward" size={16} color={color.textFaint} />
+        <Ionicons name="chevron-forward" size={iconSize.md} color={color.textFaint} />
       </View>
     </Pressable>
   );
@@ -183,6 +195,133 @@ function EditorSheet({
   );
 }
 
+// ---------------------------------------------------------------------------
+// Trophy case — the pocket view of the Records badge board.
+// ---------------------------------------------------------------------------
+
+/** Tier ring colors for the showcased medals — the tokens tier metals. */
+const TROPHY_TIER: Record<BadgeTier, string> = {
+  bronze: palette.tierBronze,
+  silver: palette.tierSilver,
+  gold: palette.tierGold,
+};
+
+/** How many medals the pocket view showcases. */
+const TROPHY_MEDALS = 3;
+
+/**
+ * The medals most recently CONFIRMED unlocked, newest first.
+ *
+ * Honesty note: unlock timestamps are not stored anywhere, so "recent" uses
+ * the only real record there is — the order the seen-store observed each
+ * badge unlocked (seenBadgeIds appends in observation order). Unlocked badges
+ * the store has not recorded yet are the newest of all. Nothing is invented.
+ */
+function recentUnlocked(
+  unlocked: readonly AchievementDef[],
+  seenIds: readonly string[],
+): AchievementDef[] {
+  const rank = (d: AchievementDef) => {
+    const i = seenIds.indexOf(d.id);
+    return i === -1 ? Number.MAX_SAFE_INTEGER : i;
+  };
+  return [...unlocked]
+    .sort((a, b) => rank(a) - rank(b))
+    .slice(-TROPHY_MEDALS)
+    .reverse();
+}
+
+/**
+ * Entry card to the Records badge board: the latest medals (AchievementRow's
+ * medal circle, ringed in its tier metal), the unlocked count, and a NEW pip
+ * when the seen-store says a badge unlocked since the last Records visit.
+ * READ-ONLY against that store — marking badges seen stays Records' job, so
+ * the pip survives here until the board itself is opened.
+ */
+function TrophyCaseCard({ entering }: { entering?: EnteringProp }) {
+  /** null = totals not loaded yet — render nothing rather than fake zeros. */
+  const [totals, setTotals] = useState<LifetimeTotals | null>(null);
+  const hasVisited = useAchievementsSeen((s) => s.hasVisited);
+  const seenBadgeIds = useAchievementsSeen((s) => s.seenBadgeIds);
+
+  useFocusEffect(
+    useCallback(() => {
+      let alive = true;
+      void lifetimeTotals()
+        .then((t) => {
+          if (alive) setTotals(t);
+        })
+        .catch(() => {
+          if (alive) setTotals(null);
+        });
+      return () => {
+        alive = false;
+      };
+    }, []),
+  );
+
+  if (totals == null) return null;
+
+  const { unlocked } = evaluate(totals);
+  const anyUnlocked = unlocked.length > 0;
+  // Mirrors records.tsx's first-visit guard: before the board has ever been
+  // opened, everything already unlocked is not "new" — no pip shower.
+  const newCount = hasVisited
+    ? unlocked.filter((d) => !seenBadgeIds.includes(d.id)).length
+    : 0;
+  // With nothing unlocked yet, preview the first rungs of the board — shown
+  // in their locked state, never dressed up as earned.
+  const showcased = anyUnlocked
+    ? recentUnlocked(unlocked, seenBadgeIds)
+    : ACHIEVEMENTS.slice(0, TROPHY_MEDALS);
+
+  return (
+    <PressableCard
+      entering={entering}
+      onPress={() => router.push('/records')}
+      haptic="selection"
+      accessibilityLabel={`Trophy case: ${unlocked.length} of ${ACHIEVEMENTS.length} badges unlocked${
+        newCount > 0 ? `, ${newCount} new` : ''
+      }. Opens Records.`}
+    >
+      <Row style={styles.trophyHead}>
+        <SectionEyebrow icon="trophy-outline">Trophy case</SectionEyebrow>
+        {newCount > 0 && (
+          <View style={styles.trophyNewPip}>
+            <Text style={styles.trophyNewPipText}>NEW</Text>
+          </View>
+        )}
+      </Row>
+      <Row gap={space.md} style={styles.trophyRow}>
+        {showcased.map((def) => (
+          <View
+            key={def.id}
+            style={[
+              styles.trophyMedal,
+              anyUnlocked
+                ? { borderColor: TROPHY_TIER[def.tier] }
+                : styles.trophyMedalLocked,
+            ]}
+          >
+            <Text style={[styles.trophyEmoji, !anyUnlocked && styles.trophyEmojiLocked]}>
+              {def.emoji}
+            </Text>
+          </View>
+        ))}
+        <View style={styles.trophyCount}>
+          <Text style={styles.trophyCountLine}>
+            {`${unlocked.length} of ${ACHIEVEMENTS.length} unlocked`}
+          </Text>
+          <Text style={styles.trophySub}>
+            {anyUnlocked ? 'Your latest medals — open the board' : 'Every badge still waiting — open the board'}
+          </Text>
+        </View>
+        <Ionicons name="chevron-forward" size={iconSize.md} color={color.textFaint} />
+      </Row>
+    </PressableCard>
+  );
+}
+
 export default function ProfileScreen() {
   const reducedMotion = useReducedMotion();
   // Canonical card stagger. Under reduced motion this renders still (undefined
@@ -198,6 +337,8 @@ export default function ProfileScreen() {
   const [editor, setEditor] = useState<EditorKey | null>(null);
   const [whyOpen, setWhyOpen] = useState(false);
   const [nickDraft, setNickDraft] = useState(p.nickname);
+  // Measured header-card size, feeding the arc backdrop's Skia canvas.
+  const [headerSize, setHeaderSize] = useState({ w: 0, h: 0 });
 
   const { filled, total } = profileProgress(p);
   const complete = filled >= total;
@@ -218,22 +359,40 @@ export default function ProfileScreen() {
   return (
     <Screen scroll>
       <View style={styles.stack}>
-        <Row style={styles.topBar}>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Settings"
-            accessibilityHint="Open app settings, storage and legal"
-            hitSlop={space.sm}
-            onPress={() => router.push('/settings')}
-            style={({ pressed }) => [styles.settingsBtn, pressed && styles.settingsBtnPressed]}
-          >
-            <Ionicons name="settings-sharp" size={22} color={color.textDim} />
-          </Pressable>
-        </Row>
-
         {/* Broadcast header */}
-        <Animated.View entering={enter(0)} style={styles.header}>
-          <Text style={styles.eyebrow}>PLAYER CARD</Text>
+        <Animated.View
+          entering={enter(0)}
+          style={styles.header}
+          onLayout={(e) =>
+            setHeaderSize({
+              w: Math.round(e.nativeEvent.layout.width),
+              h: Math.round(e.nativeEvent.layout.height),
+            })
+          }
+        >
+          {/* The signature shot arc, traced faintly behind the card content.
+              Static ArcReveal (animate={false}) — the finished frame, plain
+              declarative Skia, no draw-in and no worklet callbacks here. */}
+          {headerSize.w > 0 && (
+            <View style={styles.headerArc} pointerEvents="none">
+              <ArcReveal width={headerSize.w} height={headerSize.h} animate={false} dot={false} />
+            </View>
+          )}
+          {/* Eyebrow row also carries the settings gear — the old dedicated
+              top bar spent a full row on that one glyph. */}
+          <Row style={styles.eyebrowRow}>
+            <Text style={styles.eyebrow}>PLAYER CARD</Text>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Settings"
+              accessibilityHint="Open app settings, storage and legal"
+              hitSlop={space.sm}
+              onPress={() => router.push('/settings')}
+              style={({ pressed }) => [styles.settingsBtn, pressed && styles.settingsBtnPressed]}
+            >
+              <Ionicons name="settings-sharp" size={iconSize.lg} color={color.textDim} />
+            </Pressable>
+          </Row>
           <Text style={styles.name} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.6}>
             {p.nickname.trim() || 'Your name'}
           </Text>
@@ -243,21 +402,27 @@ export default function ProfileScreen() {
               {p.trainingGoal != null && <Chip label={GOAL_LABEL[p.trainingGoal]} />}
             </Row>
           )}
-          {/* Stat strip — the three headline numbers. Dashes when unknown. */}
+          {/* Stat strip — the three headline numbers roll in via MotionStat
+              (same visuals as StatNumber). Dashes stay static: there is no
+              numeral to roll when the field is unknown. */}
           <Row gap={space.xl} style={styles.statStrip}>
-            <StatNumber size="medium" value={age != null ? String(age) : '—'} label="Age" />
+            {age != null ? (
+              <MotionStat size="medium" value={age} label="Age" />
+            ) : (
+              <StatNumber size="medium" value="—" label="Age" />
+            )}
             <View style={styles.statDivider} />
-            <StatNumber
-              size="medium"
-              value={p.heightCm != null ? String(p.heightCm) : '—'}
-              label={p.heightCm != null ? 'cm' : 'Height'}
-            />
+            {p.heightCm != null ? (
+              <MotionStat size="medium" value={p.heightCm} label="cm" />
+            ) : (
+              <StatNumber size="medium" value="—" label="Height" />
+            )}
             <View style={styles.statDivider} />
-            <StatNumber
-              size="medium"
-              value={p.weightKg != null ? String(p.weightKg) : '—'}
-              label={p.weightKg != null ? 'kg' : 'Weight'}
-            />
+            {p.weightKg != null ? (
+              <MotionStat size="medium" value={p.weightKg} label="kg" />
+            ) : (
+              <StatNumber size="medium" value="—" label="Weight" />
+            )}
           </Row>
         </Animated.View>
 
@@ -267,9 +432,12 @@ export default function ProfileScreen() {
         {/* Consecutive-practice-DAY badge shelf — the don't-break-the-chain reward */}
         <DayStreakShelf entering={enter(2)} />
 
+        {/* Trophy case — latest medals + unlocked count, pressing opens Records */}
+        <TrophyCaseCard entering={enter(3)} />
+
         {/* Complete-your-profile progress chip (only while incomplete) */}
         {!complete && (
-          <Animated.View entering={enter(3)}>
+          <Animated.View entering={enter(4)}>
             <View
               accessible
               accessibilityLabel={`Profile ${filled} of ${total} complete`}
@@ -287,7 +455,7 @@ export default function ProfileScreen() {
         )}
 
         {/* Identity fields */}
-        <Card entering={enter(4)}>
+        <Card entering={enter(5)}>
           <Text style={styles.sectionEyebrow}>IDENTITY</Text>
           <FieldRow icon="person-outline" label="Nickname" filled={p.nickname.trim().length > 0} value={p.nickname.trim()} onPress={() => open('nickname')} />
           <View style={styles.divider} />
@@ -301,7 +469,7 @@ export default function ProfileScreen() {
         </Card>
 
         {/* Game fields */}
-        <Card entering={enter(5)}>
+        <Card entering={enter(6)}>
           <Text style={styles.sectionEyebrow}>YOUR GAME</Text>
           <FieldRow icon="flame-outline" label="Experience" filled={p.experience != null} value={expLabel ?? ''} onPress={() => open('experience')} />
           <View style={styles.divider} />
@@ -313,7 +481,7 @@ export default function ProfileScreen() {
         </Card>
 
         {/* Tracking (existing settings keys) — inline chips, no sheet needed */}
-        <Card entering={enter(6)}>
+        <Card entering={enter(7)}>
           <Text style={styles.sectionEyebrow}>TRACKING</Text>
           <View style={styles.inlineGroup}>
             <Text style={styles.inlineLabel}>Shooting hand</Text>
@@ -327,7 +495,7 @@ export default function ProfileScreen() {
         </Card>
 
         {/* Why we ask — expandable, privacy-first */}
-        <Card entering={enter(7)}>
+        <Card entering={enter(8)}>
           <Pressable
             accessibilityRole="button"
             accessibilityState={{ expanded: whyOpen }}
@@ -337,10 +505,10 @@ export default function ProfileScreen() {
             style={styles.whyHeader}
           >
             <Row gap={space.sm}>
-              <Ionicons name="lock-closed" size={15} color={color.make} />
+              <Ionicons name="lock-closed" size={iconSize.sm} color={color.make} />
               <Text style={styles.whyTitle}>Why we ask</Text>
             </Row>
-            <Ionicons name={whyOpen ? 'chevron-up' : 'chevron-down'} size={16} color={color.textFaint} />
+            <Ionicons name={whyOpen ? 'chevron-up' : 'chevron-down'} size={iconSize.md} color={color.textFaint} />
           </Pressable>
           {whyOpen && (
             <Animated.View entering={reducedMotion ? undefined : FadeIn.duration(160)} style={styles.whyBody}>
@@ -463,15 +631,16 @@ const styles = StyleSheet.create({
     gap: layout.sectionGap,
     paddingTop: space.md,
   },
-  topBar: {
-    justifyContent: 'flex-end',
-  },
   settingsBtn: {
     width: touch.minTarget,
     height: touch.minTarget,
     alignItems: 'center',
     justifyContent: 'center',
     borderRadius: radius.pill,
+    // Full 48dp target, but the eyebrow row keeps its optical height: the
+    // button overhangs into the card padding instead of inflating the row.
+    marginVertical: -space.md,
+    marginRight: -space.sm,
   },
   settingsBtnPressed: {
     backgroundColor: color.surfaceRaised,
@@ -494,11 +663,22 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: color.accentEdge,
     padding: layout.cardPadding,
+    // Clip the arc backdrop's launch point (it starts just off-canvas).
+    overflow: 'hidden',
+  },
+  headerArc: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+  },
+  eyebrowRow: {
+    justifyContent: 'space-between',
   },
   eyebrow: {
-    ...type.caption,
+    ...type.eyebrow,
     color: color.accent,
-    letterSpacing: 1.2,
   },
   name: {
     ...type.statLarge,
@@ -550,9 +730,63 @@ const styles = StyleSheet.create({
     backgroundColor: color.accent,
   },
   sectionEyebrow: {
-    ...type.caption,
+    ...type.eyebrow,
     color: color.textFaint,
     marginBottom: space.sm,
+  },
+  // ---- Trophy case ----
+  trophyHead: {
+    justifyContent: 'space-between',
+  },
+  trophyRow: {
+    marginTop: space.md,
+  },
+  /** AchievementRow's medal circle, ringed in the badge's tier metal. */
+  trophyMedal: {
+    width: 44,
+    height: 44,
+    borderRadius: radius.pill,
+    borderWidth: 1,
+    backgroundColor: color.accentTint,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  trophyMedalLocked: {
+    backgroundColor: color.surfaceRaised,
+    borderColor: color.border,
+  },
+  trophyEmoji: {
+    fontSize: 22,
+    lineHeight: 28,
+  },
+  trophyEmojiLocked: {
+    opacity: 0.45,
+  },
+  trophyCount: {
+    flex: 1,
+    minWidth: 0,
+    gap: 2,
+  },
+  trophyCountLine: {
+    ...type.bodyMedium,
+    color: color.text,
+    fontVariant: ['tabular-nums'],
+  },
+  trophySub: {
+    ...type.caption,
+    color: color.textFaint,
+  },
+  /** Mirrors AchievementRow's NEW pip so "new badge" reads identically. */
+  trophyNewPip: {
+    backgroundColor: color.accent,
+    borderRadius: radius.pill,
+    paddingHorizontal: space.sm,
+    paddingVertical: 1,
+  },
+  trophyNewPipText: {
+    ...type.micro,
+    fontFamily: font.bodySemiBold,
+    color: color.onAccent,
   },
   row: {
     minHeight: touch.minTarget,
@@ -631,7 +865,10 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     bottom: 0,
-    backgroundColor: 'rgba(0,0,0,0.55)',
+    // The one app-wide overlay scrim. Darker than the old 0.55 black; the
+    // sheet content below still reads through as shapes, which is all a
+    // dismiss target needs to show.
+    backgroundColor: color.scrim,
   },
   sheet: {
     position: 'absolute',

@@ -24,6 +24,9 @@ import Animated, {
 } from 'react-native-reanimated';
 
 import { color, space, type } from '../constants/tokens';
+// Concrete import (not the '@/components/motion' barrel): screen suites stub
+// that barrel down to the symbols they use, and this geometry must stay real.
+import { arcMotif } from './motion/ArcReveal';
 
 /** One cold-start per process: subsequent Home mounts skip the intro. */
 let played = false;
@@ -103,12 +106,13 @@ export function BootIntro() {
     );
   }, [visible, flight, halo, wordOp, wordY, cover]);
 
-  // Arc geometry — same motif as the hero CTA, scaled to the screen.
-  const rimX = W - 72;
-  const rimY = ARC_H * 0.42;
-  const p0 = { x: -24, y: ARC_H + 24 };
-  const c = { x: W * 0.36, y: -ARC_H * 0.6 };
-  const arcPath = `M ${p0.x} ${p0.y} Q ${c.x} ${c.y} ${rimX} ${rimY}`;
+  // Arc geometry — the canonical motif (motion/ArcReveal arcMotif), computed
+  // ONCE here on the JS thread. The worklets below close over the plain
+  // numbers it returns, exactly as they closed over the old inline literals —
+  // never over the motif object itself (it carries a JS function).
+  const { p0, c, p1, path: arcPath } = arcMotif(W, ARC_H, { rimInset: 72 });
+  const rimX = p1.x;
+  const rimY = p1.y;
 
   // Ball rides the quadratic Bézier at the drawn tip: P(t) = (1-t)²P0 + 2(1-t)tC + t²P1.
   const ballX = useDerivedValue(() => {

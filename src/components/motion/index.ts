@@ -22,5 +22,12 @@ export {
   type SuccessBurstProps,
 } from './SuccessBurst';
 export { MotionStat, type MotionStatProps } from './MotionStat';
+export {
+  ArcReveal,
+  arcMotif,
+  type ArcMotif,
+  type ArcPoint,
+  type ArcRevealProps,
+} from './ArcReveal';
 export { CountUp, type CountUpProps } from '../fx/CountUp';
 export { Confetti, type ConfettiProps } from '../fx/Confetti';

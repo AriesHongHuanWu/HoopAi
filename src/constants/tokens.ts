@@ -72,6 +72,22 @@ export const palette = {
   /** Neutral "no signal" tint — the dim third of the confidence ladder. */
   chalkFaintTint: 'rgba(145, 138, 131, 0.14)',
 
+  /**
+   * Tier metals — the medal ladder (streak tiers, achievement crests).
+   * ONE bronze: StreakTierCard ('#C8823C') and AchievementRow ('#C08552') had
+   * each picked their own; the more metallic '#C8823C' wins because bronze
+   * must read as a MEDAL between silver and gold, and '#C08552' drifts tan
+   * enough to muddle with the leather accent family.
+   */
+  tierBronze: '#C8823C',
+  tierBronzeTint: 'rgba(200, 130, 60, 0.14)',
+  /** Cool metallic silver (StreakTierCard's), not the warm textDim gray. */
+  tierSilver: '#C2CAD2',
+  tierSilverTint: 'rgba(194, 202, 210, 0.14)',
+  /** Same hue as downtown gold — a medal and a 3-pointer share the metal. */
+  tierGold: '#F2C14E',
+  tierGoldTint: 'rgba(242, 193, 78, 0.14)',
+
   /** On-accent text. */
   onLeather: '#140A05',
 } as const;
@@ -121,6 +137,17 @@ export const color = {
   hudGlassBorder: 'rgba(245, 241, 236, 0.14)',
   /** Deeper glass for stacked HUD panels. */
   hudGlassDeep: 'rgba(14, 12, 12, 0.74)',
+  /**
+   * Full-screen dimming layer under overlays (coach marks, debug panel,
+   * modal scrims). The warm near-coal value those surfaces already wore —
+   * one scrim app-wide instead of per-overlay alphas.
+   */
+  scrim: 'rgba(10, 9, 9, 0.82)',
+  /**
+   * TRUE black, only for letterboxing behind video/camera frames — the one
+   * place the warm coal would visibly tint footage. Never a UI surface.
+   */
+  cameraBed: '#000',
 } as const;
 
 /**
@@ -200,9 +227,28 @@ export const type = {
   heading: { fontFamily: font.bodySemiBold, fontSize: 17, lineHeight: 22 },
   body: { fontFamily: font.body, fontSize: 15, lineHeight: 21 },
   bodyMedium: { fontFamily: font.bodyMedium, fontSize: 15, lineHeight: 21 },
-  /** Chips, axis labels, eyebrows. Uppercase + tracked when used as eyebrow. */
+  /** Chips and axis labels — data-adjacent fine print, tight tracking. */
   caption: { fontFamily: font.bodyMedium, fontSize: 12, lineHeight: 16, letterSpacing: 0.4 },
+  /**
+   * Section eyebrows — the UPPERCASE kicker above a block. Wider tracking
+   * than caption (1.2, the value Home/Profile/Coach findings had each
+   * hand-rolled) because an all-caps line needs air that axis labels do not.
+   */
+  eyebrow: { fontFamily: font.bodyMedium, fontSize: 12, lineHeight: 16, letterSpacing: 1.2 },
   micro: { fontFamily: font.bodyMedium, fontSize: 10, lineHeight: 13, letterSpacing: 0.6 },
+} as const;
+
+/**
+ * Icon sizes — the ladder inline Ionicons pull from instead of inventing
+ * one-off numbers (12/14/15/16/18/20 were all in circulation). xs pairs with
+ * eyebrows/captions, xl with the tab bar and headline rows.
+ */
+export const iconSize = {
+  xs: 12,
+  sm: 14,
+  md: 16,
+  lg: 20,
+  xl: 24,
 } as const;
 
 /** 4pt base spacing scale. */

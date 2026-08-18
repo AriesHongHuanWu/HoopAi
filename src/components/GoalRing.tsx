@@ -9,6 +9,11 @@
  * goal is reached each day the ring also plays a one-shot celebration —
  * numeral pop + expanding ripple. Everything is reduced-motion aware: glows
  * hold at their resting opacity and the one-shot celebration is skipped.
+ *
+ * `size` scales the whole canvas (Home's TODAY shelf runs it small); every
+ * geometry number derives from it, and at the default 120 the ring is
+ * pixel-identical to the pre-prop version. The hot-glow threshold and the
+ * once-per-day celebration stamp are size-independent.
  */
 import { BlurMask, Canvas, Circle, Path, Skia } from '@shopify/react-native-skia';
 import React, { useEffect, useMemo } from 'react';
@@ -27,10 +32,10 @@ import Animated, {
 import { goalProgress } from '../core/goals';
 import { color, motion, space, type } from '../constants/tokens';
 
-const SIZE = 120;
-const STROKE = 10;
-const R = (SIZE - STROKE) / 2;
-const CENTER = SIZE / 2;
+/** Default ring diameter — the full-size ring. */
+const DEFAULT_SIZE = 120;
+/** Ring stroke at DEFAULT_SIZE; scales linearly with `size` (floor 6). */
+const BASE_STROKE = 10;
 /** Progress past which the arc picks up its subtle heat glow. */
 const HOT_PROGRESS = 0.75;
 
@@ -54,11 +59,14 @@ let celebratedDay: string | null = null;
 export function GoalRing({
   made,
   goal,
+  size = DEFAULT_SIZE,
 }: {
   /** Makes so far today (see src/core/goals.ts todayMakes). */
   made: number;
   /** Daily goal in makes. Callers should not render this component when goal <= 0. */
   goal: number;
+  /** Canvas diameter, px. Defaults to the original 120. */
+  size?: number;
 }) {
   const reducedMotion = useReducedMotion();
   const progress = goalProgress(made, goal);
@@ -66,6 +74,12 @@ export function GoalRing({
   /** Closing in (>75%) or done — the arc earns its glow. */
   const hot = complete || progress >= HOT_PROGRESS;
   const ringColor = complete ? color.make : color.accent;
+
+  // Geometry, all derived from the size prop. At DEFAULT_SIZE these reduce to
+  // the original constants exactly (stroke 10, r 55, center 60).
+  const stroke = Math.max(6, Math.round((size / DEFAULT_SIZE) * BASE_STROKE));
+  const r = (size - stroke) / 2;
+  const center = size / 2;
 
   const glow = useSharedValue(0);
   useEffect(() => {
@@ -106,9 +120,10 @@ export function GoalRing({
     ripple.value = withTiming(1, { duration: motion.celebrate, easing: Easing.out(Easing.cubic) });
   }, [complete, pop, reducedMotion, ripple]);
 
+  // Worklet math stays inline over plain closed-over numbers (r, complete).
   const glowOpacity = useDerivedValue(() => (complete ? 0.18 + glow.value * 0.22 : 0));
-  const glowR = useDerivedValue(() => R * 0.55 + glow.value * (complete ? 8 : 0));
-  const rippleR = useDerivedValue(() => R * (0.45 + ripple.value * 0.5));
+  const glowR = useDerivedValue(() => r * 0.55 + glow.value * (complete ? 8 : 0));
+  const rippleR = useDerivedValue(() => r * (0.45 + ripple.value * 0.5));
   const rippleOpacity = useDerivedValue(() =>
     ripple.value > 0 ? (1 - ripple.value) * 0.5 : 0,
   );
@@ -118,25 +133,25 @@ export function GoalRing({
 
   const trackPath = useMemo(() => {
     const p = Skia.Path.Make();
-    p.addCircle(CENTER, CENTER, R);
+    p.addCircle(center, center, r);
     return p;
-  }, []);
+  }, [center, r]);
 
   const arcPath = useMemo(() => {
     const p = Skia.Path.Make();
     const sweep = 360 * Math.max(0, Math.min(1, progress));
     if (sweep > 0) {
-      p.addArc(Skia.XYWHRect(STROKE / 2, STROKE / 2, R * 2, R * 2), -90, sweep);
+      p.addArc(Skia.XYWHRect(stroke / 2, stroke / 2, r * 2, r * 2), -90, sweep);
     }
     return p;
-  }, [progress]);
+  }, [progress, r, stroke]);
 
   // Faint shot arc traced inside the ring — the signature motif, echoed at
   // small scale. Purely decorative, sits behind the numeral.
   const motifPath = useMemo(() => {
-    const pad = STROKE + 14;
-    return `M ${pad} ${SIZE - pad} Q ${CENTER} ${pad * 0.2} ${SIZE - pad} ${pad}`;
-  }, []);
+    const pad = stroke + Math.round((size / DEFAULT_SIZE) * 14);
+    return `M ${pad} ${size - pad} Q ${center} ${pad * 0.2} ${size - pad} ${pad}`;
+  }, [center, size, stroke]);
 
   const pct = Math.round(progress * 100);
   const label = complete
@@ -144,9 +159,13 @@ export function GoalRing({
     : `Daily goal, ${made} of ${goal} makes, ${pct} percent`;
 
   return (
-    <View style={styles.wrap} accessible accessibilityLabel={label}>
-      <Canvas style={styles.canvas}>
-        <Circle cx={CENTER} cy={CENTER} r={glowR} color={color.make} opacity={glowOpacity} />
+    <View
+      style={[styles.wrap, { width: size, height: size }]}
+      accessible
+      accessibilityLabel={label}
+    >
+      <Canvas style={{ width: size, height: size }}>
+        <Circle cx={center} cy={center} r={glowR} color={color.make} opacity={glowOpacity} />
         <Path
           path={motifPath}
           style="stroke"
@@ -157,7 +176,7 @@ export function GoalRing({
         <Path
           path={trackPath}
           style="stroke"
-          strokeWidth={STROKE}
+          strokeWidth={stroke}
           color={color.hudGlassBorder}
           opacity={0.9}
         />
@@ -165,7 +184,7 @@ export function GoalRing({
           <Path
             path={arcPath}
             style="stroke"
-            strokeWidth={STROKE}
+            strokeWidth={stroke}
             strokeCap="round"
             color={ringColor}
             opacity={complete ? 0.55 : 0.4}
@@ -176,13 +195,13 @@ export function GoalRing({
         <Path
           path={arcPath}
           style="stroke"
-          strokeWidth={STROKE}
+          strokeWidth={stroke}
           strokeCap="round"
           color={ringColor}
         />
         <Circle
-          cx={CENTER}
-          cy={CENTER}
+          cx={center}
+          cy={center}
           r={rippleR}
           style="stroke"
           strokeWidth={2}
@@ -191,7 +210,14 @@ export function GoalRing({
         />
       </Canvas>
       <Animated.View style={[styles.center, centerStyle]} pointerEvents="none">
-        <Text style={[styles.count, complete && { color: color.make }]}>{made}</Text>
+        <Text
+          style={[
+            size >= DEFAULT_SIZE ? styles.count : styles.countSmall,
+            complete && { color: color.make },
+          ]}
+        >
+          {made}
+        </Text>
         <Text style={styles.goal}>{`OF ${goal}`}</Text>
       </Animated.View>
     </View>
@@ -200,14 +226,8 @@ export function GoalRing({
 
 const styles = StyleSheet.create({
   wrap: {
-    width: SIZE,
-    height: SIZE,
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  canvas: {
-    width: SIZE,
-    height: SIZE,
   },
   center: {
     ...absoluteFill,
@@ -218,6 +238,14 @@ const styles = StyleSheet.create({
     ...type.statLarge,
     fontSize: 40,
     lineHeight: 42,
+    color: color.text,
+    fontVariant: ['tabular-nums'],
+  },
+  // Scaled-down rings step to the smallest broadcast numeral on the ladder
+  // instead of patching a size — the ladder rule (statSmall fits inside an
+  // 88px ring with the 'OF N' micro underneath).
+  countSmall: {
+    ...type.statSmall,
     color: color.text,
     fontVariant: ['tabular-nums'],
   },

@@ -37,7 +37,7 @@ import React, {
   useState,
   type ComponentProps,
 } from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import Animated, { FadeIn, ReduceMotion } from 'react-native-reanimated';
 
 import { LEADERBOARD_TILE, NavTileRow } from '@/components/NavTiles';
@@ -45,15 +45,16 @@ import { WeeklyChallengeCard } from '@/components/WeeklyChallengeCard';
 import { ProBadge } from '@/components/ProBadge';
 import { ModeCatalogCard } from '@/components/modes/ModeCatalogCard';
 import { ModeSectionHeader } from '@/components/modes/ModeSectionHeader';
+import { ToolCard } from '@/components/modes/ToolCard';
 import { RecommendedHero } from '@/components/modes/RecommendedHero';
 import {
   DRILL_IDENTITY,
   MODE_IDENTITY,
   type ModeIdentity,
 } from '@/components/modes/modeIdentity';
-import { useCardStagger } from '@/components/motion';
+import { Shimmer, useCardStagger } from '@/components/motion';
 import { Card, Eyebrow, Row, Screen } from '@/components/ui';
-import { color, motion, radius, space, touch, type } from '@/constants/tokens';
+import { color, iconSize, motion, radius, space, touch, type } from '@/constants/tokens';
 import { levelOfGoals, type DrillLevel } from '@/core/drillProgression';
 import { DRILLS, type Drill, type DrillId } from '@/core/drills';
 import {
@@ -98,6 +99,29 @@ const GAME_SECTION_MODES = gameSectionModes();
 /** Free Play — GAME_MODES[0] by catalog contract; lives in Quick start. */
 const FREE_DEF = GAME_MODES[0];
 
+/**
+ * GAMES grid split: every non-ghost game tiles up 2-across; Ghost keeps the
+ * one full-width row beneath the grid (its inline source picker needs the
+ * width). The ghost lookup cannot miss — 'ghost' is in the catalog contract.
+ */
+const TILE_MODES = GAME_SECTION_MODES.filter((m) => m.id !== 'ghost');
+const GHOST_DEF = GAME_SECTION_MODES.find((m) => m.id === 'ghost')!;
+
+/** Chunk the tile catalog into rows of two for the cartridge grid. */
+function pairRows<T>(items: readonly T[]): T[][] {
+  const rows: T[][] = [];
+  for (let i = 0; i < items.length; i += 2) rows.push(items.slice(i, i + 2));
+  return rows;
+}
+const TILE_ROWS = pairRows(TILE_MODES);
+
+/**
+ * Height of the QUICK START hero skeleton — matches RecommendedHero's resting
+ * height (2×lg padding + eyebrow 16 + name 22+4 + tagline 21+2 + reason 16+4
+ * + foot 12+23 ≈ 152) so the shelf below does not jump when the hero lands.
+ */
+const HERO_SKELETON_HEIGHT = 152;
+
 /** Player-facing name for a ghost source session: its tag, else its date. */
 function ghostSourceTitle(row: SessionSummaryRow): string {
   const label = row.label.trim();
@@ -110,6 +134,8 @@ function ghostSourceTitle(row: SessionSummaryRow): string {
 }
 
 export default function ModePickerScreen() {
+  // Hero skeleton width: Screen's scroll content = window minus 2×lg padding.
+  const contentW = useWindowDimensions().width - space.lg * 2;
   const selectMode = useMode((s) => s.selectMode);
   const selectDrill = useMode((s) => s.selectDrill);
   const activeMode = useMode((s) => s.activeMode);
@@ -258,6 +284,7 @@ export default function ModePickerScreen() {
     tagline: string;
     accent: string;
     tint: string;
+    edge: string;
     selected: boolean;
   } | null = null;
   if (reco != null) {
@@ -270,6 +297,7 @@ export default function ModePickerScreen() {
         tagline: def.tagline,
         accent: identity.accent,
         tint: identity.tint,
+        edge: identity.edge,
         // Armed-mode check mirrors the Games cards: a drill armed on top of
         // spotShooting must not light a plain-mode hero as PICKED.
         selected: activeMode?.modeId === reco.modeId && activeMode?.config?.drill == null,
@@ -283,6 +311,7 @@ export default function ModePickerScreen() {
         tagline: drill.tagline,
         accent: identity.accent,
         tint: identity.tint,
+        edge: identity.edge,
         selected: activeDrillId === reco.drillId,
       };
     }
@@ -304,11 +333,17 @@ export default function ModePickerScreen() {
         </Text>
       </Animated.View>
 
-      {/* QUICK START — recommendation hero (when history supports one) + Free
-          Play, always one tap away. */}
+      {/* QUICK START — the hero slot is ALWAYS occupied: a Shimmer skeleton
+          while the session read is in flight (kills the layout jump on every
+          visit), then the recommendation hero — or, for a new player with no
+          history to recommend from, Free Play promoted into the hero. */}
       <ModeSectionHeader title={quickStartSection.title} />
       <View style={styles.sectionList}>
-        {hero != null && reco != null && (
+        {ghostSources == null ? (
+          <Animated.View entering={enter(0)}>
+            <Shimmer width={contentW} height={HERO_SKELETON_HEIGHT} radius={radius.lg} />
+          </Animated.View>
+        ) : hero != null && reco != null ? (
           <Animated.View entering={enter(0)}>
             <RecommendedHero
               icon={hero.icon}
@@ -316,26 +351,49 @@ export default function ModePickerScreen() {
               tagline={hero.tagline}
               accent={hero.accent}
               tint={hero.tint}
+              edge={hero.edge}
               reason={recommendationReason(reco)}
               selected={hero.selected}
               onPress={startReco}
             />
           </Animated.View>
+        ) : (
+          // New player (<2 plays → reco == null): Free Play IS the hero. The
+          // 'starter' variant renders no reason line at all — there is no
+          // session history to cite, and inventing one is forbidden.
+          <Animated.View entering={enter(0)}>
+            <RecommendedHero
+              variant="starter"
+              icon={MODE_IDENTITY.free.icon}
+              name={FREE_DEF.name}
+              tagline={FREE_DEF.tagline}
+              accent={MODE_IDENTITY.free.accent}
+              tint={MODE_IDENTITY.free.tint}
+              edge={MODE_IDENTITY.free.edge}
+              selected={activeMode?.modeId === 'free'}
+              onPress={() => pick('free')}
+            />
+          </Animated.View>
         )}
-        <Animated.View entering={enter(hero != null ? 1 : 0)}>
-          <ModeCatalogCard
-            icon={MODE_IDENTITY.free.icon}
-            name={FREE_DEF.name}
-            tagline={FREE_DEF.tagline}
-            accent={MODE_IDENTITY.free.accent}
-            tint={MODE_IDENTITY.free.tint}
-            glance={MODE_IDENTITY.free.glance}
-            showProBadge={false}
-            selected={activeMode?.modeId === 'free'}
-            accessibilityHint={FREE_DEF.rules}
-            onPress={() => pick('free')}
-          />
-        </Animated.View>
+        {/* Free Play compact row — hidden only once Free Play IS the hero
+            (rendered while loading so a returning player's shelf holds
+            still; a recommendation landing changes nothing below it). */}
+        {(ghostSources == null || reco != null) && (
+          <Animated.View entering={enter(1)}>
+            <ModeCatalogCard
+              icon={MODE_IDENTITY.free.icon}
+              name={FREE_DEF.name}
+              tagline={FREE_DEF.tagline}
+              accent={MODE_IDENTITY.free.accent}
+              tint={MODE_IDENTITY.free.tint}
+              glance={MODE_IDENTITY.free.glance}
+              showProBadge={false}
+              selected={activeMode?.modeId === 'free'}
+              accessibilityHint={FREE_DEF.rules}
+              onPress={() => pick('free')}
+            />
+          </Animated.View>
+        )}
       </View>
 
       {/* GAMES — the seven non-free modes; collapsible. */}
@@ -352,24 +410,24 @@ export default function ModePickerScreen() {
             entering={FadeIn.duration(motion.quick).reduceMotion(ReduceMotion.System)}
             style={styles.sectionList}
           >
-            {GAME_SECTION_MODES.map((m, i) => {
-              // PICKED guard: drills run as modeId 'spotShooting', so an armed
-              // DRILL must not also light the Spot Shooting card as PICKED.
-              const isSelected =
-                activeMode?.modeId === m.id &&
-                (m.id !== 'spotShooting' || activeMode?.config?.drill == null);
-              return (
-                <Animated.View key={m.id} entering={enter(i)}>
-                  {m.id === 'ghost' ? (
-                    <GhostCatalogCard
-                      mode={m}
-                      identity={MODE_IDENTITY[m.id]}
-                      selected={isSelected}
-                      sources={ghostSources}
-                      onStart={startGhost}
-                    />
-                  ) : (
+            {/* 2-column cartridge grid — every game except Ghost. Saves the
+                section ~200px over the old full-width rows. */}
+            {TILE_ROWS.map((pair, rowIdx) => (
+              <Animated.View
+                key={pair.map((m) => m.id).join('+')}
+                entering={enter(rowIdx)}
+                style={styles.tileRow}
+              >
+                {pair.map((m) => {
+                  // PICKED guard: drills run as modeId 'spotShooting', so an
+                  // armed DRILL must not light the Spot Shooting tile.
+                  const isSelected =
+                    activeMode?.modeId === m.id &&
+                    (m.id !== 'spotShooting' || activeMode?.config?.drill == null);
+                  return (
                     <ModeCatalogCard
+                      key={m.id}
+                      variant="tile"
                       icon={MODE_IDENTITY[m.id].icon}
                       name={m.name}
                       tagline={m.tagline}
@@ -381,10 +439,22 @@ export default function ModePickerScreen() {
                       accessibilityHint={m.rules}
                       onPress={() => pick(m.id)}
                     />
-                  )}
-                </Animated.View>
-              );
-            })}
+                  );
+                })}
+                {pair.length === 1 && <View style={styles.tileSpacer} />}
+              </Animated.View>
+            ))}
+            {/* Ghost keeps the one full-width row — the inline source picker
+                needs the width. */}
+            <Animated.View key={GHOST_DEF.id} entering={enter(TILE_ROWS.length)}>
+              <GhostCatalogCard
+                mode={GHOST_DEF}
+                identity={MODE_IDENTITY[GHOST_DEF.id]}
+                selected={activeMode?.modeId === GHOST_DEF.id}
+                sources={ghostSources}
+                onStart={startGhost}
+              />
+            </Animated.View>
           </Animated.View>
         )}
       </View>
@@ -447,43 +517,41 @@ export default function ModePickerScreen() {
         )}
       </View>
 
-      {/* TRAINING TOOLS — nav tiles; the section header supplies the eyebrow
-          the first NavTileRow used to carry. */}
+      {/* TRAINING TOOLS — 2-column ToolCard entry cards with the one-line
+          hint made VISIBLE (the old NavTiles hid it in the a11y tree). The
+          Leaderboard NavTile stays in CHALLENGES above — this section never
+          renders NavTileRow. */}
       <View style={styles.sectionGap}>
         <ModeSectionHeader title={toolsSection.title} />
         <View style={styles.sectionList}>
-          <NavTileRow
-            tiles={[
-              {
-                icon: 'basketball-outline',
-                label: 'Scoreboard',
-                hint: 'Track a live head-to-head score',
-                onPress: () => router.push('/scoreboard'),
-              },
-              {
-                icon: 'fitness',
-                label: 'Jump Lab',
-                hint: 'Measure and train your vertical',
-                onPress: () => router.push('/jump'),
-              },
-            ]}
-          />
-          <NavTileRow
-            tiles={[
-              {
-                icon: 'body',
-                label: 'Form Studio',
-                hint: 'Compare your shooting form to NBA archetypes',
-                onPress: () => router.push('/formstudio'),
-              },
-              {
-                icon: 'scan-outline',
-                label: 'Video Check',
-                hint: 'Run the detector on a video from your library',
-                onPress: () => router.push('/session/analyze'),
-              },
-            ]}
-          />
+          <View style={styles.tileRow}>
+            <ToolCard
+              icon="basketball-outline"
+              label="Scoreboard"
+              hint="Track a live head-to-head score"
+              onPress={() => router.push('/scoreboard')}
+            />
+            <ToolCard
+              icon="fitness"
+              label="Jump Lab"
+              hint="Measure and train your vertical"
+              onPress={() => router.push('/jump')}
+            />
+          </View>
+          <View style={styles.tileRow}>
+            <ToolCard
+              icon="body"
+              label="Form Studio"
+              hint="Compare your shooting form to NBA archetypes"
+              onPress={() => router.push('/formstudio')}
+            />
+            <ToolCard
+              icon="scan-outline"
+              label="Video Check"
+              hint="Run the detector on a video from your library"
+              onPress={() => router.push('/session/analyze')}
+            />
+          </View>
         </View>
       </View>
 
@@ -503,7 +571,11 @@ export default function ModePickerScreen() {
             <Text style={styles.proLinkText}>
               {proOpen ? 'Hide what Pro unlocks' : 'What does Pro unlock?'}
             </Text>
-            <Text style={styles.proChevron}>{proOpen ? '︿' : '﹀'}</Text>
+            <Ionicons
+              name={proOpen ? 'chevron-up' : 'chevron-down'}
+              size={iconSize.md}
+              color={color.textFaint}
+            />
           </Pressable>
           {proOpen && (
             <Animated.View entering={FadeIn.duration(motion.quick).reduceMotion(ReduceMotion.System)}>
@@ -553,6 +625,8 @@ function GhostCatalogCard({
   const [open, setOpen] = useState(false);
   const [busyId, setBusyId] = useState<number | null>(null);
   const [rowError, setRowError] = useState<string | null>(null);
+  // Skeleton row width: window minus the screen (lg) and card (md) padding.
+  const ghostRowW = useWindowDimensions().width - space.lg * 2 - space.md * 2;
   const disabled = sources != null && sources.length === 0;
   const disabledReason = `Finish a session with ${GHOST_MIN_MAKES}+ tracked makes first — your recent runs will appear here to race.`;
 
@@ -600,7 +674,12 @@ function GhostCatalogCard({
       {open && !disabled && (
         <View style={styles.ghostList}>
           {sources == null ? (
-            <Text style={styles.ghostLoading}>Loading recent sessions…</Text>
+            // Two skeletons shaped like the real ghostRow (48px, radius.md) —
+            // the app's one loading language, no dim placeholder text.
+            <>
+              <Shimmer width={ghostRowW} height={touch.minTarget} radius={radius.md} />
+              <Shimmer width={ghostRowW} height={touch.minTarget} radius={radius.md} />
+            </>
           ) : (
             sources.map((s) => {
               const title = ghostSourceTitle(s);
@@ -628,7 +707,9 @@ function GhostCatalogCard({
                     </Text>
                   </View>
                   {busyId === s.id ? (
-                    <Text style={[styles.ghostRowGo, { color: identity.accent }]}>LOADING…</Text>
+                    // Shimmer sweep in place of the RACE affordance while the
+                    // shot timeline loads.
+                    <Shimmer width={56} height={14} radius={radius.sm} />
                   ) : (
                     <Row gap={space.xs}>
                       <Text style={[styles.ghostRowGo, { color: identity.accent }]}>RACE</Text>
@@ -670,14 +751,19 @@ const styles = StyleSheet.create({
     marginTop: space.md,
     gap: space.md,
   },
+  /** One 2-up grid row (GAMES cartridges, TRAINING TOOLS cards). */
+  tileRow: {
+    flexDirection: 'row',
+    gap: space.md,
+  },
+  /** Keeps a lone tile at half width when the catalog count is odd. */
+  tileSpacer: {
+    flex: 1,
+  },
   // --- Ghost source picker (inline, inside the ghost cartridge) -----------
   ghostList: {
     marginTop: space.md,
     gap: space.sm,
-  },
-  ghostLoading: {
-    ...type.caption,
-    color: color.textFaint,
   },
   ghostRow: {
     flexDirection: 'row',
@@ -728,10 +814,6 @@ const styles = StyleSheet.create({
   proLinkText: {
     ...type.bodyMedium,
     color: color.textDim,
-  },
-  proChevron: {
-    ...type.caption,
-    color: color.textFaint,
   },
   proCard: {
     marginTop: space.md,

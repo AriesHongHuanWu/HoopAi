@@ -25,6 +25,12 @@ export interface ModeIdentity {
   accent: string;
   /** 14% wash of the accent for badge/chip fills. */
   tint: string;
+  /**
+   * 45% hairline of the accent — the exact leatherEdge recipe from tokens.ts
+   * (a 14% wash read as a border disappears against `court`, so emphasized
+   * edges need the hotter alpha). Used by the RecommendedHero resting border.
+   */
+  edge: string;
   /** Rules-at-a-glance chips for the picker (2 short fragments max). */
   glance: readonly string[];
 }
@@ -34,48 +40,56 @@ export const MODE_IDENTITY: Record<GameModeId, ModeIdentity> = {
     icon: 'basketball',
     accent: color.accent,
     tint: color.accentTint,
+    edge: color.accentEdge,
     glance: ['Open run', 'No clock'],
   },
   aroundTheWorld: {
     icon: 'earth',
     accent: color.info,
     tint: 'rgba(79, 141, 232, 0.14)',
+    edge: 'rgba(79, 141, 232, 0.45)',
     glance: ['5 spots', 'Make to move'],
   },
   spotShooting: {
     icon: 'locate',
     accent: color.make,
     tint: color.makeTint,
+    edge: 'rgba(47, 214, 163, 0.45)',
     glance: ['5 spots', '% per spot'],
   },
   timed: {
     icon: 'stopwatch',
     accent: color.unsure,
     tint: 'rgba(232, 184, 79, 0.14)',
+    edge: 'rgba(232, 184, 79, 0.45)',
     glance: ['60 seconds', 'Most makes'],
   },
   threePoint: {
     icon: 'cash',
     accent: color.threePt,
     tint: color.threePtTint,
+    edge: 'rgba(242, 193, 78, 0.45)',
     glance: ['25 balls', 'Money 5th'],
   },
   ftStreak: {
     icon: 'flame',
     accent: color.miss,
     tint: color.missTint,
+    edge: color.missEdge,
     glance: ['Free throws', 'In a row'],
   },
   horse: {
     icon: 'text',
     accent: color.textDim,
     tint: 'rgba(179, 172, 165, 0.14)',
+    edge: 'rgba(179, 172, 165, 0.45)',
     glance: ['Call it', '5 letters'],
   },
   ghost: {
     icon: 'walk',
     accent: color.ghost,
     tint: color.ghostTint,
+    edge: 'rgba(156, 123, 240, 0.45)',
     glance: ['Your past run', 'Same clock'],
   },
 } as const;
@@ -90,6 +104,8 @@ export const MODE_IDENTITY: Record<GameModeId, ModeIdentity> = {
 export interface DrillIdentity {
   accent: string;
   tint: string;
+  /** 45% accent hairline — same leatherEdge recipe as ModeIdentity.edge. */
+  edge: string;
   glance: readonly string[];
 }
 
@@ -97,26 +113,31 @@ export const DRILL_IDENTITY: Record<DrillId, DrillIdentity> = {
   corners3: {
     accent: color.threePt,
     tint: color.threePtTint,
+    edge: 'rgba(242, 193, 78, 0.45)',
     glance: ['Both corners', '3PT'],
   },
   ftLadder: {
     accent: color.make,
     tint: color.makeTint,
+    edge: 'rgba(47, 214, 163, 0.45)',
     glance: ['10 free throws', 'From the line'],
   },
   midClock: {
     accent: color.info,
     tint: 'rgba(79, 141, 232, 0.14)',
+    edge: 'rgba(79, 141, 232, 0.45)',
     glance: ['5 spots', '3 makes each'],
   },
   aroundKey: {
     accent: color.accent,
     tint: color.accentTint,
+    edge: color.accentEdge,
     glance: ['6 spots', 'At the rim'],
   },
   catchShoot10: {
     accent: color.ghost,
     tint: color.ghostTint,
+    edge: 'rgba(156, 123, 240, 0.45)',
     glance: ['10 makes', '15 attempts'],
   },
 } as const;

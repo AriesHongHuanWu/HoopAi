@@ -1,6 +1,8 @@
 /**
  * Settings — grouped cards wired straight to the persisted settings store.
- * Sections: Feedback (sounds/haptics/voice), Detection (model/rate/debug),
+ * Sections: Feedback (sounds/haptics/voice), Detection (tracking preset,
+ * device tier, the two make-suppressing guards, Debug — the Debug-gated
+ * detector internals live on the pushed /settings-advanced screen),
  * Video (record + clip retention), Player (hand, height),
  * Help (restart tutorial / replay onboarding), About (version + model licenses).
  */
@@ -20,13 +22,8 @@ import {
 import { BackPill } from '@/components/ShotList';
 import { CalibrationHealthCard } from '@/components/CalibrationHealthCard';
 import { Card, Eyebrow, Row, Screen } from '@/components/ui';
-import { color, radius, space, touch, type } from '@/constants/tokens';
+import { color, iconSize, layout, radius, space, touch, type } from '@/constants/tokens';
 import type { ShootingHand } from '@/core/types';
-import {
-  HARD_EXAMPLE_EXPORT_LIMIT,
-  countHardExamples,
-  exportHardExamples,
-} from '@/data/hardExamples';
 import { runBackupExport, runBackupImport } from '@/data/backupRunner';
 import { useCardStagger } from '@/components/motion';
 import { haptic } from '@/utils/haptics';
@@ -37,18 +34,24 @@ import {
   CLIP_PRE_ROLL_MIN,
   presetFromKnobs,
   useSettings,
-  type DetectionRate,
   type KeepMode,
   type TrackingPreset,
   type VoiceMetric,
 } from '@/state/settingsStore';
+// Height is PROFILE data — the row's copy says "Saved to your profile", so it
+// reads and writes profileStore.heightCm (the store Coach, Jump Lab and the
+// wizard actually consume), using the profile's own bounds. settingsStore
+// still carries its legacy playerHeightCm key so persisted shapes stay
+// migration-stable; the UI just never touches it anymore.
+import {
+  DEFAULT_HEIGHT_CM,
+  MAX_HEIGHT_CM,
+  MIN_HEIGHT_CM,
+  useProfile,
+} from '@/state/profileStore';
 import * as Device from 'expo-device';
 import { resolvedTuning } from '@/camera/deviceTuning';
 import { tierLabel, type DeviceTier } from '@/core/deviceProfile';
-
-const MIN_HEIGHT_CM = 120;
-const MAX_HEIGHT_CM = 230;
-const DEFAULT_HEIGHT_CM = 175;
 
 /** Daily goal stepper bounds (see Home's GoalRing). 0 = off. */
 const DAILY_GOAL_MIN = 0;
@@ -130,12 +133,6 @@ const COURT_RANGE_OPTIONS: {
   },
 ];
 
-const DETECTION_RATE_OPTIONS: { value: DetectionRate; label: string; blurb: string }[] = [
-  { value: 'auto', label: 'Auto · recommended', blurb: 'Smooth tracking on every supported phone.' },
-  { value: 'battery', label: 'Battery saver', blurb: 'Cooler phone, longer sessions.' },
-  { value: 'max', label: 'Maximum', blurb: 'Newest phones only.' },
-];
-
 const DEVICE_TIER_OPTIONS: { value: 'auto' | DeviceTier; label: string; blurb: string }[] = [
   { value: 'auto', label: 'Auto · recommended', blurb: 'Detect this phone and tune detection for it.' },
   { value: 'high', label: 'High', blurb: 'Newest phones — most accurate small-ball model, all features.' },
@@ -176,16 +173,6 @@ function tick() {
   haptic.selection();
 }
 
-/** Human copy for the measured device tier, from the last on-device benchmark. */
-function benchmarkSummary(bench: { delegate: string; ms: number } | null): string {
-  if (bench == null) return 'Run a session once to benchmark this phone.';
-  const tier = bench.ms <= AUTO_PRECISE_MAX_MS ? 'Precise recommended' : 'Standard recommended';
-  return `Your phone: ${bench.delegate} · ${bench.ms}ms — ${tier}`;
-}
-
-/** Mirrors AUTO_PRECISE_MAX_MS in src/camera/useShotEngine.ts (auto step-down budget). */
-const AUTO_PRECISE_MAX_MS = 55;
-
 // ---------------------------------------------------------------------------
 // Sound pack preview — plays the pack's make sound on select
 // ---------------------------------------------------------------------------
@@ -216,7 +203,7 @@ function SectionHeader({ icon, children }: { icon: IconName; children: string })
   return (
     <Row gap={space.sm}>
       <View style={styles.sectionIcon}>
-        <Ionicons name={icon} size={14} color={color.accent} />
+        <Ionicons name={icon} size={iconSize.sm} color={color.accent} />
       </View>
       <Eyebrow>{children}</Eyebrow>
     </Row>
@@ -226,19 +213,24 @@ function SectionHeader({ icon, children }: { icon: IconName; children: string })
 function ToggleRow({
   label,
   description,
+  detail,
   value,
   disabled,
   experimental,
   onValueChange,
 }: {
   label: string;
+  /** ONE honest sentence — the full story lives behind `detail`. */
   description?: string;
+  /** Collapsed long-form copy behind a "More" disclosure. Never deleted. */
+  detail?: string;
   value: boolean;
   disabled?: boolean;
   /** Renders a flask badge so pre-release features read as a class. */
   experimental?: boolean;
   onValueChange: (v: boolean) => void;
 }) {
+  const [expanded, setExpanded] = useState(false);
   return (
     <Row style={[styles.settingRow, disabled === true && styles.disabled]} gap={space.lg}>
       <View style={styles.settingText}>
@@ -252,6 +244,20 @@ function ToggleRow({
           )}
         </View>
         {description != null && <Text style={styles.settingDesc}>{description}</Text>}
+        {detail != null && (
+          <>
+            {expanded && <Text style={styles.settingDesc}>{detail}</Text>}
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={expanded ? `Less about ${label}` : `More about ${label}`}
+              accessibilityState={{ expanded }}
+              hitSlop={space.sm}
+              onPress={() => setExpanded((v) => !v)}
+            >
+              <Text style={styles.moreLink}>{expanded ? 'Less' : 'More'}</Text>
+            </Pressable>
+          </>
+        )}
       </View>
       <Switch
         accessibilityLabel={experimental === true ? `${label} (experimental)` : label}
@@ -297,7 +303,7 @@ function SelectChip({
         pressed && selected && { opacity: 0.82 },
       ]}
     >
-      {selected && <Ionicons name="checkmark" size={13} color={color.accent} />}
+      {selected && <Ionicons name="checkmark" size={iconSize.sm} color={color.accent} />}
       <Text style={[styles.selectChipLabel, selected && styles.selectChipLabelSelected]}>
         {label}
       </Text>
@@ -415,7 +421,7 @@ function ActionRow({
         <Text style={styles.settingLabel}>{label}</Text>
         <Text style={styles.settingDesc}>{description}</Text>
       </View>
-      <Ionicons name="chevron-forward" size={18} color={color.textFaint} />
+      <Ionicons name="chevron-forward" size={iconSize.lg} color={color.textFaint} />
     </Pressable>
   );
 }
@@ -527,30 +533,23 @@ export default function SettingsScreen() {
   const ballSize = useSettings((s) => s.ballSize);
   const rimHeightM = useSettings((s) => s.rimHeightM);
   const courtRange = useSettings((s) => s.courtRange);
-  const playerHeightCm = useSettings((s) => s.playerHeightCm);
-  const detectorModel = useSettings((s) => s.detectorModel);
+  // The advanced detector knobs (model/engine/rate, experiments, guards) are
+  // read on /settings-advanced; this screen only keeps the four preset knobs
+  // (to derive the active preset) plus what its own rows render.
   const detectionRate = useSettings((s) => s.detectionRate);
   const perfMode = useSettings((s) => s.perfMode);
   const detectorEngine = useSettings((s) => s.detectorEngine);
   const detectorAccel = useSettings((s) => s.detectorAccel);
   const lastBenchmark = useSettings((s) => s.lastBenchmark);
   const debugMode = useSettings((s) => s.debugMode);
-  const roiZoom = useSettings((s) => s.roiZoom);
-  const depthVeto = useSettings((s) => s.depthVeto);
-  const reappearance = useSettings((s) => s.reappearance);
   const rattleGuard = useSettings((s) => s.rattleGuard);
   const settleWindow = useSettings((s) => s.settleWindow);
-  const motionAssist = useSettings((s) => s.motionAssist);
-  const metric23 = useSettings((s) => s.metric23);
-  const nanoV2 = useSettings((s) => s.nanoV2);
-  const useFlightArc = useSettings((s) => s.useFlightArc);
   const replay3d = useSettings((s) => s.replay3d);
-  const multiBallGuard = useSettings((s) => s.multiBallGuard);
-  const rimGuard = useSettings((s) => s.rimGuard);
-  const trackerRescue = useSettings((s) => s.trackerRescue);
-  const adaptiveThermal = useSettings((s) => s.adaptiveThermal);
-  const lensCheck = useSettings((s) => s.lensCheck);
   const formAnalysis = useSettings((s) => s.formAnalysis);
+  // Height reads the PROFILE store (see the import comment): the row promises
+  // "Saved to your profile", so that has to be literally true.
+  const heightCm = useProfile((s) => s.heightCm);
+  const setProfileField = useProfile((s) => s.set);
   const dailyGoalMakes = useSettings((s) => s.dailyGoalMakes);
   const set = useSettings((s) => s.set);
   const applyTrackingPreset = useSettings((s) => s.applyTrackingPreset);
@@ -573,17 +572,12 @@ export default function SettingsScreen() {
     detectionRate,
   });
   // Advanced detector knobs live behind Debug mode (two-tier settings): the
-  // page stays a 30-second read; flipping Debug reveals everything.
+  // page stays a 30-second read; flipping Debug reveals the row that pushes
+  // /settings-advanced, where every diagnostic knob now lives.
 
   // Transient caption shown after "Restart tutorial" is tapped.
   const [tutorialNotice, setTutorialNotice] = useState(false);
   const tutorialNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // Correction flywheel (Debug-gated "Improve detection" block): live count of
-  // exportable hard examples + a transient caption when an export can't run.
-  const [hardExampleCount, setHardExampleCount] = useState<number | null>(null);
-  const [exportNotice, setExportNotice] = useState<string | null>(null);
-  const exportNoticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // P19 backup — export/import all data. `backupBusy` guards double taps;
   // `backupNotice` is the transient result caption under the rows.
@@ -605,20 +599,7 @@ export default function SettingsScreen() {
   // Clear the pending notice timers on unmount.
   useEffect(() => () => {
     if (tutorialNoticeTimer.current != null) clearTimeout(tutorialNoticeTimer.current);
-    if (exportNoticeTimer.current != null) clearTimeout(exportNoticeTimer.current);
     if (backupNoticeTimer.current != null) clearTimeout(backupNoticeTimer.current);
-  }, []);
-
-  // Count once on mount — corrections happen on other screens, so the number
-  // is stable while Settings is open.
-  useEffect(() => {
-    let alive = true;
-    void countHardExamples().then((n) => {
-      if (alive) setHardExampleCount(n);
-    });
-    return () => {
-      alive = false;
-    };
   }, []);
 
   const restartTutorial = () => {
@@ -633,18 +614,6 @@ export default function SettingsScreen() {
     tick();
     set('onboardingDone', false);
     router.push('/onboarding');
-  };
-
-  const runHardExampleExport = async () => {
-    tick();
-    const result = await exportHardExamples();
-    if (!result.ok && result.count > 0) {
-      // Collected fine but the share sheet never opened — worth a caption.
-      // (ok:false with count 0 can't happen here; the row is disabled at 0.)
-      setExportNotice("Couldn't open the share sheet — try again.");
-      if (exportNoticeTimer.current != null) clearTimeout(exportNoticeTimer.current);
-      exportNoticeTimer.current = setTimeout(() => setExportNotice(null), 3000);
-    }
   };
 
   const runExportAll = async () => {
@@ -687,10 +656,10 @@ export default function SettingsScreen() {
     tick();
     // First tap lands on a sensible default; later taps step by 1 cm.
     const next =
-      playerHeightCm == null
+      heightCm == null
         ? DEFAULT_HEIGHT_CM
-        : Math.min(MAX_HEIGHT_CM, Math.max(MIN_HEIGHT_CM, playerHeightCm + delta));
-    set('playerHeightCm', next);
+        : Math.min(MAX_HEIGHT_CM, Math.max(MIN_HEIGHT_CM, heightCm + delta));
+    setProfileField('heightCm', next);
   };
 
   const version = Constants.expoConfig?.version ?? '1.0.0';
@@ -796,7 +765,7 @@ export default function SettingsScreen() {
           </View>
           {activePreset === 'custom' && (
             <Text style={styles.tierCaption}>
-              Custom — your advanced controls below don&apos;t match a preset.
+              Custom — your advanced detection controls don&apos;t match a preset.
               Pick one above to snap back to a bundle.
             </Text>
           )}
@@ -833,7 +802,8 @@ export default function SettingsScreen() {
               reach the off switch without first discovering Debug mode. */}
           <ToggleRow
             label="Rattle-out guard"
-            description="If you SEE the ball carom back out of the rim — landing outside the hoop, or popping back up above it — hold that shot as 'unsure' instead of counting a make. It now needs to actually see the ball leave the rim; it no longer holds a shot back just because the drop-through was hidden by the net. It can only downgrade a make to unsure, never invent a miss. Turn it off if makes still go uncounted."
+            description="If the ball visibly rattles back OUT of the rim, the shot is held as 'unsure' — it can only downgrade a make to unsure, never invent a miss."
+            detail="If you SEE the ball carom back out of the rim — landing outside the hoop, or popping back up above it — hold that shot as 'unsure' instead of counting a make. It now needs to actually see the ball leave the rim; it no longer holds a shot back just because the drop-through was hidden by the net. It can only downgrade a make to unsure, never invent a miss. Turn it off if makes still go uncounted."
             value={rattleGuard}
             onValueChange={(v) => {
               tick();
@@ -843,7 +813,8 @@ export default function SettingsScreen() {
           <View style={styles.divider} />
           <ToggleRow
             label="Late bounce-out check"
-            description="After a shot that TOUCHED the rim drops below it, wait a few frames (~0.13s) to catch a late bounce-out — the ball dips in, then pops back over the rim and out. A clean swish no longer waits, so makes register immediately. Like the guard above, it can only downgrade a make to unsure."
+            description="Waits ~0.13s after a rim-touch shot drops, to catch a late bounce-out — it can only downgrade a make to unsure."
+            detail="After a shot that TOUCHED the rim drops below it, wait a few frames (~0.13s) to catch a late bounce-out — the ball dips in, then pops back over the rim and out. A clean swish no longer waits, so makes register immediately. Like the guard above, it can only downgrade a make to unsure."
             value={settleWindow}
             onValueChange={(v) => {
               tick();
@@ -851,11 +822,11 @@ export default function SettingsScreen() {
             }}
           />
           <View style={styles.divider} />
-          {/* Debug mode is the ONE switch that reveals every advanced knob —
+          {/* Debug mode is the ONE switch that reveals the advanced surface —
               the settings stay a 30-second read for everyone else. */}
           <ToggleRow
             label="Debug mode"
-            description="Show live detector diagnostics and unlock the advanced detection controls below."
+            description="Show live detector diagnostics and unlock the advanced detection & diagnostics screen below."
             value={debugMode}
             onValueChange={(v) => {
               tick();
@@ -863,315 +834,19 @@ export default function SettingsScreen() {
             }}
           />
           {debugMode && (
-          <>
-          <View style={styles.divider} />
-          <View style={styles.settingText}>
-            <Text style={styles.settingLabel}>Device benchmark</Text>
-            <Text style={styles.settingDesc}>{benchmarkSummary(lastBenchmark)}</Text>
-          </View>
-          <View style={styles.divider} />
-          <View style={styles.settingText}>
-            <Text style={styles.settingLabel}>Detector model</Text>
-            <Text style={styles.settingDesc}>
-              Auto measures your phone at start and picks the best fit —
-              precise on recent phones, standard on older ones. You can also
-              pin one manually.
-            </Text>
-          </View>
-          <View style={styles.chipWrap}>
-            <SelectChip
-              label="Auto · recommended"
-              selected={detectorModel === 'auto'}
-              onPress={() => {
-                tick();
-                set('detectorModel', 'auto');
-              }}
-            />
-            <SelectChip
-              label="Standard · fast"
-              selected={detectorModel === 'standard'}
-              onPress={() => {
-                tick();
-                set('detectorModel', 'standard');
-              }}
-            />
-            <SelectChip
-              label="Precise · accurate"
-              selected={detectorModel === 'precise'}
-              onPress={() => {
-                tick();
-                set('detectorModel', 'precise');
-              }}
-            />
-          </View>
-          <Text style={styles.tierCaption}>
-            Standard: every iPhone since XR · Precise: iPhone 13 and newer recommended.
-          </Text>
-          <Text style={styles.tierCaption}>
-            These Standard/Precise tiers apply only to the YOLO11 fallback below.
-          </Text>
-          <View style={styles.divider} />
-          <View style={styles.settingText}>
-            <Text style={styles.settingLabel}>Detector engine</Text>
-            <Text style={styles.settingDesc}>
-              YOLOX is the default — an Apache-licensed detector the iPhone GPU
-              runs directly for faster, steadier boxes and a clean licence. YOLO11
-              is the older fallback (and the Detector model / Performance settings
-              above apply to it). Switch anytime.
-            </Text>
-          </View>
-          <View style={styles.chipWrap}>
-            <SelectChip
-              label="YOLOX · default"
-              selected={detectorEngine === 'yolox'}
-              onPress={() => {
-                tick();
-                set('detectorEngine', 'yolox');
-              }}
-            />
-            <SelectChip
-              label="YOLO11 · fallback"
-              selected={detectorEngine === 'yolo'}
-              onPress={() => {
-                tick();
-                set('detectorEngine', 'yolo');
-              }}
-            />
-          </View>
-          {detectorEngine === 'yolox' && (
             <>
               <View style={styles.divider} />
-              <View style={styles.settingText}>
-                <Text style={styles.settingLabel}>YOLOX accelerator</Text>
-                <Text style={styles.settingDesc}>
-                  CPU is the most accurate (it's what the Test AI screen uses) and
-                  runs YOLOX in real time on most phones. GPU is faster but can make
-                  the boxes less accurate on some devices. If live tracking looks
-                  worse than Test AI, use CPU; if it feels laggy, try GPU. Turn on
-                  Debug mode below to see the live fps.
-                </Text>
-              </View>
-              <View style={styles.chipWrap}>
-                <SelectChip
-                  label="CPU · accurate"
-                  selected={detectorAccel === 'cpu'}
-                  onPress={() => {
-                    tick();
-                    set('detectorAccel', 'cpu');
-                  }}
-                />
-                <SelectChip
-                  label="GPU · faster"
-                  selected={detectorAccel === 'gpu'}
-                  onPress={() => {
-                    tick();
-                    set('detectorAccel', 'gpu');
-                  }}
-                />
-              </View>
-            </>
-          )}
-          <View style={styles.divider} />
-          <View style={styles.settingText}>
-            <Text style={styles.settingLabel}>Performance</Text>
-            <Text style={styles.settingDesc}>
-              Input resolution — the biggest accuracy/speed lever. Quality feeds
-              the detector a larger image so the small, fast BALL is seen in ~2×
-              more frames (YOLOX 640) — best for tracking the ball, but slower.
-              Speed is lighter and faster (YOLOX 416) with a hit on a tiny/far
-              ball. If the ball keeps getting missed, use Quality.
-            </Text>
-          </View>
-          <View style={styles.chipWrap}>
-            <SelectChip
-              label="Quality · best ball"
-              selected={perfMode === 'quality'}
-              onPress={() => {
-                tick();
-                set('perfMode', 'quality');
-              }}
-            />
-            <SelectChip
-              label="Speed · faster"
-              selected={perfMode === 'speed'}
-              onPress={() => {
-                tick();
-                set('perfMode', 'speed');
-              }}
-            />
-          </View>
-          <View style={styles.divider} />
-          <View style={styles.settingText}>
-            <Text style={styles.settingLabel}>Detection rate</Text>
-            <Text style={styles.settingDesc}>
-              How often each camera frame is analyzed. Lower rates save battery.
-            </Text>
-          </View>
-          {DETECTION_RATE_OPTIONS.map((opt, i) => (
-            <View key={opt.value}>
-              {i > 0 && <View style={styles.divider} />}
-              <OptionRow
-                label={opt.label}
-                blurb={opt.blurb}
-                selected={detectionRate === opt.value}
+              {/* The 14-knob debug block lives on its own pushed screen so
+                  the Detection card stays scannable even with Debug on. */}
+              <ActionRow
+                label="Advanced detection & diagnostics"
+                description="Benchmark, detector model and engine, experiments, guards and the hard-example export."
                 onPress={() => {
                   tick();
-                  set('detectionRate', opt.value);
+                  router.push('/settings-advanced');
                 }}
               />
-            </View>
-          ))}
-          <View style={styles.divider} />
-          <ToggleRow
-            label="Full-flight tracking"
-            description="Fits one parabola over the WHOLE shot so the ball keeps being tracked across its entire flight — from the release, under the basket, all the way to the rim — not just near the hoop. On by default; it only recovers real ball detections along the physics path and can't invent a make. Turn off only if a specific phone misbehaves."
-            value={useFlightArc}
-            onValueChange={(v) => {
-              tick();
-              set('useFlightArc', v);
-            }}
-          />
-          <View style={styles.divider} />
-          <ToggleRow
-            label="nano-v2 detector"
-            experimental
-            description="An aggressive small-ball model for the fast (Nano) rung. Finds a small or fast ball in more frames, but is noisier — it can flash phantom boxes on ceiling lights, rafters or a background hoop, so it runs with a higher confidence bar to hold those back. OFF uses the cleaner conservative model. Only affects the Nano rung (slow phones / Speed); the Tiny model is unchanged. Reloads the detector when toggled."
-            value={nanoV2}
-            onValueChange={(v) => {
-              tick();
-              set('nanoV2', v);
-            }}
-          />
-          <View style={styles.divider} />
-          <ToggleRow
-            label="Metric 2/3 distance"
-            experimental
-            description="Uses the rim's real size (0.45m) and height (3.05m) as a ruler to compute your TRUE shooting distance in meters for the 2/3-point call, instead of the rough on-screen estimate. Falls back automatically when the camera angle can't support it. A successful FT-line calibration on the live screen switches this path on for that session even with this toggle off."
-            value={metric23}
-            onValueChange={(v) => {
-              tick();
-              set('metric23', v);
-            }}
-          />
-          <View style={styles.divider} />
-          <ToggleRow
-            label="Parallax guard (optical-illusion)"
-            description="Uses your ball's real size vs the rim's to catch a ball that crosses the rim line while flying IN FRONT of (or behind) the hoop — the airball that 'looks like it went in' — instead of counting it as a make. Veto-only: it can cancel a fake make, never invent one, and stays silent beyond its verified range (~1m separation up to ~6m; needs the right Ball size set in Player). ON by default; when it overturns a shot the receipt shows an 'IN FRONT' tag. Takes effect at the next rim lock."
-            value={depthVeto}
-            onValueChange={(v) => {
-              tick();
-              set('depthVeto', v);
-            }}
-          />
-          <View style={styles.divider} />
-          <ToggleRow
-            label="Ghost-swish rescue"
-            description="When the ball disappears into the net and reappears below the rim on the same flight path, count the make it implies — but only when the net motion or the in-basket detector agrees, so it can never invent a make. Recovers clean swishes the net swallows. ON by default; hardened against rim-bounces and putback fakes."
-            value={reappearance}
-            onValueChange={(v) => {
-              tick();
-              set('reappearance', v);
-            }}
-          />
-          <View style={styles.divider} />
-          <ToggleRow
-            label="Rim zoom"
-            experimental
-            description="When the ball is missed near the basket, re-run the detector on a magnified crop of the rim to recover it at the make/miss moment. Self-limiting — only fires during a shot, only when needed, and only on phones fast enough. Turn on Debug mode to see it working (the 'roi zoom' row)."
-            value={roiZoom}
-            onValueChange={(v) => {
-              tick();
-              set('roiZoom', v);
-            }}
-          />
-          <View style={styles.divider} />
-          <ToggleRow
-            label="Motion assist"
-            experimental
-            description="When the detector loses the ball mid-flight, use frame-to-frame motion to keep following the strongest mover. Can mistake other movement for the ball — leave off unless testing."
-            value={motionAssist}
-            onValueChange={(v) => {
-              tick();
-              set('motionAssist', v);
-            }}
-          />
-          <View style={styles.divider} />
-          {/* Detection guards — suppression/advisory-only safety nets. None of
-              them can ever create a make call; each toggle is an escape hatch. */}
-          <Eyebrow>Detection guards</Eyebrow>
-          <ToggleRow
-            label="Multi-ball guard"
-            description="Pause new shot detection while several balls are in the air. Prevents false calls during warmups."
-            value={multiBallGuard}
-            onValueChange={(v) => {
-              tick();
-              set('multiBallGuard', v);
-            }}
-          />
-          <View style={styles.divider} />
-          <ToggleRow
-            label="Rim bump guard"
-            description="Re-settle the rim quickly after camera bumps and hold judgment while the rim is uncertain."
-            value={rimGuard}
-            onValueChange={(v) => {
-              tick();
-              set('rimGuard', v);
-            }}
-          />
-          <View style={styles.divider} />
-          <ToggleRow
-            label="Track rescue"
-            description="Recovers a ball the detector keeps seeing but the tracker won’t start on (raised-gate models only). Detection-side only — never changes make/miss judging."
-            value={trackerRescue}
-            onValueChange={(v) => {
-              tick();
-              set('trackerRescue', v);
-            }}
-          />
-          <View style={styles.divider} />
-          <ToggleRow
-            label="Thermal auto-throttle"
-            description="Ease off detection when the phone runs hot, instead of stuttering."
-            value={adaptiveThermal}
-            onValueChange={(v) => {
-              tick();
-              set('adaptiveThermal', v);
-            }}
-          />
-          <View style={styles.divider} />
-          <ToggleRow
-            label="Lens check"
-            description="Warn before a session if glare or a smudged lens may hurt tracking."
-            value={lensCheck}
-            onValueChange={(v) => {
-              tick();
-              set('lensCheck', v);
-            }}
-          />
-          <View style={styles.divider} />
-          {/* Correction flywheel — fully manual, opt-in, one tap. */}
-          <View style={styles.settingText}>
-            <Text style={styles.settingLabel}>Improve detection</Text>
-            <Text style={styles.settingDesc}>
-              Export a manifest of your corrected and unsure shots — the exact
-              clips the AI got wrong — to help train better models. Video stays
-              on your phone; the export is a text manifest.
-            </Text>
-          </View>
-          <ActionRow
-            // Displayed count is capped at the export limit — advertising an
-            // uncapped total the export would then silently truncate reads
-            // as a bug to the user doing us the favor.
-            label={`Export hard examples (${Math.min(
-              hardExampleCount ?? 0,
-              HARD_EXAMPLE_EXPORT_LIMIT,
-            )} available)`}
-            description="Opens the share sheet with a JSON manifest of shot timings. No video is attached or uploaded."
-            disabled={hardExampleCount == null || hardExampleCount === 0}
-            onPress={() => void runHardExampleExport()}
-          />
-          {exportNotice != null && <Text style={styles.exportNotice}>{exportNotice}</Text>}
-          </>
+            </>
           )}
         </Card>
 
@@ -1406,17 +1081,17 @@ export default function SettingsScreen() {
               <StepperButton
                 glyph="−"
                 label="Decrease height"
-                disabled={playerHeightCm != null && playerHeightCm <= MIN_HEIGHT_CM}
+                disabled={heightCm != null && heightCm <= MIN_HEIGHT_CM}
                 onPress={() => bumpHeight(-1)}
               />
               <Text style={styles.heightValue}>
-                {playerHeightCm != null ? `${playerHeightCm}` : '—'}
-                <Text style={styles.heightUnit}>{playerHeightCm != null ? ' cm' : ''}</Text>
+                {heightCm != null ? `${heightCm}` : '—'}
+                <Text style={styles.heightUnit}>{heightCm != null ? ' cm' : ''}</Text>
               </Text>
               <StepperButton
                 glyph="+"
                 label="Increase height"
-                disabled={playerHeightCm != null && playerHeightCm >= MAX_HEIGHT_CM}
+                disabled={heightCm != null && heightCm >= MAX_HEIGHT_CM}
                 onPress={() => bumpHeight(1)}
               />
             </Row>
@@ -1583,7 +1258,7 @@ export default function SettingsScreen() {
 
 const styles = StyleSheet.create({
   stack: {
-    gap: space.lg,
+    gap: layout.sectionGap,
     paddingTop: space.md,
   },
   header: {
@@ -1610,6 +1285,11 @@ const styles = StyleSheet.create({
   settingDesc: {
     ...type.body,
     color: color.textDim,
+  },
+  /** The "More"/"Less" disclosure under a compressed toggle description. */
+  moreLink: {
+    ...type.bodyMedium,
+    color: color.accent,
   },
   aboutBody: {
     ...type.body,
@@ -1650,7 +1330,7 @@ const styles = StyleSheet.create({
     paddingVertical: 2,
     borderRadius: radius.pill,
     // color.unsure at chip-tint strength (matches the ui.tsx unsure Chip).
-    backgroundColor: 'rgba(232, 184, 79, 0.14)',
+    backgroundColor: color.unsureTint,
   },
   flaskBadgeLabel: {
     ...type.micro,
@@ -1686,12 +1366,6 @@ const styles = StyleSheet.create({
   tutorialNotice: {
     ...type.caption,
     color: color.accent,
-    marginTop: space.sm,
-  },
-  /** Transient failure caption under the hard-example export row. */
-  exportNotice: {
-    ...type.caption,
-    color: color.unsure,
     marginTop: space.sm,
   },
   divider: {
@@ -1801,7 +1475,7 @@ const styles = StyleSheet.create({
   // Import paste sheet (P19).
   importBackdrop: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    backgroundColor: color.scrim,
     justifyContent: 'center',
     padding: space.lg,
   },

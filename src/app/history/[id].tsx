@@ -5,6 +5,12 @@
  * with an optimistic local flip. Below the recap: a "vs previous session"
  * comparison (against the next older session with shots) and the entry-angle
  * histogram.
+ *
+ * SCORE BEFORE TOOLS: the recap (hero FG%, pips) sits directly under the
+ * header, with the unsure integrity line above it; the Shot Lab / share /
+ * replay pills collapse into one compact action row beneath the hero. The
+ * re-check panel keeps its high slot right after — triage is content, not
+ * chrome.
  */
 import { Ionicons } from '@expo/vector-icons';
 import { router, useLocalSearchParams } from 'expo-router';
@@ -34,7 +40,7 @@ import { CompareBars } from '@/components/charts/CompareBars';
 import { RecheckPanel } from '@/components/RecheckPanel';
 import { ReelEntryButton } from '@/components/ReelEntryButton';
 import { ModeMark } from '@/components/modes/modeIdentity';
-import { Card, Chip, ErrorCard, Eyebrow, PillButton, Row, Screen } from '@/components/ui';
+import { Card, Chip, ErrorCard, Eyebrow, PillButton, Row, Screen, SkeletonCard } from '@/components/ui';
 import { color, radius, space, touch, type } from '@/constants/tokens';
 import { getModeDef, type ModeState } from '@/core/gameModes';
 import type { SessionStats } from '@/core/types';
@@ -321,7 +327,8 @@ export default function SessionDetailScreen() {
       <Eyebrow>Session</Eyebrow>
 
       {!record.loaded ? (
-        <Text style={styles.dim}>Loading session…</Text>
+        // One loading language: the shape of the recap card that is arriving.
+        <SkeletonCard hero lines={2} />
       ) : session == null ? (
         <ErrorCard
           title="Session not found"
@@ -349,50 +356,89 @@ export default function SessionDetailScreen() {
               <TagField tag={tag} onChange={onTagChange} />
             </View>
           </Animated.View>
-          {/* Block 1 — actions: share status, Shot Lab, share, replay. */}
-          <Animated.View entering={enter(1)}>
+          {/* Block 1 — the score: integrity line + hero stats + shot list
+              (shared recap), directly under the header. The shot list's own
+              rows stay static: it can be long and lives in a shared
+              component; only the section enters as one unit. */}
+          <Animated.View entering={enter(1)} style={styles.recapSection}>
+            {/* Integrity line — SAME copy and shape as the summary hero's
+                (pinned by summaryHeroMotion.test.tsx; kept inline rather than
+                imported so this screen never doubles it when summary renders
+                SummaryHero + SessionRecap together). Renders regardless of
+                videoPath: the re-check panel below is video-gated, and unsure
+                shots deserve a top-line count even without a recording. */}
+            {record.stats.unsure > 0 && (
+              <View
+                style={styles.integrityLine}
+                accessible
+                accessibilityLabel={`${record.stats.unsure} ${
+                  record.stats.unsure === 1 ? 'shot' : 'shots'
+                } flagged unsure and not counted, so your field-goal percentage stays honest.`}
+              >
+                <View style={styles.integrityDot} importantForAccessibility="no" />
+                <Text style={styles.integrityText}>
+                  {`${record.stats.unsure} ${record.stats.unsure === 1 ? 'shot' : 'shots'} unsure — not counted either way`}
+                </Text>
+              </View>
+            )}
+            <SessionRecap
+              shots={record.shots}
+              stats={record.stats}
+              onCorrect={undoable.correct}
+              onCorrectValue={record.correctValue}
+              videoPath={session.videoPath}
+              keepMode={session.keepMode}
+            />
+          </Animated.View>
+          {/* Block 2 — compact action row beneath the hero: the three stacked
+              full-width pills, collapsed. Tools follow the score. */}
+          <Animated.View entering={enter(2)}>
             {shareFailed && (
               <View style={{ marginTop: space.md }}>
                 <Chip label="Couldn't share — try again" tone="unsure" />
               </View>
             )}
-            <PillButton
-              label="Shot Lab — deep analysis"
-              icon="flask"
-              onPress={() =>
-                router.push({ pathname: '/shotlab', params: { sid: String(session.id) } })
-              }
-              disabled={record.shots.length === 0}
-              style={{ marginTop: space.lg }}
-            />
-            <PillButton
-              variant="ghost"
-              label={sharing ? 'Preparing…' : 'Share card'}
-              icon="share-social"
-              onPress={onShareCard}
-              disabled={sharing || record.shots.length === 0}
-              style={{ marginTop: space.md }}
-            />
+            <Row gap={space.sm} style={{ marginTop: space.lg }}>
+              <PillButton
+                label="Shot Lab"
+                icon="flask"
+                onPress={() =>
+                  router.push({ pathname: '/shotlab', params: { sid: String(session.id) } })
+                }
+                disabled={record.shots.length === 0}
+                style={styles.actionPill}
+              />
+              <PillButton
+                variant="ghost"
+                label={sharing ? 'Preparing…' : 'Share'}
+                icon="share-social"
+                onPress={onShareCard}
+                disabled={sharing || record.shots.length === 0}
+                style={styles.actionPill}
+              />
+              {session.videoPath != null && (
+                <>
+                  <PillButton
+                    variant="ghost"
+                    label="Replay"
+                    icon="play"
+                    onPress={() => router.push(`/video/${session.id}`)}
+                    style={styles.actionPill}
+                  />
+                  <ReelEntryButton sessionId={session.id} variant="ghost" style={styles.actionPill} />
+                </>
+              )}
+            </Row>
             {record.shots.length === 0 && (
               <View style={{ marginTop: space.md, alignItems: 'flex-start' }}>
                 <Chip label="No shots logged — nothing to analyze or share" />
               </View>
             )}
-            {session.videoPath != null && (
-              <Row gap={space.md} style={{ marginTop: space.lg }}>
-                <PillButton
-                  label="Watch replay"
-                  icon="play"
-                  onPress={() => router.push(`/video/${session.id}`)}
-                  style={{ flex: 1 }}
-                />
-                <ReelEntryButton sessionId={session.id} variant="ghost" style={{ flex: 1 }} />
-              </Row>
-            )}
           </Animated.View>
-          {/* Block 2 — offline re-check panel. */}
+          {/* Block 3 — offline re-check panel. Keeps its high slot: triage is
+              content, not chrome. */}
           {session.videoPath != null && recStartSec != null && (
-            <Animated.View entering={enter(2)}>
+            <Animated.View entering={enter(3)}>
               <RecheckPanel
                 sessionId={session.id}
                 unsureCount={unsureCount}
@@ -410,25 +456,12 @@ export default function SessionDetailScreen() {
               />
             </Animated.View>
           )}
-          {/* Block 3 — game-mode breakdown. */}
+          {/* Block 4 — game-mode breakdown. */}
           {session.modeId != null && (
-            <Animated.View entering={enter(3)} style={{ marginTop: space.lg }}>
+            <Animated.View entering={enter(4)} style={{ marginTop: space.lg }}>
               <ModeBreakdownCard modeId={session.modeId} resultJson={session.modeResultJson} />
             </Animated.View>
           )}
-          {/* Block 4 — hero stats + shot list (shared recap). The shot list's
-              own rows stay static: it can be long and lives in a shared
-              component; only the section enters as one unit. */}
-          <Animated.View entering={enter(4)} style={styles.recapSection}>
-            <SessionRecap
-              shots={record.shots}
-              stats={record.stats}
-              onCorrect={undoable.correct}
-              onCorrectValue={record.correctValue}
-              videoPath={session.videoPath}
-              keepMode={session.keepMode}
-            />
-          </Animated.View>
           {/* Blocks 5–6 — deeper analysis cards. */}
           <View style={styles.analysisSection}>
             {prev != null && (
@@ -483,12 +516,42 @@ const styles = StyleSheet.create({
   },
   // Section rhythm: the recap and analysis blocks each open with a hairline
   // rule + generous top padding so the detail reads in broadcast "segments"
-  // (header / recap / deeper analysis), matching the summary screen's beat.
+  // (header / score / tools + triage / deeper analysis), matching the summary
+  // screen's beat.
   recapSection: {
     marginTop: space.xl,
     paddingTop: space.xl,
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: color.border,
+  },
+  /** Compact action pills share the row; tighter padding than a lone pill. */
+  actionPill: {
+    flex: 1,
+    paddingHorizontal: space.sm,
+  },
+  // Integrity line — same shape as the summary hero's: caution-tinted fill,
+  // chalk-yellow dot, caption copy. Unsure shots are EXCLUDED from FG%, never
+  // guessed into makes; surfacing the count here keeps that promise visible.
+  integrityLine: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: space.sm,
+    paddingHorizontal: space.md,
+    paddingVertical: space.sm,
+    borderRadius: radius.md,
+    backgroundColor: color.unsureTint,
+    marginBottom: space.md,
+  },
+  integrityDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: color.unsure,
+  },
+  integrityText: {
+    ...type.caption,
+    color: color.textDim,
+    flexShrink: 1,
   },
   analysisSection: {
     marginTop: space.xl,

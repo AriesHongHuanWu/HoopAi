@@ -38,6 +38,12 @@ const code = (src: string): string => src.replace(/\/\/.*$/gm, '');
 
 /** Every screen whose top-level stack must breathe on the SAME grid. */
 const RHYTHM_SCREENS: readonly [name: string, src: string][] = [
+  // Home joined the pin in the storefront wave: its stack already sat on the
+  // space.xl grid but hand-picked the value, so a future rhythm move in
+  // tokens.ts would have silently left the FIRST tab behind. Deliberate
+  // tightening owned by the home package — styles.stack now pulls
+  // layout.sectionGap like every sibling below.
+  ['home', read('(tabs)', 'index.tsx')],
   ['coach', read('(tabs)', 'coach.tsx')],
   ['profile', read('(tabs)', 'profile.tsx')],
   ['jump', read('jump.tsx')],

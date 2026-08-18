@@ -9,8 +9,9 @@
  *                  per-shot evidence receipts and swipe-to-correct rows
  *                  (swipe right = make, left = miss).
  * - PipRow       — wrapping W/L pip row of make/miss/unsure markers.
- * - SessionRecap — hero FG% under the arc, stat cards, shot chart,
- *                  highlights plan and the shot list.
+ * - SessionRecap — hero FG% under the arc (history detail; the summary passes
+ *                  hero={false} — SummaryHero is its one arc), the merged
+ *                  box-score card, shot chart, highlights plan and the list.
  * - useSessionRecord — loads a persisted session + shots from the db and
  *                  exposes an optimistic outcome-correction callback.
  * - useUndoableCorrection / UndoSnackbar — wraps a correction callback with
@@ -41,6 +42,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { HeroArcStat, ShotChart } from '@/components/charts/ShotChart';
 import { MiniArcReplay } from '@/components/charts/MiniArcReplay';
 import { FormReportCard } from '@/components/FormReport';
+import { useStaggerAt } from '@/components/motion';
 import { ShotReceipt } from '@/components/ShotReceipt';
 import { SessionStory } from './SessionStory';
 import {
@@ -50,7 +52,6 @@ import {
   MakeMissDot,
   PillButton,
   Row,
-  StatNumber,
 } from '@/components/ui';
 
 import { color, motion, radius, space, touch, type } from '@/constants/tokens';
@@ -616,6 +617,13 @@ export interface SessionRecapProps {
   videoPath?: string | null;
   /** Clip keep mode ('makes' | 'decided' | 'all' | 'none'). */
   keepMode?: string;
+  /**
+   * Render the FG% hero arc + pip row at the top. Default TRUE — the history
+   * detail screen keeps its arc hero unchanged. The summary passes false:
+   * its SummaryHero strip is the screen's ONE arc-crowned hero, and a second
+   * arc inside the box score read as a duplicate.
+   */
+  hero?: boolean;
 }
 
 export function SessionRecap({
@@ -625,7 +633,13 @@ export function SessionRecap({
   onCorrectValue,
   videoPath,
   keepMode = 'makes',
+  hero = true,
 }: SessionRecapProps) {
+  // Canonical reduced-motion-gated entrances from the motion barrel — the
+  // SAME 0/90 ms delays and motion.standard duration the raw FadeInDown pair
+  // used (pixel-identical for non-reduced users), but returning undefined
+  // under system reduced motion instead of animating anyway.
+  const enterAt = useStaggerAt({ durationMs: motion.standard });
   // Arc replay: the shot picked on the shot chart. Cleared whenever the shot
   // set reloads so a stale selection can't outlive its session.
   const [replayShot, setReplayShot] = useState<ResolvedShot | null>(null);
@@ -648,57 +662,37 @@ export function SessionRecap({
           ? 'A bit flat — add some arc.'
           : 'A bit steep — soften your arc.';
 
+  // The one caption line under the box-score grid. Every coaching-voice
+  // string survives verbatim — the optimal band, the consistency read and the
+  // entry hint just share a line now instead of a chip and two card footers.
+  const boxCaption = [
+    entryInBand ? `Optimal ${FORM.entryAngle.min}–${FORM.entryAngle.max}°` : null,
+    consistencyLine(stats.entryAngleStdDeg),
+    avgEntry != null ? entryHint : null,
+  ]
+    .filter((s): s is string => s != null)
+    .join(' · ');
+
   return (
     <View style={{ gap: space.lg }}>
-      <Animated.View entering={FadeInDown.duration(motion.standard)}>
-        <HeroArcStat
-          value={fgValue}
-          caption={`${stats.points} PTS · ${stats.makes}/${stats.attempts} FG`}
-        />
-        <PipRow
-          outcomes={shots.map((s) => s.outcome)}
-          style={{ justifyContent: 'center', marginTop: space.sm }}
-        />
-      </Animated.View>
+      {hero && (
+        <Animated.View entering={enterAt(0)}>
+          <HeroArcStat
+            value={fgValue}
+            caption={`${stats.points} PTS · ${stats.makes}/${stats.attempts} FG`}
+          />
+          <PipRow
+            outcomes={shots.map((s) => s.outcome)}
+            style={{ justifyContent: 'center', marginTop: space.sm }}
+          />
+        </Animated.View>
+      )}
 
-      <Animated.View
-        entering={FadeInDown.duration(motion.standard).delay(90)}
-        style={{ gap: space.lg }}
-      >
-        <Row gap={space.md} style={{ alignItems: 'stretch' }}>
-          <Card style={{ flex: 1 }}>
-            <Eyebrow>Best streak</Eyebrow>
-            <StatNumber
-              value={String(stats.bestStreak)}
-              size="medium"
-              label="makes in a row"
-              style={{ alignItems: 'flex-start' }}
-            />
-            {stats.bestStreak >= 3 && (
-              <View style={{ marginTop: space.sm }}>
-                <Chip label="Heater" tone="accent" />
-              </View>
-            )}
-          </Card>
-          <Card style={{ flex: 1 }}>
-            <Eyebrow>Entry angle</Eyebrow>
-            <StatNumber
-              value={avgEntry != null ? `${Math.round(avgEntry)}°` : '—'}
-              size="medium"
-              label="average"
-              style={{ alignItems: 'flex-start' }}
-            />
-            {entryInBand && (
-              <View style={{ marginTop: space.sm }}>
-                <Chip
-                  label={`Optimal ${FORM.entryAngle.min}–${FORM.entryAngle.max}°`}
-                  tone="make"
-                />
-              </View>
-            )}
-          </Card>
-        </Row>
-
+      <Animated.View entering={enterAt(90)} style={{ gap: space.lg }}>
+        {/* ONE box-score card: the 2PT/3PT split up top, then a three-across
+            statSmall grid (streak / avg entry / consistency). Replaces the
+            former Best streak + Entry angle + Scoring + Consistency shelf so
+            the numbers read as one line score, not four cards of chrome. */}
         <Card>
           <Eyebrow>Scoring</Eyebrow>
           <Row gap={space.md} style={{ alignItems: 'stretch', marginTop: space.xs }}>
@@ -732,27 +726,28 @@ export function SessionRecap({
               </Text>
             </View>
           </Row>
-        </Card>
-
-        <Card>
-          <Eyebrow>Consistency</Eyebrow>
-          <Row gap={space.lg}>
-            <StatNumber
-              value={
-                stats.entryAngleStdDeg != null
+          <View style={styles.boxDivider} />
+          <Row gap={space.md} style={{ alignItems: 'flex-start' }}>
+            <View style={styles.boxCol}>
+              <Text style={styles.boxStat}>{String(stats.bestStreak)}</Text>
+              <Text style={styles.boxStatLabel}>BEST STREAK</Text>
+            </View>
+            <View style={styles.boxCol}>
+              <Text style={styles.boxStat}>
+                {avgEntry != null ? `${Math.round(avgEntry)}°` : '—'}
+              </Text>
+              <Text style={styles.boxStatLabel}>AVG ENTRY</Text>
+            </View>
+            <View style={styles.boxCol}>
+              <Text style={styles.boxStat}>
+                {stats.entryAngleStdDeg != null
                   ? `±${stats.entryAngleStdDeg.toFixed(1)}°`
-                  : '—'
-              }
-              size="medium"
-              style={{ alignItems: 'flex-start' }}
-            />
-            <Text style={styles.consistencyText}>
-              {consistencyLine(stats.entryAngleStdDeg)}
-            </Text>
+                  : '—'}
+              </Text>
+              <Text style={styles.boxStatLabel}>CONSISTENCY</Text>
+            </View>
           </Row>
-          {avgEntry != null && (
-            <Text style={styles.cardCaption}>{entryHint}</Text>
-          )}
+          <Text style={styles.cardCaption}>{boxCaption}</Text>
         </Card>
 
         <SessionStory shots={shots} stats={stats} />
@@ -1241,6 +1236,28 @@ const styles = StyleSheet.create({
     ...type.micro,
     fontSize: 9,
     color: color.textFaint,
+  },
+
+  // Box-score card: hairline between the 2PT/3PT split and the stat grid.
+  boxDivider: {
+    height: StyleSheet.hairlineWidth,
+    backgroundColor: color.border,
+    marginVertical: space.md,
+  },
+  boxCol: {
+    flex: 1,
+    minWidth: 0,
+  },
+  /** Dense three-across numerals — the statSmall step exists for this grid. */
+  boxStat: {
+    ...type.statSmall,
+    color: color.text,
+    fontVariant: ['tabular-nums'],
+  },
+  boxStatLabel: {
+    ...type.micro,
+    color: color.textFaint,
+    marginTop: 2,
   },
 
   // Scoring split card (2PT / 3PT)

@@ -3,10 +3,11 @@
  *
  * A weekly-report hero card (broadcast box-score idiom, like SummaryHero) with
  * a Mon–Sun week selector, then the insight cards — arc profile, four-week
- * timeline, season strip, NBA twin, weekly plan (+ Form Studio 3D promo), form
+ * timeline, season strip, NBA twin, weekly plan (+ Form Studio entries), form
  * readiness — and the ranked coach findings for that week: severity-toned cards
- * carrying the user's OWN evidence numbers and a prescription chip. "Share my
- * week" pushes the report through the existing ShareCard story pipeline.
+ * carrying the user's OWN evidence numbers and a prescription chip. The hero's
+ * WSS wears the signature arc treatment: a static Skia progress ring (GoalRing
+ * idiom) around a rolled numeral, with the shot-arc motif traced inside.
  *
  * ┌─ WHY THIS SCREEN IS SEGMENTED ──────────────────────────────────────────┐
  * │ Everything above used to arrive as ONE scroll of eight-plus cards of     │
@@ -29,43 +30,47 @@
  * └──────────────────────────────────────────────────────────────────────────┘
  *
  * All analysis is pure (src/core/coachEngine.ts + weeklyReport.ts); this screen
- * only loads sessions from SQLite, groups them into weeks, and renders.
+ * only loads sessions from SQLite, groups them into weeks, and renders. The
+ * presentational cards live in src/components/coach/; WeeklyHero stays HERE
+ * (layoutRhythmContract reads this file's source for the one hero Card).
  * Dark-broadcast tokens throughout; motion is one-shot and reduced-motion
- * aware; every stat block carries an a11y label.
+ * aware; every stat block carries an a11y label. Skia on this screen is
+ * STATIC — JS-built paths only, no worklets (the fx/particles precedent).
  */
+import { BlurMask, Canvas, Path, Skia } from '@shopify/react-native-skia';
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import React, { useEffect, useMemo, useState } from 'react';
 import { Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
-import Animated from 'react-native-reanimated';
 
-import { useCardStagger, useStaggerAt } from '@/components/motion';
+import { MotionStat, Shimmer, arcMotif, useCardStagger, useStaggerAt } from '@/components/motion';
 import { BodyDirectionCard } from '@/components/BodyDirectionCard';
+import { SectionEyebrow } from '@/components/ScreenHeader';
 import { SegmentedTabs, type SegmentedTabItem } from '@/components/SegmentedTabs';
 import { shareCoachCard, shareWeekCard } from '@/components/ShareCard';
 import { ArcProfileCard } from '@/components/coach/ArcProfileCard';
 import { CoachTimelineCard } from '@/components/coach/CoachTimelineCard';
+import { FindingCard } from '@/components/coach/FindingCard';
 import { FormReadinessCard } from '@/components/coach/FormReadinessCard';
+import { NbaTwinCard } from '@/components/coach/NbaTwinCard';
 import { SeasonStrip } from '@/components/coach/SeasonStrip';
+import { WeekSelector } from '@/components/coach/WeekSelector';
+import { WeeklyPlanCard } from '@/components/coach/WeeklyPlanCard';
 import { Card, Chip, EmptyState, PillButton, Row, Screen, StatNumber } from '@/components/ui';
-import { color, font, layout, motion, radius, space, type } from '@/constants/tokens';
+import { color, iconSize, layout, motion, radius, space, touch, type } from '@/constants/tokens';
 import {
   runCoach,
   weeklyPlan,
   type CoachFinding,
   type CoachProfile,
   type CoachSession,
-  type Severity,
-  type Trend,
   type WeeklyAssignment,
 } from '@/core/coachEngine';
 import { arcProfile, coachTimeline, formReadiness, seasonComparison } from '@/core/coachInsights';
-import { getDrill } from '@/core/drills';
 import {
   drillPrescription,
   drillResultFromModeState,
   levelForDrill,
-  LEVEL_LABEL,
   type DrillLevel,
   type DrillResult,
 } from '@/core/drillProgression';
@@ -93,86 +98,91 @@ type CoachSegment = 'week' | 'form' | 'plan';
 const DEFAULT_SEGMENT: CoachSegment = 'week';
 
 // ---------------------------------------------------------------------------
-// Section eyebrow (matches Shot Lab's idiom exactly)
+// WSS ring (the hero's expressive moment)
 // ---------------------------------------------------------------------------
 
-function SectionEyebrow({
-  icon,
-  children,
-}: {
-  icon: React.ComponentProps<typeof Ionicons>['name'];
-  children: string;
-}) {
-  return (
-    <Row gap={6} style={styles.eyebrowRow}>
-      <Ionicons name={icon} size={12} color={color.accent} />
-      <Text style={styles.eyebrowText}>{children.toUpperCase()}</Text>
-    </Row>
+/** Ring canvas box — a step up from the old 72pt square badge. */
+const RING_SIZE = 84;
+const RING_STROKE = 6;
+const RING_R = (RING_SIZE - RING_STROKE) / 2;
+/** WSS past which the sweep earns its soft heat glow (GoalRing's threshold). */
+const RING_HOT = 0.75;
+
+/**
+ * Static Skia progress ring for the week's WSS — the GoalRing idiom at hero
+ * scale: track circle, addArc sweep = WSS/100, the signature shot-arc motif
+ * (arcMotif from the motion barrel) traced faintly through the interior, and
+ * a soft glow under the sweep once the score runs hot. Every path is built on
+ * the JS thread in useMemo; the only motion is the numeral's MotionStat roll,
+ * re-triggered per week so paging weeks re-rolls the score.
+ */
+function WssRing({ wss, weekStartMs }: { wss: number; weekStartMs: number }) {
+  const progress = Math.max(0, Math.min(1, wss / 100));
+  const hot = progress >= RING_HOT;
+
+  const trackPath = useMemo(() => {
+    const p = Skia.Path.Make();
+    p.addCircle(RING_SIZE / 2, RING_SIZE / 2, RING_R);
+    return p;
+  }, []);
+
+  const sweepPath = useMemo(() => {
+    const p = Skia.Path.Make();
+    const sweep = 360 * progress;
+    if (sweep > 0) {
+      p.addArc(
+        Skia.XYWHRect(RING_STROKE / 2, RING_STROKE / 2, RING_R * 2, RING_R * 2),
+        -90,
+        sweep,
+      );
+    }
+    return p;
+  }, [progress]);
+
+  // The canonical quadratic, clipped by the canvas so only the swoop through
+  // the ring's interior shows — the same echo GoalRing traces.
+  const motifPath = useMemo(
+    () => arcMotif(RING_SIZE, RING_SIZE, { rimInset: 16 }).path,
+    [],
   );
-}
 
-// ---------------------------------------------------------------------------
-// Severity + trend visual language
-// ---------------------------------------------------------------------------
-
-const SEVERITY_META: Record<Severity, { label: string; fg: string; bg: string; edge: string }> = {
-  3: { label: 'FIX FIRST', fg: color.miss, bg: color.missTint, edge: color.missEdge },
-  2: { label: 'WORK ON', fg: color.accent, bg: color.accentTint, edge: color.accentEdge },
-  1: { label: 'NOTE', fg: color.textDim, bg: color.surfaceRaised, edge: color.border },
-};
-
-function trendVisual(trend: Trend): { icon: React.ComponentProps<typeof Ionicons>['name']; fg: string; label: string } | null {
-  switch (trend) {
-    case 'improving':
-      return { icon: 'trending-up', fg: color.make, label: 'improving' };
-    case 'worsening':
-      return { icon: 'trending-down', fg: color.miss, label: 'worsening' };
-    case 'flat':
-      return { icon: 'remove', fg: color.textFaint, label: 'holding steady' };
-    default:
-      return null;
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Finding card
-// ---------------------------------------------------------------------------
-
-function FindingCard({ finding, index }: { finding: CoachFinding; index: number }) {
-  const meta = SEVERITY_META[finding.severity];
-  const trend = trendVisual(finding.trend);
-  // Canonical stagger (reduced-motion gated inside the hook).
-  const enter = useCardStagger({ stepMs: 70 });
-  const entering = enter(index);
   return (
-    <Animated.View
-      entering={entering}
-      accessible
-      accessibilityLabel={`${meta.label}. ${finding.title}. ${finding.evidence} Prescription: ${finding.prescription}${
-        trend ? `. Trend ${trend.label}` : ''
-      }`}
-      style={[styles.finding, { borderLeftColor: meta.edge }]}
-    >
-      <Row style={styles.findingHead} gap={space.sm}>
-        <View style={[styles.sevChip, { backgroundColor: meta.bg }]}>
-          <Text style={[styles.sevChipText, { color: meta.fg }]}>{meta.label}</Text>
-        </View>
-        {trend && (
-          <View style={styles.trendPill}>
-            <Ionicons name={trend.icon} size={13} color={trend.fg} />
-            <Text style={[styles.trendText, { color: trend.fg }]}>{trend.label}</Text>
-          </View>
+    // Hidden from the screen reader: the box-score strip below speaks the WSS.
+    <View style={styles.wssRing} accessibilityElementsHidden>
+      <Canvas style={styles.wssCanvas}>
+        <Path path={motifPath} style="stroke" strokeWidth={2} color={color.text} opacity={0.14} />
+        <Path
+          path={trackPath}
+          style="stroke"
+          strokeWidth={RING_STROKE}
+          color={color.hudGlassBorder}
+          opacity={0.9}
+        />
+        {hot && (
+          <Path
+            path={sweepPath}
+            style="stroke"
+            strokeWidth={RING_STROKE}
+            strokeCap="round"
+            color={color.accent}
+            opacity={0.4}
+          >
+            <BlurMask blur={7} style="normal" />
+          </Path>
         )}
-      </Row>
-      <Text style={styles.findingTitle}>{finding.title}</Text>
-      <Text style={styles.findingEvidence}>{finding.evidence}</Text>
-      <Row gap={space.xs} style={styles.rxRow}>
-        <View style={styles.rxIcon}>
-          <Ionicons name="basketball-outline" size={13} color={color.accent} />
-        </View>
-        <Text style={styles.rxText}>{finding.prescription}</Text>
-      </Row>
-    </Animated.View>
+        <Path
+          path={sweepPath}
+          style="stroke"
+          strokeWidth={RING_STROKE}
+          strokeCap="round"
+          color={color.accent}
+        />
+      </Canvas>
+      <View style={styles.wssCenter} pointerEvents="none">
+        <MotionStat value={wss} size="medium" tint={color.accent} trigger={weekStartMs} />
+        <Text style={styles.wssLabel}>WSS</Text>
+      </View>
+    </View>
   );
 }
 
@@ -183,7 +193,6 @@ function FindingCard({ finding, index }: { finding: CoachFinding; index: number 
 const ZONE_NAME: Record<ChartZone, string> = { left: 'Left', center: 'Middle', right: 'Right' };
 
 function WeeklyHero({ report }: { report: WeeklyReport }) {
-  const fg = report.fgPct != null ? `${Math.round(report.fgPct * 100)}%` : '—';
   // Absolute-delay stagger (reduced-motion gated inside the hook).
   const enterAt = useStaggerAt({ durationMs: motion.standard });
 
@@ -207,14 +216,38 @@ function WeeklyHero({ report }: { report: WeeklyReport }) {
 
   return (
     <Card entering={enterAt(0)} style={styles.heroCard}>
-      <SectionEyebrow icon="calendar-outline">{`Week of ${report.label}`}</SectionEyebrow>
+      {/* Eyebrow row — the share action rides here as a compact icon pill so
+          the segment foot's "Share coach report" stays the ONE full-width
+          share CTA on the screen. */}
+      <Row style={styles.heroTopRow} gap={space.sm}>
+        <SectionEyebrow icon="calendar-outline">{`Week of ${report.label}`}</SectionEyebrow>
+        {report.sessions > 0 && (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Share my week"
+            hitSlop={8}
+            onPress={() => {
+              void shareWeekCard({
+                label: report.label,
+                fgPct: report.fgPct,
+                makes: report.makes,
+                attempts: report.attempts,
+                bestStreak: report.bestStreak,
+                wss: report.wss,
+                sessions: report.sessions,
+              });
+            }}
+            style={({ pressed }) => [styles.sharePill, pressed && styles.sharePillPressed]}
+          >
+            <Ionicons name="logo-instagram" size={iconSize.md} color={color.accent} />
+          </Pressable>
+        )}
+      </Row>
 
-      {/* WSS badge + headline */}
+      {/* WSS ring + headline (headline/delta stay plain Text — only the
+          numerals roll). */}
       <Row style={styles.wssRow} gap={space.lg}>
-        <View style={styles.wssBadge} accessibilityElementsHidden>
-          <Text style={styles.wssNum}>{report.wss}</Text>
-          <Text style={styles.wssLabel}>WSS</Text>
-        </View>
+        <WssRing wss={report.wss} weekStartMs={report.weekStartMs} />
         <View style={styles.wssHeadlineWrap}>
           <Text style={styles.wssHeadline}>{report.headline}</Text>
           {deltaText && <Text style={[styles.wssDelta, { color: deltaColor }]}>{deltaText}</Text>}
@@ -224,11 +257,22 @@ function WeeklyHero({ report }: { report: WeeklyReport }) {
       {/* Broadcast box-score strip */}
       <View style={styles.strip} accessible accessibilityLabel={a11y}>
         <View style={styles.col}>
+          {/* Compound "12/20" can't roll honestly — stays static. */}
           <StatNumber value={`${report.makes}/${report.attempts}`} label="makes" size="medium" />
         </View>
         <View style={styles.divider} />
         <View style={styles.col}>
-          <StatNumber value={fg} label="field goals" size="large" />
+          {report.fgPct != null ? (
+            <MotionStat
+              value={Math.round(report.fgPct * 100)}
+              suffix="%"
+              label="field goals"
+              size="large"
+              trigger={report.weekStartMs}
+            />
+          ) : (
+            <StatNumber value="—" label="field goals" size="large" />
+          )}
         </View>
         <View style={styles.divider} />
         <View style={styles.col}>
@@ -267,70 +311,50 @@ function WeeklyHero({ report }: { report: WeeklyReport }) {
           {report.nextWeekFocus}
         </Text>
       </View>
-
-      {/* Share */}
-      {report.sessions > 0 && (
-        <PillButton
-          label="Share my week"
-          icon="logo-instagram"
-          onPress={() => {
-            void shareWeekCard({
-              label: report.label,
-              fgPct: report.fgPct,
-              makes: report.makes,
-              attempts: report.attempts,
-              bestStreak: report.bestStreak,
-              wss: report.wss,
-              sessions: report.sessions,
-            });
-          }}
-          style={styles.shareBtn}
-        />
-      )}
     </Card>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Week selector
+// Loading skeleton
 // ---------------------------------------------------------------------------
 
-function WeekSelector({
-  weeks,
-  activeIndex,
-  onPick,
-}: {
-  weeks: { startMs: number; label: string; sessions: number }[];
-  activeIndex: number;
-  onPick: (i: number) => void;
-}) {
-  if (weeks.length <= 1) return null;
+/**
+ * The shape of what's coming: a hero-shaped block (raised surface + accent
+ * hairline, ring + headline + strip), a segmented-control bar, two card rows.
+ * Heights mirror the real layout so content lands without reflow. Mounted
+ * behind load.status === 'loading' ONLY — error/empty render their own cards.
+ */
+function CoachSkeleton() {
+  const { width: screenW } = useWindowDimensions();
+  // Screen pads space.lg per side; the hero block pads space.lg again.
+  const innerW = Math.max(touch.minTarget * 4, screenW - space.lg * 2);
+  const cardInnerW = innerW - space.lg * 2;
+  const headlineW = cardInnerW - RING_SIZE - space.lg;
+
   return (
-    // Named, because this screen now carries TWO tablists (weeks here, the
-    // section switcher below the hero) and an unnamed pair is indistinguishable
-    // to a screen reader.
-    <View accessibilityRole="tablist" accessibilityLabel="Pick a week" style={styles.weekBar}>
-      {weeks.map((w, i) => {
-        const active = i === activeIndex;
-        return (
-          <Pressable
-            key={w.startMs}
-            accessibilityRole="tab"
-            accessibilityState={{ selected: active }}
-            accessibilityLabel={`Week of ${w.label}, ${w.sessions} ${w.sessions === 1 ? 'session' : 'sessions'}`}
-            onPress={() => onPick(i)}
-            style={({ pressed }) => [
-              styles.weekChip,
-              active && styles.weekChipActive,
-              pressed && !active && styles.weekChipPressed,
-            ]}
-          >
-            <Text style={[styles.weekChipText, active && styles.weekChipTextActive]} numberOfLines={1}>
-              {w.label}
-            </Text>
-          </Pressable>
-        );
-      })}
+    <View
+      style={styles.skeleton}
+      accessible
+      accessibilityRole="progressbar"
+      accessibilityLabel="Loading your sessions"
+    >
+      <View style={styles.skelHero}>
+        <Shimmer width={Math.round(cardInnerW * 0.4)} height={12} radius={radius.sm} />
+        <Row gap={space.lg} style={styles.skelHeroRow}>
+          <Shimmer width={RING_SIZE} height={RING_SIZE} radius={RING_SIZE / 2} />
+          <View style={styles.skelHeroLines}>
+            <Shimmer width={Math.round(headlineW * 0.9)} height={16} radius={radius.sm} />
+            <Shimmer width={Math.round(headlineW * 0.55)} height={12} radius={radius.sm} />
+          </View>
+        </Row>
+        <Shimmer width={cardInnerW} height={56} radius={radius.md} />
+      </View>
+      <View style={styles.skelBody}>
+        <Shimmer width={innerW} height={touch.minTarget} radius={radius.pill} />
+        <Shimmer width={innerW} height={120} radius={radius.lg} />
+        <Shimmer width={innerW} height={120} radius={radius.lg} />
+      </View>
     </View>
   );
 }
@@ -415,124 +439,6 @@ function weeksOf(sessions: readonly CoachSession[]): { startMs: number; label: s
 // Screen
 // ---------------------------------------------------------------------------
 
-/**
- * "Your NBA twin" — the closest shooting archetype for the week (matched on
- * ball-flight metrics, so no pose needed) plus the coachable universals worth
- * stealing from that player's form. The identity hook the user asked for
- * ("who do I shoot like?") folded into the weekly report.
- */
-function NbaTwinCard({
-  match,
-  entering,
-}: {
-  match: ArchetypeMatch;
-  entering?: React.ComponentProps<typeof Animated.View>['entering'];
-}) {
-  const p = match.player;
-  return (
-    <Card entering={entering}>
-      <SectionEyebrow icon="person-outline">Your NBA twin</SectionEyebrow>
-      <Row style={styles.twinHead} gap={space.md}>
-        <View style={styles.twinHeadText}>
-          <Text
-            style={styles.twinName}
-            numberOfLines={1}
-            adjustsFontSizeToFit
-            minimumFontScale={0.7}
-          >
-            {p.name}
-          </Text>
-          <Text style={styles.twinStyle}>{p.style}</Text>
-        </View>
-        <Chip label={`${match.similarity}% match`} tone="accent" />
-      </Row>
-      <Text style={styles.body}>{p.mechanics}</Text>
-      <Text style={styles.twinCopyLabel}>STEAL THIS FROM THEIR FORM</Text>
-      <View style={styles.twinCopyList}>
-        {p.whatToCopy.slice(0, 2).map((c, i) => (
-          <Row key={i} gap={space.sm} style={styles.twinCopyRow}>
-            <Ionicons
-              name="checkmark-circle"
-              size={16}
-              color={color.make}
-              style={styles.twinCopyIcon}
-            />
-            <Text style={styles.twinCopy}>{c}</Text>
-          </Row>
-        ))}
-      </View>
-    </Card>
-  );
-}
-
-/**
- * "This week's plan" — the coach as a training partner: the top few drillable
- * findings, each with its fix and the exact drill to groove it, numbered as a
- * checklist. Turns diagnosis into a week of work.
- */
-function WeeklyPlanCard({
-  plan,
-  levels,
-  entering,
-}: {
-  plan: readonly WeeklyAssignment[];
-  /** Per-drill progression: current level + the coach's level prescription. */
-  levels: Partial<Record<string, { level: DrillLevel; prescription: string }>>;
-  entering?: React.ComponentProps<typeof Animated.View>['entering'];
-}) {
-  return (
-    <Card entering={entering}>
-      <SectionEyebrow icon="barbell-outline">This week&apos;s plan</SectionEyebrow>
-      <Text style={styles.planLede}>
-        {`Your top ${plan.length} ${plan.length === 1 ? 'fix' : 'fixes'}, each with a drill to groove it.`}
-      </Text>
-      <View style={styles.planList}>
-        {plan.map((item, i) => {
-          const drill = getDrill(item.drillId);
-          const lv = levels[item.drillId];
-          return (
-            <View key={item.finding.id} style={styles.planItem}>
-              <View style={styles.planNum}>
-                <Text style={styles.planNumText}>{i + 1}</Text>
-              </View>
-              <View style={styles.planBody}>
-                <Text style={styles.assignTitle}>{item.finding.title}</Text>
-                <Text style={styles.body}>{item.finding.prescription}</Text>
-                {lv != null && (
-                  <>
-                    <Row gap={space.sm} style={styles.planLevelRow}>
-                      <Chip
-                        label={`LEVEL ${lv.level} · ${LEVEL_LABEL[lv.level].toUpperCase()}`}
-                        tone={lv.level > 1 ? 'accent' : 'default'}
-                        compact
-                      />
-                    </Row>
-                    <Text style={styles.planLevelRx}>{lv.prescription}</Text>
-                  </>
-                )}
-                <Pressable
-                  accessibilityRole="button"
-                  accessibilityLabel={`Practice ${drill.title} at level ${lv?.level ?? 1} in Train`}
-                  onPress={() =>
-                    router.push({
-                      pathname: '/modes',
-                      params: { drill: item.drillId, level: String(lv?.level ?? 1) },
-                    })
-                  }
-                  style={({ pressed }) => [styles.planDrill, pressed && { opacity: 0.6 }]}
-                >
-                  <Ionicons name="basketball" size={14} color={color.accent} />
-                  <Text style={styles.planDrillText}>{`Practice: ${drill.title}`}</Text>
-                </Pressable>
-              </View>
-            </View>
-          );
-        })}
-      </View>
-    </Card>
-  );
-}
-
 export default function CoachScreen() {
   const { state: load, reload } = useCoachSessions();
   const [weekIndex, setWeekIndex] = useState(0);
@@ -588,6 +494,13 @@ export default function CoachScreen() {
   const plan = useMemo<WeeklyAssignment[]>(
     () => weeklyPlan(findings),
     [findings],
+  );
+
+  // Findings the plan ACTUALLY contains — only these get the "Drill this"
+  // bridge on their card. An unmapped finding never invents a drill.
+  const plannedFindingIds = useMemo(
+    () => new Set(plan.map((p) => p.finding.id)),
+    [plan],
   );
 
   // Four-week timeline ending at the selected week (oldest-first, empty weeks
@@ -677,7 +590,7 @@ export default function CoachScreen() {
         </View>
 
         {load.status === 'loading' ? (
-          <Text style={styles.dim}>Loading your sessions…</Text>
+          <CoachSkeleton />
         ) : load.status === 'error' ? (
           <EmptyState
             title="Couldn't load your sessions"
@@ -749,7 +662,9 @@ export default function CoachScreen() {
 
                   {/* Findings */}
                   <View>
-                    <SectionEyebrow icon="clipboard-outline">The read on your week</SectionEyebrow>
+                    <SectionEyebrow icon="clipboard-outline" style={styles.eyebrow}>
+                      The read on your week
+                    </SectionEyebrow>
                     {findings.length === 0 ? (
                       <Card entering={cardEnter(2)}>
                         <Text style={styles.body}>
@@ -761,7 +676,14 @@ export default function CoachScreen() {
                     ) : (
                       <View style={styles.findingList}>
                         {findings.map((f, i) => (
-                          <FindingCard key={f.id} finding={f} index={i} />
+                          <FindingCard
+                            key={f.id}
+                            finding={f}
+                            index={i}
+                            onDrillThis={
+                              plannedFindingIds.has(f.id) ? () => setSegment('plan') : undefined
+                            }
+                          />
                         ))}
                       </View>
                     )}
@@ -806,25 +728,42 @@ export default function CoachScreen() {
                   {/* NBA twin — who you shoot like this week + what to steal */}
                   {twin != null && <NbaTwinCard match={twin} entering={cardEnter(2)} />}
 
-                  {/* Form Studio 3D promo — the upgrade's flagship, one tap away */}
+                  {/* Form Studio — two honest doors. The side-by-side theater is
+                      2D; the orbitable skeleton lives in Form Studio 3D and says
+                      "estimated" out loud. One card no longer promises the one
+                      while routing to the other. */}
                   <Card entering={cardEnter(3)}>
                     <Row gap={space.sm} style={styles.promoHead}>
-                      <Ionicons name="cube-outline" size={18} color={color.accent} />
+                      <Ionicons name="body-outline" size={18} color={color.accent} />
                       <Text style={styles.promoTitle} numberOfLines={1}>
-                        See your shooting form in 3D
+                        Form Studio
                       </Text>
                       <Chip label="NEW" tone="accent" compact />
                     </Row>
                     <Text style={styles.body}>
-                      Your tracked shots, rebuilt as a 3D skeleton you can orbit from any angle.
+                      Study the mechanics of your tracked shots — side-by-side on video, or as an
+                      estimated 3D skeleton.
                     </Text>
-                    <PillButton
-                      label="Open Form Studio"
-                      icon="cube-outline"
-                      variant="ghost"
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel="Compare your motion side-by-side. Opens Form Studio."
                       onPress={() => router.push('/formstudio')}
-                      style={styles.promoBtn}
-                    />
+                      style={({ pressed }) => [styles.promoRow, pressed && { opacity: 0.6 }]}
+                    >
+                      <Ionicons name="albums-outline" size={iconSize.sm} color={color.accent} />
+                      <Text style={styles.promoRowText}>Compare your motion side-by-side</Text>
+                      <Ionicons name="chevron-forward" size={iconSize.sm} color={color.textFaint} />
+                    </Pressable>
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel="Orbit your shot in 3D, estimated. Opens Form Studio 3D."
+                      onPress={() => router.push('/formstudio3d')}
+                      style={({ pressed }) => [styles.promoRow, pressed && { opacity: 0.6 }]}
+                    >
+                      <Ionicons name="cube-outline" size={iconSize.sm} color={color.accent} />
+                      <Text style={styles.promoRowText}>Orbit your shot in 3D (estimated)</Text>
+                      <Ionicons name="chevron-forward" size={iconSize.sm} color={color.textFaint} />
+                    </Pressable>
                   </Card>
 
                   {/* Form-data readiness — how much of the coach's form read is
@@ -850,7 +789,9 @@ export default function CoachScreen() {
                     // so "no plan" means the coach found nothing to prescribe —
                     // never a fabricated drill to fill the tab.
                     <Card entering={cardEnter(0)}>
-                      <SectionEyebrow icon="barbell-outline">This week&apos;s plan</SectionEyebrow>
+                      <SectionEyebrow icon="barbell-outline" style={styles.eyebrow}>
+                        This week&apos;s plan
+                      </SectionEyebrow>
                       <Text style={styles.body}>
                         {findings.length === 0
                           ? 'No drill plan this week — the coach found nothing systematic to fix. Bank the reps.'
@@ -861,7 +802,9 @@ export default function CoachScreen() {
 
                   {/* Deeper dive hook */}
                   <Card entering={cardEnter(1)}>
-                    <SectionEyebrow icon="flask-outline">Go deeper</SectionEyebrow>
+                    <SectionEyebrow icon="flask-outline" style={styles.eyebrow}>
+                      Go deeper
+                    </SectionEyebrow>
                     <Text style={styles.body}>
                       Coach's Corner reads across your whole week. For a single session — make-vs-miss
                       breakdowns, shot-by-shot form and a drill plan — open the Shot Lab.
@@ -924,118 +867,14 @@ const styles = StyleSheet.create({
     ...type.title,
     color: color.text,
   },
-  dim: {
-    ...type.body,
-    color: color.textDim,
-  },
   body: {
     ...type.body,
     color: color.textDim,
     marginTop: space.xs,
   },
-  twinHead: {
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
+  // Shared SectionEyebrow leaves margins to the call site (screens own rhythm).
+  eyebrow: {
     marginBottom: space.sm,
-  },
-  twinHeadText: {
-    flex: 1,
-    minWidth: 0,
-    gap: 2,
-  },
-  assignTitle: {
-    ...type.heading,
-    color: color.text,
-    marginBottom: space.xs,
-  },
-  planLede: {
-    ...type.body,
-    color: color.textDim,
-    marginTop: space.xs,
-    marginBottom: space.md,
-  },
-  planList: {
-    gap: space.md,
-  },
-  planItem: {
-    flexDirection: 'row',
-    gap: space.sm,
-  },
-  planNum: {
-    width: 26,
-    height: 26,
-    borderRadius: radius.pill,
-    backgroundColor: color.accentTint,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginTop: 2,
-  },
-  planNumText: {
-    ...type.bodyMedium,
-    color: color.accent,
-    fontVariant: ['tabular-nums'],
-  },
-  planBody: {
-    flex: 1,
-    minWidth: 0,
-  },
-  planLevelRow: {
-    marginTop: space.sm,
-    alignItems: 'center',
-  },
-  planLevelRx: {
-    ...type.caption,
-    color: color.textDim,
-    marginTop: 4,
-  },
-  planDrill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    marginTop: space.sm,
-  },
-  planDrillText: {
-    ...type.caption,
-    color: color.accent,
-    fontFamily: font.bodyMedium,
-  },
-  twinName: {
-    ...type.heading,
-    color: color.text,
-  },
-  twinStyle: {
-    ...type.body,
-    color: color.textDim,
-  },
-  twinCopyLabel: {
-    ...type.micro,
-    color: color.textFaint,
-    letterSpacing: 1,
-    marginTop: space.md,
-    marginBottom: space.sm,
-  },
-  twinCopyList: {
-    gap: space.sm,
-  },
-  twinCopyRow: {
-    alignItems: 'flex-start',
-  },
-  twinCopyIcon: {
-    marginTop: 1,
-  },
-  twinCopy: {
-    ...type.body,
-    color: color.text,
-    flex: 1,
-    minWidth: 0,
-  },
-  eyebrowRow: {
-    marginBottom: space.sm,
-  },
-  eyebrowText: {
-    ...type.caption,
-    color: color.textFaint,
-    letterSpacing: 1,
   },
 
   // Timeline block (card + optional sparse-history hint hugging it)
@@ -1048,7 +887,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: space.xs,
   },
 
-  // Form Studio 3D promo
+  // Form Studio card (two entry rows)
   promoHead: {
     alignItems: 'center',
   },
@@ -1058,60 +897,61 @@ const styles = StyleSheet.create({
     flex: 1,
     minWidth: 0,
   },
-  promoBtn: {
-    marginTop: space.md,
-    alignSelf: 'flex-start',
-  },
-
-  // Week selector
-  weekBar: {
+  promoRow: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
+    alignItems: 'center',
     gap: space.sm,
+    marginTop: space.md,
+    paddingVertical: space.xs,
   },
-  weekChip: {
-    borderRadius: radius.pill,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: color.border,
-    backgroundColor: color.surface,
-    paddingHorizontal: space.md,
-    paddingVertical: space.sm,
-  },
-  weekChipActive: {
-    backgroundColor: color.accentTint,
-    borderColor: color.accentEdge,
-  },
-  weekChipPressed: {
-    backgroundColor: color.surfaceRaised,
-  },
-  weekChipText: {
+  promoRowText: {
     ...type.caption,
-    color: color.textDim,
-  },
-  weekChipTextActive: {
     color: color.accent,
-    fontFamily: font.bodySemiBold,
+    flex: 1,
+    minWidth: 0,
   },
 
-  // WSS + headline
+  // Hero top row: eyebrow + compact share icon pill
+  heroTopRow: {
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: space.sm,
+  },
+  sharePill: {
+    width: 32,
+    height: 32,
+    borderRadius: radius.pill,
+    backgroundColor: color.accentTint,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  sharePillPressed: {
+    backgroundColor: color.surface,
+  },
+
+  // WSS ring + headline
   wssRow: {
     marginTop: space.sm,
     alignItems: 'center',
   },
-  wssBadge: {
-    width: 72,
-    height: 72,
-    borderRadius: radius.md,
-    backgroundColor: color.accentTint,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: color.accentEdge,
+  wssRing: {
+    width: RING_SIZE,
+    height: RING_SIZE,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  wssNum: {
-    ...type.statMedium,
-    color: color.accent,
-    fontVariant: ['tabular-nums'],
+  wssCanvas: {
+    width: RING_SIZE,
+    height: RING_SIZE,
+  },
+  wssCenter: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   wssLabel: {
     ...type.micro,
@@ -1207,73 +1047,37 @@ const styles = StyleSheet.create({
     color: color.text,
     flex: 1,
   },
-  shareBtn: {
-    marginTop: space.lg,
-    alignSelf: 'stretch',
-  },
 
   // Findings
   findingList: {
     gap: layout.cardGap,
   },
-  finding: {
-    backgroundColor: color.surface,
-    borderRadius: radius.lg,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: color.border,
-    borderLeftWidth: 3,
-    padding: space.lg,
-    gap: space.sm,
-  },
-  findingHead: {
-    justifyContent: 'space-between',
-  },
-  sevChip: {
-    borderRadius: radius.pill,
-    paddingHorizontal: space.md,
-    paddingVertical: 4,
-  },
-  sevChipText: {
-    ...type.micro,
-    letterSpacing: 1,
-  },
-  trendPill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-  },
-  trendText: {
-    ...type.micro,
-    letterSpacing: 0.6,
-  },
-  findingTitle: {
-    ...type.headingLarge,
-    color: color.text,
-  },
-  findingEvidence: {
-    ...type.body,
-    color: color.textDim,
-  },
-  rxRow: {
-    alignItems: 'flex-start',
-    marginTop: space.xs,
-  },
-  rxIcon: {
-    width: 22,
-    height: 22,
-    borderRadius: radius.pill,
-    backgroundColor: color.accentTint,
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginTop: 1,
-  },
-  rxText: {
-    ...type.body,
-    color: color.text,
-    flex: 1,
-  },
   deepBtn: {
     marginTop: space.md,
     alignSelf: 'flex-start',
+  },
+
+  // Loading skeleton — the hero shape, the switcher bar, two card rows.
+  skeleton: {
+    gap: layout.sectionGap,
+  },
+  skelHero: {
+    borderRadius: radius.lg,
+    backgroundColor: color.surfaceRaised,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: color.accentEdge,
+    padding: space.lg,
+    gap: space.lg,
+  },
+  skelHeroRow: {
+    alignItems: 'center',
+  },
+  skelHeroLines: {
+    flex: 1,
+    minWidth: 0,
+    gap: space.sm,
+  },
+  skelBody: {
+    gap: layout.cardGap,
   },
 });

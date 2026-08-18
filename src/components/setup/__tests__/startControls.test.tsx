@@ -5,7 +5,7 @@
  * safe-area-context jest mocks.
  */
 import React from 'react';
-import { StyleSheet } from 'react-native';
+import { StyleSheet, Text } from 'react-native';
 import renderer, { act } from 'react-test-renderer';
 
 // The shipped react-native-reanimated/mock still boots react-native-worklets
@@ -51,6 +51,14 @@ jest.mock('react-native-reanimated', () => {
 jest.mock('react-native-safe-area-context', () =>
   require('react-native-safe-area-context/jest/mock').default,
 );
+// StartHero's CTA carries a static arcMotif stroke on a Skia canvas; Skia's
+// native bindings can't load under jest, and the canvas never mounts here
+// anyway (it is gated behind onLayout, which react-test-renderer never fires).
+jest.mock('@shopify/react-native-skia', () => ({
+  Canvas: () => null,
+  Circle: () => null,
+  Path: () => null,
+}));
 jest.mock('@expo/vector-icons', () => {
   const ReactLocal = require('react');
   const { Text } = require('react-native');
@@ -60,7 +68,7 @@ jest.mock('@expo/vector-icons', () => {
   };
 });
 
-import { space } from '@/constants/tokens';
+import { color, space } from '@/constants/tokens';
 import { PLACEMENT_TIPS, StartHero, layoutBottom, type StartHeroProps } from '../StartHero';
 import { StickyStartBar, barAccessibilityLabel } from '../StickyStartBar';
 
@@ -121,6 +129,54 @@ describe('StartHero', () => {
     const tree = create(<StartHero {...heroProps({ disabled: true })} />);
     const cta = pressableByLabel(tree, 'Start session — open the camera');
     expect(cta.props.accessibilityState).toEqual({ disabled: true });
+  });
+
+  it('promises the camera on the common path — the sub-line is the honest default', () => {
+    const tree = create(<StartHero {...heroProps()} />);
+    expect(JSON.stringify(tree.toJSON())).toContain(
+      'Opens the camera — tracking starts with your first shot',
+    );
+  });
+
+  it('disabledReason replaces the camera promise — a dead CTA never keeps selling the camera', () => {
+    const reason = 'Camera access needed — open the Camera section below to fix it';
+    const tree = create(
+      <StartHero {...heroProps({ disabled: true, disabledReason: reason })} />,
+    );
+    const flat = JSON.stringify(tree.toJSON());
+    expect(flat).toContain(reason);
+    expect(flat).not.toContain('Opens the camera — tracking starts with your first shot');
+    // The a11y label of the CTA itself is unchanged — the reason is the sub-line.
+    const cta = pressableByLabel(tree, 'Start session — open the camera');
+    expect(cta.props.accessibilityState).toEqual({ disabled: true });
+  });
+
+  it("paints a tone='warning' chip in the unsure tint (the blocked-camera treatment)", () => {
+    const warnChips: StartHeroProps['chips'] = [
+      { id: 'mode', label: 'Free Play', icon: 'game-controller-outline' },
+      {
+        id: 'camera',
+        label: 'Camera access needed',
+        icon: 'phone-portrait-outline',
+        tone: 'warning',
+      },
+    ];
+    const tree = create(<StartHero {...heroProps({ chips: warnChips })} />);
+    const warn = pressableByLabel(tree, 'Camera access needed — opens options');
+    const style = StyleSheet.flatten(
+      typeof warn.props.style === 'function' ? warn.props.style({ pressed: false }) : warn.props.style,
+    );
+    expect(style.backgroundColor).toBe(color.unsureTint);
+    expect(style.borderColor).toBe(color.unsure);
+    // The neutral chip keeps the resting hairline.
+    const neutral = pressableByLabel(tree, 'Free Play — opens options');
+    const neutralStyle = StyleSheet.flatten(
+      typeof neutral.props.style === 'function'
+        ? neutral.props.style({ pressed: false })
+        : neutral.props.style,
+    );
+    expect(neutralStyle.backgroundColor).toBeUndefined();
+    expect(neutralStyle.borderColor).toBe(color.border);
   });
 
   it('renders one chip per entry and reports the section id on press', () => {
@@ -200,6 +256,24 @@ describe('StickyStartBar', () => {
       pills[0]!.props.onPress();
     });
     expect(onStart).toHaveBeenCalledTimes(1);
+  });
+
+  it("tone='warning' paints the summary in the unsure tint; the default stays dim", () => {
+    const warmTree = create(
+      <StickyStartBar visible disabled tone="warning" summary={summary} onStart={jest.fn()} />,
+    );
+    const warmText = warmTree.root
+      .findAllByType(Text)
+      .find((t) => t.props.children === summary)!;
+    expect(StyleSheet.flatten(warmText.props.style).color).toBe(color.unsure);
+
+    const plainTree = create(
+      <StickyStartBar visible disabled={false} summary={summary} onStart={jest.fn()} />,
+    );
+    const plainText = plainTree.root
+      .findAllByType(Text)
+      .find((t) => t.props.children === summary)!;
+    expect(StyleSheet.flatten(plainText.props.style).color).toBe(color.textDim);
   });
 
   it('pads the bottom by safe-area inset + space.md', () => {

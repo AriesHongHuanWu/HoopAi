@@ -1,11 +1,13 @@
 /**
  * Home dashboard — the app's face.
  *
- * Giant Start CTA (the one daily action) with a slow-breathing shot arc,
- * last-session recap from SQLite with a mini FG% sparkline across recent
- * sessions, quiet icon tiles to history and trends. Redirects to /onboarding
- * on first launch; the root layout guarantees the settings store is hydrated
- * before this screen renders, so the check is flash-free.
+ * Giant Start CTA (the one daily action) with the signature shot arc and a
+ * quick-start chip, a recommendation entry into Train, a TODAY shelf (streak
+ * ladder + goal ring on one row), compact daily/weekly challenge decks, and a
+ * last-session payoff card whose FG% rolls in over a full-width trend band.
+ * Redirects to /onboarding on first launch; the root layout guarantees the
+ * settings store is hydrated before this screen renders, so the check is
+ * flash-free.
  */
 import { Ionicons } from '@expo/vector-icons';
 import { Canvas, Circle, Path } from '@shopify/react-native-skia';
@@ -30,15 +32,27 @@ import Animated, {
 } from 'react-native-reanimated';
 
 import { BootIntro, bootIntroDelayMs } from '@/components/BootIntro';
-import { useCardStagger } from '@/components/motion';
+import { MotionStat, SuccessBurst, arcMotif, useCardStagger } from '@/components/motion';
 import { Sparkline } from '@/components/charts/Sparkline';
 import { CoachMarks, useCoachMarks, type CoachStep } from '@/components/coach/CoachMarks';
 import { GoalRing } from '@/components/GoalRing';
+import { FirstRunScene } from '@/components/home/FirstRunScene';
+import { WeeklyChallengeSummary } from '@/components/home/WeeklyChallengeSummary';
+import { DRILL_IDENTITY, MODE_IDENTITY } from '@/components/modes/modeIdentity';
 import { ProfileButton } from '@/components/profile/ProfileButton';
+import { SectionEyebrow } from '@/components/ScreenHeader';
 import { StreakTierCard } from '@/components/StreakTierCard';
-import { WeeklyChallengeCard } from '@/components/WeeklyChallengeCard';
-import { Card, Chip, EmptyState, ErrorCard, Eyebrow, Row, Screen, StatNumber } from '@/components/ui';
-import { color, radius, space, touch, type } from '@/constants/tokens';
+import {
+  Card,
+  Chip,
+  ErrorCard,
+  Eyebrow,
+  PressableCard,
+  Row,
+  Screen,
+  SkeletonCard,
+} from '@/components/ui';
+import { color, iconSize, layout, radius, space, touch, type } from '@/constants/tokens';
 import {
   PERFECT_DAY_BONUS,
   PERFECT_DAY_ID,
@@ -50,7 +64,14 @@ import {
   progressFor,
   type DayAggregate,
 } from '@/core/dailyChallenges';
+import { getDrill } from '@/core/drills';
+import { getModeDef } from '@/core/gameModes';
 import { todayMakes } from '@/core/goals';
+import {
+  recommendFromSessions,
+  recommendationReason,
+  type ModeRecommendation,
+} from '@/core/modeRecommendation';
 import { computeDayStreak, type StreakResult } from '@/core/streak';
 import {
   emptyWeekAggregate,
@@ -67,17 +88,29 @@ import { useMode } from '@/state/modeStore';
 import { useSession } from '@/state/sessionStore';
 import { useSettings } from '@/state/settingsStore';
 
+type IoniconName = React.ComponentProps<typeof Ionicons>['name'];
+
 const HERO_HEIGHT = 176;
-/** Sessions pulled for the last-session card + its mini FG% sparkline. */
+/** Sessions pulled for the last-session card + its FG% trend band. */
 const RECENT_LIMIT = 8;
-const MINI_SPARK_W = 76;
-const MINI_SPARK_H = 30;
+/** Height of the full-width FG% trend band inside the last-session card. */
+const SPARK_BAND_H = 36;
+/** GoalRing diameter on the TODAY shelf — scaled down from its default 120. */
+const TODAY_RING_SIZE = 88;
 /**
  * Sessions scanned for today's make-goal progress. Generous relative to
  * RECENT_LIMIT so a heavy shooting day (many short sessions) still counts
- * every make, not just the ones in the last-session sparkline window.
+ * every make, not just the ones in the last-session trend window.
  */
 const GOAL_SCAN_LIMIT = 100;
+
+/**
+ * Day stamp of the last perfect-day celebration, per JS runtime — the same
+ * pattern as GoalRing's celebratedDay. Home's ONE celebration moment fires
+ * the first time all three daily challenges flip done on a given day;
+ * refocuses and remounts never replay it.
+ */
+let perfectDayCelebrated: string | null = null;
 
 function formatSessionDate(ms: number): string {
   const d = new Date(ms);
@@ -91,8 +124,11 @@ function formatSessionDate(ms: number): string {
 }
 
 /**
- * Decorative shot arc over the hero CTA — the signature motif. The ball dot
- * at the rim breathes on a slow loop; under reduced motion it holds still.
+ * Decorative shot arc over the hero CTA — the signature motif, drawn from the
+ * canonical arcMotif (motion/ArcReveal); the default rim inset IS this hero's
+ * geometry, byte-identical to the old hand-rolled quadratic (pinned by
+ * arcReveal.test.ts). The ball dot at the rim breathes on a slow loop; under
+ * reduced motion it holds still.
  */
 function HeroArc({ width }: { width: number }) {
   const reducedMotion = useReducedMotion();
@@ -115,17 +151,17 @@ function HeroArc({ width }: { width: number }) {
   const haloOpacity = useDerivedValue(() => 0.1 + pulse.value * 0.1);
 
   if (width <= 0) return null;
-  // Quadratic arc from just off the bottom-left up toward a "rim" at right.
-  const rimX = width - 44;
-  const rimY = HERO_HEIGHT * 0.42;
-  const path = `M -24 ${HERO_HEIGHT + 24} Q ${width * 0.36} ${-HERO_HEIGHT * 0.6} ${rimX} ${rimY}`;
+  // Canonical quadratic, launch bottom-left up to the "rim" at right.
+  const motif = arcMotif(width, HERO_HEIGHT);
+  const rimX = motif.p1.x;
+  const rimY = motif.p1.y;
   return (
     <View pointerEvents="none" style={StyleSheet.absoluteFill}>
       <Canvas style={{ width, height: HERO_HEIGHT }}>
         {/* Soft wide echo under the crisp stroke — same geometry, quieter
             opacity, so the arc reads as light rather than a line. */}
-        <Path path={path} style="stroke" strokeWidth={7} color={color.onAccent} opacity={0.08} />
-        <Path path={path} style="stroke" strokeWidth={3} color={color.onAccent} opacity={0.22} />
+        <Path path={motif.path} style="stroke" strokeWidth={7} color={color.onAccent} opacity={0.08} />
+        <Path path={motif.path} style="stroke" strokeWidth={3} color={color.onAccent} opacity={0.22} />
         <Circle cx={rimX} cy={rimY} r={haloR} color={color.onAccent} opacity={haloOpacity} />
         <Circle cx={rimX} cy={rimY} r={7} color={color.onAccent} opacity={dotOpacity} />
       </Canvas>
@@ -170,7 +206,7 @@ export default function HomeScreen() {
 
   // undefined = loading, null = no sessions yet.
   const [lastSession, setLastSession] = useState<SessionSummaryRow | null | undefined>(undefined);
-  /** FG% of recent sessions with shots, oldest first — the mini sparkline. */
+  /** FG% of recent sessions with shots, oldest first — the trend band. */
   const [recentTrend, setRecentTrend] = useState<number[]>([]);
   const [dbFailed, setDbFailed] = useState(false);
   /** Makes so far today, for the goal ring (src/core/goals.ts todayMakes). */
@@ -181,14 +217,22 @@ export default function HomeScreen() {
     longest: 0,
     shotToday: false,
   });
+  /**
+   * Recommendation over the SAME listSessions rows fetched below — zero extra
+   * queries. Display-only on Home: the entry card deep-links to /modes,
+   * arming the mode stays Train's contract.
+   */
+  const [reco, setReco] = useState<ModeRecommendation | null>(null);
   /** Local day key driving today's deterministic challenge picks. */
   const [challengeDay, setChallengeDay] = useState(() => dateKeyFor(Date.now()));
   /** Today's aggregate for challenge progress (src/state/challengeStore.ts). */
   const [dayAgg, setDayAgg] = useState<DayAggregate>(emptyDayAggregate);
   /** Local ISO week key ('YYYY-Www') driving this week's deterministic picks. */
   const [challengeWeek, setChallengeWeek] = useState(() => isoWeekKey(Date.now()));
-  /** This week's aggregate for the weekly card (src/state/challengeStore.ts). */
+  /** This week's aggregate for the weekly summary (src/state/challengeStore.ts). */
   const [weekAgg, setWeekAgg] = useState<WeekAggregate>(emptyWeekAggregate);
+  /** Day the perfect-day burst is firing for; null = no burst mounted. */
+  const [burstDay, setBurstDay] = useState<string | null>(null);
   const totalPoints = useChallenges((s) => s.totalPoints);
   const challengesHydrated = useChallengesHydrated();
 
@@ -258,14 +302,12 @@ export default function HomeScreen() {
   const coach = useCoachMarks('home', homeSteps);
 
   /**
-   * ONE session read per focus. The last-session card, its mini FG% sparkline,
-   * the day streak and today's goal progress used to fire two separate
-   * listSessions() calls (8 rows and 100 rows) against the same table on every
-   * focus, so returning from a session made the tab sit visibly still while
-   * both round-trips landed. They all derive from the same newest-first rows,
-   * so we read the wider window once and slice the recent window out of it —
-   * `rows.slice(0, RECENT_LIMIT)` is byte-identical to what listSessions(8)
-   * returned, so the card and sparkline are unchanged.
+   * ONE session read per focus. The last-session card, its FG% trend band,
+   * the day streak, today's goal progress and the mode recommendation all
+   * derive from the same newest-first rows, so we read the wider window once
+   * and slice the recent window out of it — `rows.slice(0, RECENT_LIMIT)` is
+   * byte-identical to what listSessions(8) returned, so the card and trend
+   * are unchanged.
    */
   useFocusEffect(
     useCallback(() => {
@@ -285,6 +327,7 @@ export default function HomeScreen() {
           const now = Date.now();
           setStreak(computeDayStreak(rows.map((r) => r.startedAt), now));
           if (dailyGoalMakes > 0) setGoalMakes(todayMakes(rows, now));
+          setReco(recommendFromSessions(rows, now));
         })
         .catch(() => {
           if (!alive) return;
@@ -295,6 +338,7 @@ export default function HomeScreen() {
           setDbFailed(true);
           setGoalMakes(0);
           setStreak({ current: 0, longest: 0, shotToday: false });
+          setReco(null);
         });
       return () => {
         alive = false;
@@ -342,7 +386,10 @@ export default function HomeScreen() {
   // Weekly challenges: same rhythm as the daily pass above, one ISO week wide.
   // Kept as its OWN effect rather than folded into the daily one because the
   // two periods roll over on different clocks — a midnight rollover must not
-  // be able to skip the weekly award, and vice versa.
+  // be able to skip the weekly award, and vice versa. This award pass runs
+  // even while the deck is presentationally hidden (first run) or compacted
+  // (WeeklyChallengeSummary): points writes are Home-owned by contract,
+  // modes.tsx displays read-only.
   useFocusEffect(
     useCallback(() => {
       // Same hydration gate as the daily pass: awardWeekly rewrites the shared
@@ -383,13 +430,69 @@ export default function HomeScreen() {
     dailyChallenges.length > 0 &&
     dailyChallenges.every((c) => isChallengeComplete(c, dayAgg));
 
+  // Perfect-day celebration — Home's ONE celebration moment. Fires only the
+  // first time allChallengesDone flips true on a given day (module-level day
+  // stamp, the GoalRing pattern), so refocuses never replay it. SuccessBurst
+  // is reduced-motion aware on its own (renders null; the perfect-day banner
+  // stays as the static signal) and unmounts itself via onDone.
+  useEffect(() => {
+    if (!allChallengesDone) return;
+    const day = new Date().toDateString();
+    if (perfectDayCelebrated === day) return;
+    perfectDayCelebrated = day;
+    setBurstDay(day);
+  }, [allChallengesDone]);
+  const clearBurst = useCallback(() => setBurstDay(null), []);
+
+  /**
+   * Presentation for the recommendation entry card. `reason` is the exact
+   * db-derived count from recommendationReason() and is rendered VERBATIM
+   * (iron rule 8 — never dressed up with invented stats).
+   */
+  const recoView = useMemo(() => {
+    if (reco == null) return null;
+    if (reco.kind === 'mode') {
+      const identity = MODE_IDENTITY[reco.modeId];
+      return {
+        name: getModeDef(reco.modeId).name,
+        icon: identity.icon,
+        accent: identity.accent,
+        tint: identity.tint,
+        reason: recommendationReason(reco),
+      };
+    }
+    const drill = getDrill(reco.drillId);
+    const identity = DRILL_IDENTITY[reco.drillId];
+    return {
+      name: drill.title,
+      icon: drill.icon as IoniconName,
+      accent: identity.accent,
+      tint: identity.tint,
+      reason: recommendationReason(reco),
+    };
+  }, [reco]);
+
+  /**
+   * Honest FG% delta vs the previous session — plain arithmetic on the stored
+   * fgPct values already fetched above, in the same whole-percent rounding
+   * the card displays. NEVER a projected or smoothed number. Only meaningful
+   * when the last session took shots (otherwise the trend's newest point is
+   * an older session and "vs previous" would lie).
+   */
+  const fgDelta = useMemo(() => {
+    if (recentTrend.length < 2) return null;
+    const last = recentTrend[recentTrend.length - 1]!;
+    const prev = recentTrend[recentTrend.length - 2]!;
+    return Math.round(last * 100) - Math.round(prev * 100);
+  }, [recentTrend]);
+
   if (!onboardingDone) return <Redirect href="/onboarding" />;
 
   const startSession = () => {
     if (hapticsEnabled) void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     // The hero ALWAYS opens setup — orientation choice and the pre-flight
     // checklist live there. (An earlier "one tap to ball" hero skipped it and
-    // made orientation unpickable; quickStart below is the deliberate shortcut.)
+    // made orientation unpickable; the quick chip below is the deliberate shortcut.)
     router.push('/session/setup');
   };
 
@@ -402,21 +505,35 @@ export default function HomeScreen() {
     router.push(`/session/live?orient=${useSettings.getState().lastOrient}`);
   };
 
+  /** First run = the db read succeeded and found no sessions. Hides the
+   *  challenge decks (presentation only — the award effects above keep
+   *  running) and swaps the last-session slot for the FirstRunScene. */
+  const firstRun = lastSession === null && !dbFailed;
+  const goalDone = dailyGoalMakes > 0 && goalMakes >= dailyGoalMakes;
+
   return (
     <View style={styles.root}>
     <Screen scroll>
       <View style={styles.stack}>
-        {/* Header: wordmark + settings */}
+        {/* Header: wordmark + beta chip + settings. The chip keeps the honest
+            disclosure (premium entitlements are defined but unwired) without
+            spending a full line on it. */}
         <Row style={styles.header}>
           <View
             accessible
             accessibilityRole="header"
             accessibilityLabel="Hoopilot. Beta — everything unlocked."
           >
-            <Text style={styles.wordmark}>
-              HOOP<Text style={styles.wordmarkAccent}>ILOT</Text>
-            </Text>
-            <Text style={styles.betaNote}>Beta — everything unlocked</Text>
+            <Row gap={space.sm}>
+              <Text style={styles.wordmark}>
+                HOOP<Text style={styles.wordmarkAccent}>ILOT</Text>
+              </Text>
+              {/* Content-sized wrapper neutralises Chip's own alignSelf so it
+                  centers against the wordmark instead of pinning to the top. */}
+              <View>
+                <Chip compact label="Beta — everything unlocked" />
+              </View>
+            </Row>
           </View>
           <Row gap={space.sm}>
             <ProfileButton size={40} />
@@ -427,13 +544,17 @@ export default function HomeScreen() {
                 hitSlop={space.sm}
                 style={({ pressed }) => [styles.gearButton, pressed && styles.gearPressed]}
               >
-                <Ionicons name="settings-sharp" size={22} color={color.textDim} />
+                <Ionicons name="settings-sharp" size={iconSize.xl} color={color.textDim} />
               </Pressable>
             </Link>
           </Row>
         </Row>
 
-        {/* Hero Start CTA */}
+        {/* Hero Start CTA. Two separate accessible buttons live here: the
+            hero itself and the quick-start chip (repeat sessions only — it
+            needs a granted camera and reuses the last orientation). The
+            coach-mark anchor measures the OUTER container, so the "Start a
+            session" step still frames the whole hero. */}
         <Animated.View entering={enter(0)}>
         <View ref={heroRef} onLayout={onHeroLayout}>
           <Pressable
@@ -456,88 +577,122 @@ export default function HomeScreen() {
             >
               START SESSION
             </Text>
-            <Text style={styles.heroSub}>Point your phone at the hoop — we do the counting.</Text>
+            <Row gap={space.md} style={styles.heroFootRow}>
+              <Text style={[styles.heroSub, styles.heroSubFlex]}>
+                Point your phone at the hoop — we do the counting.
+              </Text>
+              {cameraPermission.hasPermission && (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel="Quick start"
+                  accessibilityHint={`Skips setup and starts in ${useSettings.getState().lastOrient} like last time`}
+                  hitSlop={space.sm}
+                  onPress={quickStart}
+                  style={({ pressed }) => [styles.quickChip, pressed && styles.quickChipPressed]}
+                >
+                  <Ionicons name="flash" size={iconSize.sm} color={color.onAccent} />
+                  <Text style={styles.quickChipLabel}>Same setup as last time</Text>
+                </Pressable>
+              )}
+            </Row>
           </Pressable>
         </View>
         </Animated.View>
 
-        {/* Quick start — the deliberate skip-setup shortcut (repeat sessions
-            only: it needs a granted camera and reuses the last orientation). */}
-        {cameraPermission.hasPermission && (
-          <Animated.View entering={enter(1)}>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityLabel="Quick start"
-            accessibilityHint={`Skips setup and starts in ${useSettings.getState().lastOrient} like last time`}
-            onPress={quickStart}
-            style={({ pressed }) => [styles.quickStart, pressed && styles.quickStartPressed]}
-          >
-            <Ionicons name="flash" size={15} color={color.accent} />
-            <Text style={styles.quickStartLabel}>Quick start — same setup as last time</Text>
-          </Pressable>
-          </Animated.View>
-        )}
-
-        {/* Choose a game mode */}
+        {/* Recommendation entry into Train. When the session history supports
+            a pick (recommendFromSessions over the rows fetched above), the row
+            leads with that mode; otherwise it stays the generic mode door.
+            Home only deep-links /modes — arming the mode is Train's contract. */}
         <Animated.View entering={enter(2)}>
         <View ref={modeRowRef} onLayout={onModeRowLayout}>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Choose a mode"
-          accessibilityHint="Pick a game like Around the World, Timed Challenge or HORSE"
-          onPress={() => {
-            if (hapticsEnabled) void Haptics.selectionAsync();
-            router.push('/modes');
-          }}
-          style={({ pressed }) => [styles.modeRow, pressed && styles.modeRowPressed]}
+        <PressableCard
+          onPress={() => router.push('/modes')}
+          haptic="selection"
+          accessibilityLabel={
+            recoView
+              ? `Choose a mode. Recommended: ${recoView.name}. ${recoView.reason}.`
+              : 'Choose a mode. Around the World, Timed Challenge, HORSE and more.'
+          }
+          style={styles.modeCard}
         >
-          <View style={styles.modeText}>
-            <Text style={styles.modeTitle}>Choose a mode</Text>
-            <Text style={styles.modeSub}>
-              Around the World · Timed · 3-Point Contest · HORSE and more
-            </Text>
+          <View
+            style={[
+              styles.modeBadge,
+              recoView != null && { backgroundColor: recoView.tint },
+            ]}
+          >
+            <Ionicons
+              name={recoView?.icon ?? 'basketball'}
+              size={iconSize.lg}
+              color={recoView?.accent ?? color.accent}
+            />
           </View>
-          <Ionicons name="chevron-forward" size={20} color={color.accent} />
-        </Pressable>
+          <View style={styles.modeText}>
+            {recoView ? (
+              <>
+                <Text style={styles.modeReco}>RECOMMENDED</Text>
+                <Text style={styles.modeTitle} numberOfLines={1}>
+                  {recoView.name}
+                </Text>
+                {/* Exact db-derived count, VERBATIM — never dressed up. */}
+                <Text style={styles.modeSub} numberOfLines={1}>
+                  {recoView.reason}
+                </Text>
+              </>
+            ) : (
+              <>
+                <Text style={styles.modeTitle}>Choose a mode</Text>
+                <Text style={styles.modeSub}>
+                  Around the World · Timed · 3-Point Contest · HORSE and more
+                </Text>
+              </>
+            )}
+          </View>
+          <Ionicons name="chevron-forward" size={iconSize.lg} color={color.accent} />
+        </PressableCard>
         </View>
         </Animated.View>
 
-        {/* Day streak — the return loop, gamified into a medal ladder. Shown
-            once a streak exists; stays live through today until a day is missed. */}
-        {streak.current >= 1 && (
-          <Animated.View entering={enter(3)}>
-            <StreakTierCard streak={streak} />
-          </Animated.View>
-        )}
-
-        {/* Daily goal */}
-        {dailyGoalMakes > 0 && (
+        {/* TODAY shelf — streak ladder and goal ring on ONE row, one eyebrow.
+            Shown once either loop is live; the ring keeps its own one-shot
+            celebration and hot-glow behavior at the smaller size. */}
+        {(streak.current >= 1 || dailyGoalMakes > 0) && (
           <Card
             entering={enter(3)}
-            style={[styles.goalCard, goalMakes >= dailyGoalMakes && styles.goalCardDone]}
+            style={goalDone ? styles.todayShelfDone : undefined}
           >
-            <View style={styles.goalText}>
-              <Eyebrow>Daily goal</Eyebrow>
-              {goalMakes >= dailyGoalMakes ? (
-                <Row gap={space.sm} style={styles.goalDoneRow}>
-                  <Ionicons name="checkmark-circle" size={18} color={color.make} />
-                  <Text style={[styles.goalHeadline, styles.goalHeadlineDone]}>
-                    Goal reached — nice shooting today.
-                  </Text>
-                </Row>
-              ) : (
-                <Text style={styles.goalHeadline}>
-                  {`${dailyGoalMakes - goalMakes} makes to go today.`}
-                </Text>
+            <SectionEyebrow icon="today" style={styles.todayEyebrow}>
+              Today
+            </SectionEyebrow>
+            <Row gap={space.lg} style={styles.todayRow}>
+              <View style={styles.todayLeft}>
+                {streak.current >= 1 && <StreakTierCard streak={streak} embedded />}
+                {dailyGoalMakes > 0 &&
+                  (goalDone ? (
+                    <Row gap={space.sm} style={styles.goalDoneRow}>
+                      <Ionicons name="checkmark-circle" size={iconSize.md} color={color.make} />
+                      <Text style={[styles.goalHeadline, styles.goalHeadlineDone]}>
+                        Goal reached — nice shooting today.
+                      </Text>
+                    </Row>
+                  ) : (
+                    <Text style={styles.goalHeadline}>
+                      {`${dailyGoalMakes - goalMakes} makes to go today.`}
+                    </Text>
+                  ))}
+              </View>
+              {dailyGoalMakes > 0 && (
+                <GoalRing made={goalMakes} goal={dailyGoalMakes} size={TODAY_RING_SIZE} />
               )}
-            </View>
-            <GoalRing made={goalMakes} goal={dailyGoalMakes} />
+            </Row>
           </Card>
         )}
 
         {/* Daily challenges — three per day, drawn deterministically from the
             date, progress recomputed from today's sessions on focus. Display
-            only: no navigation, the loop lives right here. */}
+            only: no navigation, the loop lives right here. Hidden on first
+            run (the award effects above still run — they're idempotent). */}
+        {!firstRun && (
         <Card entering={enter(4)}>
           <Row style={styles.challengeHeader}>
             <Eyebrow>Daily challenges</Eyebrow>
@@ -570,11 +725,7 @@ export default function HomeScreen() {
                     style={[styles.challengeIconChip, done && styles.challengeIconChipDone]}
                   >
                     <Ionicons
-                      name={
-                        done
-                          ? 'checkmark'
-                          : (c.icon as React.ComponentProps<typeof Ionicons>['name'])
-                      }
+                      name={done ? 'checkmark' : (c.icon as IoniconName)}
                       size={15}
                       color={done ? color.make : color.accent}
                     />
@@ -616,25 +767,29 @@ export default function HomeScreen() {
               </Text>
             </View>
           )}
+          {/* One-shot perfect-day burst over the banner (day-stamped above).
+              Reduced motion: SuccessBurst renders null; the banner carries
+              the meaning. */}
+          {burstDay != null && <SuccessBurst trigger={burstDay} onDone={clearBurst} />}
         </Card>
+        )}
 
-        {/* Weekly challenges — the daily loop's bigger sibling: three per ISO
-            week, drawn deterministically from the week key, progress folded
-            from this week's sessions on focus. Same display-only contract as
-            the daily block; the card owns its own layout (Home is long). */}
-        <WeeklyChallengeCard
-          challenges={weeklyChallengeSet}
-          agg={weekAgg}
-          entering={enter(5)}
-        />
+        {/* Weekly challenges, compacted to one row + one aggregate bar. The
+            FULL card renders read-only in Train's CHALLENGES section; the
+            award pass stays in the focus effect above (Home-owned writes). */}
+        {!firstRun && (
+          <WeeklyChallengeSummary
+            challenges={weeklyChallengeSet}
+            agg={weekAgg}
+            entering={enter(5)}
+            onPress={() => router.push('/modes')}
+          />
+        )}
 
         {/* Last session */}
         <Animated.View entering={enter(6)}>
         {lastSession === undefined ? (
-          <Card>
-            <Eyebrow>Last session</Eyebrow>
-            <Text style={styles.emptyBody}>Loading…</Text>
-          </Card>
+          <SkeletonCard lines={2} />
         ) : dbFailed ? (
           <View>
             <Eyebrow>Last session</Eyebrow>
@@ -657,7 +812,7 @@ export default function HomeScreen() {
                   <Eyebrow>Last session</Eyebrow>
                   <Ionicons
                     name="chevron-forward"
-                    size={14}
+                    size={iconSize.sm}
                     color={color.textFaint}
                     style={styles.sessionEyebrowChevron}
                   />
@@ -672,43 +827,62 @@ export default function HomeScreen() {
                         ? `${lastSession.makes} makes · ${lastSession.attempts} attempts`
                         : 'No shots logged'}
                     </Text>
-                    {recentTrend.length >= 2 && (
-                      <View
-                        accessible
-                        accessibilityLabel={`FG% trend across your last ${recentTrend.length} sessions`}
-                        style={styles.miniSpark}
+                    {/* Honest delta: plain arithmetic on stored fgPct values
+                        (same rounding as the numeral) — never projected. */}
+                    {fgDelta != null && lastSession.attempts > 0 && (
+                      <Text
+                        style={[
+                          styles.sessionDelta,
+                          {
+                            color:
+                              fgDelta > 0
+                                ? color.make
+                                : fgDelta < 0
+                                  ? color.miss
+                                  : color.textDim,
+                          },
+                        ]}
                       >
-                        <Sparkline
-                          data={recentTrend}
-                          width={MINI_SPARK_W}
-                          height={MINI_SPARK_H}
-                        />
-                        <Text style={styles.miniSparkLabel}>
-                          {`LAST ${recentTrend.length} SESSIONS`}
-                        </Text>
-                      </View>
+                        {`${fgDelta > 0 ? '+' : ''}${fgDelta}% vs previous session`}
+                      </Text>
                     )}
                   </View>
-                  {/* Broadcast stat block: FG% set off behind its own hairline. */}
+                  {/* Broadcast stat block: FG% rolls in, re-rolling only when
+                      a genuinely new session lands (trigger = session id). */}
                   <View style={styles.sessionStat}>
-                    <StatNumber
+                    <MotionStat
                       size="medium"
-                      value={`${Math.round(lastSession.fgPct * 100)}%`}
+                      value={Math.round(lastSession.fgPct * 100)}
+                      suffix="%"
                       label="FG"
+                      trigger={lastSession.id}
                     />
                   </View>
                 </Row>
+                {/* Quiet full-width trend band under the payoff numbers. */}
+                {recentTrend.length >= 2 && (
+                  <View
+                    accessible
+                    accessibilityLabel={`FG% trend across your last ${recentTrend.length} sessions`}
+                    style={styles.sparkBand}
+                  >
+                    <View style={styles.sparkBandChart}>
+                      <Sparkline
+                        data={recentTrend}
+                        width={contentWidth - space.lg * 2}
+                        height={SPARK_BAND_H}
+                      />
+                    </View>
+                    <Text style={styles.sparkBandLabel}>
+                      {`LAST ${recentTrend.length} SESSIONS`}
+                    </Text>
+                  </View>
+                )}
               </Card>
             )}
           </Pressable>
         ) : (
-          <View>
-            <Eyebrow>First session</Eyebrow>
-            <EmptyState
-              title="Prop your phone up. We'll count every shot."
-              body="Makes, misses, streaks and FG% land here after your first run."
-            />
-          </View>
+          <FirstRunScene width={contentWidth} />
         )}
         </Animated.View>
       </View>
@@ -726,7 +900,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   stack: {
-    gap: space.xl,
+    gap: layout.sectionGap,
     paddingTop: space.md,
   },
   header: {
@@ -749,11 +923,6 @@ const styles = StyleSheet.create({
   gearPressed: {
     backgroundColor: color.surfaceRaised,
   },
-  betaNote: {
-    ...type.caption,
-    color: color.textFaint,
-    marginTop: 2,
-  },
   hero: {
     minHeight: HERO_HEIGHT,
     borderRadius: radius.lg,
@@ -763,11 +932,10 @@ const styles = StyleSheet.create({
     overflow: 'hidden',
   },
   heroEyebrow: {
-    ...type.caption,
+    // Broadcast eyebrow voice — the shared tracked-caps step.
+    ...type.eyebrow,
     color: color.onAccent,
     opacity: 0.7,
-    // Wider tracking than the base caption — broadcast eyebrow voice.
-    letterSpacing: 1.2,
     marginBottom: 2,
   },
   heroLabel: {
@@ -779,39 +947,45 @@ const styles = StyleSheet.create({
     color: color.onAccent,
     opacity: 0.85,
   },
-  quickStart: {
+  heroFootRow: {
+    alignItems: 'flex-end',
+  },
+  heroSubFlex: {
+    flex: 1,
+    minWidth: 0,
+  },
+  quickChip: {
     flexDirection: 'row',
+    alignItems: 'center',
+    gap: space.xs,
+    borderRadius: radius.pill,
+    backgroundColor: color.accentPressed,
+    paddingHorizontal: space.md,
+    paddingVertical: space.sm,
+  },
+  quickChipPressed: {
+    opacity: 0.8,
+  },
+  quickChipLabel: {
+    ...type.caption,
+    color: color.onAccent,
+  },
+  modeCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: space.md,
+  },
+  modeBadge: {
+    width: 40,
+    height: 40,
+    borderRadius: radius.pill,
+    backgroundColor: color.accentTint,
     alignItems: 'center',
     justifyContent: 'center',
-    gap: space.sm,
-    minHeight: touch.minTarget,
-    borderRadius: radius.pill,
-    borderWidth: 1,
-    borderColor: color.border,
-    paddingHorizontal: space.lg,
   },
-  quickStartPressed: {
-    backgroundColor: color.surfaceRaised,
-  },
-  quickStartLabel: {
-    ...type.caption,
-    color: color.textDim,
-  },
-  modeRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: space.md,
-    backgroundColor: color.surface,
-    borderRadius: radius.lg,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderColor: color.border,
-    paddingVertical: space.lg,
-    paddingHorizontal: space.lg,
-    minHeight: touch.minTarget,
-  },
-  modeRowPressed: {
-    backgroundColor: color.surfaceRaised,
+  modeReco: {
+    ...type.micro,
+    color: color.accent,
   },
   modeText: {
     flex: 1,
@@ -829,21 +1003,23 @@ const styles = StyleSheet.create({
   cardPressed: {
     backgroundColor: color.surfaceRaised,
   },
-  goalCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: space.lg,
-  },
-  goalCardDone: {
+  todayShelfDone: {
     // Quiet make-green edge — the completed state reads at a glance without
-    // shouting over the ring's own green flip.
-    borderColor: 'rgba(47, 214, 163, 0.3)',
+    // shouting over the ring's own green flip. The shared 14% make tint doubles
+    // as the hairline (deliberately no dedicated edge token for this).
+    borderColor: color.makeTint,
   },
-  goalText: {
+  todayEyebrow: {
+    marginBottom: space.md,
+  },
+  todayRow: {
+    alignItems: 'center',
+  },
+  todayLeft: {
     flex: 1,
     minWidth: 0,
-    gap: space.xs,
+    gap: space.md,
+    justifyContent: 'center',
   },
   goalHeadline: {
     ...type.heading,
@@ -868,13 +1044,8 @@ const styles = StyleSheet.create({
   challengeList: {
     gap: space.md,
   },
-  challengeRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: space.md,
-  },
   challengeIconChip: {
-    // Same tinted circle as the quick-link chips below — one icon voice.
+    // Same tinted circle as the weekly rows — one icon voice.
     width: 26,
     height: 26,
     borderRadius: radius.pill,
@@ -884,6 +1055,11 @@ const styles = StyleSheet.create({
   },
   challengeIconChipDone: {
     backgroundColor: color.makeTint,
+  },
+  challengeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: space.md,
   },
   challengeBody: {
     flex: 1,
@@ -958,12 +1134,19 @@ const styles = StyleSheet.create({
     ...type.body,
     color: color.textDim,
   },
-  miniSpark: {
-    marginTop: space.sm,
-    gap: space.xs,
-    alignSelf: 'flex-start',
+  sessionDelta: {
+    ...type.caption,
+    marginTop: 2,
+    fontVariant: ['tabular-nums'],
   },
-  miniSparkLabel: {
+  sparkBand: {
+    marginTop: space.md,
+    gap: space.xs,
+  },
+  sparkBandChart: {
+    opacity: 0.75,
+  },
+  sparkBandLabel: {
     ...type.micro,
     color: color.textFaint,
   },
@@ -973,9 +1156,5 @@ const styles = StyleSheet.create({
     borderLeftWidth: StyleSheet.hairlineWidth,
     borderLeftColor: color.border,
     paddingLeft: space.lg,
-  },
-  emptyBody: {
-    ...type.body,
-    color: color.textDim,
   },
 });

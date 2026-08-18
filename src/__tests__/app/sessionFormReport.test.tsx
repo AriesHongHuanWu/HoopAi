@@ -48,6 +48,30 @@ jest.mock('react-native-reanimated', () => ({
 
 jest.mock('@expo/vector-icons', () => ({ Ionicons: () => null }));
 
+// Skia is ESM-only under jest; the shot-of-the-session arc header is a
+// decorative static canvas (persisted trajectory samples only) — stub it the
+// same way sessionSummaryRender.test.tsx does.
+jest.mock('@shopify/react-native-skia', () => {
+  const stub = () => null;
+  return {
+    __esModule: true,
+    Canvas: stub,
+    Group: stub,
+    Circle: stub,
+    Path: stub,
+    Skia: {
+      Path: {
+        Make: () => ({
+          moveTo() {},
+          lineTo() {},
+          quadTo() {},
+          close() {},
+        }),
+      },
+    },
+  };
+});
+
 jest.mock('expo-router', () => ({
   router: { push: jest.fn(), replace: jest.fn() },
 }));
@@ -366,6 +390,13 @@ describe('SessionFormReport — swapping shots', () => {
     // Shot 4 is the miss — a made-shot report must never offer it.
     expect([...labels].some((l) => l.startsWith('Analyse shot 4'))).toBe(false);
 
+    // The visible sub-label speaks the app-wide confidence language mapped
+    // through the evidence ladder over SEQ_TARGET_FRAMES (24): only the
+    // 24-frame capture clears the HIGH tier; 18 and 12 read as thin. The raw
+    // counts live in the accessibility labels above, never invented away.
+    expect(text).toContain('strong capture');
+    expect(text).toContain('thin capture');
+
     await unmount(r);
   });
 
@@ -380,7 +411,11 @@ describe('SessionFormReport — swapping shots', () => {
     expect(text).toContain(`You chose this one. ${describeCandidate(chosen)}`);
     // The "most analysable" claim belongs to the automatic pick alone.
     expect(text).not.toContain('is the most analysable make of this session');
-    expect(text).toContain('12 frames');
+    // RE-PINNED: the strip's raw '12 frames' sub-label became the shared
+    // confidence language (12/24 sits below the evidence ladder's HIGH tier),
+    // and the swapped-to shot's frame count now surfaces on the report chip.
+    expect(text).toContain('thin capture');
+    expect(text).toContain('12 pose frames');
     expect(hapticsMod.haptic.selection).toHaveBeenCalled();
 
     await unmount(r);

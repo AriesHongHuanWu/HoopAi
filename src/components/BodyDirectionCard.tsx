@@ -34,6 +34,7 @@ import { router } from 'expo-router';
 import React, { useMemo, type ComponentProps } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
+import { SectionEyebrow } from '@/components/ScreenHeader';
 import { Card, Chip, PillButton, Row, StatNumber } from '@/components/ui';
 import { color, radius, space, type } from '@/constants/tokens';
 import {
@@ -128,16 +129,6 @@ function distanceGapCopy(input: ShotRangeInput): string {
   );
 }
 
-/** Local replica of coach.tsx's SectionEyebrow (the screen doesn't export it). */
-function SectionEyebrow({ icon, children }: { icon: IconName; children: string }) {
-  return (
-    <Row gap={6} style={styles.eyebrowRow}>
-      <Ionicons name={icon} size={12} color={color.accent} />
-      <Text style={styles.eyebrowText}>{children.toUpperCase()}</Text>
-    </Row>
-  );
-}
-
 /** A directive list (play / avoid), icon + text so it is never colour alone. */
 function DirectiveList({
   label,
@@ -218,7 +209,9 @@ export function BodyDirectionCard({ shots, entering }: BodyDirectionCardProps) {
   if (plan.direction == null) {
     return (
       <Card entering={entering}>
-        <SectionEyebrow icon="body-outline">Body sets the direction</SectionEyebrow>
+        <SectionEyebrow icon="body-outline" style={styles.eyebrow}>
+          Body sets the direction
+        </SectionEyebrow>
         <Text style={styles.inviteTitle} accessibilityRole="header">
           Add your height to unlock your play-style direction
         </Text>
@@ -243,7 +236,9 @@ export function BodyDirectionCard({ shots, entering }: BodyDirectionCardProps) {
   const d = plan.direction;
   return (
     <Card entering={entering}>
-      <SectionEyebrow icon="body-outline">Body sets the direction</SectionEyebrow>
+      <SectionEyebrow icon="body-outline" style={styles.eyebrow}>
+        Body sets the direction
+      </SectionEyebrow>
 
       <Row style={styles.head} gap={space.md}>
         <View style={styles.headText}>
@@ -273,13 +268,9 @@ export function BodyDirectionCard({ shots, entering }: BodyDirectionCardProps) {
 }
 
 const styles = StyleSheet.create({
-  eyebrowRow: {
+  // Shared SectionEyebrow leaves margins to the call site (screens own rhythm).
+  eyebrow: {
     marginBottom: space.sm,
-  },
-  eyebrowText: {
-    ...type.caption,
-    color: color.textFaint,
-    letterSpacing: 1,
   },
   head: {
     justifyContent: 'space-between',

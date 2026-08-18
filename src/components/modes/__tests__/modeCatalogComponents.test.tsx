@@ -9,6 +9,26 @@
  * pressed treatment) that the picker relies on to make the armed mode
  * unmistakable.
  */
+// RecommendedHero draws its static arc through the motion module (arcMotif +
+// a Skia canvas). Neither Reanimated's worklets runtime nor Skia's native
+// bindings load under jest, so both are stubbed at the module boundary — the
+// component never CALLS them here (the arc is a static draw gated behind
+// onLayout, which react-test-renderer never fires).
+jest.mock('react-native-reanimated', () => ({
+  __esModule: true,
+  default: { View: () => null },
+  useReducedMotion: () => true,
+  useSharedValue: (v: unknown) => ({ value: v }),
+  useDerivedValue: (fn: () => unknown) => ({ value: fn() }),
+  withTiming: (v: unknown) => v,
+  Easing: { out: (f: unknown) => f, cubic: (t: number) => t },
+}));
+jest.mock('@shopify/react-native-skia', () => ({
+  Canvas: () => null,
+  Circle: () => null,
+  Path: () => null,
+}));
+
 import { Ionicons } from '@expo/vector-icons';
 import React from 'react';
 import { StyleSheet, Text, View } from 'react-native';
@@ -25,6 +45,8 @@ import { RecommendedHero } from '../RecommendedHero';
 
 const ACCENT = color.info;
 const TINT = 'rgba(79, 141, 232, 0.14)';
+/** Identity 45% hairline — the hero's RESTING border (the leatherEdge recipe). */
+const EDGE = 'rgba(79, 141, 232, 0.45)';
 
 function render(element: React.ReactElement): ReactTestRenderer {
   let renderer!: ReactTestRenderer;
@@ -184,6 +206,7 @@ describe('RecommendedHero', () => {
     tagline: 'Five spots, make to move',
     accent: ACCENT,
     tint: TINT,
+    edge: EDGE,
     reason: 'Played 3× in the last 2 weeks',
     selected: false,
     onPress: jest.fn(),
@@ -224,6 +247,50 @@ describe('RecommendedHero', () => {
     const style = pressableStyle(findButton(r2.root), false);
     expect(style.borderColor).toBe(ACCENT);
     expect(style.borderWidth).toBe(1.5);
+  });
+
+  it('outranks the shelf at rest: the resting border is the identity edge, not color.border', () => {
+    const r = render(<RecommendedHero {...heroProps} />);
+    const style = pressableStyle(findButton(r.root), false);
+    expect(style.borderColor).toBe(EDGE);
+    expect(style.borderColor).not.toBe(color.border);
+  });
+
+  describe("variant='starter' (new player — no history to recommend from)", () => {
+    const starterProps = {
+      icon: 'basketball' as const,
+      name: 'Free Play',
+      tagline: 'Just shoot — every make and miss is tracked',
+      accent: ACCENT,
+      tint: TINT,
+      edge: EDGE,
+      selected: false,
+      onPress: jest.fn(),
+    };
+
+    it("shows the START HERE eyebrow and NO reason row — never fabricates a recommendation", () => {
+      const r = render(<RecommendedHero variant="starter" {...starterProps} />);
+      const all = texts(r.root);
+      expect(all).toContain('START HERE');
+      expect(all).not.toContain('RECOMMENDED FOR YOU');
+      // Honesty: with no history to cite, no provenance line may render.
+      expect(all.some((t) => t.includes('from your session history'))).toBe(false);
+      expect(all).toContain('START');
+    });
+
+    it('announces itself as a starting point, not a recommendation', () => {
+      const onPress = jest.fn();
+      const r = render(
+        <RecommendedHero variant="starter" {...starterProps} onPress={onPress} />,
+      );
+      const card = findButton(r.root);
+      expect(card.props.accessibilityLabel).toBe(
+        'Start here: Free Play. Just shoot — every make and miss is tracked',
+      );
+      expect(card.props.accessibilityHint).toBe('Starts setup with this mode armed.');
+      card.props.onPress();
+      expect(onPress).toHaveBeenCalledTimes(1);
+    });
   });
 });
 

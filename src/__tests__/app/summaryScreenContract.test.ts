@@ -112,14 +112,24 @@ describe('section entrance stagger', () => {
     const indices = [...src.matchAll(/entering=\{enter\((\d+)\)\}/g)].map((m) =>
       Number(m[1]),
     );
-    // hero 0 · goal-line 1 · milestone 1 · media 2 · shot map 3 · court map 4
+    // hero 0 · HONORS BLOCK 1 · media 2 · shot map 3 · court map 4
     // · SHOT OF THE SESSION 5 · box score 5 · next up 6
     //
-    // Shot of the session shares index 5 with the box score on purpose:
-    // useCardStagger caps at STAGGER_CAP_INDEX (4), so 5 and 6 already resolve
-    // to the same delay. Reusing it inserts the new block without renumbering
-    // the two that follow, and the ladder still finishes in one short beat.
-    expect(indices).toEqual([0, 1, 1, 2, 3, 4, 5, 5, 6]);
+    // RE-PINNED for the honors merge: the goal line and milestone banner used
+    // to be two sibling Animated.Views sharing slot 1; they now live INSIDE
+    // one honors card (PB banner first — it keeps its own hero-synced
+    // entrance and stays the reduced-motion confetti carrier), so slot 1
+    // appears exactly once. Shot of the session still shares index 5 with the
+    // box score on purpose: useCardStagger caps at STAGGER_CAP_INDEX (4), so
+    // 5 and 6 already resolve to the same delay.
+    expect(indices).toEqual([0, 1, 2, 3, 4, 5, 5, 6]);
+  });
+
+  it('merges every celebration into the single honors slot', () => {
+    // The three -space.md tuck-ups are gone; the honors block carries ONE.
+    expect(src.match(/marginTop: -space\.md/g) ?? []).toHaveLength(1);
+    // The milestone banner sits on the shared radius scale, not a literal.
+    expect(src).not.toMatch(/borderRadius:\s*14\b/);
   });
 
   it('never staggers the snackbar, modals or coach marks', () => {
@@ -129,5 +139,32 @@ describe('section entrance stagger', () => {
       const before = src.slice(Math.max(0, mount - 400), mount);
       expect(before).not.toContain('entering={enter(');
     }
+  });
+});
+
+describe('trust bridge to the analyze screen', () => {
+  it('links the detector test at the moment of doubt (unsure shots only)', () => {
+    expect(src).toContain(
+      'label="Doubt a call? Test the detector on your own clip"',
+    );
+    // Typed literal route — never a string variable (typedRoutes contract).
+    expect(src).toMatch(/onPress=\{\(\) => router\.push\('\/session\/analyze'\)\}/);
+  });
+});
+
+describe('next-up routing semantics', () => {
+  it('reaches History via dismissTo, never push', () => {
+    // This screen is a ROOT-STACK route above the Tabs navigator: push()
+    // would stack a SECOND tabs instance on top of the summary, and Back
+    // would drop the user into the session they just finished. dismissTo
+    // pops to the tabs instance that is already mounted.
+    expect(src).toMatch(/onPress=\{\(\) => router\.dismissTo\('\/history'\)\}/);
+    expect(src).not.toContain("router.push('/history')");
+  });
+
+  it('keeps the arc off the recap — SummaryHero is the one hero', () => {
+    // hero={false} suppresses SessionRecap's duplicated HeroArcStat + pips on
+    // the summary ONLY (history detail keeps the shared default of true).
+    expect(src).toMatch(/<SessionRecap[\s\S]*?hero=\{false\}[\s\S]*?\/>/);
   });
 });

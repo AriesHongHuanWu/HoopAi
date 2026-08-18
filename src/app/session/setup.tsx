@@ -199,6 +199,13 @@ export default function SessionSetupScreen() {
   };
 
   const startDisabled = !camera.hasPermission && !camera.canRequestPermission;
+  // Honesty: a hard-blocked start must never keep promising the camera. The
+  // hero CTA's sub-line swaps to the true state + the fix, and the camera
+  // chip/sticky summary wear the unsure tint (chalkYellow — the app's one
+  // caution color).
+  const disabledReason = startDisabled
+    ? 'Camera access needed — open the Camera section below to fix it'
+    : undefined;
   const summary = startSummaryLine({
     modeName: modeDef?.name ?? null,
     orient,
@@ -214,17 +221,22 @@ export default function SessionSetupScreen() {
   });
   const recordingSub = recordingSubtitle({ recordVideo, keepMode });
 
-  // Hero summary chips — labels mirror the section subtitles they open.
+  // Hero summary chips — labels mirror the section subtitles they open. The
+  // camera chip turns honest when access is hard-blocked: it names the problem
+  // and wears the unsure tint instead of quietly reading "Portrait".
   const chips: StartHeroChip[] = HERO_CHIP_DEFS.map((d) => ({
     id: d.id,
     icon: d.icon as StartHeroChip['icon'],
+    tone: d.id === 'camera' && startDisabled ? ('warning' as const) : undefined,
     label:
       d.id === 'mode'
         ? modeSub
         : d.id === 'camera'
-          ? orient === 'portrait'
-            ? 'Portrait'
-            : 'Landscape'
+          ? startDisabled
+            ? 'Camera access needed'
+            : orient === 'portrait'
+              ? 'Portrait'
+              : 'Landscape'
           : recordingSub,
   }));
 
@@ -356,6 +368,7 @@ export default function SessionSetupScreen() {
           summary={summary}
           chips={chips}
           disabled={startDisabled}
+          disabledReason={disabledReason}
           onStart={() => void openCamera()}
           onChipPress={onChipPress}
           onLayoutBottom={(y) => {
@@ -394,6 +407,7 @@ export default function SessionSetupScreen() {
         visible={stickyOn}
         disabled={startDisabled}
         summary={summary}
+        tone={startDisabled ? 'warning' : undefined}
         onStart={() => void openCamera()}
       />
     </View>

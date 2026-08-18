@@ -32,14 +32,26 @@
  * cues from src/core/postureFix.ts against src/core/nbaReferenceForms.ts.
  */
 import { Ionicons } from '@expo/vector-icons';
+import { Canvas, Circle, Path, Skia } from '@shopify/react-native-skia';
 import { router } from 'expo-router';
-import React, { useMemo, useState, type ComponentProps } from 'react';
-import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
+import React, { useMemo, useState } from 'react';
+import {
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+  type LayoutChangeEvent,
+} from 'react-native';
 
 import { FormReportCard } from '@/components/FormReport';
+import { buildSparklinePoints } from '@/components/hud/shotSparkline';
 import type { EnteringProp } from '@/components/motion';
+import { SectionEyebrow } from '@/components/ScreenHeader';
 import { Card, Chip, EmptyState, Row } from '@/components/ui';
-import { color, radius, space, type } from '@/constants/tokens';
+import { color, confidenceColor, radius, space, type } from '@/constants/tokens';
+import { confidenceLevel, type ConfidenceLevel } from '@/core/evidence';
+import { SEQ_TARGET_FRAMES } from '@/core/formSequence';
 import { PLAYER_ARCHETYPES, type PlayerArchetype } from '@/core/nbaBenchmarks';
 import { referenceSequence } from '@/core/nbaReferenceForms';
 import { posturePlan, type PostureCue } from '@/core/postureFix';
@@ -53,8 +65,6 @@ import {
 import type { CoachingTip, ResolvedShot } from '@/core/types';
 import { useSettings } from '@/state/settingsStore';
 import { haptic } from '@/utils/haptics';
-
-type IconName = ComponentProps<typeof Ionicons>['name'];
 
 /**
  * The sentence that must survive any redesign of this card: it is the line
@@ -113,13 +123,102 @@ export function verdictLine(
 // Small presentational pieces
 // ---------------------------------------------------------------------------
 
-function SectionEyebrow({ icon, children }: { icon: IconName; children: string }) {
-  return (
-    <Row gap={6} style={styles.eyebrowRow}>
-      <Ionicons name={icon} size={12} color={color.accent} />
-      <Text style={styles.eyebrowText}>{children.toUpperCase()}</Text>
-    </Row>
+/** Height of the shot-of-the-session arc band across the card top. */
+const ARC_HEADER_H = 72;
+/** Inset keeps stroke caps and the comet dot inside the band. */
+const ARC_HEADER_INSET = 8;
+
+/**
+ * The picked shot's PERSISTED trajectory as a static arc header. Honesty
+ * rule: only the recorded samples are drawn (a polyline through
+ * buildSparklinePoints) — never a smoothed or idealized curve. A static Skia
+ * Path on purpose, NOT a second MiniArcReplay: its one-mounted-instance perf
+ * contract belongs to the recap's replay card, and this band animates
+ * nothing. Renders nothing when the shot persisted no drawable trajectory.
+ */
+function ShotArcHeader({ shot }: { shot: ResolvedShot }) {
+  const [w, setW] = useState(0);
+  const pts = useMemo(
+    () =>
+      w > 0
+        ? buildSparklinePoints(shot.trajectory, w, ARC_HEADER_H, ARC_HEADER_INSET)
+        : [],
+    [shot.trajectory, w],
   );
+  const path = useMemo(() => {
+    if (pts.length < 2) return null;
+    const p = Skia.Path.Make();
+    p.moveTo(pts[0]!.x, pts[0]!.y);
+    for (let i = 1; i < pts.length; i++) p.lineTo(pts[i]!.x, pts[i]!.y);
+    return p;
+  }, [pts]);
+  // Entry end = the LAST persisted sample (where the ball met the rim).
+  const tip = pts.length >= 2 ? pts[pts.length - 1]! : null;
+
+  if (shot.trajectory.length < 2) return null;
+
+  // Numeral sits beside the comet dot, flipped to whichever side has room.
+  const metaTop =
+    tip != null ? Math.min(Math.max(tip.y - 17, 0), ARC_HEADER_H - 34) : 0;
+  const metaSide =
+    tip != null && tip.x > w / 2
+      ? { right: Math.max(0, w - tip.x + ARC_HEADER_INSET + 8) }
+      : { left: (tip?.x ?? 0) + ARC_HEADER_INSET + 8 };
+
+  return (
+    <View
+      style={styles.arcHeader}
+      onLayout={(e: LayoutChangeEvent) => setW(e.nativeEvent.layout.width)}
+    >
+      {path != null && tip != null && (
+        <Canvas style={{ width: w, height: ARC_HEADER_H }} pointerEvents="none">
+          {/* Double stroke: wide soft echo under the crisp make-green line. */}
+          <Path
+            path={path}
+            style="stroke"
+            strokeWidth={7}
+            strokeCap="round"
+            strokeJoin="round"
+            color={color.make}
+            opacity={0.12}
+          />
+          <Path
+            path={path}
+            style="stroke"
+            strokeWidth={3}
+            strokeCap="round"
+            strokeJoin="round"
+            color={color.make}
+            opacity={0.65}
+          />
+          <Circle cx={tip.x} cy={tip.y} r={10} color={color.make} opacity={0.18} />
+          <Circle cx={tip.x} cy={tip.y} r={5} color={color.make} />
+        </Canvas>
+      )}
+      {tip != null && shot.entryAngleDeg != null && (
+        <View
+          pointerEvents="none"
+          style={[styles.arcHeaderMeta, { top: metaTop }, metaSide]}
+        >
+          <Text style={styles.arcHeaderNum}>{`${Math.round(shot.entryAngleDeg)}°`}</Text>
+          <Text style={styles.arcHeaderUnit}>ENTRY</Text>
+        </View>
+      )}
+    </View>
+  );
+}
+
+/**
+ * Capture-strength tier for the swap strip: the candidate's usable-frame
+ * count mapped through the SAME confidence ladder every detection surface
+ * speaks (core/evidence.ts), over the picker's own frameScore denominator
+ * (SEQ_TARGET_FRAMES — see shotOfSession.scoreCandidate). 'strong capture'
+ * only at the ladder's HIGH tier; anything the evidence module would not
+ * call high reads as 'thin capture'. The exact frame count stays in each
+ * pick's accessibilityLabel.
+ */
+function captureTier(usableFrames: number): ConfidenceLevel {
+  return confidenceLevel(Math.min(1, usableFrames / SEQ_TARGET_FRAMES));
 }
 
 /**
@@ -138,7 +237,9 @@ function AlternativesStrip({
 }) {
   return (
     <View style={styles.stripWrap}>
-      <SectionEyebrow icon="albums-outline">Analyse another make</SectionEyebrow>
+      <SectionEyebrow icon="albums-outline" style={styles.eyebrowRow}>
+        Analyse another make
+      </SectionEyebrow>
       <ScrollView
         horizontal
         showsHorizontalScrollIndicator={false}
@@ -146,6 +247,9 @@ function AlternativesStrip({
       >
         {candidates.map((c) => {
           const on = c.shot.id === selectedId;
+          // App-wide confidence language instead of a raw frame count — the
+          // count itself stays in the accessibilityLabel below.
+          const tier = captureTier(c.usableFrames);
           return (
             <Pressable
               key={c.shot.id}
@@ -159,9 +263,14 @@ function AlternativesStrip({
               style={[styles.pick, on && styles.pickOn]}
             >
               <Text style={[styles.pickText, on && styles.pickTextOn]}>{`Shot ${c.shot.id}`}</Text>
-              <Text style={[styles.pickSub, on && styles.pickSubOn]}>
-                {`${c.usableFrames} frames`}
-              </Text>
+              <Row gap={space.xs}>
+                <View
+                  style={[styles.pickDot, { backgroundColor: confidenceColor[tier] }]}
+                />
+                <Text style={[styles.pickSub, on && styles.pickSubOn]}>
+                  {tier === 'high' ? 'strong capture' : 'thin capture'}
+                </Text>
+              </Row>
             </Pressable>
           );
         })}
@@ -290,7 +399,11 @@ export function SessionFormReport({ shots, entering }: SessionFormReportProps) {
   return (
     <View style={styles.stack}>
       <Card entering={entering}>
-        <SectionEyebrow icon="ribbon-outline">Shot of the session</SectionEyebrow>
+        {/* Hero band: the pick's own persisted arc across the card top. */}
+        <ShotArcHeader shot={selected.shot} />
+        <SectionEyebrow icon="ribbon-outline" style={styles.eyebrowRow}>
+          Shot of the session
+        </SectionEyebrow>
         <Text style={styles.title} accessibilityRole="header">
           {`Shot ${selected.shot.id}`}
         </Text>
@@ -319,7 +432,9 @@ export function SessionFormReport({ shots, entering }: SessionFormReportProps) {
       <FormReportCard report={report} />
 
       <Card>
-        <SectionEyebrow icon="construct-outline">Posture vs the reference</SectionEyebrow>
+        <SectionEyebrow icon="construct-outline" style={styles.eyebrowRow}>
+          Posture vs the reference
+        </SectionEyebrow>
         <Row gap={space.xs} style={styles.chipRow}>
           <Chip label={archetype.name} tone="accent" />
           <Chip label={archetype.motion} />
@@ -339,7 +454,9 @@ export function SessionFormReport({ shots, entering }: SessionFormReportProps) {
       </Card>
 
       <Card>
-        <SectionEyebrow icon="copy-outline">{`What to copy from ${archetype.name}`}</SectionEyebrow>
+        <SectionEyebrow icon="copy-outline" style={styles.eyebrowRow}>
+          {`What to copy from ${archetype.name}`}
+        </SectionEyebrow>
         <Text style={styles.body}>{archetype.mechanics}</Text>
         {archetype.whatToCopy.map((line) => (
           <Row key={line} gap={space.xs} style={styles.copyRow}>
@@ -381,12 +498,29 @@ const styles = StyleSheet.create({
   stack: {
     gap: space.md,
   },
+  /** Call-site margin for the shared SectionEyebrow (screens own rhythm). */
   eyebrowRow: {
     marginBottom: space.xs,
   },
-  eyebrowText: {
+  /** Shot-of-the-session arc band across the card top. */
+  arcHeader: {
+    height: ARC_HEADER_H,
+    marginBottom: space.md,
+  },
+  arcHeaderMeta: {
+    position: 'absolute',
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    gap: space.xs,
+  },
+  arcHeaderNum: {
+    ...type.statMedium,
+    color: color.make,
+    fontVariant: ['tabular-nums'],
+  },
+  arcHeaderUnit: {
     ...type.micro,
-    color: color.accent,
+    color: color.textFaint,
   },
   title: {
     ...type.title,
@@ -449,6 +583,12 @@ const styles = StyleSheet.create({
   },
   pickSubOn: {
     color: color.accent,
+  },
+  /** Capture-strength dot — colored by the shared confidence ladder. */
+  pickDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
   },
   cueItem: {
     marginTop: space.md,

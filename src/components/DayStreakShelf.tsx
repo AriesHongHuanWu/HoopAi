@@ -26,7 +26,7 @@ import { StyleSheet, Text, View } from 'react-native';
 
 import type { EnteringProp } from '@/components/motion';
 import { Card, Chip, Eyebrow, Row, StatNumber } from '@/components/ui';
-import { color, radius, space, type } from '@/constants/tokens';
+import { color, iconSize, radius, space, type } from '@/constants/tokens';
 import {
   DAY_STREAK_BADGES,
   dayStreakTier,
@@ -65,7 +65,7 @@ function BadgeTile({ badge, earned }: { badge: DayStreakBadge; earned: boolean }
           // Core keeps `icon` a plain string (no UI imports there); every name
           // on the ladder is a checked Ionicons glyph.
           name={badge.icon as IconName}
-          size={17}
+          size={iconSize.md}
           color={earned ? color.accent : color.textFaint}
         />
       </View>

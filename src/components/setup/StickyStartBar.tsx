@@ -23,6 +23,11 @@ export interface StickyStartBarProps {
   disabled: boolean;
   /** One-line session summary, e.g. "Free Play · Portrait · Makes only". */
   summary: string;
+  /**
+   * 'warning' paints the summary in the unsure/chalkYellow tint — the same
+   * treatment as the hero's camera chip when permission is hard-denied.
+   */
+  tone?: 'default' | 'warning';
   onStart: () => void;
 }
 
@@ -31,7 +36,13 @@ export function barAccessibilityLabel(summary: string): string {
   return `Start session. ${summary}`;
 }
 
-export function StickyStartBar({ visible, disabled, summary, onStart }: StickyStartBarProps) {
+export function StickyStartBar({
+  visible,
+  disabled,
+  summary,
+  tone,
+  onStart,
+}: StickyStartBarProps) {
   // Hooks run unconditionally (before the early return) to keep order stable.
   const insets = useSafeAreaInsets();
   const reducedMotion = useReducedMotion();
@@ -42,7 +53,11 @@ export function StickyStartBar({ visible, disabled, summary, onStart }: StickySt
       accessibilityLabel={barAccessibilityLabel(summary)}
       style={[styles.bar, { paddingBottom: insets.bottom + space.md }]}
     >
-      <Text style={styles.summary} numberOfLines={1} ellipsizeMode="tail">
+      <Text
+        style={[styles.summary, tone === 'warning' && styles.summaryWarning]}
+        numberOfLines={1}
+        ellipsizeMode="tail"
+      >
         {summary}
       </Text>
       <PillButton
@@ -76,5 +91,9 @@ const styles = StyleSheet.create({
     flex: 1,
     ...type.caption,
     color: color.textDim,
+  },
+  /** The unsure/chalkYellow treatment — mirrors the hero's blocked-camera chip. */
+  summaryWarning: {
+    color: color.unsure,
   },
 });
