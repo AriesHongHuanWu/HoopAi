@@ -19,6 +19,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { router } from 'expo-router';
 
+import { DayStreakShelf } from '@/components/DayStreakShelf';
 import { useCardStagger } from '@/components/motion';
 import { ChoiceCard, ChipSelect } from '@/components/profile/Choice';
 import { NumberSlider } from '@/components/profile/NumberSlider';
@@ -263,9 +264,12 @@ export default function ProfileScreen() {
         {/* Living season scoreboard — the profile's heartbeat */}
         <SeasonCard entering={enter(1)} />
 
+        {/* Consecutive-practice-DAY badge shelf — the don't-break-the-chain reward */}
+        <DayStreakShelf entering={enter(2)} />
+
         {/* Complete-your-profile progress chip (only while incomplete) */}
         {!complete && (
-          <Animated.View entering={enter(1)}>
+          <Animated.View entering={enter(3)}>
             <View
               accessible
               accessibilityLabel={`Profile ${filled} of ${total} complete`}
@@ -283,7 +287,7 @@ export default function ProfileScreen() {
         )}
 
         {/* Identity fields */}
-        <Card entering={enter(2)}>
+        <Card entering={enter(4)}>
           <Text style={styles.sectionEyebrow}>IDENTITY</Text>
           <FieldRow icon="person-outline" label="Nickname" filled={p.nickname.trim().length > 0} value={p.nickname.trim()} onPress={() => open('nickname')} />
           <View style={styles.divider} />
@@ -297,7 +301,7 @@ export default function ProfileScreen() {
         </Card>
 
         {/* Game fields */}
-        <Card entering={enter(3)}>
+        <Card entering={enter(5)}>
           <Text style={styles.sectionEyebrow}>YOUR GAME</Text>
           <FieldRow icon="flame-outline" label="Experience" filled={p.experience != null} value={expLabel ?? ''} onPress={() => open('experience')} />
           <View style={styles.divider} />
@@ -309,7 +313,7 @@ export default function ProfileScreen() {
         </Card>
 
         {/* Tracking (existing settings keys) — inline chips, no sheet needed */}
-        <Card entering={enter(4)}>
+        <Card entering={enter(6)}>
           <Text style={styles.sectionEyebrow}>TRACKING</Text>
           <View style={styles.inlineGroup}>
             <Text style={styles.inlineLabel}>Shooting hand</Text>
@@ -323,7 +327,7 @@ export default function ProfileScreen() {
         </Card>
 
         {/* Why we ask — expandable, privacy-first */}
-        <Card entering={enter(5)}>
+        <Card entering={enter(7)}>
           <Pressable
             accessibilityRole="button"
             accessibilityState={{ expanded: whyOpen }}

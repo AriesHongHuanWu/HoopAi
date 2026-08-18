@@ -36,6 +36,7 @@ import { CoachMarks, useCoachMarks, type CoachStep } from '@/components/coach/Co
 import { GoalRing } from '@/components/GoalRing';
 import { ProfileButton } from '@/components/profile/ProfileButton';
 import { StreakTierCard } from '@/components/StreakTierCard';
+import { WeeklyChallengeCard } from '@/components/WeeklyChallengeCard';
 import { Card, Chip, EmptyState, ErrorCard, Eyebrow, Row, Screen, StatNumber } from '@/components/ui';
 import { color, radius, space, touch, type } from '@/constants/tokens';
 import {
@@ -51,10 +52,17 @@ import {
 } from '@/core/dailyChallenges';
 import { todayMakes } from '@/core/goals';
 import { computeDayStreak, type StreakResult } from '@/core/streak';
+import {
+  emptyWeekAggregate,
+  evaluateWeekly,
+  isoWeekKey,
+  pickWeeklyChallenges,
+  type WeekAggregate,
+} from '@/core/weeklyChallenges';
 import { listSessions, type SessionSummaryRow } from '@/data/db';
 import { useCameraPermission } from 'react-native-vision-camera';
 
-import { loadTodayAggregate, useChallenges } from '@/state/challengeStore';
+import { loadTodayAggregate, loadWeekAggregate, useChallenges } from '@/state/challengeStore';
 import { useMode } from '@/state/modeStore';
 import { useSession } from '@/state/sessionStore';
 import { useSettings } from '@/state/settingsStore';
@@ -177,6 +185,10 @@ export default function HomeScreen() {
   const [challengeDay, setChallengeDay] = useState(() => dateKeyFor(Date.now()));
   /** Today's aggregate for challenge progress (src/state/challengeStore.ts). */
   const [dayAgg, setDayAgg] = useState<DayAggregate>(emptyDayAggregate);
+  /** Local ISO week key ('YYYY-Www') driving this week's deterministic picks. */
+  const [challengeWeek, setChallengeWeek] = useState(() => isoWeekKey(Date.now()));
+  /** This week's aggregate for the weekly card (src/state/challengeStore.ts). */
+  const [weekAgg, setWeekAgg] = useState<WeekAggregate>(emptyWeekAggregate);
   const totalPoints = useChallenges((s) => s.totalPoints);
   const challengesHydrated = useChallengesHydrated();
 
@@ -300,9 +312,46 @@ export default function HomeScreen() {
     }, [challengesHydrated]),
   );
 
+  // Weekly challenges: same rhythm as the daily pass above, one ISO week wide.
+  // Kept as its OWN effect rather than folded into the daily one because the
+  // two periods roll over on different clocks — a midnight rollover must not
+  // be able to skip the weekly award, and vice versa.
+  useFocusEffect(
+    useCallback(() => {
+      // Same hydration gate as the daily pass: awardWeekly rewrites the shared
+      // career points total, so it must never run against pre-hydration zeros.
+      if (!challengesHydrated) return;
+      let alive = true;
+      const key = isoWeekKey(Date.now());
+      setChallengeWeek(key);
+      useChallenges.getState().ensureWeek(key);
+      loadWeekAggregate()
+        .then((agg) => {
+          if (!alive) return;
+          setWeekAgg(agg);
+          const { awardWeekly } = useChallenges.getState();
+          for (const r of evaluateWeekly(pickWeeklyChallenges(key), agg)) {
+            if (r.done) awardWeekly(key, r.def.id, r.def.points);
+          }
+        })
+        .catch(() => {
+          if (!alive) return;
+          // Honest fallback: an unreadable week shows true zeros, never the
+          // stale numbers from a previous focus.
+          setWeekAgg(emptyWeekAggregate());
+        });
+      return () => {
+        alive = false;
+      };
+    }, [challengesHydrated]),
+  );
+
   /** Today's three challenges — deterministic for the day key, so stable
    *  across re-renders and refocuses until local midnight. */
   const dailyChallenges = useMemo(() => pickDailyChallenges(challengeDay), [challengeDay]);
+  /** This week's three — deterministic for the week key, so stable until the
+   *  next local Monday 00:00. */
+  const weeklyChallengeSet = useMemo(() => pickWeeklyChallenges(challengeWeek), [challengeWeek]);
   const allChallengesDone =
     dailyChallenges.length > 0 &&
     dailyChallenges.every((c) => isChallengeComplete(c, dayAgg));
@@ -542,8 +591,18 @@ export default function HomeScreen() {
           )}
         </Card>
 
+        {/* Weekly challenges — the daily loop's bigger sibling: three per ISO
+            week, drawn deterministically from the week key, progress folded
+            from this week's sessions on focus. Same display-only contract as
+            the daily block; the card owns its own layout (Home is long). */}
+        <WeeklyChallengeCard
+          challenges={weeklyChallengeSet}
+          agg={weekAgg}
+          entering={enter(5)}
+        />
+
         {/* Last session */}
-        <Animated.View entering={enter(5)}>
+        <Animated.View entering={enter(6)}>
         {lastSession === undefined ? (
           <Card>
             <Eyebrow>Last session</Eyebrow>

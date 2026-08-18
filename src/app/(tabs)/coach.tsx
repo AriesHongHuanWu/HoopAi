@@ -21,6 +21,7 @@ import { Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-na
 import Animated from 'react-native-reanimated';
 
 import { useCardStagger, useStaggerAt } from '@/components/motion';
+import { BodyDirectionCard } from '@/components/BodyDirectionCard';
 import { shareCoachCard, shareWeekCard } from '@/components/ShareCard';
 import { ArcProfileCard } from '@/components/coach/ArcProfileCard';
 import { CoachTimelineCard } from '@/components/coach/CoachTimelineCard';
@@ -582,6 +583,11 @@ export default function CoachScreen() {
     [timeline],
   );
 
+  // Every logged shot in the scan window. Feeds the body plan's DISTANCE
+  // half, which needs volume (RANGE_MIN_ATTEMPTS) and must not flip as the
+  // user pages between weeks.
+  const allShots = useMemo(() => sessions.flatMap((s) => s.shots), [sessions]);
+
   // Pose/form data coverage across the whole scan window (not week-scoped).
   const readiness = useMemo(() => formReadiness(sessions.flatMap((s) => s.shots)), [sessions]);
 
@@ -619,12 +625,18 @@ export default function CoachScreen() {
             onAction={reload}
           />
         ) : sessions.length === 0 || report == null ? (
-          <EmptyState
-            title="No sessions to coach yet"
-            body="Track a few shooting sessions and the coach will break down your week — what's working, what to fix, and one focus for next week."
-            actionLabel="Start a session"
-            onAction={() => router.push('/session/setup')}
-          />
+          <>
+            <EmptyState
+              title="No sessions to coach yet"
+              body="Track a few shooting sessions and the coach will break down your week — what's working, what to fix, and one focus for next week."
+              actionLabel="Start a session"
+              onAction={() => router.push('/session/setup')}
+            />
+
+            {/* Body sets the direction — this half needs the profile, not
+                shots, so it is the one thing the coach can say on day one. */}
+            <BodyDirectionCard shots={allShots} entering={cardEnter(1)} />
+          </>
         ) : (
           <>
             <WeekSelector
@@ -635,10 +647,15 @@ export default function CoachScreen() {
 
             <WeeklyHero report={report} />
 
+            {/* THE headline read: body data sets the style DIRECTION, the
+                user's own logged shots set the practice DISTANCE. Each half
+                renders its own honest gap state when its data is missing. */}
+            <BodyDirectionCard shots={allShots} entering={cardEnter(1)} />
+
             {/* Arc profile — the release-arc signature over recent sessions.
                 The card owns its own n<5 "charging" state, so it mounts from
                 the very first measured shot. */}
-            {arc.n >= 1 && <ArcProfileCard profile={arc} entering={cardEnter(1)} />}
+            {arc.n >= 1 && <ArcProfileCard profile={arc} entering={cardEnter(2)} />}
 
             {/* Four-week timeline — tap a bar to jump the week selector */}
             {timeline.some((w) => w.sessions > 0) && (
@@ -650,7 +667,7 @@ export default function CoachScreen() {
                     const i = weeks.findIndex((w) => w.startMs === ms);
                     if (i >= 0) setWeekIndex(i);
                   }}
-                  entering={cardEnter(2)}
+                  entering={cardEnter(3)}
                 />
                 {timelineMostlyEmpty && (
                   <Text style={styles.timelineHint}>
@@ -662,19 +679,19 @@ export default function CoachScreen() {
 
             {/* Season strip — shown whenever EITHER 28-day window has data */}
             {season != null && (season.recent.attempts > 0 || season.prior.attempts > 0) && (
-              <SeasonStrip comparison={season} entering={cardEnter(3)} />
+              <SeasonStrip comparison={season} entering={cardEnter(4)} />
             )}
 
             {/* NBA twin — who you shoot like this week + what to steal */}
-            {twin != null && <NbaTwinCard match={twin} entering={cardEnter(4)} />}
+            {twin != null && <NbaTwinCard match={twin} entering={cardEnter(5)} />}
 
             {/* This week's plan — the top fixes + drills to groove them */}
             {plan.length > 0 && (
-              <WeeklyPlanCard plan={plan} levels={planLevels} entering={cardEnter(5)} />
+              <WeeklyPlanCard plan={plan} levels={planLevels} entering={cardEnter(6)} />
             )}
 
             {/* Form Studio 3D promo — the upgrade's flagship, one tap away */}
-            <Card entering={cardEnter(6)}>
+            <Card entering={cardEnter(7)}>
               <Row gap={space.sm} style={styles.promoHead}>
                 <Ionicons name="cube-outline" size={18} color={color.accent} />
                 <Text style={styles.promoTitle} numberOfLines={1}>
@@ -699,7 +716,7 @@ export default function CoachScreen() {
               readiness={readiness}
               onOpenSettings={() => router.push('/settings')}
               onOpenFormStudio={() => router.push('/formstudio')}
-              entering={cardEnter(7)}
+              entering={cardEnter(8)}
             />
 
             {/* Findings */}
@@ -744,7 +761,7 @@ export default function CoachScreen() {
             )}
 
             {/* Deeper dive hook */}
-            <Card entering={cardEnter(9)}>
+            <Card entering={cardEnter(8)}>
               <SectionEyebrow icon="flask-outline">Go deeper</SectionEyebrow>
               <Text style={styles.body}>
                 Coach's Corner reads across your whole week. For a single session — make-vs-miss
