@@ -515,7 +515,14 @@ export const useSettings = create<SettingsState>()(
             detectorAccel: t.detectorAccel,
             detectionRate: t.detectionRate,
             roiZoom: t.roiZoomSafe,
-            formAnalysis: t.poseSafe ? s.formAnalysis : false,
+            // Form analysis is no longer force-disabled on mid/entry phones.
+            // The pose pass is now THROTTLED per tier (FORM.poseMinIntervalMs:
+            // ~16Hz mid, ~10Hz entry) instead of running on every frame, which
+            // is what made it unaffordable there. poseSafe therefore only
+            // decides whether it is ON BY DEFAULT — a user who wants the
+            // shooting-form comparison on a slower phone can now turn it on and
+            // keep it on, instead of having device tuning silently revoke it.
+            formAnalysis: s.formAnalysis || t.poseSafe,
           };
         }),
       setDeviceTier: (override) =>

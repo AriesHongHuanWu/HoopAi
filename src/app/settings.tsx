@@ -1180,7 +1180,7 @@ export default function SettingsScreen() {
           <SectionHeader icon="school">Coaching</SectionHeader>
           <ToggleRow
             label="Shooting form analysis"
-            description="Analyzes your elbow, knee, release and follow-through with a pose model and gives one cue per shot. Runs a second model — best on recent phones (iPhone 12 and newer)."
+            description="Analyzes your elbow, knee, release and follow-through with a pose model, gives one cue per shot, and unlocks Form Studio's side-by-side comparison against an NBA reference. It runs a second model, so on older phones it samples at a lower rate (about 10 times a second) rather than every frame — enough for the dip, set, release and follow-through it compares."
             value={formAnalysis}
             onValueChange={(v) => {
               tick();
