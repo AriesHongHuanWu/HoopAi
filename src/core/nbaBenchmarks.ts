@@ -1,7 +1,7 @@
 /**
  * NBA / pro-shooting reference data for the Shot Lab.
  *
- * The 12 player profiles below come from a sourced research pass over public
+ * The 13 player profiles below come from a sourced research pass over public
  * shooting analyses (ESPN Sport Science, FiveThirtyEight, Noah arc research,
  * Splash Lab / BBallBreakdown-style coaching film, sports-science reporting),
  * cross-checked for physical consistency (release vs entry angle, motion type
@@ -15,6 +15,16 @@
  *   published catch→release figures were converted.
  * - Retired-era players (Allen, Miller, Nash, Nowitzki) predate modern shot
  *   tracking, so their numbers lean more on estimation.
+ *
+ * ANTHROPOMETRICS ({@link PlayerAnthro}) are held to a STRICTER bar than the
+ * shooting numbers: unlike the "est." profile figures, a body measurement is
+ * either a published fact or it is nothing. Only players with widely reported
+ * NBA Draft Combine / listed measurements carry an `anthro` block; the rest
+ * (Allen, Miller, Nash, Nowitzki, Doncic, Haliburton) deliberately have NONE,
+ * because their measurements predate published combine data, were taken
+ * outside the NBA combine, or were never measured in person. Body matching
+ * skips them rather than guessing. Standing reach / standing vertical are
+ * carried only where the figure is itself famous.
  */
 import type { FormMetrics } from './types';
 
@@ -100,6 +110,28 @@ export const BENCHMARK_AXES: readonly BenchmarkAxis[] = [
 export type ShotMotion = 'one-motion' | 'two-motion';
 
 /**
+ * Published body measurements for an archetype — the input to the app's
+ * anthropometric ("body data sets the style direction") matching.
+ *
+ * Every field here is a REPORTED figure, never an estimate: combine heights
+ * are barefoot ("no shoes") and therefore often 2-3 cm under a player's listed
+ * height, which is exactly why `source` is mandatory. A player whose numbers
+ * we cannot source simply has no anthro block.
+ */
+export interface PlayerAnthro {
+  /** Standing height, cm. Barefoot when the source is a combine measurement. */
+  heightCm: number;
+  /** Fingertip-to-fingertip wingspan, cm. */
+  wingspanCm: number;
+  /** Standing reach, cm — only where the figure is itself well known. */
+  standingReachCm?: number;
+  /** Standing (no-step) vertical leap, cm — only where publicly reported. */
+  standingVertCm?: number;
+  /** Where the numbers come from, e.g. '2007 draft combine (no shoes)'. */
+  source: string;
+}
+
+/**
  * A comparable pro-shooter profile in the app's own units, plus the coaching
  * substance: how the form actually works, which traits transfer to an amateur
  * and which are body-specific quirks that don't.
@@ -117,6 +149,12 @@ export interface PlayerArchetype {
   };
   /** Approximate release height, meters (display only, est.). */
   releaseHeightM: number;
+  /**
+   * Published body measurements, when they exist. OPTIONAL on purpose —
+   * absent means "not publicly sourced", and body matching skips the player
+   * rather than inventing a frame. See {@link PlayerAnthro}.
+   */
+  anthro?: PlayerAnthro;
   /** 2-3 sentence signature of the mechanics, from coaching film analyses. */
   mechanics: string;
   /** Coachable universals worth stealing. */
@@ -132,6 +170,7 @@ export const PLAYER_ARCHETYPES: readonly PlayerArchetype[] = [
     motion: 'one-motion',
     profile: { releaseAngleDeg: 55, entryAngleDeg: 52, releaseTimeMs: 400, consistencyStdDeg: 1.2 },
     releaseHeightM: 2.4,
+    anthro: { heightCm: 188, wingspanCm: 191, source: '2009 draft combine (no shoes)' },
     mechanics:
       'Pure one-motion: the ball never stops from hip-level dip to release, leaving his hand while still ascending. Set point at the forehead with a documented 90° elbow; minimal knee bend, with a ~55° rainbow launch gone in 0.4 seconds.',
     whatToCopy: [
@@ -150,6 +189,7 @@ export const PLAYER_ARCHETYPES: readonly PlayerArchetype[] = [
     motion: 'two-motion',
     profile: { releaseAngleDeg: 48, entryAngleDeg: 45, releaseTimeMs: 650, consistencyStdDeg: 1.5 },
     releaseHeightM: 2.6,
+    anthro: { heightCm: 198, wingspanCm: 206, source: 'listed height; widely reported wingspan' },
     mechanics:
       'Two-motion with the pause compressed to near zero, so the legs still power the shot. Set point reached at the forehead before his feet leave the ground, elbow at a documented 90° directly under the ball; identical footwork on every catch.',
     whatToCopy: [
@@ -201,6 +241,12 @@ export const PLAYER_ARCHETYPES: readonly PlayerArchetype[] = [
     motion: 'two-motion',
     profile: { releaseAngleDeg: 52, entryAngleDeg: 47, releaseTimeMs: 580, consistencyStdDeg: 2.5 },
     releaseHeightM: 2.9,
+    anthro: {
+      heightCm: 206,
+      wingspanCm: 225,
+      standingReachCm: 279,
+      source: '2007 draft combine (no shoes)',
+    },
     mechanics:
       'Deliberate two-motion built on the "triple 90s" — roughly 90° angles at elbow, knee and hip during the load. High forehead set point, deep rhythmic dip, shooting hand centered dead under the ball.',
     whatToCopy: [
@@ -218,6 +264,7 @@ export const PLAYER_ARCHETYPES: readonly PlayerArchetype[] = [
     motion: 'two-motion',
     profile: { releaseAngleDeg: 51, entryAngleDeg: 46, releaseTimeMs: 620, consistencyStdDeg: 2.2 },
     releaseHeightM: 2.8,
+    anthro: { heightCm: 199, wingspanCm: 221, source: '2011 draft combine (no shoes)' },
     mechanics:
       'Methodical two-motion with an unusually slow, deliberate load. Eye-level set point, dip controlled to mid-torso; enormous hands let him steer the ball one-handed with a featherweight guide hand.',
     whatToCopy: [
@@ -236,6 +283,7 @@ export const PLAYER_ARCHETYPES: readonly PlayerArchetype[] = [
     motion: 'one-motion',
     profile: { releaseAngleDeg: 48, entryAngleDeg: 42, releaseTimeMs: 510, consistencyStdDeg: 3.1 },
     releaseHeightM: 2.65,
+    anthro: { heightCm: 188, wingspanCm: 203, source: '2012 draft combine (no shoes)' },
     mechanics:
       'Explosive one-motion with a shallow dip: pickup to release is one fluid climb, the set point existing for only an instant. Violent leg drive supplies deep range without a deep load.',
     whatToCopy: [
@@ -253,6 +301,7 @@ export const PLAYER_ARCHETYPES: readonly PlayerArchetype[] = [
     motion: 'one-motion',
     profile: { releaseAngleDeg: 50, entryAngleDeg: 44, releaseTimeMs: 530, consistencyStdDeg: 3.2 },
     releaseHeightM: 2.62,
+    anthro: { heightCm: 187, wingspanCm: 193, source: '2011 draft combine (no shoes)' },
     mechanics:
       'Quick one-motion release riding on top of wildly varied footwork: the upper-body mechanics are decoupled from whatever the feet are doing, so the same shot fires from any platform.',
     whatToCopy: [
@@ -270,6 +319,7 @@ export const PLAYER_ARCHETYPES: readonly PlayerArchetype[] = [
     motion: 'two-motion',
     profile: { releaseAngleDeg: 53, entryAngleDeg: 48, releaseTimeMs: 520, consistencyStdDeg: 2.5 },
     releaseHeightM: 2.8,
+    anthro: { heightCm: 194, wingspanCm: 211, source: '2015 draft combine (no shoes)' },
     mechanics:
       'Two-motion from a low dip where the ball moves before the body commits, wrist loaded with elbows tucked, flowing to a forehead release. His signature: the same clean release from a dozen different platforms and heights.',
     whatToCopy: [
@@ -329,6 +379,27 @@ export const PLAYER_ARCHETYPES: readonly PlayerArchetype[] = [
     idiosyncratic: [
       'The one-leg fade needs a 7-foot frame and decades of specialist coaching.',
       'A 60° launch only pencils out from a 2.9m release — shorter shooters lose too much energy.',
+    ],
+  },
+  {
+    // No anthro block on purpose: the 2020 pre-draft process ran without an
+    // in-person combine, so there is no published measured height/wingspan to
+    // cite for him. Body matching skips him rather than guessing.
+    name: 'Tyrese Haliburton',
+    style: 'Unorthodox low-effort quick trigger',
+    motion: 'one-motion',
+    profile: { releaseAngleDeg: 45, entryAngleDeg: 41, releaseTimeMs: 420, consistencyStdDeg: 2.0 },
+    releaseHeightM: 2.6,
+    mechanics:
+      'A one-motion release that is famously unorthodox and famously efficient: the ball starts low and slightly off-center, the guide hand rides high, and the shot leaves on a flat-ish arc almost as soon as it is gathered. Very little visible effort — the trigger speed comes from a short path rather than an explosive load, which is what keeps the pull-up live off the dribble.',
+    whatToCopy: [
+      'Shortest possible path from gather to release — trim the motion instead of adding power.',
+      'Same trigger speed on the pull-up as on the catch — one clock for every shot type.',
+      'Low-effort leg use: enough drive for the distance, nothing spent on jump height.',
+    ],
+    idiosyncratic: [
+      'The off-center start and high guide hand are personal compensations built over years of reps — copying the LOOK without the reps just adds side-spin.',
+      'A flat-ish arc leaves a smaller entry window; it survives on his repeatability, not because flat is better.',
     ],
   },
 ] as const;

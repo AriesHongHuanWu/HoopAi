@@ -692,6 +692,26 @@ export const FORM = {
   releaseAngleStdFlagDeg: 4,
   /** Keypoint score gate below which a landmark is treated as missing. */
   keypointScoreMin: 0.3,
+  /**
+   * MINIMUM GAP BETWEEN POSE INFERENCES, milliseconds, per device tier.
+   *
+   * WHY THIS EXISTS: the pose pass used to run on EVERY analysed frame, which
+   * doubles the per-frame model cost. That is why form analysis was restricted
+   * to `poseSafe` (high-tier) phones and force-disabled everywhere else — so
+   * the whole shooting-form comparison, the app's most demo-able feature, was
+   * unreachable on the very phones most people own.
+   *
+   * Form analysis does not need every frame: it compares a handful of KEY
+   * FRAMES (dip / set / release / follow-through) over a ~1s shot, and the
+   * reference sequences are resampled anyway. Sampling at ~10Hz still yields
+   * ~10 poses across a shot — enough for the keyframe comparison — at a third
+   * of the cost. So instead of denying the feature we throttle it:
+   *   high  0   — every analysed frame (unchanged behaviour)
+   *   mid   60  — ~16Hz
+   *   entry 100 — ~10Hz
+   * The thermal governor still sheds the pose pass entirely at its last stage.
+   */
+  poseMinIntervalMs: { high: 0, mid: 60, entry: 100 },
 } as const;
 
 export const CLIPS = {

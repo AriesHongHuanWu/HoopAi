@@ -30,7 +30,7 @@ import {
 } from 'react-native-fast-tflite';
 import { NitroModules } from 'react-native-nitro-modules';
 
-import { DETECTION } from '../core/config';
+import { DETECTION, FORM } from '../core/config';
 import { EMPTY_FUNNEL, type FrameFunnel } from '../core/acquisitionFunnel';
 import { LENS, LensCheckAccumulator } from '../core/lensCheck';
 import { ThermalGovernor } from '../core/thermalGovernor';
@@ -413,7 +413,14 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
   // decide. Refined live by the last measured benchmark (resolveTier).
   const deviceTierOverride = useSettings((s) => s.deviceTierOverride);
   const lastBenchmark = useSettings((s) => s.lastBenchmark);
-  const startRung = resolvedTuning(deviceTierOverride, lastBenchmark?.ms ?? null).tuning.startRung;
+  const resolvedDevice = resolvedTuning(deviceTierOverride, lastBenchmark?.ms ?? null);
+  const startRung = resolvedDevice.tuning.startRung;
+  /**
+   * Minimum gap between pose inferences for THIS device tier. Throttling the
+   * second model is what lets form analysis (the shooting-form comparison) run
+   * on a mid/entry phone at all instead of being denied by poseSafe.
+   */
+  const poseGapMs = FORM.poseMinIntervalMs[resolvedDevice.tier];
   // Opt-in Apache-2.0 YOLOX detector (beta). When on, it overrides model + input
   // size + pixel layout; when off (default) every path is byte-identical to the
   // shipping YOLO11 pipeline, so there is zero regression risk.
@@ -999,6 +1006,11 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
   // roiZoom, so toggling re-registers the frame processor.
   const motionAssist = useSettings((s) => s.motionAssist);
   const lastRoiRunMs = useSharedValue(0);
+  /** Last pose inference timestamp (ms) + the minimum gap for this device
+   *  tier, so the second model can be throttled instead of denied outright
+   *  on mid/entry phones (see FORM.poseMinIntervalMs). */
+  const lastPoseMs = useSharedValue(0);
+  const poseGapMsSv = useSharedValue(0);
   const avgRoiMs = useSharedValue(0);
   const roiFramesSv = useSharedValue(0); // ROI passes actually run
   const roiHitsSv = useSharedValue(0); // ROI passes that recovered a ball
@@ -1041,6 +1053,7 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
     thermalRoiSv.value = true;
     thermalPoseSv.value = true;
     thermalLevelSv.value = 0;
+    poseGapMsSv.value = poseGapMs;
   }, [
     modelState.delegate,
     governor,
@@ -1744,7 +1757,18 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
         let pose = null;
         const poseBox = boxedPoseSv.value;
         // thermalPoseSv: the governor sheds the pose pass LAST (L3 only).
-        if (poseBox != null && poseResizer != null && thermalPoseSv.value) {
+        // poseGapMsSv: minimum gap between pose inferences (FORM.poseMinIntervalMs,
+        // per device tier). The pose pass is a SECOND model on the same frame, so
+        // running it every frame is what made form analysis a high-tier-only
+        // feature. Form comparison only needs the dip/set/release/follow key
+        // frames, so ~10Hz still captures the shot while costing a third as much
+        // — which is what lets a mid/entry phone run it at all. 0 = every frame.
+        const poseGapMs = poseGapMsSv.value;
+        const nowPoseMs = Date.now();
+        const poseDue =
+          poseGapMs <= 0 || nowPoseMs - lastPoseMs.value >= poseGapMs;
+        if (poseBox != null && poseResizer != null && thermalPoseSv.value && poseDue) {
+          lastPoseMs.value = nowPoseMs;
           let pResized: { getPixelBuffer(): ArrayBuffer; dispose(): void } | null = null;
           try {
             const pModel = poseBox.unbox() as TensorflowModel;
