@@ -7,11 +7,14 @@
  *      Play, always one tap away.
  *   2. GAMES — the seven non-free modes as compact ModeCatalogCard rows;
  *      collapsible.
- *   3. DRILLS — the drill catalog, same card anatomy; collapsible. A coach
+ *   3. CHALLENGES — this week's goal set (WeeklyChallengeCard) plus the
+ *      friend-board entry. See the CHALLENGES block below for why this screen
+ *      shows the week but never awards it.
+ *   4. DRILLS — the drill catalog, same card anatomy; collapsible. A coach
  *      deep link always re-expands this section so a prescription is visible.
- *   4. TRAINING TOOLS — the nav tiles (Scoreboard / Jump Lab / Form Studio /
+ *   5. TRAINING TOOLS — the nav tiles (Scoreboard / Jump Lab / Form Studio /
  *      Video Check).
- *   5. PRO — the "what does Pro unlock?" disclosure.
+ *   6. PRO — the "what does Pro unlock?" disclosure.
  *
  * Picking any card arms the mode store and routes to /session/setup. Ghost
  * Challenge is the one cartridge that needs a source: tapping it expands an
@@ -19,14 +22,26 @@
  * (GHOST_MIN_MAKES); choosing one derives the ghost timeline from that
  * session's persisted shots and starts the mode. With no eligible session the
  * card is disabled with the reason inked where the tagline normally sits.
+ *
+ * The H1 is the TAB WORD ("Train"), not a friendly question: the bottom bar
+ * says Train, so the screen it opens has to say Train back or the label never
+ * becomes muscle memory. The friendly line lives on as the lede.
  */
-import { router, useLocalSearchParams } from 'expo-router';
+import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import React, { useEffect, useRef, useState, type ComponentProps } from 'react';
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ComponentProps,
+} from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import Animated, { FadeIn, ReduceMotion } from 'react-native-reanimated';
 
-import { NavTileRow } from '@/components/NavTiles';
+import { LEADERBOARD_TILE, NavTileRow } from '@/components/NavTiles';
+import { WeeklyChallengeCard } from '@/components/WeeklyChallengeCard';
 import { ProBadge } from '@/components/ProBadge';
 import { ModeCatalogCard } from '@/components/modes/ModeCatalogCard';
 import { ModeSectionHeader } from '@/components/modes/ModeSectionHeader';
@@ -55,7 +70,14 @@ import {
   type ModeRecommendation,
 } from '@/core/modeRecommendation';
 import { PRO_FEATURES } from '@/core/premium';
+import {
+  emptyWeekAggregate,
+  isoWeekKey,
+  pickWeeklyChallenges,
+  type WeekAggregate,
+} from '@/core/weeklyChallenges';
 import { listSessions, sessionShots, type SessionSummaryRow } from '@/data/db';
+import { loadWeekAggregate } from '@/state/challengeStore';
 import { useMode } from '@/state/modeStore';
 import { haptic } from '@/utils/haptics';
 
@@ -66,6 +88,7 @@ const GHOST_SOURCE_LIMIT = 5;
 // testable pure TS; this screen only renders it.
 const quickStartSection = MODE_SECTIONS.find((s) => s.id === 'quickStart')!;
 const gamesSection = MODE_SECTIONS.find((s) => s.id === 'games')!;
+const challengesSection = MODE_SECTIONS.find((s) => s.id === 'challenges')!;
 const drillsSection = MODE_SECTIONS.find((s) => s.id === 'drills')!;
 const toolsSection = MODE_SECTIONS.find((s) => s.id === 'tools')!;
 
@@ -142,6 +165,38 @@ export default function ModePickerScreen() {
       alive = false;
     };
   }, []);
+
+  // --- CHALLENGES section data ------------------------------------------
+  // READ-ONLY on purpose. Home (app/(tabs)/index.tsx) owns awardWeekly: it is
+  // the single writer of the points ledger, gated on challengeStore hydration.
+  // A second screen awarding the same week key could double-credit a goal the
+  // moment both are mounted, so Train only ever DISPLAYS the week — every
+  // number on the card still comes from the same loadWeekAggregate() read.
+  const [weekKey, setWeekKey] = useState(() => isoWeekKey(Date.now()));
+  const [weekAgg, setWeekAgg] = useState<WeekAggregate>(emptyWeekAggregate);
+  // useFocusEffect, not useEffect: the bars have to be current after a session
+  // finishes and the user taps back into Train, and the week key has to roll
+  // over on a Monday the app stayed open through.
+  useFocusEffect(
+    useCallback(() => {
+      let alive = true;
+      setWeekKey(isoWeekKey(Date.now()));
+      loadWeekAggregate()
+        .then((agg) => {
+          if (alive) setWeekAgg(agg);
+        })
+        .catch(() => {
+          // Honest fallback (same as Home's): an unreadable week shows true
+          // zeros rather than stale numbers from a previous focus.
+          if (alive) setWeekAgg(emptyWeekAggregate());
+        });
+      return () => {
+        alive = false;
+      };
+    }, []),
+  );
+  /** This week's three — deterministic for the week key, stable until Monday. */
+  const weeklyChallengeSet = useMemo(() => pickWeeklyChallenges(weekKey), [weekKey]);
 
   const startGhost = (cfg: GhostConfig) => {
     haptic.impactLight();
@@ -239,10 +294,13 @@ export default function ModePickerScreen() {
         entering={FadeIn.duration(motion.standard).reduceMotion(ReduceMotion.System)}
       >
         <Eyebrow>Choose a mode</Eyebrow>
-        <Text style={styles.title}>How do you want to play?</Text>
+        {/* H1 == the tab word. The old H1 ("How do you want to play?") is the
+            first half of the lede now, so the friendly voice survives without
+            costing the tab bar its label. */}
+        <Text style={styles.title}>Train</Text>
         <Text style={styles.lede}>
-          Every mode runs on the same automatic make/miss tracking — pick a game and prop your
-          phone up.
+          How do you want to play? Every mode runs on the same automatic make/miss tracking —
+          pick a game and prop your phone up.
         </Text>
       </Animated.View>
 
@@ -329,6 +387,29 @@ export default function ModePickerScreen() {
             })}
           </Animated.View>
         )}
+      </View>
+
+      {/* CHALLENGES — the one section where "challenge" means a scored goal:
+          this week's set, and the friend board you can send a score to. The
+          card is display-only here (see the CHALLENGES data block above); the
+          leaderboard tile is placed EXPLICITLY rather than injected by
+          NavTileRow, so no copy edit can delete the app's only social entry
+          point. */}
+      <View style={styles.sectionGap}>
+        <ModeSectionHeader
+          title={challengesSection.title}
+          lede={challengesSection.lede}
+        />
+        <View style={styles.sectionList}>
+          <WeeklyChallengeCard
+            challenges={weeklyChallengeSet}
+            agg={weekAgg}
+            entering={enter(0)}
+          />
+          <Animated.View entering={enter(1)}>
+            <NavTileRow tiles={[LEADERBOARD_TILE]} />
+          </Animated.View>
+        </View>
       </View>
 
       {/* DRILLS — structured HomeCourt-style workouts. They run as spot

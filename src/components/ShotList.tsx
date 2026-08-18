@@ -472,6 +472,9 @@ const ShotListItem = React.memo(function ShotListItem({
   );
 });
 
+/** Module-level so its identity never changes between renders. */
+const shotKey = (s: ResolvedShot) => String(s.id);
+
 export function ShotList({
   shots,
   onCorrect,
@@ -483,21 +486,32 @@ export function ShotList({
   /** One-tap 2↔3 correction: called with the shot and its NEW point value. */
   onCorrectValue?: (shot: ResolvedShot, value: ShotValue) => void;
 }) {
+  /**
+   * PERF: `renderItem` must be stable. VirtualizedList re-renders every mounted
+   * cell whenever the renderItem identity changes, so an inline arrow here
+   * rebuilt every visible row (each one a Swipeable wrapping a receipt, chips
+   * and up to two buttons) on ANY parent re-render — one correction, one undo
+   * tick, one keyboard show. ShotListItem is already memo'd and both callbacks
+   * come from useCallback (see useSessionRecord), so pinning renderItem lets
+   * that memo actually hold: only the corrected row re-renders.
+   */
+  const renderItem = useCallback(
+    ({ item }: { item: ResolvedShot }) => (
+      <ShotListItem shot={item} onCorrect={onCorrect} onCorrectValue={onCorrectValue} />
+    ),
+    [onCorrect, onCorrectValue],
+  );
+
+  // Hooks must run unconditionally — the empty case returns after them.
   if (shots.length === 0) {
     return <Text style={styles.empty}>No shots recorded.</Text>;
   }
   return (
     <FlatList
       data={shots}
-      keyExtractor={(s) => String(s.id)}
+      keyExtractor={shotKey}
       scrollEnabled={false}
-      renderItem={({ item }) => (
-        <ShotListItem
-          shot={item}
-          onCorrect={onCorrect}
-          onCorrectValue={onCorrectValue}
-        />
-      )}
+      renderItem={renderItem}
       ItemSeparatorComponent={Separator}
     />
   );
@@ -841,14 +855,30 @@ export function useSessionRecord(sessionId: number | null): SessionRecord {
     };
   }, [sessionId]);
 
+  /**
+   * PERF: shotFromRow allocates a fresh ResolvedShot, so re-deriving the whole
+   * array on one correction handed EVERY row a new object identity — which
+   * busts ShotListItem's memo for the entire list instead of the single row
+   * that changed (the reason the shot list stutters on a long session).
+   * Both setters preserve the identity of untouched DbShotRows, so cache the
+   * derived shot against its source row object plus the value override that
+   * applies to it; either changing is a miss, and nothing else can affect the
+   * result. A WeakMap keeps evicted rows collectable.
+   */
+  const shotCache = useRef(
+    new WeakMap<DbShotRow, { override: ShotValue | undefined; shot: ResolvedShot }>(),
+  );
   const shots = useMemo(
     () =>
       rows.map((r) => {
-        const shot = shotFromRow(r);
         const override = valueOverrides[r.shotIndex];
-        return override != null
-          ? { ...shot, shotValue: override, corrected: true }
-          : shot;
+        const cached = shotCache.current.get(r);
+        if (cached != null && cached.override === override) return cached.shot;
+        const base = shotFromRow(r);
+        const shot =
+          override != null ? { ...base, shotValue: override, corrected: true } : base;
+        shotCache.current.set(r, { override, shot });
+        return shot;
       }),
     [rows, valueOverrides],
   );

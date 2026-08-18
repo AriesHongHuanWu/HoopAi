@@ -4,7 +4,7 @@
  * The signature shot arc draws itself while a ball rides its tip into the
  * rim, the halo pops on arrival, the wordmark rises, then the whole cover
  * lifts away to reveal Home (whose cards stagger in underneath — Home reads
- * {@link bootIntroDelayMs} to time them). Total ~1.5s, non-blocking (pure
+ * {@link bootIntroDelayMs} to time them). Total ~1.2s, non-blocking (pure
  * overlay, Home mounts and loads data beneath it), skipped entirely under
  * reduced motion and on every later mount in the same app process.
  */
@@ -38,8 +38,31 @@ export function bootIntroDelayMs(reducedMotion: boolean): number {
 }
 
 const ARC_H = 240;
-/** When the cover starts lifting — Home's stagger anchors to this. */
-const REVEAL_AT_MS = 1150;
+/**
+ * When the cover starts lifting — Home's stagger anchors to this.
+ *
+ * Retimed 1150 -> 820. WHY: this is the FIRST thing a cold start shows, and
+ * every millisecond of it is time the user is looking at a screen they did
+ * not ask for. The old cut held the finished brand frame for ~350 ms after
+ * the wordmark had already settled — a beat nobody reads and everybody feels.
+ * The beats below were pulled in together so the story is unchanged, just
+ * told at the pace of an app that is ready: ball lands at 600, wordmark is
+ * settled by 620, the frame holds ~200 ms, then it lifts. Home is fully
+ * revealed at 1200 instead of 1530.
+ */
+const REVEAL_AT_MS = 820;
+/** How long the ball takes to fly its arc into the rim (was 640). */
+const FLIGHT_MS = 480;
+/** Flight starts here; the ball therefore ARRIVES at FLIGHT_AT + FLIGHT_MS. */
+const FLIGHT_AT_MS = 120;
+/**
+ * The halo pops slightly BEFORE the ball lands, so the rim reads as reacting
+ * to the shot rather than reporting it afterwards. Same 60 ms lead as before.
+ */
+const HALO_AT_MS = FLIGHT_AT_MS + FLIGHT_MS - 60;
+/** The wordmark rises while the ball is still in the air. */
+const WORD_AT_MS = 260;
+const WORD_MS = 360;
 
 export function BootIntro() {
   const reducedMotion = useReducedMotion();
@@ -57,20 +80,20 @@ export function BootIntro() {
     if (!visible) return;
     played = true;
     flight.value = withDelay(
-      120,
-      withTiming(1, { duration: 640, easing: Easing.out(Easing.cubic) }),
+      FLIGHT_AT_MS,
+      withTiming(1, { duration: FLIGHT_MS, easing: Easing.out(Easing.cubic) }),
     );
     halo.value = withDelay(
-      700,
+      HALO_AT_MS,
       withSequence(
         withTiming(1, { duration: 220, easing: Easing.out(Easing.quad) }),
         withTiming(0.55, { duration: 260 }),
       ),
     );
-    wordOp.value = withDelay(380, withTiming(1, { duration: 420 }));
+    wordOp.value = withDelay(WORD_AT_MS, withTiming(1, { duration: WORD_MS }));
     wordY.value = withDelay(
-      380,
-      withTiming(0, { duration: 420, easing: Easing.out(Easing.cubic) }),
+      WORD_AT_MS,
+      withTiming(0, { duration: WORD_MS, easing: Easing.out(Easing.cubic) }),
     );
     cover.value = withDelay(
       REVEAL_AT_MS,

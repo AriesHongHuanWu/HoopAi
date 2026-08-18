@@ -39,7 +39,16 @@ const TOUR_TEXT = 'Every call comes with a receipt — see WHY in your summary';
 
 type Stage = 'idle' | 'awaitBall' | 'ballSeen' | 'quiet' | 'tour' | 'done';
 
-export function FirstBallRitual({ overlay }: { overlay: ShotEngine['overlay'] }) {
+/**
+ * PERF (memo): the ritual watches the overlay SharedValue itself and holds its
+ * own one-shot state. `overlay` is a stable ref — memo keeps the parent's
+ * per-shot / per-tick re-renders from touching it.
+ */
+export const FirstBallRitual = React.memo(function FirstBallRitual({
+  overlay,
+}: {
+  overlay: ShotEngine['overlay'];
+}) {
   const rimLocked = useSession((s) => s.rimLocked);
   const shotCount = useSession((s) => s.shots.length);
   const tourSeen = useSettings((s) => s.receiptTourSeen);
@@ -119,7 +128,7 @@ export function FirstBallRitual({ overlay }: { overlay: ShotEngine['overlay'] })
       </Animated.View>
     </View>
   );
-}
+});
 
 const styles = StyleSheet.create({
   wrap: {

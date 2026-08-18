@@ -236,7 +236,15 @@ function announcement(shot: ResolvedShot, streak: number): string {
   return 'Unsure — review this shot later.';
 }
 
-export function ShotFlash() {
+/**
+ * PERF (memo): ShotFlash takes NO props and subscribes to the session store
+ * itself, so a re-render driven by the live screen can never change what it
+ * shows. Without memo, every countdown tick and toast re-ran this component —
+ * and on a make that means re-rendering the Skia burst / escalation layers
+ * mid-celebration, exactly when the UI thread is busiest. memo() with no props
+ * is an unconditional bail-out; only the store subscriptions wake it now.
+ */
+export const ShotFlash = React.memo(function ShotFlash() {
   const lastShot = useSession((s) => s.lastShot);
   const streak = useSession((s) => s.stats.currentStreak);
   const reducedMotion = useReducedMotion();
@@ -360,7 +368,7 @@ export function ShotFlash() {
       </Animated.View>
     </View>
   );
-}
+});
 
 const styles = StyleSheet.create({
   fill: {

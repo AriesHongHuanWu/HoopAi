@@ -18,7 +18,7 @@ import { AchievementRow } from '@/components/AchievementRow';
 import { ProBadge } from '@/components/ProBadge';
 import { BackPill } from '@/components/ShotList';
 import { Card, Chip, Eyebrow, PillButton, Row, Screen } from '@/components/ui';
-import { color, motion, radius, space, type } from '@/constants/tokens';
+import { color, layout, motion, radius, space, type } from '@/constants/tokens';
 import { ACHIEVEMENTS, evaluate, type LifetimeTotals } from '@/core/achievements';
 import { computeDayStreak } from '@/core/streak';
 import { allSessionStartedAt, lifetimeTotals } from '@/data/db';
@@ -312,7 +312,8 @@ const styles = StyleSheet.create({
     marginBottom: space.lg,
   },
   stack: {
-    gap: space.xl,
+    // Common rhythm — see `layout` in constants/tokens.ts.
+    gap: layout.sectionGap,
   },
   heroRow: {
     alignItems: 'stretch',

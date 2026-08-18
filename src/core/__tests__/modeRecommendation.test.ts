@@ -348,21 +348,38 @@ describe('recommendationReason', () => {
 // ---------------------------------------------------------------------------
 
 describe('MODE_SECTIONS', () => {
-  it('has exactly the four sections in render order', () => {
+  // UPDATED: 'challenges' was added between games and drills. "Challenge" used
+  // to name four unrelated things across three tabs; this section is now the
+  // one place the word means "a scored goal you can complete or share", and
+  // its POSITION is part of the taxonomy — a challenge is a goal laid over
+  // what you play, so it reads after Games and before the Drills it is not.
+  it('has exactly the five sections in render order, challenges between games and drills', () => {
     expect(MODE_SECTIONS.map((s) => s.id)).toEqual([
       'quickStart',
       'games',
+      'challenges',
       'drills',
       'tools',
     ]);
   });
 
-  it('games and drills are collapsible; quickStart and tools are not', () => {
+  it('games and drills are collapsible; quickStart, challenges and tools are not', () => {
     const byId = new Map(MODE_SECTIONS.map((s) => [s.id, s]));
     expect(byId.get('games')?.collapsible).toBe(true);
     expect(byId.get('drills')?.collapsible).toBe(true);
     expect(byId.get('quickStart')?.collapsible).toBe(false);
+    // Challenges is one card plus one tile — a toggle would cost more taps
+    // than the height it saves, so it stays open like Quick start and Tools.
+    expect(byId.get('challenges')?.collapsible).toBe(false);
     expect(byId.get('tools')?.collapsible).toBe(false);
+  });
+
+  it('keeps Drills named Drills — the section really does hold drills', () => {
+    const byId = new Map(MODE_SECTIONS.map((s) => [s.id, s]));
+    // Renaming Drills to Challenges would have moved the ambiguity rather than
+    // removed it: spot routines with make goals are drills, not contests.
+    expect(byId.get('drills')?.title).toBe('Drills');
+    expect(byId.get('challenges')?.title).toBe('Challenges');
   });
 });
 

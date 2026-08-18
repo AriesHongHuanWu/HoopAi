@@ -25,7 +25,11 @@ import { EMPTY_CUE_MEMO, pickFormCue, type FormCueMemo } from './formCue';
 /** How long the cue stays up before fading out. */
 const CUE_MS = 3500;
 
-export function FormCueToast({
+/**
+ * PERF (memo): same shape as ShotToast — driven by the resolved shot, not by
+ * the live screen's tick-level state.
+ */
+export const FormCueToast = React.memo(function FormCueToast({
   shot,
   streak,
 }: {
@@ -98,7 +102,7 @@ export function FormCueToast({
       </Pressable>
     </Animated.View>
   );
-}
+});
 
 const styles = StyleSheet.create({
   wrap: {

@@ -28,7 +28,7 @@ import { CoachTimelineCard } from '@/components/coach/CoachTimelineCard';
 import { FormReadinessCard } from '@/components/coach/FormReadinessCard';
 import { SeasonStrip } from '@/components/coach/SeasonStrip';
 import { Card, Chip, EmptyState, PillButton, Row, Screen, StatNumber } from '@/components/ui';
-import { color, font, motion, radius, space, type } from '@/constants/tokens';
+import { color, font, layout, motion, radius, space, type } from '@/constants/tokens';
 import {
   runCoach,
   weeklyPlan,
@@ -88,8 +88,8 @@ function SectionEyebrow({
 // ---------------------------------------------------------------------------
 
 const SEVERITY_META: Record<Severity, { label: string; fg: string; bg: string; edge: string }> = {
-  3: { label: 'FIX FIRST', fg: color.miss, bg: color.missTint, edge: 'rgba(232, 87, 79, 0.45)' },
-  2: { label: 'WORK ON', fg: color.accent, bg: color.accentTint, edge: 'rgba(240, 90, 36, 0.4)' },
+  3: { label: 'FIX FIRST', fg: color.miss, bg: color.missTint, edge: color.missEdge },
+  2: { label: 'WORK ON', fg: color.accent, bg: color.accentTint, edge: color.accentEdge },
   1: { label: 'NOTE', fg: color.textDim, bg: color.surfaceRaised, edge: color.border },
 };
 
@@ -178,7 +178,7 @@ function WeeklyHero({ report }: { report: WeeklyReport }) {
         }`;
 
   return (
-    <Card entering={enterAt(0)}>
+    <Card entering={enterAt(0)} style={styles.heroCard}>
       <SectionEyebrow icon="calendar-outline">{`Week of ${report.label}`}</SectionEyebrow>
 
       {/* WSS badge + headline */}
@@ -784,9 +784,22 @@ export default function CoachScreen() {
 
 const styles = StyleSheet.create({
   stack: {
-    gap: space.lg,
+    // Common tab rhythm — see `layout` in constants/tokens.ts. No paddingBottom
+    // here: Screen already tails the scroll with insets.bottom + space.xxl, so
+    // a local one just stacked a second dead gap above the tab bar.
+    gap: layout.sectionGap,
     paddingTop: space.md,
-    paddingBottom: space.xl,
+  },
+  /**
+   * The weekly report is the ENTRY POINT: eight sibling cards of identical
+   * weight gave the eye nowhere to land. Raised surface + a full-weight accent
+   * edge (vs the hairline every other card wears) makes the hierarchy legible
+   * before a single word is read.
+   */
+  heroCard: {
+    backgroundColor: color.surfaceRaised,
+    borderWidth: 1,
+    borderColor: color.accentEdge,
   },
   kicker: {
     ...type.micro,
@@ -953,7 +966,7 @@ const styles = StyleSheet.create({
   },
   weekChipActive: {
     backgroundColor: color.accentTint,
-    borderColor: 'rgba(240, 90, 36, 0.5)',
+    borderColor: color.accentEdge,
   },
   weekChipPressed: {
     backgroundColor: color.surfaceRaised,
@@ -978,14 +991,12 @@ const styles = StyleSheet.create({
     borderRadius: radius.md,
     backgroundColor: color.accentTint,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(240, 90, 36, 0.4)',
+    borderColor: color.accentEdge,
     alignItems: 'center',
     justifyContent: 'center',
   },
   wssNum: {
-    fontFamily: font.display,
-    fontSize: 34,
-    lineHeight: 36,
+    ...type.statMedium,
     color: color.accent,
     fontVariant: ['tabular-nums'],
   },
@@ -1038,13 +1049,18 @@ const styles = StyleSheet.create({
     borderRadius: radius.md,
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: color.border,
-    backgroundColor: color.surfaceRaised,
+    // One step BELOW the hero card that holds them. These tiles used to sit on
+    // surfaceRaised over a `surface` card; now the card itself is raised, so
+    // the same value would make them disappear into their own container.
+    backgroundColor: color.surface,
     paddingHorizontal: space.md,
     paddingVertical: space.sm,
     gap: 2,
   },
   receiptPressed: {
-    backgroundColor: color.surface,
+    // Presses push IN here rather than lighting up: on a raised card the only
+    // free direction is down toward the canvas.
+    backgroundColor: color.bg,
   },
   receiptLabel: {
     ...type.micro,
@@ -1085,7 +1101,7 @@ const styles = StyleSheet.create({
 
   // Findings
   findingList: {
-    gap: space.md,
+    gap: layout.cardGap,
   },
   finding: {
     backgroundColor: color.surface,
@@ -1118,9 +1134,7 @@ const styles = StyleSheet.create({
     letterSpacing: 0.6,
   },
   findingTitle: {
-    ...type.heading,
-    fontSize: 18,
-    lineHeight: 24,
+    ...type.headingLarge,
     color: color.text,
   },
   findingEvidence: {

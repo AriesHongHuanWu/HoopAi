@@ -37,7 +37,13 @@ const OUTCOME_UI: Record<
   unsure: { label: 'REVIEW', tone: 'unsure', stroke: color.unsure, spoken: 'Unsure, review later' },
 };
 
-export function ShotToast({
+/**
+ * PERF (memo): the toast must re-render when a shot RESOLVES (new `shot`) — and
+ * only then. memo drops the re-renders it was getting for free from every
+ * countdown tick and every unrelated live.tsx state change, which used to
+ * restart nothing visually but still walked the sparkline + receipt tree.
+ */
+export const ShotToast = React.memo(function ShotToast({
   shot,
   streak,
 }: {
@@ -119,7 +125,7 @@ export function ShotToast({
       </Pressable>
     </Animated.View>
   );
-}
+});
 
 const styles = StyleSheet.create({
   wrap: {

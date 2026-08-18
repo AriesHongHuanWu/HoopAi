@@ -161,7 +161,13 @@ export function funnelRows(f: FrameFunnel): Array<{ k: string; v: string; vc?: s
   ];
 }
 
-export function DebugPanel({
+/**
+ * PERF (memo): the panel polls both SharedValues on its own 4 Hz clock and
+ * shows nothing derived from live.tsx state. Its props are stable refs, so
+ * memo keeps a countdown tick or a resolved shot from re-rendering ~20 rows of
+ * diagnostics text on the busiest screen in the app.
+ */
+export const DebugPanel = React.memo(function DebugPanel({
   debug,
   overlay,
 }: {
@@ -169,7 +175,19 @@ export function DebugPanel({
   /** Optional: read the locked rim box to show its aspect (camera-angle proxy). */
   overlay?: SharedValue<OverlayState>;
 }) {
-  const [d, setD] = useState<EngineDebug>(debug.value);
+  /**
+   * Deliberately NOT `useState(debug.value)`. Reading a Reanimated SharedValue
+   * during React's render phase is the exact pattern Reanimated warns about:
+   * the UI thread can be mid-write, and the read is invisible to React's
+   * scheduler, so the value can be torn or silently stale. We start empty and
+   * take the first snapshot inside the effect below (which runs `poll()`
+   * immediately, so there is no 250 ms blank).
+   *
+   * WHY not an EMPTY_DEBUG-shaped default: that constant lives in
+   * camera/useShotEngine, whose native deps cannot resolve under jest — this
+   * file must stay importable there (see __tests__/DebugPanel.test.ts).
+   */
+  const [d, setD] = useState<EngineDebug | null>(null);
   // Rim box aspect (width/height) — a rough camera-angle read. 0 = no rim yet.
   const [rimAsp, setRimAsp] = useState(0);
   // Latest acquisition funnel (null until the engine publishes one).
@@ -178,9 +196,10 @@ export function DebugPanel({
   const { width, height } = useWindowDimensions();
   const isLandscape = width > height;
   useEffect(() => {
-    const id = setInterval(() => {
+    const poll = () => {
       const next = debug.value;
-      setD((prev) => (debugChanged(prev, next) ? { ...next } : prev));
+      // prev == null only on the very first poll — adopt the snapshot as-is.
+      setD((prev) => (prev == null || debugChanged(prev, next) ? { ...next } : prev));
       const r = overlay?.value.rim;
       const a = r != null && r.height > 0 ? r.width / r.height : 0;
       setRimAsp((prev) => (Math.abs(prev - a) > 0.05 ? a : prev));
@@ -196,9 +215,15 @@ export function DebugPanel({
             ? nf
             : prev,
       );
-    }, 250);
+    };
+    poll();
+    const id = setInterval(poll, 250);
     return () => clearInterval(id);
   }, [debug, overlay]);
+
+  // First paint only: the mount effect above fills this in synchronously
+  // after commit, so the panel appears in the same frame the toggle flips.
+  if (d == null) return null;
 
   // maxScore ~0 across frames => bad input/model. Good detections raise it.
   const scoreColor = d.maxScore > 0.3 ? color.make : d.maxScore > 0.05 ? color.unsure : color.miss;
@@ -291,7 +316,7 @@ export function DebugPanel({
       </Pressable>
     </View>
   );
-}
+});
 
 function Row({ k, v, vc }: { k: string; v: string; vc?: string }) {
   return (

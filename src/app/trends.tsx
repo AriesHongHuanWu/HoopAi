@@ -25,7 +25,7 @@ import {
 import { Sparkline } from '@/components/charts/Sparkline';
 import { CourtHeatmap } from '@/components/charts/CourtHeatmap';
 import { Card, EmptyState, Eyebrow, Row, Screen } from '@/components/ui';
-import { color, font, motion, radius, space, type } from '@/constants/tokens';
+import { color, font, layout, motion, radius, space, type } from '@/constants/tokens';
 import { fgTrend, listSessions, sessionShots, shotFromRow } from '@/data/db';
 import { monthlyProgress, type MonthlyProgress } from '@/core/progression';
 import { buildHeatmap, type Heatmap } from '@/core/heatmap';
@@ -262,7 +262,7 @@ export default function TrendsScreen() {
           onAction={() => router.push('/session/setup')}
         />
       ) : (
-        <View style={{ gap: space.lg }}>
+        <View style={styles.cardStack}>
           <Card entering={enter(0)}>
             <Eyebrow>Field goal %</Eyebrow>
             <Row style={{ justifyContent: 'space-between' }}>
@@ -412,8 +412,13 @@ const styles = StyleSheet.create({
     ...type.body,
     color: color.textDim,
   },
+  /** Sits above the card stack, so its trailing margin IS a section gap. */
   monthCard: {
-    marginBottom: space.lg,
+    marginBottom: layout.sectionGap,
+  },
+  /** Common rhythm — see `layout` in constants/tokens.ts. */
+  cardStack: {
+    gap: layout.sectionGap,
   },
   monthRow: {
     justifyContent: 'space-between',

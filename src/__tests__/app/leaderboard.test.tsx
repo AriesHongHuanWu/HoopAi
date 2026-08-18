@@ -365,14 +365,16 @@ describe('Leaderboard outbound', () => {
 });
 
 describe('Leaderboard entry point', () => {
-  it('rides in the Data tab’s EXPLORE nav row and pushes /leaderboard', async () => {
-    const { NavTileRow } = require('@/components/NavTiles');
-    const r = await render(
-      <NavTileRow
-        eyebrow="EXPLORE"
-        tiles={[{ icon: 'trending-up', label: 'Trends', hint: 'h', onPress: () => {} }]}
-      />,
-    );
+  // UPDATED CONTRACT. This used to assert that NavTileRow APPENDS the
+  // leaderboard tile to any row whose eyebrow string equals 'EXPLORE'. That
+  // made a copy edit — renaming one all-caps label — silently delete the app's
+  // only social screen, with nothing at the call site to notice. The tile is
+  // now a named export placed explicitly (Train tab's Challenges section), so
+  // what is pinned here is the tile itself: right label, right destination,
+  // and NOT conjured by any eyebrow string.
+  it('is a named tile that pushes /leaderboard wherever a screen places it', async () => {
+    const { LEADERBOARD_TILE, NavTileRow } = require('@/components/NavTiles');
+    const r = await render(<NavTileRow tiles={[LEADERBOARD_TILE]} />);
 
     const tile = r.root.findAll(
       (n) => n.props.accessibilityLabel === 'Leaderboard' && typeof n.props.onPress === 'function',
@@ -382,6 +384,21 @@ describe('Leaderboard entry point', () => {
       tile.props.onPress();
     });
     expect(routerMod.router.push).toHaveBeenCalledWith('/leaderboard');
+    await unmount(r);
+  });
+
+  it('is never injected implicitly by a row eyebrow', async () => {
+    const { NavTileRow } = require('@/components/NavTiles');
+    const r = await render(
+      <NavTileRow
+        eyebrow="EXPLORE"
+        tiles={[{ icon: 'trending-up', label: 'Trends', hint: 'h', onPress: () => {} }]}
+      />,
+    );
+
+    expect(
+      r.root.findAll((n) => n.props.accessibilityLabel === 'Leaderboard'),
+    ).toHaveLength(0);
     await unmount(r);
   });
 });

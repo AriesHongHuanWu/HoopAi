@@ -2,13 +2,15 @@
  * Shared UI primitives — the only building blocks screens should use for
  * basic structure. Dark broadcast system; tokens in src/constants/tokens.ts.
  */
-import React from 'react';
+import React, { useState } from 'react';
 import {
   Pressable,
   ScrollView,
   StyleSheet,
   Text,
   View,
+  useWindowDimensions,
+  type LayoutChangeEvent,
   type StyleProp,
   type TextStyle,
   type ViewStyle,
@@ -19,6 +21,12 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { color, radius, space, touch, type } from '../constants/tokens';
 import type { ShotOutcome } from '../core/types';
+// Imported from the CONCRETE module, not the '@/components/motion' barrel:
+// this kit sits underneath every screen, and several suites stub that barrel
+// down to the two or three symbols the screen under test uses. Reaching past
+// the barrel keeps Card's press physics real everywhere instead of resolving
+// to `undefined` in any suite that happens to mock the barrel.
+import { PressScale } from './motion/PressScale';
 
 // ---------------------------------------------------------------------------
 
@@ -57,6 +65,56 @@ export function Screen({
   return <View style={base}>{children}</View>;
 }
 
+/** Entering animation shape shared by every card in the kit. */
+type Entering = React.ComponentProps<typeof Animated.View>['entering'];
+
+/**
+ * PressableCard — a Card that answers the finger.
+ *
+ * WHY it exists: PillButton was the only surface in the app with press
+ * physics, so session cards, mode tiles and profile rows all flat-cut on
+ * touch and the app read as a slideshow of static panels. This routes the
+ * card shape through the shared {@link PressScale} spring (identical numbers
+ * to PillButton, reduced-motion aware, haptics via the gated gateway) so
+ * screens stop hand-rolling their own — and so every press in the app has
+ * the same weight.
+ */
+export function PressableCard({
+  children,
+  style,
+  onPress,
+  onLongPress,
+  disabled = false,
+  haptic = 'none',
+  accessibilityLabel,
+  entering,
+}: {
+  children: React.ReactNode;
+  style?: StyleProp<ViewStyle>;
+  onPress: () => void;
+  onLongPress?: () => void;
+  disabled?: boolean;
+  /** Settings-gated haptic fired on press. See PressScale. */
+  haptic?: 'none' | 'selection' | 'impactLight';
+  accessibilityLabel?: string;
+  /** See {@link Card}. */
+  entering?: Entering;
+}) {
+  const pressable = (
+    <PressScale
+      onPress={onPress}
+      onLongPress={onLongPress}
+      disabled={disabled}
+      haptic={haptic}
+      accessibilityLabel={accessibilityLabel}
+      style={[styles.card, disabled && styles.cardDisabled, style]}
+    >
+      {children}
+    </PressScale>
+  );
+  return entering ? <Animated.View entering={entering}>{pressable}</Animated.View> : pressable;
+}
+
 export function Card({
   children,
   style,
@@ -71,18 +129,20 @@ export function Card({
    * Screens stagger their cards on mount so navigation feels alive; leave
    * undefined for cards inside frequently-updating lists.
    */
-  entering?: React.ComponentProps<typeof Animated.View>['entering'];
+  entering?: Entering;
 }) {
+  // A tappable Card IS a PressableCard. Delegating here (rather than adding
+  // the spring only to a new opt-in export) is the whole point of the change:
+  // every `<Card onPress>` already written across the app inherits the press
+  // physics without a single screen being touched. The old pressed-state
+  // background tint is gone on purpose — the spring is the feedback now, and
+  // two simultaneous press signals read as a flicker.
   if (onPress) {
-    const pressable = (
-      <Pressable
-        onPress={onPress}
-        style={({ pressed }) => [styles.card, pressed && styles.cardPressed, style]}
-      >
+    return (
+      <PressableCard onPress={onPress} style={style} entering={entering}>
         {children}
-      </Pressable>
+      </PressableCard>
     );
-    return entering ? <Animated.View entering={entering}>{pressable}</Animated.View> : pressable;
   }
   if (entering) {
     return (
@@ -92,6 +152,119 @@ export function Card({
     );
   }
   return <View style={[styles.card, style]}>{children}</View>;
+}
+
+// ---------------------------------------------------------------------------
+// Skeletons
+
+/**
+ * Shimmer is pulled in on FIRST USE instead of at module scope.
+ *
+ * WHY: it paints on a Skia canvas, and @shopify/react-native-skia is an
+ * ESM-only package. A top-level import would drag Skia into every module that
+ * touches this kit — which is every screen, and every unit test that renders
+ * so much as a Card — forcing a Skia mock on suites that never paint one.
+ * Behind a getter, that cost lands on SkeletonCard alone. Metro still sees a
+ * static require, so nothing changes about bundling.
+ */
+type ShimmerComponent = (typeof import('./motion/Shimmer'))['Shimmer'];
+let shimmerImpl: ShimmerComponent | null = null;
+function getShimmer(): ShimmerComponent {
+  shimmerImpl ??= (require('./motion/Shimmer') as typeof import('./motion/Shimmer')).Shimmer;
+  return shimmerImpl;
+}
+
+/** Hero block height — a `statLarge` numeral is what's arriving. */
+const SKELETON_HERO_H = type.statLarge.lineHeight;
+/** Text-bar height: the ink height of a body line, not its full line box. */
+const SKELETON_LINE_H = type.body.fontSize;
+/**
+ * Floor for the seeded bar width, so the Skia canvas never gets a nonsense
+ * size on a first frame that hasn't been measured yet.
+ */
+const SKELETON_MIN_W = touch.minTarget * 2;
+
+/**
+ * Ragged right edge. A stack of identical full-width bars reads as a table;
+ * real paragraphs break short and the LAST line breaks shortest, which is what
+ * makes a skeleton parse as "text is coming" without being read.
+ */
+function skeletonLineFactor(index: number, total: number): number {
+  if (index === total - 1) return total === 1 ? 0.72 : 0.6;
+  return index % 2 === 0 ? 1 : 0.88;
+}
+
+/**
+ * SkeletonCard — the SHAPE of the card that is loading.
+ *
+ * WHY: loading screens showed a single line of dim text, so the layout
+ * visibly reflowed the instant data landed and every load felt like a jump
+ * cut. A skeleton reserves the real geometry, so content arrives INTO the
+ * space it was always going to occupy.
+ *
+ * `hero` adds the big-numeral block on top; `lines` is how many text bars sit
+ * under it. Unmount it when the content arrives — see the Shimmer contract.
+ */
+export function SkeletonCard({
+  lines = 3,
+  hero = false,
+  style,
+}: {
+  /** Text bars to draw under the optional hero block. Minimum 1. */
+  lines?: number;
+  /** Draw a hero-numeral block above the bars. */
+  hero?: boolean;
+  style?: StyleProp<ViewStyle>;
+}) {
+  const ShimmerBlock = getShimmer();
+  const { width: screenW } = useWindowDimensions();
+  const [measuredW, setMeasuredW] = useState(0);
+
+  // Shimmer is a Skia canvas, so it needs REAL pixel widths. Seed them from
+  // the natural full-bleed card width (screen minus Screen's horizontal
+  // padding and the card's own padding, both sides) and refine on first
+  // layout. WHY not simply wait for onLayout: a skeleton that renders empty
+  // on its first frame flashes blank at exactly the moment it exists to
+  // reassure.
+  const innerW =
+    measuredW > 0 ? measuredW : Math.max(SKELETON_MIN_W, screenW - (space.lg + space.lg) * 2);
+  const count = Math.max(1, Math.floor(lines));
+
+  const onLayout = (e: LayoutChangeEvent) => {
+    const next = Math.max(SKELETON_MIN_W, e.nativeEvent.layout.width - space.lg * 2);
+    // Guard the setState so a re-layout at the same width can't spin.
+    setMeasuredW((prev) => (Math.abs(prev - next) < 1 ? prev : next));
+  };
+
+  return (
+    <View
+      style={[styles.card, style]}
+      onLayout={onLayout}
+      // One node to the screen reader: the bars are decoration, the message
+      // is "this is loading".
+      accessible
+      accessibilityRole="progressbar"
+      accessibilityLabel="Loading"
+    >
+      {hero && (
+        <ShimmerBlock
+          width={innerW}
+          height={SKELETON_HERO_H}
+          radius={radius.md}
+          style={styles.skeletonHero}
+        />
+      )}
+      {Array.from({ length: count }, (_, i) => (
+        <ShimmerBlock
+          key={i}
+          width={Math.round(innerW * skeletonLineFactor(i, count))}
+          height={SKELETON_LINE_H}
+          radius={radius.sm}
+          style={i === 0 ? undefined : styles.skeletonLine}
+        />
+      ))}
+    </View>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -360,8 +533,14 @@ const styles = StyleSheet.create({
     borderColor: color.border,
     padding: space.lg,
   },
-  cardPressed: {
-    backgroundColor: color.surfaceRaised,
+  cardDisabled: {
+    opacity: 0.4,
+  },
+  skeletonHero: {
+    marginBottom: space.lg,
+  },
+  skeletonLine: {
+    marginTop: space.sm,
   },
   pill: {
     minHeight: touch.minTarget,

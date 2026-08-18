@@ -49,7 +49,7 @@ Repo:`AriesHongHuanWu/HoopAi`,本機 `C:\Users\aries\claude\claudeCode\hoop-ai`�
 **2026-07-10 Round-2 mega-upgrade(13 偵察/設計 + 29 實作/整合 + 57 審查/驗證/修復;1976 tests 全綠):**
 - **FT-seed 場地定位(旗艦)**:`src/core/ftSeed.ts` — 開場罰球錨定(已知 FT 線距離反解 scale+yaw 修正)→ 任意鏡頭擺位的每球場上位置 + corner-accurate 2/3;provenance 新增 `ftSeed`(FT-anchored)層(court > ftSeed > metric > heuristic);信心上限 0.75 誠實封頂;live 的 `FtSeedChip` 儀式化引導;seed 亦回饋 shrink-only 球尺寸上限給 tracker。判定路徑零影響(只動 shotValue/位置)。rim 漂移/re-aim 會同步清 seed。
 - **追蹤斷鏈修復**:`acquisitionFunnel.ts` 漏斗遙測(raw→cull→gate→tracked→drawn + 最後拒絕原因,進 DebugPanel/COPY DIAG)、flag-gated 持續性救援(高分未收養球連續 N 幀→放行冷門檻,recall-only)、FSM `armRefusal` 記錄口徑、DetectionBoxes 雙層框(raw vs tracked)、dribbleGate 陳舊 latch/apex 跨界加固。
-- **模式分類 IA**:Train 分頁改 QUICK START/GAMES/CHALLENGES/TOOLS 分區 + 使用紀錄驅動的推薦 hero;全部 arm-then-route/deep-link/ghost picker 契約保留。
+- **模式分類 IA**:Train 分頁分區 = QUICK START / GAMES / CHALLENGES / DRILLS / TRAINING TOOLS(順序與 `src/core/modeCatalogSections.ts` 的 `MODE_SECTIONS` 一致)+ 使用紀錄驅動的推薦 hero;全部 arm-then-route/deep-link/ghost picker 契約保留。CHALLENGES 區 = 本週 WeeklyChallengeCard(唯讀顯示,發點數仍只由 Home 寫)+ 好友排行榜入口(明確放置,不再由 NavTiles 依 eyebrow 字串自動注入)。Tab 標題即分頁字(Train/Data),原本的口語標題降為 lede。
 - **Setup 一鍵開始**:頂部 StartHero(上次設定摘要 chip)+ 摺疊選項段 + sticky 底欄;settingsStore v7。
 - **動畫系統**:`src/components/motion/`(stagger/CountUp/MotionStat/SuccessBurst/AnimatedProgressBar/Shimmer/PressScale)+ gated haptics util;home/coach/history/trends/records/summary(PB 彩帶)/jump/profile/reel 全鋪;全部尊重 reduced-motion。
 - **3D v2**:視角預設(SIDE/FRONT/TOP)平滑 tween、自動環繞、手腕軌跡緞帶、release 幀場景內角度標註、兩球對比(誠實「estimated reconstruction」)、Stage3DStill 分享圖、首開導覽。

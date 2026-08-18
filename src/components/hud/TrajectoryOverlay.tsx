@@ -32,6 +32,15 @@
  * That composition (and the reason it must read the REAL source frame dims, not
  * a hardcoded aspect) lives in ./overlayMapping so this and DetectionBoxes stay
  * pixel-identical. All per-frame math runs inside useDerivedValue worklets.
+ *
+ * PER-FRAME WORK IS PHASE-GATED
+ * -----------------------------
+ * This canvas is full-screen and carries six BlurMask passes, so ANY value that
+ * changes every display frame repaints the whole thing. Both display-rate
+ * drivers — the ambient pulse and the display clock behind the ball glide — are
+ * therefore gated on ./overlayActivity's isAnimatedPhase: SHOT_LIVE and
+ * COOLDOWN animate, IDLE holds still at base opacity. The gate is display-only
+ * and never touches what the detector or the shot FSM sees.
  */
 import React from 'react';
 import { View, type LayoutChangeEvent, type StyleProp, type ViewStyle } from 'react-native';
@@ -46,6 +55,8 @@ import {
   type SkPath,
 } from '@shopify/react-native-skia';
 import {
+  cancelAnimation,
+  useAnimatedReaction,
   useDerivedValue,
   useFrameCallback,
   useReducedMotion,
@@ -57,9 +68,10 @@ import {
 } from 'react-native-reanimated';
 
 import type { OverlayState } from '../../camera/useShotEngine';
-import { color, glow } from '../../constants/tokens';
+import { color, glow, motion } from '../../constants/tokens';
 import { apexOfFlatArc, arcQuality, entryAngleDegFromFlat, splitFlatTail, type ArcQuality } from './arcHudGeometry';
 import { ArcReadout } from './ArcReadout';
+import { isAnimatedPhase } from './overlayActivity';
 import { mapAnalysisToView } from './overlayMapping';
 
 /** Widths of the three stacked trail passes (bloom → core → hot). */
@@ -82,6 +94,9 @@ const BRACKET_FRAC = 0.28;
 const BRACKET_STROKE = 3;
 /** How long (ms) the latched landing ghost lingers + fades through COOLDOWN. */
 const LANDING_GHOST_FADE_MS = 1200;
+/** One breath of the rim/ghost pulse. Deliberately not a motion token: this is
+ *  an ambient loop period, not a UI transition duration. */
+const PULSE_MS = 1400;
 
 // RN 0.86 removed StyleSheet.absoluteFillObject — local const per the
 // repo-documented pattern (see live.tsx).
@@ -140,7 +155,14 @@ function crosshairPath(x: number, y: number): SkPath {
   return p;
 }
 
-export function TrajectoryOverlay({
+/**
+ * PERF (memo): every pixel here is driven by the `overlay` SharedValue on the
+ * UI thread; nothing reads live.tsx React state. `overlay` is a stable ref and
+ * live.tsx passes no `style`, so memo turns each of the screen's many
+ * re-renders (every shot, every countdown tick, every toast) into a bail-out
+ * instead of a full rebuild of this Canvas's ~20 blurred draw calls.
+ */
+export const TrajectoryOverlay = React.memo(function TrajectoryOverlay({
   overlay,
   style,
 }: {
@@ -154,21 +176,47 @@ export function TrajectoryOverlay({
     viewSize.value = { w: width, h: height };
   };
 
-  // A free-running 0→1→0 pulse drives the rim's "breathing" glow. Ambient, so
-  // the lock never looks frozen even between shots. Under reduced motion the
-  // pulse stays at 0 and everything pulse-driven renders at its base opacity.
+  // A 0→1→0 pulse drives the rim's "breathing" glow and the landing ghost.
+  // Under reduced motion the pulse stays at 0 and everything pulse-driven
+  // renders at its base opacity.
+  //
+  // PERF — why this is PHASE-GATED rather than free-running: see the rationale
+  // on isAnimatedPhase (./overlayActivity). The settle is a withTiming, not a
+  // bare assignment, so the rim brackets ease down to their base opacity
+  // instead of stepping when a shot finishes.
+  //
+  // Visual contract: identical while a shot is live. Between shots the lock-on
+  // brackets and idle ball reticle hold at their base opacity — precisely the
+  // look this overlay already ships under reduced motion.
   const reducedMotion = useReducedMotion();
   const pulse = useSharedValue(0);
+  useAnimatedReaction(
+    () => isAnimatedPhase(overlay.value.phase),
+    (active, prev) => {
+      if (active === prev) return;
+      if (reducedMotion || !active) {
+        pulse.value = withTiming(0, { duration: motion.standard });
+        return;
+      }
+      pulse.value = withRepeat(
+        withTiming(1, { duration: PULSE_MS, easing: Easing.inOut(Easing.ease) }),
+        -1,
+        true,
+      );
+    },
+    // `overlay` is listed even though it is a stable ref for this component's
+    // life: an explicit dependency list REPLACES the auto-collected one, so a
+    // future caller swapping engines would otherwise keep reacting to the old
+    // SharedValue.
+    [overlay, reducedMotion],
+  );
+  // The reaction only fires on a PHASE change, so a reduce-motion toggle flipped
+  // mid-shot would otherwise keep the loop running until the shot resolved.
+  // Stop it the moment the setting changes.
   React.useEffect(() => {
-    if (reducedMotion) {
-      pulse.value = 0;
-      return;
-    }
-    pulse.value = withRepeat(
-      withTiming(1, { duration: 1400, easing: Easing.inOut(Easing.ease) }),
-      -1,
-      true,
-    );
+    if (!reducedMotion) return;
+    cancelAnimation(pulse);
+    pulse.value = 0;
   }, [pulse, reducedMotion]);
 
   // --- analysis → view transform (worklet-local) ---------------------------
@@ -283,12 +331,24 @@ export function TrajectoryOverlay({
   useFrameCallback((frameInfo) => {
     'worklet';
     const nowMs = frameInfo.timestamp;
-    displayNowMs.value = nowMs;
     const o = overlay.value;
     const key = o.ball?.t ?? -1;
-    if (key !== lastSampleKey.value) {
+    const newSample = key !== lastSampleKey.value;
+    if (newSample) {
       lastSampleKey.value = key;
       sampleArrivalMs.value = nowMs;
+    }
+    // PERF: writing displayNowMs is what makes the mappers below re-run — and
+    // a mapper re-run allocates SkPaths and dirties the whole blurred canvas.
+    // Only the animated phases consume the display clock (ball glide in
+    // SHOT_LIVE, landing-ghost fade in COOLDOWN), so outside those we advance
+    // it ONLY on a new detection sample. That rate is already the overlay's own
+    // update rate, so it costs nothing extra — and it keeps displayNowMs
+    // coherent with sampleArrivalMs, meaning dt is exactly 0 the instant a
+    // sample lands. Without that, the first live frame could inherit a stale dt
+    // and jump the drawn ball forward by the full MAX_EXTRAPOLATION_SEC.
+    if (isAnimatedPhase(o.phase) || newSample) {
+      displayNowMs.value = nowMs;
     }
     if (o.pred != null && o.phase === 'SHOT_LIVE') {
       // Re-stamp the time every frame (fade starts from the LAST live moment)
@@ -686,4 +746,4 @@ export function TrajectoryOverlay({
       <ArcReadout overlay={overlay} />
     </View>
   );
-}
+});

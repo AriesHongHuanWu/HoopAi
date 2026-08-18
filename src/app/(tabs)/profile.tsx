@@ -25,7 +25,7 @@ import { ChoiceCard, ChipSelect } from '@/components/profile/Choice';
 import { NumberSlider } from '@/components/profile/NumberSlider';
 import { SeasonCard } from '@/components/SeasonCard';
 import { Card, Chip, PillButton, Row, Screen, StatNumber } from '@/components/ui';
-import { color, radius, space, touch, type } from '@/constants/tokens';
+import { color, layout, radius, space, touch, type } from '@/constants/tokens';
 import type { ShootingHand } from '@/core/types';
 import {
   ageFromBirthYear,
@@ -457,7 +457,10 @@ export default function ProfileScreen() {
 
 const styles = StyleSheet.create({
   stack: {
-    gap: space.lg,
+    // Common tab rhythm — see `layout` in constants/tokens.ts. Profile used to
+    // stack tighter than Home/Records, so swiping across visibly compressed
+    // the page.
+    gap: layout.sectionGap,
     paddingTop: space.md,
   },
   topBar: {
@@ -473,9 +476,24 @@ const styles = StyleSheet.create({
   settingsBtnPressed: {
     backgroundColor: color.surfaceRaised,
   },
+  /**
+   * The player card is Profile's ENTRY POINT. It used to be loose text on the
+   * canvas, so it carried no more weight than the five identical cards below
+   * it. Raised surface + a full-weight accent edge (the same emphasis Coach's
+   * weekly hero wears) gives the eye somewhere to land first.
+   */
   header: {
     gap: space.sm,
-    paddingVertical: space.sm,
+    // `surface`, NOT surfaceRaised, even though this is the hero: the header
+    // carries a default-tone Chip (the training goal) whose ground IS
+    // surfaceRaised, so raising the card would swallow it whole. The emphasis
+    // comes from the full-weight accent edge instead — it is the only bordered
+    // accent card on the screen, against five hairline-neutral ones.
+    backgroundColor: color.surface,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: color.accentEdge,
+    padding: layout.cardPadding,
   },
   eyebrow: {
     ...type.caption,
@@ -503,8 +521,10 @@ const styles = StyleSheet.create({
     backgroundColor: color.surface,
     borderRadius: radius.lg,
     borderWidth: 1,
-    borderColor: color.accent,
-    padding: space.lg,
+    // Hairline-weight accent: the player card above is the hero now, and two
+    // full-strength accent borders on one screen cancel each other out.
+    borderColor: color.accentEdge,
+    padding: layout.cardPadding,
     gap: space.md,
   },
   progressText: {

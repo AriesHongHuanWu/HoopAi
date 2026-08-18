@@ -48,7 +48,7 @@ import {
 import { Sparkline } from '@/components/charts/Sparkline';
 import { CountUp, SuccessBurst, useCardStagger } from '@/components/motion';
 import { Card, Chip, PillButton, Row, Screen } from '@/components/ui';
-import { color, font, radius, space, type } from '@/constants/tokens';
+import { color, font, layout, radius, space, type } from '@/constants/tokens';
 import { haptic } from '@/utils/haptics';
 import {
   PLYO_PROGRAMS,
@@ -818,9 +818,10 @@ function estimateMppFromPose(samples: readonly JumpSample[]): number | undefined
 
 const styles = StyleSheet.create({
   stack: {
-    gap: space.lg,
+    // Common rhythm — see `layout` in constants/tokens.ts. No paddingBottom:
+    // Screen already tails the scroll with insets.bottom + space.xxl.
+    gap: layout.sectionGap,
     paddingTop: space.md,
-    paddingBottom: space.xl,
   },
   header: {
     marginBottom: space.sm,
@@ -855,9 +856,7 @@ const styles = StyleSheet.create({
     letterSpacing: 1,
   },
   measureLead: {
-    ...type.heading,
-    fontSize: 18,
-    lineHeight: 24,
+    ...type.headingLarge,
     color: color.text,
   },
   measureBody: {
@@ -873,7 +872,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     gap: space.sm,
     alignItems: 'flex-start',
-    backgroundColor: 'rgba(232,184,79,0.10)',
+    backgroundColor: color.unsureTint,
     borderRadius: radius.md,
     padding: space.md,
     marginTop: space.md,
@@ -933,9 +932,7 @@ const styles = StyleSheet.create({
     letterSpacing: 0.8,
   },
   methodVal: {
-    ...type.statMedium,
-    fontSize: 22,
-    lineHeight: 26,
+    ...type.statSmall,
     color: color.text,
     marginTop: 2,
   },
@@ -986,8 +983,7 @@ const styles = StyleSheet.create({
     alignItems: 'flex-start',
   },
   programTitle: {
-    ...type.heading,
-    fontSize: 18,
+    ...type.headingLarge,
     color: color.text,
   },
   programWho: {

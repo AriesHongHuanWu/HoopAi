@@ -21,9 +21,10 @@ import * as SplashScreen from 'expo-splash-screen';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useState } from 'react';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import { useReducedMotion } from 'react-native-reanimated';
 
 import { ErrorBoundary } from '@/components/ErrorBoundary';
-import { color } from '@/constants/tokens';
+import { color, motion } from '@/constants/tokens';
 import { useDeviceTuning } from '@/camera/deviceTuning';
 import { useSettings } from '@/state/settingsStore';
 
@@ -67,6 +68,13 @@ export default function RootLayout() {
     Inter_600SemiBold,
   });
   const settingsHydrated = useSettingsHydrated();
+  // Screen transitions are native, so the OS "Reduce Motion" setting does not
+  // reach them on its own. When it is on, every class below collapses to a
+  // cross-fade: no travel, no direction, but still a transition rather than a
+  // hard cut — the same substitution Apple makes system-wide.
+  const reduceMotion = useReducedMotion();
+  const drillDown = reduceMotion ? 'fade' : ('slide_from_right' as const);
+  const utilityPanel = reduceMotion ? 'fade' : ('slide_from_bottom' as const);
   // One-time per-device detector tuning, applied once settings have hydrated
   // (so it never races the persisted store — see useDeviceTuning).
   useDeviceTuning(settingsHydrated);
@@ -92,11 +100,22 @@ export default function RootLayout() {
             screenOptions={{
               headerShown: false,
               contentStyle: { backgroundColor: color.bg },
+              // TRANSITION CLASS 1 — DRILL-DOWN (the default).
+              // Declared rather than left to the per-platform default so
+              // "I went one level deeper" has the SAME shape and the same
+              // timing on both platforms, and so the classes below read as
+              // deliberate exceptions to a stated rule instead of noise.
+              animation: drillDown,
+              animationDuration: motion.standard,
             }}
           >
             {/* The bottom-tab navigator is the app's home surface; every other
                 route in this Stack pushes full-bleed OVER its tab bar. */}
             <Stack.Screen name="(tabs)" />
+
+            {/* CLASS 2 — TAKEOVER: a screen that owns the device until it is
+                finished. Arrives by cross-fade (there is no "back" to point
+                at) and refuses the swipe-back. */}
             {/* Onboarding fades in over the splash and can't be swiped away. */}
             <Stack.Screen name="onboarding" options={{ animation: 'fade', gestureEnabled: false }} />
             {/* Live session: swipe-back would silently drop an in-progress
@@ -106,6 +125,37 @@ export default function RootLayout() {
                 gone" path entirely — Android hardware back still routes
                 through beforeRemove and gets the same confirmation. */}
             <Stack.Screen name="session/live" options={{ gestureEnabled: false }} />
+
+            {/* CLASS 3 — PAYOFF ARRIVAL. Summary is reached by
+                router.replace() from the live camera: nothing slid sideways,
+                the session RESOLVED into its scoreboard, so a lateral push
+                mis-describes the moment. It cross-fades instead, and the
+                swipe-back is off because "swipe right to re-enter a session
+                that already ended" is not a real destination — the screen's
+                own dismissTo actions are the only way out. */}
+            <Stack.Screen
+              name="session/summary"
+              options={{ animation: 'fade', gestureEnabled: false }}
+            />
+
+            {/* CLASS 4 — UTILITY PANEL. Settings, storage and the legal hub
+                are not "deeper into your shooting" — they are app machinery
+                summoned from wherever you were, so they rise from the bottom
+                instead of sliding in from the side.
+                WHY animation and not `presentation: 'modal'`: Settings is a
+                HUB that pushes six further routes, and react-navigation
+                auto-promotes every screen pushed after a modal to a modal
+                too (see getModalRouteKeys) — settings -> legal -> privacy
+                would stack three sheets, and a sheet-presented screen still
+                reads WINDOW safe-area insets, so Screen's paddingTop would
+                double up inside the card. slide_from_bottom buys the "a
+                panel appeared" reading with none of that.
+                Their own sub-pages (legal/privacy, terms, licenses) keep the
+                Class 1 drill-down, so going deeper inside a panel still
+                reads as going deeper. */}
+            <Stack.Screen name="settings" options={{ animation: utilityPanel }} />
+            <Stack.Screen name="storage" options={{ animation: utilityPanel }} />
+            <Stack.Screen name="legal/index" options={{ animation: utilityPanel }} />
           </Stack>
         </ErrorBoundary>
       </ThemeProvider>

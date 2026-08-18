@@ -27,6 +27,12 @@ export const palette = {
   leatherDeep: '#C2431A',
   /** Subtle leather tint for fills (12% on coal). */
   leatherTint: 'rgba(240, 90, 36, 0.12)',
+  /**
+   * Accent HAIRLINE. Deliberately hotter than leatherTint: a 12% fill read as
+   * a border disappears against `court`, so every emphasized edge (hero card,
+   * selected week chip, WSS badge) was hand-rolling its own 0.4–0.5 alpha.
+   */
+  leatherEdge: 'rgba(240, 90, 36, 0.45)',
 
   /** Make — cyan-leaning green (separable for deuteranopia). */
   swish: '#2FD6A3',
@@ -34,11 +40,15 @@ export const palette = {
   /** Miss — warm red, never punishing-bright. */
   brick: '#E8574F',
   brickTint: 'rgba(232, 87, 79, 0.14)',
+  /** Miss hairline — the "fix first" severity edge. */
+  brickEdge: 'rgba(232, 87, 79, 0.45)',
   /** Unsure / needs review. */
   chalkYellow: '#E8B84F',
+  chalkYellowTint: 'rgba(232, 184, 79, 0.14)',
 
   /** Informational (charts secondary series, links). */
   paintBlue: '#4F8DE8',
+  paintBlueTint: 'rgba(79, 141, 232, 0.14)',
 
   /** 3-point accent — downtown gold, distinct from make-green & leather. */
   downtown: '#F2C14E',
@@ -59,6 +69,8 @@ export const palette = {
    * lightness only: 5.14:1 on surface, 4.63:1 on surfaceRaised, 5.57:1 on bg.
    */
   chalkFaint: '#918A83',
+  /** Neutral "no signal" tint — the dim third of the confidence ladder. */
+  chalkFaintTint: 'rgba(145, 138, 131, 0.14)',
 
   /** On-accent text. */
   onLeather: '#140A05',
@@ -75,13 +87,27 @@ export const color = {
   accent: palette.leather,
   accentPressed: palette.leatherDeep,
   accentTint: palette.leatherTint,
+  /** Border for accent-emphasized surfaces — see palette.leatherEdge. */
+  accentEdge: palette.leatherEdge,
   onAccent: palette.onLeather,
   make: palette.swish,
   makeTint: palette.swishTint,
   miss: palette.brick,
   missTint: palette.brickTint,
+  missEdge: palette.brickEdge,
+  /**
+   * Status tints — the fill that goes UNDER a status glyph/label. One value
+   * per status so a caution chip reads identically wherever it lands; screens
+   * were previously inlining their own alphas (0.10 here, 0.14 there), which
+   * made the same warning look like two different severities.
+   */
   unsure: palette.chalkYellow,
+  unsureTint: palette.chalkYellowTint,
   info: palette.paintBlue,
+  infoTint: palette.paintBlueTint,
+  /** Dim/neutral status — "not enough signal", pairs with confidenceColor.low. */
+  dim: palette.chalkFaint,
+  dimTint: palette.chalkFaintTint,
   /** 2-point shots / stat pill. */
   twoPt: palette.chalkDim,
   /** 3-point shots / stat pill accent. */
@@ -154,8 +180,22 @@ export const type = {
   /** Secondary big stat (FG%, streak). */
   statLarge: { fontFamily: font.display, fontSize: 56, lineHeight: 58 },
   statMedium: { fontFamily: font.display, fontSize: 32, lineHeight: 34 },
+  /**
+   * Smallest broadcast numeral — dense stat GRIDS (method columns, 2pt/3pt
+   * splits) where statMedium would collide at three-across. Missing step:
+   * Jump Lab and the HUD split strip had each hand-rolled `statMedium` +
+   * fontSize 22 with different line heights.
+   */
+  statSmall: { fontFamily: font.display, fontSize: 22, lineHeight: 24 },
   /** Screen titles. */
   title: { fontFamily: font.display, fontSize: 28, lineHeight: 32, letterSpacing: 0.2 },
+  /**
+   * The heading that LEADS a card (finding title, program name, hero lede) —
+   * one step above the heading that labels a sub-block. Missing step: Coach,
+   * Jump Lab and Shot Lab each re-declared `heading` + fontSize 18 with line
+   * heights of 24/25/22, so the same rank of text sat differently per screen.
+   */
+  headingLarge: { fontFamily: font.bodySemiBold, fontSize: 18, lineHeight: 24 },
   /** Card headings. */
   heading: { fontFamily: font.bodySemiBold, fontSize: 17, lineHeight: 22 },
   body: { fontFamily: font.body, fontSize: 15, lineHeight: 21 },
@@ -174,6 +214,25 @@ export const space = {
   xl: 24,
   xxl: 32,
   hero: 48,
+} as const;
+
+/**
+ * Layout rhythm — the ONE vertical grid every screen breathes on.
+ *
+ * WHY this exists as tokens rather than per-screen literals: the tabs are
+ * SIBLINGS the user swipes between, and the cross-fade shows both layouts in
+ * the same 140 ms. Coach and Profile were stacking on space.lg while Home and
+ * Records used space.xl, so a lateral swipe visibly tightened the page —
+ * exactly the kind of seam that reads as "unfinished" without being nameable.
+ * Screens pull `sectionGap` for their top-level stack; nothing hand-picks it.
+ */
+export const layout = {
+  /** Between top-level sections/cards in a screen's scroll stack. */
+  sectionGap: space.xl,
+  /** Between sibling items INSIDE one section — a tighter, related group. */
+  cardGap: space.lg,
+  /** A card's inner padding. Mirrors `card` in components/ui.tsx. */
+  cardPadding: space.lg,
 } as const;
 
 export const radius = {

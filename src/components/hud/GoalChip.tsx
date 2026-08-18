@@ -24,7 +24,12 @@ import { useSettings } from '../../state/settingsStore';
 import { Row } from '../ui';
 import { HudChip } from './HudChip';
 
-export function GoalChip(): React.JSX.Element | null {
+/**
+ * PERF (memo): no props — the chip reads the goal + session stores itself, so a
+ * live-screen re-render can never change what it shows. memo makes those an
+ * unconditional bail-out.
+ */
+export const GoalChip = React.memo(function GoalChip(): React.JSX.Element | null {
   const goal = useSettings((s) => s.dailyGoalMakes);
   const liveMakes = useSession((s) => s.stats.makes);
   const sessionId = useSession((s) => s.sessionId);
@@ -81,7 +86,7 @@ export function GoalChip(): React.JSX.Element | null {
       </Row>
     </HudChip>
   );
-}
+});
 
 const styles = StyleSheet.create({
   chip: {

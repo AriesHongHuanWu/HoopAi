@@ -83,7 +83,12 @@ function deriveSnap(
   return { steps: result.steps, lowLight: result.lowLight, digit, modelFailed, lens, key };
 }
 
-export function RimLockChecklist({
+/**
+ * PERF (memo): every row this checklist shows is polled from the two engine
+ * SharedValues, never from live.tsx state. Both props are stable refs, so memo
+ * skips the whole list on the parent's unrelated re-renders.
+ */
+export const RimLockChecklist = React.memo(function RimLockChecklist({
   overlay,
   debug,
 }: {
@@ -230,7 +235,7 @@ export function RimLockChecklist({
       </HudChip>
     </Animated.View>
   );
-}
+});
 
 const styles = StyleSheet.create({
   wrap: {

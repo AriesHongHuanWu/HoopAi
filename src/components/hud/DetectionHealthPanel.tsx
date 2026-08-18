@@ -110,7 +110,14 @@ const FPS_TEXT: Record<FpsTier, string> = {
   off: HEALTH_COPY.fpsOff,
 };
 
-export function DetectionHealthPanel({
+/**
+ * PERF (memo): this panel owns its own ~3 Hz change-gated poll — it never
+ * derives anything from the live screen's render. Its props are two stable
+ * SharedValue refs plus one boolean, so memo turns every unrelated live.tsx
+ * re-render (each shot, each countdown tick, each toast) into a no-op instead
+ * of a full re-render of the chip and, when open, the four-row detail card.
+ */
+export const DetectionHealthPanel = React.memo(function DetectionHealthPanel({
   debug,
   overlay,
   drift,
@@ -229,7 +236,7 @@ export function DetectionHealthPanel({
       )}
     </View>
   );
-}
+});
 
 const styles = StyleSheet.create({
   /** Stretches to the HUD column so the expanded card's flex:1 values get

@@ -136,7 +136,15 @@ export function crumbsPath(o: OverlayState, m: Mapping) {
   return p;
 }
 
-export function DetectionBoxes({
+/**
+ * PERF (memo): every pixel this component draws comes from the `overlay`
+ * SharedValue on the UI thread — nothing here reads live.tsx React state. The
+ * live screen re-renders on every shot, countdown tick and toast, and each of
+ * those re-renders used to rebuild this Canvas's whole element tree for no
+ * visual change. `overlay` is a stable SharedValue ref, so the memo compare
+ * short-circuits all of them.
+ */
+export const DetectionBoxes = React.memo(function DetectionBoxes({
   overlay,
 }: {
   overlay: SharedValue<OverlayState>;
@@ -177,4 +185,4 @@ export function DetectionBoxes({
       <Path path={ballSolidPath} color={color.accent} style="stroke" strokeWidth={4} />
     </Canvas>
   );
-}
+});

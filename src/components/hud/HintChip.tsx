@@ -23,7 +23,11 @@ import { color, motion, space, touch, type } from '@/constants/tokens';
 import { useSettings, type HintKey } from '@/state/settingsStore';
 import { HudChip } from './HudChip';
 
-export function HintChip({
+/**
+ * PERF (memo): callers pass literal copy + a StyleSheet ref, so the props are
+ * stable for the chip's whole life; memo makes parent re-renders free.
+ */
+export const HintChip = React.memo(function HintChip({
   hintKey,
   text,
   actionLabel,
@@ -77,7 +81,7 @@ export function HintChip({
       </Pressable>
     </Animated.View>
   );
-}
+});
 
 const styles = StyleSheet.create({
   chip: {

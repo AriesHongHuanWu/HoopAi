@@ -118,7 +118,13 @@ export function arcReadoutA11yLabel(entry: number, q: ArcQuality, rel: number | 
 
 const EMPTY_READOUT: ArcReadoutState = { entry: null, rel: null, q: null, visible: false };
 
-export function ArcReadout({
+/**
+ * PERF (memo): the readout owns its own ~5 Hz poll of the overlay SharedValue,
+ * so nothing it displays comes from the live screen's render. `overlay` is a
+ * stable ref — memo keeps every unrelated live.tsx re-render (shot, countdown
+ * tick, toast) from rebuilding this chip.
+ */
+export const ArcReadout = React.memo(function ArcReadout({
   overlay,
 }: {
   overlay: SharedValue<OverlayState>;
@@ -174,7 +180,7 @@ export function ArcReadout({
       </HudChip>
     </Animated.View>
   );
-}
+});
 
 const styles = StyleSheet.create({
   wrap: {

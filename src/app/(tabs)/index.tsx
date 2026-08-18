@@ -200,72 +200,99 @@ export default function HomeScreen() {
   const [heroRect, setHeroRect] = useState<LayoutRectangle | undefined>();
   const [modeRowRect, setModeRowRect] = useState<LayoutRectangle | undefined>();
 
-  const measure = (ref: React.RefObject<View | null>, set: (r: LayoutRectangle) => void) => {
-    ref.current?.measureInWindow((x, y, w, h) => set({ x, y, width: w, height: h }));
-  };
+  /**
+   * Measure into state ONLY when the rect actually moved. The old version
+   * pushed a freshly allocated LayoutRectangle on every onLayout, so an
+   * identical measurement still re-rendered the screen — and a re-render that
+   * can retrigger onLayout is a loop waiting to happen. Comparing the four
+   * numbers and returning `prev` makes an unchanged measurement a no-op.
+   */
+  const measure = useCallback(
+    (
+      ref: React.RefObject<View | null>,
+      set: React.Dispatch<React.SetStateAction<LayoutRectangle | undefined>>,
+    ) => {
+      ref.current?.measureInWindow((x, y, w, h) => {
+        set((prev) =>
+          prev != null && prev.x === x && prev.y === y && prev.width === w && prev.height === h
+            ? prev
+            : { x, y, width: w, height: h },
+        );
+      });
+    },
+    [],
+  );
+  // Stable handlers so the measured views don't take a new onLayout prop on
+  // every render of this (frequently re-rendering) screen.
+  const onHeroLayout = useCallback(() => measure(heroRef, setHeroRect), [measure]);
+  const onModeRowLayout = useCallback(() => measure(modeRowRef, setModeRowRect), [measure]);
 
-  const homeSteps: CoachStep[] = [
-    {
-      title: 'Start a session',
-      text: 'Tap Start session to open the camera. Prop your phone up, and once the rim locks on, every shot you take gets counted automatically.',
-      targetRect: heroRect,
-    },
-    {
-      title: 'Or play a mode',
-      text: 'Around the World, Timed Challenge, HORSE and more — structured games with their own rules and a finish line, all tracked the same way.',
-      targetRect: modeRowRect,
-    },
-    {
-      title: 'Everything else is in the tabs',
-      text: 'The bar at the bottom is always there: Train for game modes and drills, Data for your history, trends and records, Coach for your weekly report, and You for your profile and settings.',
-      // No anchor — the tab bar lives outside this screen, so this step centers.
-      targetRect: undefined,
-    },
-  ];
+  /**
+   * The step copy is constant; only the two anchor rects change. Building this
+   * array fresh every render handed useCoachMarks (and through it CoachMarks)
+   * a new `steps` identity on every unrelated state change on this screen —
+   * challenge awards, focus reloads, streak updates. Memoised on the rects
+   * alone, it changes exactly when an anchor really moves.
+   */
+  const homeSteps = useMemo<CoachStep[]>(
+    () => [
+      {
+        title: 'Start a session',
+        text: 'Tap Start session to open the camera. Prop your phone up, and once the rim locks on, every shot you take gets counted automatically.',
+        targetRect: heroRect,
+      },
+      {
+        title: 'Or play a mode',
+        text: 'Around the World, Timed Challenge, HORSE and more — structured games with their own rules and a finish line, all tracked the same way.',
+        targetRect: modeRowRect,
+      },
+      {
+        title: 'Everything else is in the tabs',
+        text: 'The bar at the bottom is always there: Train for game modes and drills, Data for your history, trends and records, Coach for your weekly report, and You for your profile and settings.',
+        // No anchor — the tab bar lives outside this screen, so this step centers.
+        targetRect: undefined,
+      },
+    ],
+    [heroRect, modeRowRect],
+  );
   const coach = useCoachMarks('home', homeSteps);
 
-  // Reload whenever the dashboard regains focus (e.g. after a session ends).
-  useFocusEffect(
-    useCallback(() => {
-      let alive = true;
-      listSessions(RECENT_LIMIT)
-        .then((rows) => {
-          if (!alive) return;
-          setLastSession(rows[0] ?? null);
-          setRecentTrend(
-            rows
-              .filter((r) => r.attempts > 0)
-              .map((r) => r.fgPct)
-              .reverse(),
-          );
-          setDbFailed(false);
-        })
-        .catch(() => {
-          if (!alive) return;
-          setLastSession(null);
-          setRecentTrend([]);
-          setDbFailed(true);
-        });
-      return () => {
-        alive = false;
-      };
-    }, []),
-  );
-
-  // Session scan (100 sessions): drives the day streak always, and today's
-  // goal progress when a goal is set — one DB read for both.
+  /**
+   * ONE session read per focus. The last-session card, its mini FG% sparkline,
+   * the day streak and today's goal progress used to fire two separate
+   * listSessions() calls (8 rows and 100 rows) against the same table on every
+   * focus, so returning from a session made the tab sit visibly still while
+   * both round-trips landed. They all derive from the same newest-first rows,
+   * so we read the wider window once and slice the recent window out of it —
+   * `rows.slice(0, RECENT_LIMIT)` is byte-identical to what listSessions(8)
+   * returned, so the card and sparkline are unchanged.
+   */
   useFocusEffect(
     useCallback(() => {
       let alive = true;
       listSessions(GOAL_SCAN_LIMIT)
         .then((rows) => {
           if (!alive) return;
+          const recent = rows.slice(0, RECENT_LIMIT);
+          setLastSession(recent[0] ?? null);
+          setRecentTrend(
+            recent
+              .filter((r) => r.attempts > 0)
+              .map((r) => r.fgPct)
+              .reverse(),
+          );
+          setDbFailed(false);
           const now = Date.now();
           setStreak(computeDayStreak(rows.map((r) => r.startedAt), now));
           if (dailyGoalMakes > 0) setGoalMakes(todayMakes(rows, now));
         })
         .catch(() => {
           if (!alive) return;
+          // One read, one failure path: every derived surface falls back to its
+          // honest empty state rather than showing stale numbers.
+          setLastSession(null);
+          setRecentTrend([]);
+          setDbFailed(true);
           setGoalMakes(0);
           setStreak({ current: 0, longest: 0, shotToday: false });
         });
@@ -408,7 +435,7 @@ export default function HomeScreen() {
 
         {/* Hero Start CTA */}
         <Animated.View entering={enter(0)}>
-        <View ref={heroRef} onLayout={() => measure(heroRef, setHeroRect)}>
+        <View ref={heroRef} onLayout={onHeroLayout}>
           <Pressable
             accessibilityRole="button"
             accessibilityLabel="Start session"
@@ -453,7 +480,7 @@ export default function HomeScreen() {
 
         {/* Choose a game mode */}
         <Animated.View entering={enter(2)}>
-        <View ref={modeRowRef} onLayout={() => measure(modeRowRef, setModeRowRect)}>
+        <View ref={modeRowRef} onLayout={onModeRowLayout}>
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="Choose a mode"

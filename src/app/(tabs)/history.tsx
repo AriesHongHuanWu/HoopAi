@@ -1,9 +1,18 @@
 /**
- * History — list of past sessions as cards: date up top, FG% as the big
+ * Data tab — list of past sessions as cards: date up top, FG% as the big
  * numeral, makes/attempts meta and a mini pip row of the actual shot
  * sequence. Tapping a card opens the full session detail at /history/[id];
  * long-pressing offers delete (which also removes the local recording).
  * The empty state draws the signature shot arc waiting for its first make.
+ *
+ * The H1 is the TAB WORD ("Data"), not "History": the bottom bar says Data, so
+ * the screen it opens has to say Data back or the label never becomes muscle
+ * memory. What the tab actually holds — history, trends, records — moves into
+ * the lede, where it doubles as a map of the sub-nav tiles right below it.
+ *
+ * ONE route to Trends. The tile in the sub-nav row is it; the screen used to
+ * ALSO offer a "View trends" pill at the very bottom, which taught nothing
+ * except that the app has two of everything.
  */
 import { Ionicons } from '@expo/vector-icons';
 import { Canvas, Circle, DashPathEffect, Line, Path, vec } from '@shopify/react-native-skia';
@@ -190,7 +199,10 @@ export default function HistoryScreen() {
   return (
     <Screen scroll>
       <Eyebrow>Your sessions</Eyebrow>
-      <Text style={styles.title}>History</Text>
+      <Text style={styles.title}>Data</Text>
+      <Text style={styles.lede}>
+        Everything you have tracked: session history below, trends and records one tap away.
+      </Text>
 
       <View style={styles.subNav}>
         <NavTileRow
@@ -389,25 +401,22 @@ export default function HistoryScreen() {
       {items !== null && items.length > 0 && (
         <View style={{ marginTop: space.xl, alignItems: 'center', gap: space.sm }}>
           {exportFailed && <Chip label="Couldn't export — try again" tone="unsure" />}
-          <Row gap={space.md}>
-            <PillButton
-              variant="ghost"
-              label={
-                exporting
-                  ? 'Exporting…'
-                  : tagFilter != null
-                    ? 'Export CSV (filtered)'
-                    : 'Export CSV'
-              }
-              onPress={onExportCsv}
-              disabled={exporting || visibleItems == null || visibleItems.length === 0}
-            />
-            <PillButton
-              variant="ghost"
-              label="View trends"
-              onPress={() => router.push('/trends')}
-            />
-          </Row>
+          {/* Export only. The "View trends" pill that used to sit beside it was
+              the second route to /trends on one screen — the Trends tile at the
+              top of this screen is the one that stays, because it sits with
+              Records where a reader looks for "where else can I go". */}
+          <PillButton
+            variant="ghost"
+            label={
+              exporting
+                ? 'Exporting…'
+                : tagFilter != null
+                  ? 'Export CSV (filtered)'
+                  : 'Export CSV'
+            }
+            onPress={onExportCsv}
+            disabled={exporting || visibleItems == null || visibleItems.length === 0}
+          />
         </View>
       )}
     </Screen>
@@ -418,6 +427,12 @@ const styles = StyleSheet.create({
   title: {
     ...type.title,
     color: color.text,
+  },
+  /** Same lede rhythm as the Train tab, so both tab roots open identically. */
+  lede: {
+    ...type.body,
+    color: color.textDim,
+    marginTop: space.xs,
     marginBottom: space.lg,
   },
   subNav: {

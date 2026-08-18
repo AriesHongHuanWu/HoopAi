@@ -98,7 +98,11 @@ function CourtLines({ stroke }: { stroke: string }) {
   );
 }
 
-export function DrillOverlay({ mode }: { mode: ModeState }) {
+/**
+ * PERF (memo): the overlay renders from the mode-store object alone. memo keeps
+ * the live screen's per-shot / per-tick re-renders out of it.
+ */
+export const DrillOverlay = React.memo(function DrillOverlay({ mode }: { mode: ModeState }) {
   const drill = drillOf(mode);
   const reducedMotion = useReducedMotion();
   const pulse = useSharedValue(0);
@@ -219,7 +223,7 @@ export function DrillOverlay({ mode }: { mode: ModeState }) {
       </View>
     </Animated.View>
   );
-}
+});
 
 const HALO = 22;
 

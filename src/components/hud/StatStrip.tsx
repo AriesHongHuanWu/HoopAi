@@ -42,7 +42,12 @@ function DotSep() {
   return <Text style={styles.dotSep}>·</Text>;
 }
 
-export function StatStrip({
+/**
+ * PERF (memo): StatStrip subscribes to the session store directly; the only
+ * prop from the live screen is the orientation flag. memo means a countdown
+ * tick or toast no longer re-renders the strip (and its expanded card).
+ */
+export const StatStrip = React.memo(function StatStrip({
   style,
   compact = false,
 }: {
@@ -203,7 +208,7 @@ export function StatStrip({
       </Animated.View>
     </Pressable>
   );
-}
+});
 
 const styles = StyleSheet.create({
   miniChip: {
