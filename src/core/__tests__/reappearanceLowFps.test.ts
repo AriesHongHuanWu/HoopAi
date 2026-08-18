@@ -8,15 +8,35 @@
  * quadratic). These tests sample the SAME continuous flight at 8 / 12 / 15 /
  * 24 / 30 fps and assert: it still ARMS at low fps, and the honest below-rim
  * reappearance still CORROBORATES.
+ *
+ * The free-fall drag test adds a SECOND fps story on top of that one, and it
+ * runs the other way: low fps measures velocity MORE precisely (a longer
+ * baseline between frames), so the physics gets sharper as the frame rate
+ * drops, while the occlusion gap in seconds stays the same. At 8/12/15 fps the
+ * two post-gap samples straddle enough time for REAPPEAR.dragMinGapSec to be
+ * met and the verdict is a real 'through'; at 24/30 fps the same two samples
+ * land inside 0.20 s of the last pre-gap sighting and the honest answer is
+ * 'unknown' — the bands cannot discriminate there, so nothing is claimed. Both
+ * are asserted below, because "it refuses at 30 fps" is a load-bearing
+ * property, not a gap in coverage.
  */
+import { REAPPEAR } from '../config';
 import { ReappearanceTest, type ReappearanceSample } from '../reappearance';
 import type { BallSample, RimGeometry } from '../types';
 
-const G = 900;
+/**
+ * G is DERIVED from the fixture rim width so the fixture describes one
+ * coherent camera: the drag test reads image-plane gravity off the locked rim
+ * (9.81 · rimWidth / 0.45 m) and refuses when it disagrees with the flight's
+ * own curvature. The old G = 900 paired with a 60 px rim implied a 41 px rim —
+ * a 45% disagreement that would have made every verdict 'unknown'.
+ */
+const RIM_W = 60;
 const X0 = 100;
 const VX = 300;
 const Y0 = 600;
-const VY0 = 800; // apex y = Y0 - VY0²/2G = 244 < 300 (clears the rim plane)
+const G = 9.81 * (RIM_W / 0.45); // = 1308 px/s²
+const VY0 = 1000; // apex y = Y0 - VY0²/2G = 218 < 300 (clears the rim plane)
 
 const yAt = (t: number): number => Y0 - VY0 * t + 0.5 * G * t * t;
 const xAt = (t: number): number => X0 + VX * t;
@@ -26,7 +46,7 @@ const tCross = (planeY: number): number =>
 const RIM: RimGeometry = (() => {
   const planeY = 300;
   const cx = xAt(tCross(planeY));
-  const w = 60;
+  const w = RIM_W;
   return {
     box: { x: cx - w / 2, y: planeY - 15, width: w, height: 30 },
     cx,
@@ -56,9 +76,24 @@ function preGap(fps: number, tEnd: number): BallSample[] {
   return out;
 }
 
-/** A physical below-rim reappearance (x frozen at the crossing, y on the arc). */
+const VY_AT_CROSS = G * CROSS_T - VY0;
+/** Vertical speed the net strips at the crossing (a guess — see REAPPEAR.drag*). */
+const NET_BRAKE = 120;
+
+/**
+ * A physical below-rim reappearance THROUGH THE NET: x frozen at the crossing,
+ * y on the gravity arc but starting NET_BRAKE px/s slower from the crossing
+ * instant. The un-braked version used to stand in for a swish here; under the
+ * free-fall drag test an un-braked drop is by definition a ball that touched
+ * nothing, so it is pinned as a veto in reappearance.test.ts instead.
+ */
 function reappear(t: number, dx = 0): ReappearanceSample {
-  return { cx: xAt(CROSS_T) + dx, cy: yAt(t), vy: G * t - VY0, diaPx: 24 };
+  const dt = Math.max(0, t - CROSS_T);
+  const cy =
+    t <= CROSS_T
+      ? yAt(t)
+      : yAt(CROSS_T) + (VY_AT_CROSS - NET_BRAKE) * dt + 0.5 * G * dt * dt;
+  return { cx: xAt(CROSS_T) + dx, cy, vy: G * t - VY0 - NET_BRAKE, diaPx: 24 };
 }
 
 describe('ReappearanceTest low-fps matrix', () => {
@@ -86,6 +121,29 @@ describe('ReappearanceTest low-fps matrix', () => {
         const res = r.onSample(reappear(t2), t2, 0.3, 7);
         expect(res.fired).toBe(true);
         expect(res.corroborates).toBe(true);
+
+        // --- and the free-fall drag test's own fps story -------------------
+        // The measurement epoch is the midpoint of the two post-gap samples,
+        // so the gap this test sees GROWS as fps falls (the samples are
+        // further apart in time). Below REAPPEAR.dragMinGapSec the free-fall
+        // increment g·gap does not stand clear of pixel noise and the verdict
+        // must be 'unknown' — never a guess, and never a veto.
+        expect(res.drag).toBeDefined();
+        const gap = res.drag!.gapSec;
+        if (gap >= REAPPEAR.dragMinGapSec) {
+          // 8 / 12 / 15 fps: gap 0.307 / 0.244 / 0.219 s.
+          expect(res.drag!.verdict).toBe('through');
+        } else {
+          // 24 / 30 fps: gap 0.182 / 0.169 s — under the floor.
+          expect(res.drag!.verdict).toBe('unknown');
+          // The ratio is still reported so telemetry can re-fit the bands…
+          expect(Number.isFinite(res.drag!.ratio)).toBe(true);
+          // …and it is nowhere near 1, i.e. the refusal is a genuine
+          // statement about resolving power, not a masked 'through'.
+          expect(res.drag!.ratio).toBeLessThan(REAPPEAR.dragThroughMax);
+        }
+        // Either way the corroboration above is UNCHANGED from before the
+        // drag test existed: 'through' and 'unknown' are both no-ops.
       });
     }
   });

@@ -217,7 +217,16 @@ export type ShotHold =
   | 'passThrough'
   | 'rattleOut'
   | 'settleReascend'
-  | 'apexBelowRim';
+  | 'apexBelowRim'
+  /**
+   * The free-fall drag test read the reappeared ball as falling at ~100% of
+   * free fall — nothing bled energy off it — so the reappearance corroborator
+   * was suppressed and an otherwise-eligible occluded crossing stayed `null`.
+   * Recorded ONLY when net/cls agreement was present, i.e. when the upgrade
+   * really would have happened but for the veto. See REAPPEAR.drag* — this is
+   * the hold to look at first when a real make comes back 'unsure'.
+   */
+  | 'reappDragVeto';
 
 /**
  * A landing prediction from the GLOBAL full-flight parabola
@@ -338,6 +347,38 @@ export interface ResolvedShot {
    * (geo null) shot with net/cls agreement, never flip a seen miss.
    */
   flightCross?: { xCross: number; tCross: number; r2y: number };
+  /**
+   * FREE-FALL DRAG TEST diagnostics for the reappearance that ended this
+   * shot's occlusion gap (src/core/reappearance.ts `dragRatio`). Present only
+   * when the reappearance trap actually reached a velocity measurement;
+   * absent when it never armed, timed out, or disarmed on an earlier gate.
+   *
+   * Every input is carried, not just the answer, because the bands that turn
+   * `ratio` into `verdict` are UNVALIDATED guesses inherited from Roboflow's
+   * write-up — re-fitting them from real sessions needs the raw numbers. A
+   * verdict of 'unknown' with a finite `ratio` means the physics could not
+   * discriminate at this gap/fps (the common case at 30 fps); `refusal`
+   * explains the non-band refusals.
+   *
+   * DIAGNOSTIC + AUDIT ONLY on this object. The verdict's effect is already
+   * reflected in `signals.geo` and in the 'reappDragVeto' entry of `holds`.
+   * Like virtualCross/flightCross this is in-memory telemetry and is not
+   * persisted, so it survives only for the live session.
+   */
+  reappDrag?: {
+    /** measured / expected downward speed. NaN when not computable. */
+    ratio: number;
+    verdict: 'through' | 'untouched' | 'reject' | 'unknown';
+    /** Last real pre-gap sample → measurement epoch, seconds. */
+    gapSec: number;
+    vyEntryPxPerSec: number;
+    vyMeasuredPxPerSec: number;
+    /** vyEntry + g·gap, px/s — what free fall alone would have produced. */
+    expectedPxPerSec: number;
+    gravityPxPerSec2: number;
+    /** Why no verdict was possible; present only with verdict 'unknown'. */
+    refusal?: string;
+  };
   /**
    * Apex (parabola vertex) of the WHOLE observed flight — the pre-arm approach
    * samples plus the live trajectory, fitted as one arc. This is the first

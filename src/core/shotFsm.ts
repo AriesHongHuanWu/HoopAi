@@ -53,7 +53,7 @@ import {
 } from './config';
 import { depthRatioGate, type BallSizeSetting, type ViewBandName } from './depthRatioGate';
 import { elevationAngleDeg, interpolateXAtY } from './geometry';
-import { ReappearanceTest } from './reappearance';
+import { ReappearanceTest, type DragReading } from './reappearance';
 import { selectDepthSamples } from './sampleQuality';
 import {
   ABS_MIN_FIT_SAMPLES,
@@ -230,8 +230,15 @@ export class ShotFsm {
   private useSettleWindow: boolean;
   private ballSize: BallSizeSetting = 7;
   private viewBand: ViewBandName = 'side_wing';
-  private readonly reapp = new ReappearanceTest();
+  private readonly reapp: ReappearanceTest;
   private reappCorroborated = false;
+  /**
+   * Free-fall drag reading from this attempt's reappearance, latched for the
+   * resolve-time diagnostics. Record-only here — the verdict's effect on the
+   * outcome already happened inside ReappearanceTest, which refuses to
+   * corroborate on 'untouched'/'reject'.
+   */
+  private reappDrag: DragReading | null = null;
   /** Slow EMA of the net-motion score (drives the net-hang TTL extension). */
   private netScoreEma = 0;
 
@@ -372,6 +379,8 @@ export class ShotFsm {
       useReappearance?: boolean;
       useRattleGuard?: boolean;
       useSettleWindow?: boolean;
+      /** Free-fall drag VETO (see REAPPEAR.dragVetoEnabled — ships false). */
+      dragVetoEnabled?: boolean;
     } = {},
   ) {
     this.frameW = frame.width;
@@ -380,6 +389,7 @@ export class ShotFsm {
     this.useReappearance = opts.useReappearance ?? SHOT_FSM.useReappearance;
     this.useRattleGuard = opts.useRattleGuard ?? SHOT_FSM.useRattleGuard;
     this.useSettleWindow = opts.useSettleWindow ?? SHOT_FSM.useSettleWindow;
+    this.reapp = new ReappearanceTest({ dragVetoEnabled: opts.dragVetoEnabled });
     this.setRim(rim);
   }
 
@@ -593,7 +603,10 @@ export class ShotFsm {
             this.netScoreEma,
             this.ballSize,
           );
-          if (res.fired && res.corroborates) this.reappCorroborated = true;
+          if (res.fired) {
+            if (res.drag) this.reappDrag = res.drag;
+            if (res.corroborates) this.reappCorroborated = true;
+          }
         }
       }
       this.lastBallT = t;
@@ -1382,6 +1395,28 @@ export class ShotFsm {
       if (net === true || (net === null && cls)) geo = true;
     }
 
+    // --- free-fall drag VETO telemetry --------------------------------------
+    // The veto itself already happened upstream: ReappearanceTest refuses to
+    // corroborate when the reappeared ball came out of the occlusion at ~100%
+    // of free fall, because nothing having touched it means it did NOT pass
+    // through a net. That suppression is invisible from here — reappCorroborated
+    // is simply false — so record WHICH guard ate the upgrade, and record it
+    // only when every other clause of the corroborator contract was satisfied
+    // and the upgrade genuinely would have fired. This is the first thing to
+    // look at when a real make comes back 'unsure'.
+    //
+    // RECORD-ONLY, exactly like every other ShotHold: no branch below reads
+    // it, and deleting this block leaves the resolve path byte-identical.
+    if (
+      this.useReappearance &&
+      geo == null &&
+      !this.reappCorroborated &&
+      this.reappDrag?.verdict === 'untouched' &&
+      (net === true || (net === null && cls))
+    ) {
+      holds.push('reappDragVeto');
+    }
+
     // --- virtual-crossing corroborator ---------------------------------------
     // Same contract as reappearance: an occluded (geo null) shot whose
     // projected crossing lands IN the span may upgrade to geo=true, but only
@@ -1675,6 +1710,10 @@ export class ShotFsm {
       // the whole-flight apex. Both omitted when unavailable, so a shot with
       // no trustworthy global fit carries no extra payload.
       ...(flightCross ? { flightCross } : {}),
+      // Free-fall drag audit trail: every input plus the verdict, so the
+      // unvalidated bands in REAPPEAR.drag* can be re-fit from real sessions
+      // rather than guessed at twice.
+      ...(this.reappDrag ? { reappDrag: this.reappDrag } : {}),
       ...(apex ? { apex } : {}),
       ...(releaseToRimSec !== null ? { releaseToRimSec } : {}),
       // Diagnostic only (see ShotHold): omitted entirely when nothing demoted
@@ -1688,6 +1727,7 @@ export class ShotFsm {
     if (this.rimBounce) this.lastBounceResolveT = t;
     this.reapp.clear();
     this.reappCorroborated = false;
+    this.reappDrag = null;
     this.trajectory = [];
     this.approach = [];
     this.flightLanding = null;

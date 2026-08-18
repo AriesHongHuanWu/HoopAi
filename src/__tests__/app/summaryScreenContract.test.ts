@@ -113,8 +113,13 @@ describe('section entrance stagger', () => {
       Number(m[1]),
     );
     // hero 0 · goal-line 1 · milestone 1 · media 2 · shot map 3 · court map 4
-    // · box score 5 · next up 6
-    expect(indices).toEqual([0, 1, 1, 2, 3, 4, 5, 6]);
+    // · SHOT OF THE SESSION 5 · box score 5 · next up 6
+    //
+    // Shot of the session shares index 5 with the box score on purpose:
+    // useCardStagger caps at STAGGER_CAP_INDEX (4), so 5 and 6 already resolve
+    // to the same delay. Reusing it inserts the new block without renumbering
+    // the two that follow, and the ladder still finishes in one short beat.
+    expect(indices).toEqual([0, 1, 1, 2, 3, 4, 5, 5, 6]);
   });
 
   it('never staggers the snackbar, modals or coach marks', () => {

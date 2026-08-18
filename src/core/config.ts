@@ -824,6 +824,32 @@ export const COURT = {
 export const DEFAULT_3PT_RIMWIDTHS = COURT.default3ptRimWidths;
 
 /**
+ * Standard gravity, m/s². Paired with {@link COURT.rimDiameterM} this turns a
+ * MEASURED rim box width into an image-plane gravity, which is what any
+ * physics test on pixel trajectories actually needs:
+ *
+ *   pxPerM = rim.box.width / COURT.rimDiameterM      (0.45 m, regulation)
+ *   g_px   = GRAVITY_MPS2 * pxPerM                   px/s², +y DOWN
+ *
+ * WHY the rim and not the ball: the rim's 0.45 m is a fixed regulation number
+ * and its width is scale-stable under camera pitch (a horizontal segment is
+ * not foreshortened by looking down), which is the same reasoning COURT and
+ * DEPTH_GATE already use for their scale reference. The ball's apparent size
+ * would work too but it is the noisier of the two and it changes with depth.
+ *
+ * CAVEAT this constant cannot fix: a pitched camera foreshortens VERTICAL
+ * motion by ~cos(pitch) while leaving the horizontal rim width alone, so
+ * g_px derived this way OVERESTIMATES the true image-plane vertical
+ * acceleration on a steeply angled camera. Callers that care (see
+ * REAPPEAR.dragGravityAgreeFrac) cross-check it against the flight's own
+ * fitted curvature and refuse to answer when the two disagree.
+ *
+ * TRACKER.gravityPxPerSec2Fallback (900 px/s², ≈ a 41 px rim) is the value to
+ * fall back to when no rim width is available.
+ */
+export const GRAVITY_MPS2 = 9.81;
+
+/**
  * Official ball OUTER diameters by size, meters (FIBA circumference specs:
  * size 7 749-780mm, size 6 ~724-737mm, size 5 ~690-710mm). The user picks
  * their ball in Settings > Player; a mis-set size shifts the depth ratio by
@@ -900,6 +926,145 @@ export const REAPPEAR = {
   spanWidenFrac: 0.15,
   /** Post-gap samples that must be descending. */
   vyDownSamples: 2,
+
+  // --- FREE-FALL DRAG TEST -------------------------------------------------
+  /**
+   * The prior art this project cited but never tried. Roboflow's 2025 "local
+   * AI basketball shot evaluator" write-up documents EXACTLY the failure the
+   * user reports — two shots that went in were recorded as misses because the
+   * camera lost the ball right at the hoop — and answers it with a question
+   * that needs ZERO detections at the rim. Read the ball only AFTER it
+   * reappears below, and ask how fast it is falling:
+   *
+   *   expected = vyEntry + g·gap        (image coords, +y DOWN)
+   *   ratio    = measured / expected
+   *
+   *   ratio ≈ 1      NOTHING bled energy off it. It fell through clean air —
+   *                  i.e. it passed in FRONT of / BEHIND the hoop, or missed
+   *                  outright. NOT a make.
+   *   0.1 … 0.9      something braked it: the net (and/or the rim).
+   *                  Consistent with having gone THROUGH.
+   *   ≲ 0            not the same ball (an unrelated ball on the court, or a
+   *                  rebound already travelling upward). Reject the sample.
+   *
+   * ⚠ EVERY NUMBER IN THIS BLOCK IS UNVALIDATED ON THIS APP'S FOOTAGE. The
+   * 10–90% band is Roboflow's, quoted from their write-up and measured on
+   * THEIR camera, THEIR net, THEIR detector. Nobody has yet measured how much
+   * speed a real net strips off a real make in this app's clips — if a worn or
+   * short net only takes 5%, the 0.9 edge would suppress genuine makes; on a
+   * NETLESS hoop a true swish touches nothing at all and reads ratio ≈ 1, so
+   * the veto below will suppress it by construction. That is a recall cost,
+   * never a correctness one (see the one-directional wiring note). Re-fit
+   * these from telemetry: ResolvedShot.reappDrag carries every input, the
+   * measured ratio and the verdict for exactly that purpose.
+   */
+  /** ratio < this ⇒ 'reject' — the object is not the ball we were tracking. */
+  dragRejectMax: 0.1,
+  /** ratio ≤ this (and ≥ dragRejectMax) ⇒ 'through' — something braked it. */
+  dragThroughMax: 0.9,
+  /**
+   * ratio ≥ this ⇒ 'unknown', NOT 'untouched'. Nothing can fall FASTER than
+   * free fall, so a reading well above 1 is a broken measurement, not a
+   * confident "clean air". Refusing here keeps the verdict honest; the
+   * (dragThroughMax, dragImpossibleMin) window is the untouched band, wide on
+   * the high side because noise around a true 1.0 lands there.
+   */
+  dragImpossibleMin: 1.25,
+  /**
+   * Minimum occlusion gap, seconds, for which the bands mean anything. Below
+   * this the answer is 'unknown' — never a guess.
+   *
+   * THE ARITHMETIC (reference framing: 60 px rim ⇒ 60/0.45 = 133 px/m ⇒
+   * g = 1308 px/s²; a 4 m/s entry ⇒ vyEntry ≈ 533 px/s; ball-centre noise
+   * σ_y ≈ 2 px, the conservative companion to DEPTH_GATE.sigmaBallRadiusPx):
+   *
+   * The measurement is a two-point finite difference over one frame interval,
+   * so σ_v = σ_y·√2/dt = 85 px/s at 30 fps, 42 px/s at 15 fps. (Yes — LOWER
+   * fps measures velocity MORE precisely, because the baseline is longer.
+   * What low fps costs this test is samples, not velocity precision.)
+   *
+   * (1) The gap must carry information at all: the free-fall increment g·gap
+   *     has to stand clear of that noise, otherwise "expected" is just
+   *     "entry" and the ratio is 1 by construction. g·gap ≥ 3σ_v gives
+   *     gap ≥ 0.195 s at 30 fps and gap ≥ 0.097 s at 15 fps. 0.20 s covers
+   *     both — hence this value.
+   *
+   * (2) Can the 0.9 edge actually be RESOLVED at that gap? With
+   *     σ_ratio ≈ √(σ_measured² + σ_entry²)/expected, σ_entry ≈ σ_v/2 from
+   *     the ≥5-sample pre-gap fit, and expected = 533 + 1308·0.20 = 795 px/s:
+   *       30 fps → √(85²+43²)/795 = 12%. The entire band margin is 10%. ~1σ.
+   *       15 fps → √(42²+21²)/795 =  6%. ~1.6σ.
+   *     A 2σ call (σ_ratio ≤ 5%) needs expected ≥ 20σ, i.e. gap ≈ 0.31 s at
+   *     15 fps and gap ≈ 1.05 s at 30 fps — and 1.05 s is longer than
+   *     REAPPEAR.maxGapSec, so at 30 fps a 2σ drag verdict is UNREACHABLE.
+   *
+   * HONEST SUMMARY: at 15 fps this is a ~1.6σ hint; at 30 fps a ~1σ hint;
+   * at neither is it a proof. A typical rim occlusion at 30 fps is 3–6 frames
+   * (0.10–0.20 s), so most 30 fps shots will land under this floor and the
+   * verdict will be 'unknown' with behaviour unchanged. That weakness is
+   * exactly why the verdict is wired ONE-DIRECTIONALLY: 'untouched' only ever
+   * SUBTRACTS make evidence (a wrong veto costs a make and yields 'unsure',
+   * the safe failure), and 'through' adds nothing the reappearance
+   * corroborator did not already demand. It can never mint a make.
+   */
+  dragMinGapSec: 0.2,
+  /**
+   * The expected speed must be at least this many seconds of free fall
+   * (expected ≥ g · this) or the answer is 'unknown'. Scale-FREE by
+   * construction — expressing the floor in units of g keeps it correct at any
+   * framing, where a fixed px/s floor would not. 0.35 s ≈ 3.4 m/s: below that
+   * the denominator is small enough that pixel noise dominates the ratio.
+   * Mostly bites when the ball was lost while still rising (negative vyEntry).
+   */
+  dragMinExpectedFreeFallSec: 0.35,
+  /**
+   * The rim-derived g must agree with the pre-gap flight's OWN fitted
+   * curvature (2·ArcFit.ya) to within this fraction, or the answer is
+   * 'unknown'. These are two independent estimates of one quantity: the rim
+   * scale assumes the image's vertical scale equals its horizontal scale at
+   * the rim (false on a pitched camera — see GRAVITY_MPS2), while the fitted
+   * curvature is measured in the real image plane but is noisy over a short
+   * arc. WHY 0.25: at a typical gap the g·gap term is ~60% of `expected`, so
+   * a 25% error in g moves the ratio by ~0.15 — already more than the 0.10
+   * band margin. Anything looser and the verdict is noise wearing a label.
+   */
+  dragGravityAgreeFrac: 0.25,
+  /**
+   * Escape hatch for the 'untouched' VETO. Default ON because the veto is a
+   * pure suppression (see the one-directional note above) — but the band it
+   * fires on is the least validated number in this file, and a net that bleeds
+   * less energy than Roboflow's would make it eat real makes. One flag flip
+   * restores the pre-drag-test behaviour exactly; the reading is still
+   * computed and still reported for telemetry either way.
+   */
+  /**
+   * SHIPS OFF, on purpose, after measuring what it actually buys.
+   *
+   * The technique is sound and is implemented in full (dragRatio + its tests),
+   * but three measured facts say it must not be ON by default yet:
+   *
+   *  1. It can ONLY subtract. The 'through' verdict merely declines to veto —
+   *     the corroborator contract it feeds is byte-identical either way. So the
+   *     entire live effect of this flag is "some makes become unsure".
+   *  2. A netless / chain / worn hoop is its blind spot BY CONSTRUCTION: a true
+   *     swish there touches nothing, so it falls at ~1.0x free fall and reads
+   *     as 'untouched' — i.e. it vetoes exactly the real makes it cannot tell
+   *     from a ball passing behind the rim. The user's live complaint is that
+   *     makes are ALREADY not being counted; shipping another suppressor that
+   *     eats makes on some hoops points the wrong way.
+   *  3. At 30 fps it is mostly inert anyway. A one-frame finite difference has
+   *     sigma_v ~85 px/s, so separating the 0.9 band needs a gap of ~1.0s —
+   *     longer than REAPPEAR.maxGapSec. Typical rim occlusion at 30 fps is
+   *     0.10-0.20s, i.e. under dragMinGapSec, so the honest answer is
+   *     'unknown'. Only 8-15 fps has the baseline to discriminate.
+   *
+   * Every threshold below is also borrowed from someone else's camera, net and
+   * detector and has never been measured on this app's footage. The ratio is
+   * still COMPUTED and reported as telemetry with the flag off, which is how it
+   * earns its way on: gather real reappearances, look at where makes actually
+   * land, then set the bands from that and flip this.
+   */
+  dragVetoEnabled: false,
 } as const;
 
 /**
