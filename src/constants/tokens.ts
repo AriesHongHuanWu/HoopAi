@@ -51,7 +51,14 @@ export const palette = {
   /** Text. Chalk white, then dimmed steps. */
   chalk: '#F5F1EC',
   chalkDim: '#B3ACA5',
-  chalkFaint: '#7A736D',
+  /**
+   * Lifted from #7A736D: the old value measured under 4.5:1 on every surface,
+   * so ~200 sites of genuinely useful fine print (units, timestamps, axis
+   * labels, hints) were sub-AA — the first thing to disappear on an outdoor
+   * court in daylight, which is the actual use case. Same warm-neutral hue,
+   * lightness only: 5.14:1 on surface, 4.63:1 on surfaceRaised, 5.57:1 on bg.
+   */
+  chalkFaint: '#918A83',
 
   /** On-accent text. */
   onLeather: '#140A05',
@@ -181,6 +188,12 @@ export const radius = {
 export const motion = {
   /** Feedback must land inside the Doherty window. */
   instant: 90,
+  /**
+   * Lateral tab switch. Deliberately the shortest non-instant step: a tab is a
+   * SIBLING, so the cross-fade only needs to stop the hard cut — anything
+   * longer starts to feel like the app is thinking before it obeys.
+   */
+  tab: 140,
   quick: 180,
   standard: 260,
   celebrate: 600,

@@ -31,7 +31,7 @@ import React from 'react';
 import renderer, { act } from 'react-test-renderer';
 import { useReducedMotion } from 'react-native-reanimated';
 
-import { ENTER_MS, STAGGER_MS, useCardStagger, useStaggerAt } from '../stagger';
+import { ENTER_MS, STAGGER_CAP_INDEX, STAGGER_MS, useCardStagger, useStaggerAt } from '../stagger';
 
 const reducedMock = useReducedMotion as jest.Mock;
 
@@ -68,14 +68,34 @@ describe('useCardStagger', () => {
     }
   });
 
-  it('uses the canonical defaults: delay = i * STAGGER_MS, duration = ENTER_MS', () => {
+  it('uses the canonical defaults up to the cap: delay = i * STAGGER_MS', () => {
     const result = renderHook(() => useCardStagger());
-    for (let i = 0; i <= 5; i++) {
+    for (let i = 0; i <= STAGGER_CAP_INDEX; i++) {
       const entering = result.current(i) as unknown as FakeEntering;
       expect(entering.kind).toBe('FadeInDown');
       expect(entering.delayMs).toBe(i * STAGGER_MS);
       expect(entering.durationMs).toBe(ENTER_MS);
     }
+  });
+
+  it('CAPS the ladder so a long screen does not trickle', () => {
+    // WHY: un-capped, Coach (12 cards) and Settings spent most of a second
+    // dribbling cards in one at a time AFTER their data had already arrived,
+    // which reads as the app being slow rather than choreographed. Everything
+    // past the cap shares the last delay so the screen completes together.
+    const result = renderHook(() => useCardStagger());
+    const capped = (result.current(STAGGER_CAP_INDEX) as unknown as FakeEntering).delayMs;
+    for (const i of [STAGGER_CAP_INDEX + 1, 8, 12, 40]) {
+      expect((result.current(i) as unknown as FakeEntering).delayMs).toBe(capped);
+    }
+    // and the whole ladder stays inside a quarter second at the defaults
+    expect(capped).toBeLessThanOrEqual(250);
+  });
+
+  it('honours an explicit capIndex', () => {
+    const result = renderHook(() => useCardStagger({ capIndex: 2 }));
+    expect((result.current(2) as unknown as FakeEntering).delayMs).toBe(2 * STAGGER_MS);
+    expect((result.current(9) as unknown as FakeEntering).delayMs).toBe(2 * STAGGER_MS);
   });
 
   it('applies baseDelayMs + i * stepMs and a custom duration', () => {
@@ -92,9 +112,11 @@ describe('useCardStagger', () => {
 
   it('supports index continuation across sections (modes screen pattern)', () => {
     const result = renderHook(() => useCardStagger({ baseDelayMs: 60, stepMs: 50 }));
-    // e.g. GAME_MODES.length + i with GAME_MODES.length = 4, i = 2.
+    // e.g. GAME_MODES.length + i with GAME_MODES.length = 4, i = 2. Index 6 is
+    // past the default cap, so it shares the capped step — the continuation
+    // pattern still works, it just stops growing.
     const e = result.current(4 + 2) as unknown as FakeEntering;
-    expect(e.delayMs).toBe(60 + 6 * 50);
+    expect(e.delayMs).toBe(60 + STAGGER_CAP_INDEX * 50);
   });
 });
 

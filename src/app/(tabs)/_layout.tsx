@@ -19,7 +19,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { Tabs } from 'expo-router';
 import { StyleSheet } from 'react-native';
 
-import { color, type } from '@/constants/tokens';
+import { color, motion, type } from '@/constants/tokens';
 
 /** One place to declare the tabs so the icons + titles stay in sync. */
 const TABS: {
@@ -39,6 +39,15 @@ export default function TabsLayout() {
     <Tabs
       screenOptions={{
         headerShown: false,
+        // Tab switches used to hard-cut: the new screen appeared in one frame
+        // and only THEN did its cards stagger in, so the app read as two
+        // unrelated events instead of one movement. A short cross-fade carries
+        // the eye across and lands just as the card ladder starts.
+        animation: 'fade',
+        transitionSpec: {
+          animation: 'timing',
+          config: { duration: motion.tab },
+        },
         tabBarActiveTintColor: color.accent,
         tabBarInactiveTintColor: color.textDim,
         tabBarStyle: {

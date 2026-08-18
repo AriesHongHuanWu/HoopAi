@@ -106,7 +106,7 @@ export default function ShotLabScreen() {
       <View style={styles.stack}>
         <Row style={styles.header}>
           <BackPill />
-          <PillButton label="Coach's Corner" icon="school" variant="ghost" onPress={() => router.push('/coach')} style={styles.coachPill} />
+          <PillButton label="Coach's Corner" icon="school" variant="ghost" onPress={() => router.dismissTo('/coach')} style={styles.coachPill} />
         </Row>
         <View>
           <Text style={styles.kicker}>ANALYSIS ROOM</Text>

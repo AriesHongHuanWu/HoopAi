@@ -590,7 +590,12 @@ export default function SessionSummaryScreen() {
                 variant="ghost"
                 label="View history"
                 icon="time-outline"
-                onPress={() => router.push('/history')}
+                // dismissTo, NOT push: this screen is a ROOT-STACK route that
+                // sits ABOVE the Tabs navigator, so push() stacks a SECOND tabs
+                // instance on top of the summary and Back drops the user right
+                // back into the session they just finished. dismissTo pops to
+                // the tabs instance that is already mounted.
+                onPress={() => router.dismissTo('/history')}
                 style={{ flex: 1 }}
               />
             </Row>

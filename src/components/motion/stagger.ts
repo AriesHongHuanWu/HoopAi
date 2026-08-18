@@ -24,6 +24,12 @@ export type EnteringProp = React.ComponentProps<typeof Animated.View>['entering'
 export const STAGGER_MS = 60;
 /** Canonical card entrance duration (ms). */
 export const ENTER_MS = 360;
+/**
+ * Default {@link CardStaggerOpts.capIndex}. 4 steps x 60 ms = a 240 ms ladder:
+ * long enough to read as choreography, short enough that the screen is whole
+ * before the user's thumb has finished travelling.
+ */
+export const STAGGER_CAP_INDEX = 4;
 
 export interface CardStaggerOpts {
   /**
@@ -32,6 +38,11 @@ export interface CardStaggerOpts {
    * fresh by the returned closure (the closure is re-memoized on change).
    */
   baseDelayMs?: number;
+  /**
+   * Index past which the delay stops growing. Default
+   * {@link STAGGER_CAP_INDEX}. Keeps a long screen from trickling.
+   */
+  capIndex?: number;
   /** Per-index step (ms). Default {@link STAGGER_MS}. */
   stepMs?: number;
   /** Entrance duration (ms). Default {@link ENTER_MS}. */
@@ -48,13 +59,20 @@ export function useCardStagger(opts?: CardStaggerOpts): (i: number) => EnteringP
   const baseDelayMs = opts?.baseDelayMs ?? 0;
   const stepMs = opts?.stepMs ?? STAGGER_MS;
   const durationMs = opts?.durationMs ?? ENTER_MS;
+  const capIndex = opts?.capIndex ?? STAGGER_CAP_INDEX;
 
   return useCallback(
     (i: number) => {
       if (reduced) return undefined;
-      return FadeInDown.delay(baseDelayMs + i * stepMs).duration(durationMs);
+      // CAP the ladder. Un-capped, a 12-card screen (Coach, Settings) spends
+      // most of a second dribbling cards in one at a time AFTER the data has
+      // already arrived, which reads as the app being slow rather than
+      // choreographed. Past a few steps the eye stops reading a sequence
+      // anyway, so every card from capIndex on shares the last delay and the
+      // screen finishes together.
+      return FadeInDown.delay(baseDelayMs + Math.min(i, capIndex) * stepMs).duration(durationMs);
     },
-    [reduced, baseDelayMs, stepMs, durationMs],
+    [reduced, baseDelayMs, stepMs, durationMs, capIndex],
   );
 }
 

@@ -5,12 +5,15 @@
  * per-screen hand-rolls.
  */
 export * from './stagger';
-// NOT exported (yet): PressScale, Shimmer and AnimatedProgressBar are fully
-// built but have zero render sites — keeping them out of the barrel keeps
-// them out of the app bundle until a consumer actually lands (screens like
-// StartHero still hand-roll their press spring; migrate them here first and
-// restore the exports then). progressBar.test.ts imports clamp01 from its
-// module directly, so nothing test-side depends on these barrel lines.
+// PressScale / Shimmer / AnimatedProgressBar were built, tested and then held
+// OUT of this barrel until a consumer landed. That inverted: screens kept
+// hand-rolling press springs and dim-text loaders precisely BECAUSE the shared
+// ones were unreachable, so the app ended up with several motion dialects.
+// They are exported now — the barrel is the single source of press feedback,
+// skeleton shimmer and determinate progress.
+export { PressScale, type PressScaleProps } from './PressScale';
+export { Shimmer, type ShimmerProps } from './Shimmer';
+export { AnimatedProgressBar, clamp01 } from './AnimatedProgressBar';
 export {
   SuccessBurst,
   MAX_BURST_PIECES,
