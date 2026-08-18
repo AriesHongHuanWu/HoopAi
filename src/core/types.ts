@@ -206,6 +206,9 @@ export interface ShotSignals {
  *                       cylinder instead of dropping through it.
  *  - 'settleReascend' — during the settle window a real sample climbed back
  *                       above the rim plane AT the hoop (bounce-out).
+ *  - 'apexBelowRim'   — the parabola fitted over the whole observed flight
+ *                       (approach + trajectory) peaked BELOW the rim plane, so
+ *                       the ball never got up to the hoop (see apexSanity).
  */
 export type ShotHold =
   | 'depthVeto'
@@ -213,7 +216,30 @@ export type ShotHold =
   | 'basketCooldown'
   | 'passThrough'
   | 'rattleOut'
-  | 'settleReascend';
+  | 'settleReascend'
+  | 'apexBelowRim';
+
+/**
+ * A landing prediction from the GLOBAL full-flight parabola
+ * ({@link ./flightArc}.FlightArc.landing): where and when the whole-shot fit
+ * descends through the rim plane, plus that fit's vertical R².
+ *
+ * Passed INTO the FSM (see {@link FsmFrameInput.flightLanding}) rather than
+ * computed inside it because the accumulator lives in the pipeline, where the
+ * arc is already re-fitted every frame. A 64-sample weighted least-squares
+ * parabola is far more robust to camera angle than the FSM's own 2-sample
+ * local secant across the crossing pair — but it is still a PREDICTION, so
+ * the FSM only ever uses it to corroborate (never to convict): see the
+ * corroborator contract in shotFsm.resolve().
+ */
+export interface FlightLanding {
+  /** Predicted x where the global arc descends through the rim plane (px). */
+  x: number;
+  /** Predicted time of that crossing (seconds, camera clock). */
+  t: number;
+  /** Vertical R² of the global fit that produced it (0..1). */
+  r2y: number;
+}
 
 export interface ResolvedShot {
   /** Monotonic per-session shot number, starting at 1. */
@@ -303,6 +329,42 @@ export interface ResolvedShot {
    * xCross field stays null for an occluded crossing.
    */
   virtualCross?: { xCross: number; tCross: number; r2y: number };
+  /**
+   * Global full-flight arc landing prediction that was live when this shot
+   * resolved (see {@link FlightLanding}), present whenever the pipeline
+   * delivered a trustworthy one during the attempt. PROJECTED, not observed —
+   * `xCross` above stays null for an occluded crossing. Diagnostics plus the
+   * second virtual-crossing corroborator; it may only upgrade an occluded
+   * (geo null) shot with net/cls agreement, never flip a seen miss.
+   */
+  flightCross?: { xCross: number; tCross: number; r2y: number };
+  /**
+   * Apex (parabola vertex) of the WHOLE observed flight — the pre-arm approach
+   * samples plus the live trajectory, fitted as one arc. This is the first
+   * time the shot's real high point is surfaced at all: the judgment buffer
+   * starts at ARM, which is always at the rim, so `trajectory` alone has never
+   * contained the apex of a jump shot. Present only when the fit produced a
+   * vertex inside its own observed time window (a purely ascending or purely
+   * descending observation has no apex and reports nothing).
+   *
+   * DIAGNOSTIC. The only thing the FSM does with it is REFUSE: a vertex below
+   * the rim plane demotes a make to 'unsure' (ShotHold 'apexBelowRim'). It
+   * never contributes to a make.
+   */
+  apex?: {
+    /** Vertex position in analysis-frame px (+y DOWN, so smaller y = higher). */
+    x: number;
+    y: number;
+    /**
+     * How far the vertex sat ABOVE the rim plane, in px (rim.planeY - apex.y).
+     * Negative means the ball peaked BELOW the rim plane.
+     */
+    aboveRimPlanePx: number;
+    /** Vertical R² of the approach+flight fit (arc quality, 0..1). */
+    r2y: number;
+    /** Samples that fed the fit (approach + trajectory). */
+    nSamples: number;
+  };
   /**
    * Release-to-rim flight time in seconds: rim-plane crossing time (observed,
    * or the virtual projection when the crossing was occluded) minus the
@@ -450,6 +512,20 @@ export interface FsmFrameInput {
    * never sets it, so default behavior is byte-identical.
    */
   armLockout?: boolean;
+  /**
+   * Landing prediction from the pipeline's GLOBAL full-flight parabola
+   * ({@link FlightLanding}), delivered with a one-frame lag exactly like the
+   * tracker's flight corridor: the arc fitted THROUGH LAST FRAME predicts
+   * where the ball comes down. The FSM latches the newest trustworthy one
+   * while a shot is live and consults it at resolve as a SECOND
+   * virtual-crossing corroborator.
+   *
+   * Absent / null = "no trustworthy global arc right now"; the FSM keeps the
+   * last one it latched for this attempt and behaves exactly as before when it
+   * never got one, so every existing caller (recheck, offline replay, the unit
+   * suites) is byte-identical.
+   */
+  flightLanding?: FlightLanding | null;
 }
 
 export interface FsmStepResult {

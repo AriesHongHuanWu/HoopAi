@@ -2,12 +2,31 @@
  * Coach's Corner — the multi-session coaching room.
  *
  * A weekly-report hero card (broadcast box-score idiom, like SummaryHero) with
- * a Mon–Sun week selector, then the insight cards in narrative order — arc
- * profile, four-week timeline, season strip, NBA twin, weekly plan (+ Form
- * Studio 3D promo), form readiness — then the ranked coach findings for that
- * week: severity-toned cards carrying the user's OWN evidence numbers and a
- * prescription chip. "Share my week" pushes the report through the existing
- * ShareCard story pipeline.
+ * a Mon–Sun week selector, then the insight cards — arc profile, four-week
+ * timeline, season strip, NBA twin, weekly plan (+ Form Studio 3D promo), form
+ * readiness — and the ranked coach findings for that week: severity-toned cards
+ * carrying the user's OWN evidence numbers and a prescription chip. "Share my
+ * week" pushes the report through the existing ShareCard story pipeline.
+ *
+ * ┌─ WHY THIS SCREEN IS SEGMENTED ──────────────────────────────────────────┐
+ * │ Everything above used to arrive as ONE scroll of eight-plus cards of     │
+ * │ equal weight, so the drill plan — the only part that asks the user to DO │
+ * │ something — sat somewhere past the fold behind two charts and a promo,   │
+ * │ and nothing signalled it was down there. The cards are now grouped by    │
+ * │ the QUESTION they answer and switched with {@link SegmentedTabs}:        │
+ * │                                                                          │
+ * │   [This week]  what happened — four-week bars, season trend, the ranked  │
+ * │                findings, share the read.                                 │
+ * │   [Your form]  what my shot looks like — body direction, release arc,    │
+ * │                NBA twin, Form Studio, how much form data is actually fed.│
+ * │   [Plan]       what to do about it — the drill assignments and the       │
+ * │                single-session deep dive.                                 │
+ * │                                                                          │
+ * │ The week selector and the weekly hero stay ABOVE the control in every    │
+ * │ segment: the hero is this screen's answer to "how am I doing", so it is  │
+ * │ the headline, not a section. Nothing was cut — every card and every      │
+ * │ query that existed before still mounts, in the segment it belongs to.    │
+ * └──────────────────────────────────────────────────────────────────────────┘
  *
  * All analysis is pure (src/core/coachEngine.ts + weeklyReport.ts); this screen
  * only loads sessions from SQLite, groups them into weeks, and renders.
@@ -22,6 +41,7 @@ import Animated from 'react-native-reanimated';
 
 import { useCardStagger, useStaggerAt } from '@/components/motion';
 import { BodyDirectionCard } from '@/components/BodyDirectionCard';
+import { SegmentedTabs, type SegmentedTabItem } from '@/components/SegmentedTabs';
 import { shareCoachCard, shareWeekCard } from '@/components/ShareCard';
 import { ArcProfileCard } from '@/components/coach/ArcProfileCard';
 import { CoachTimelineCard } from '@/components/coach/CoachTimelineCard';
@@ -63,6 +83,14 @@ import type { ChartZone } from '@/core/types';
 /** Sessions scanned back for the coach window (a couple of months of weeks). */
 const SCAN_LIMIT = 120;
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * The three questions this screen answers. Ordered the way a user arrives at
+ * them — what happened, what my shot looks like, what to do — so the default
+ * segment is also the one the hero above it is already talking about.
+ */
+type CoachSegment = 'week' | 'form' | 'plan';
+const DEFAULT_SEGMENT: CoachSegment = 'week';
 
 // ---------------------------------------------------------------------------
 // Section eyebrow (matches Shot Lab's idiom exactly)
@@ -278,7 +306,10 @@ function WeekSelector({
 }) {
   if (weeks.length <= 1) return null;
   return (
-    <View accessibilityRole="tablist" style={styles.weekBar}>
+    // Named, because this screen now carries TWO tablists (weeks here, the
+    // section switcher below the hero) and an unnamed pair is indistinguishable
+    // to a screen reader.
+    <View accessibilityRole="tablist" accessibilityLabel="Pick a week" style={styles.weekBar}>
       {weeks.map((w, i) => {
         const active = i === activeIndex;
         return (
@@ -505,6 +536,11 @@ function WeeklyPlanCard({
 export default function CoachScreen() {
   const { state: load, reload } = useCoachSessions();
   const [weekIndex, setWeekIndex] = useState(0);
+  // Which question the user is asking. Screen state, not widget state — the
+  // stagger ladder restarts from it, and switching must NOT touch the loader
+  // below (useCoachSessions keys off `nonce` only, so a segment change is a
+  // pure re-render and the SQLite scan is never re-run).
+  const [segment, setSegment] = useState<CoachSegment>(DEFAULT_SEGMENT);
 
   const sessions = load.status === 'ready' ? load.sessions : [];
   const drillResults = load.status === 'ready' ? load.drillResults : [];
@@ -602,8 +638,33 @@ export default function CoachScreen() {
     return m;
   }, [plan, drillResults]);
 
-  // Canonical stagger for the insight-card ladder (reduced-motion gated inside).
+  // Canonical stagger for the insight-card ladder (reduced-motion gated
+  // inside). Every segment restarts its ladder at 0, so no section ever gets
+  // near useCardStagger's STAGGER_CAP_INDEX — the whole point of segmenting is
+  // that a section is short enough to arrive as one gesture.
   const cardEnter = useCardStagger({ stepMs: 70, durationMs: 380 });
+
+  // Badges carry only counts the screen actually has: findings for the week
+  // read, assignments for the plan. Zero renders no badge (SegmentedTabs drops
+  // it), so an empty section never advertises phantom content.
+  const segmentItems = useMemo<SegmentedTabItem<CoachSegment>[]>(
+    () => [
+      {
+        value: 'week',
+        label: 'This week',
+        badge: findings.length,
+        badgeLabel: `${findings.length} ${findings.length === 1 ? 'finding' : 'findings'}`,
+      },
+      { value: 'form', label: 'Your form' },
+      {
+        value: 'plan',
+        label: 'Plan',
+        badge: plan.length,
+        badgeLabel: `${plan.length} ${plan.length === 1 ? 'drill' : 'drills'}`,
+      },
+    ],
+    [findings.length, plan.length],
+  );
 
   return (
     <Screen scroll>
@@ -645,136 +706,177 @@ export default function CoachScreen() {
               onPick={setWeekIndex}
             />
 
+            {/* The hero is the HEADLINE, not a section: it answers "how am I
+                doing" and therefore stays above the switcher in every
+                segment. */}
             <WeeklyHero report={report} />
 
-            {/* THE headline read: body data sets the style DIRECTION, the
-                user's own logged shots set the practice DISTANCE. Each half
-                renders its own honest gap state when its data is missing. */}
-            <BodyDirectionCard shots={allShots} entering={cardEnter(1)} />
-
-            {/* Arc profile — the release-arc signature over recent sessions.
-                The card owns its own n<5 "charging" state, so it mounts from
-                the very first measured shot. */}
-            {arc.n >= 1 && <ArcProfileCard profile={arc} entering={cardEnter(2)} />}
-
-            {/* Four-week timeline — tap a bar to jump the week selector */}
-            {timeline.some((w) => w.sessions > 0) && (
-              <View style={styles.timelineBlock}>
-                <CoachTimelineCard
-                  weeks={timeline}
-                  activeStartMs={activeWeek!.startMs}
-                  onPickWeek={(ms) => {
-                    const i = weeks.findIndex((w) => w.startMs === ms);
-                    if (i >= 0) setWeekIndex(i);
-                  }}
-                  entering={cardEnter(3)}
-                />
-                {timelineMostlyEmpty && (
-                  <Text style={styles.timelineHint}>
-                    Your timeline fills in as the weeks stack up.
-                  </Text>
-                )}
-              </View>
-            )}
-
-            {/* Season strip — shown whenever EITHER 28-day window has data */}
-            {season != null && (season.recent.attempts > 0 || season.prior.attempts > 0) && (
-              <SeasonStrip comparison={season} entering={cardEnter(4)} />
-            )}
-
-            {/* NBA twin — who you shoot like this week + what to steal */}
-            {twin != null && <NbaTwinCard match={twin} entering={cardEnter(5)} />}
-
-            {/* This week's plan — the top fixes + drills to groove them */}
-            {plan.length > 0 && (
-              <WeeklyPlanCard plan={plan} levels={planLevels} entering={cardEnter(6)} />
-            )}
-
-            {/* Form Studio 3D promo — the upgrade's flagship, one tap away */}
-            <Card entering={cardEnter(7)}>
-              <Row gap={space.sm} style={styles.promoHead}>
-                <Ionicons name="cube-outline" size={18} color={color.accent} />
-                <Text style={styles.promoTitle} numberOfLines={1}>
-                  See your shooting form in 3D
-                </Text>
-                <Chip label="NEW" tone="accent" compact />
-              </Row>
-              <Text style={styles.body}>
-                Your tracked shots, rebuilt as a 3D skeleton you can orbit from any angle.
-              </Text>
-              <PillButton
-                label="Open Form Studio"
-                icon="cube-outline"
-                variant="ghost"
-                onPress={() => router.push('/formstudio')}
-                style={styles.promoBtn}
+            <View style={styles.segmentBlock}>
+              <SegmentedTabs
+                segments={segmentItems}
+                value={segment}
+                onChange={setSegment}
+                accessibilityLabel="Coach sections"
               />
-            </Card>
 
-            {/* Form-data readiness — how much of the coach's form read is fed */}
-            <FormReadinessCard
-              readiness={readiness}
-              onOpenSettings={() => router.push('/settings')}
-              onOpenFormStudio={() => router.push('/formstudio')}
-              entering={cardEnter(8)}
-            />
+              {/* ---- [This week] what happened ---------------------------- */}
+              {segment === 'week' && (
+                <View style={styles.segmentBody}>
+                  {/* Four-week timeline — tap a bar to jump the week selector */}
+                  {timeline.some((w) => w.sessions > 0) && (
+                    <View style={styles.timelineBlock}>
+                      <CoachTimelineCard
+                        weeks={timeline}
+                        activeStartMs={activeWeek!.startMs}
+                        onPickWeek={(ms) => {
+                          const i = weeks.findIndex((w) => w.startMs === ms);
+                          if (i >= 0) setWeekIndex(i);
+                        }}
+                        entering={cardEnter(0)}
+                      />
+                      {timelineMostlyEmpty && (
+                        <Text style={styles.timelineHint}>
+                          Your timeline fills in as the weeks stack up.
+                        </Text>
+                      )}
+                    </View>
+                  )}
 
-            {/* Findings */}
-            <View>
-              <SectionEyebrow icon="clipboard-outline">The read on your week</SectionEyebrow>
-              {findings.length === 0 ? (
-                <Card entering={cardEnter(8)}>
-                  <Text style={styles.body}>
-                    {report.attempts < 8
-                      ? 'A few more shots this week and the coach will have enough to break things down.'
-                      : 'Nothing systematic to fix this week — your habits sit inside the good bands. Bank the reps and keep grooving it.'}
-                  </Text>
-                </Card>
-              ) : (
-                <View style={styles.findingList}>
-                  {findings.map((f, i) => (
-                    <FindingCard key={f.id} finding={f} index={i} />
-                  ))}
+                  {/* Season strip — shown whenever EITHER 28-day window has data */}
+                  {season != null && (season.recent.attempts > 0 || season.prior.attempts > 0) && (
+                    <SeasonStrip comparison={season} entering={cardEnter(1)} />
+                  )}
+
+                  {/* Findings */}
+                  <View>
+                    <SectionEyebrow icon="clipboard-outline">The read on your week</SectionEyebrow>
+                    {findings.length === 0 ? (
+                      <Card entering={cardEnter(2)}>
+                        <Text style={styles.body}>
+                          {report.attempts < 8
+                            ? 'A few more shots this week and the coach will have enough to break things down.'
+                            : 'Nothing systematic to fix this week — your habits sit inside the good bands. Bank the reps and keep grooving it.'}
+                        </Text>
+                      </Card>
+                    ) : (
+                      <View style={styles.findingList}>
+                        {findings.map((f, i) => (
+                          <FindingCard key={f.id} finding={f} index={i} />
+                        ))}
+                      </View>
+                    )}
+                  </View>
+
+                  {/* Share the whole coach read as a story card */}
+                  {report.sessions > 0 && (
+                    <PillButton
+                      label="Share coach report"
+                      icon="share-outline"
+                      variant="ghost"
+                      onPress={() => {
+                        void shareCoachCard({
+                          label: report.label,
+                          wss: report.wss,
+                          fgPct: report.fgPct,
+                          makes: report.makes,
+                          attempts: report.attempts,
+                          sessions: report.sessions,
+                          topFinding: findings[0]?.title ?? null,
+                          focus: report.nextWeekFocus,
+                        });
+                      }}
+                    />
+                  )}
+                </View>
+              )}
+
+              {/* ---- [Your form] what my shot looks like ------------------ */}
+              {segment === 'form' && (
+                <View style={styles.segmentBody}>
+                  {/* THE headline read: body data sets the style DIRECTION, the
+                      user's own logged shots set the practice DISTANCE. Each half
+                      renders its own honest gap state when its data is missing. */}
+                  <BodyDirectionCard shots={allShots} entering={cardEnter(0)} />
+
+                  {/* Arc profile — the release-arc signature over recent sessions.
+                      The card owns its own n<5 "charging" state, so it mounts from
+                      the very first measured shot. */}
+                  {arc.n >= 1 && <ArcProfileCard profile={arc} entering={cardEnter(1)} />}
+
+                  {/* NBA twin — who you shoot like this week + what to steal */}
+                  {twin != null && <NbaTwinCard match={twin} entering={cardEnter(2)} />}
+
+                  {/* Form Studio 3D promo — the upgrade's flagship, one tap away */}
+                  <Card entering={cardEnter(3)}>
+                    <Row gap={space.sm} style={styles.promoHead}>
+                      <Ionicons name="cube-outline" size={18} color={color.accent} />
+                      <Text style={styles.promoTitle} numberOfLines={1}>
+                        See your shooting form in 3D
+                      </Text>
+                      <Chip label="NEW" tone="accent" compact />
+                    </Row>
+                    <Text style={styles.body}>
+                      Your tracked shots, rebuilt as a 3D skeleton you can orbit from any angle.
+                    </Text>
+                    <PillButton
+                      label="Open Form Studio"
+                      icon="cube-outline"
+                      variant="ghost"
+                      onPress={() => router.push('/formstudio')}
+                      style={styles.promoBtn}
+                    />
+                  </Card>
+
+                  {/* Form-data readiness — how much of the coach's form read is
+                      fed. It lands LAST in this segment on purpose: it is the
+                      honesty line under everything above it. */}
+                  <FormReadinessCard
+                    readiness={readiness}
+                    onOpenSettings={() => router.push('/settings')}
+                    onOpenFormStudio={() => router.push('/formstudio')}
+                    entering={cardEnter(4)}
+                  />
+                </View>
+              )}
+
+              {/* ---- [Plan] what to do about it --------------------------- */}
+              {segment === 'plan' && (
+                <View style={styles.segmentBody}>
+                  {/* This week's plan — the top fixes + drills to groove them */}
+                  {plan.length > 0 ? (
+                    <WeeklyPlanCard plan={plan} levels={planLevels} entering={cardEnter(0)} />
+                  ) : (
+                    // Honest empty: the plan is built from drillable findings,
+                    // so "no plan" means the coach found nothing to prescribe —
+                    // never a fabricated drill to fill the tab.
+                    <Card entering={cardEnter(0)}>
+                      <SectionEyebrow icon="barbell-outline">This week&apos;s plan</SectionEyebrow>
+                      <Text style={styles.body}>
+                        {findings.length === 0
+                          ? 'No drill plan this week — the coach found nothing systematic to fix. Bank the reps.'
+                          : "This week's findings don't map to a drill yet. Keep tracking and the plan fills in."}
+                      </Text>
+                    </Card>
+                  )}
+
+                  {/* Deeper dive hook */}
+                  <Card entering={cardEnter(1)}>
+                    <SectionEyebrow icon="flask-outline">Go deeper</SectionEyebrow>
+                    <Text style={styles.body}>
+                      Coach's Corner reads across your whole week. For a single session — make-vs-miss
+                      breakdowns, shot-by-shot form and a drill plan — open the Shot Lab.
+                    </Text>
+                    <PillButton
+                      label="Open Shot Lab"
+                      icon="flask"
+                      variant="ghost"
+                      onPress={() => router.push('/shotlab')}
+                      style={styles.deepBtn}
+                    />
+                  </Card>
                 </View>
               )}
             </View>
-
-            {/* Share the whole coach read as a story card */}
-            {report.sessions > 0 && (
-              <PillButton
-                label="Share coach report"
-                icon="share-outline"
-                variant="ghost"
-                onPress={() => {
-                  void shareCoachCard({
-                    label: report.label,
-                    wss: report.wss,
-                    fgPct: report.fgPct,
-                    makes: report.makes,
-                    attempts: report.attempts,
-                    sessions: report.sessions,
-                    topFinding: findings[0]?.title ?? null,
-                    focus: report.nextWeekFocus,
-                  });
-                }}
-              />
-            )}
-
-            {/* Deeper dive hook */}
-            <Card entering={cardEnter(8)}>
-              <SectionEyebrow icon="flask-outline">Go deeper</SectionEyebrow>
-              <Text style={styles.body}>
-                Coach's Corner reads across your whole week. For a single session — make-vs-miss
-                breakdowns, shot-by-shot form and a drill plan — open the Shot Lab.
-              </Text>
-              <PillButton
-                label="Open Shot Lab"
-                icon="flask"
-                variant="ghost"
-                onPress={() => router.push('/shotlab')}
-                style={styles.deepBtn}
-              />
-            </Card>
           </>
         )}
       </View>
@@ -800,6 +902,17 @@ const styles = StyleSheet.create({
     backgroundColor: color.surfaceRaised,
     borderWidth: 1,
     borderColor: color.accentEdge,
+  },
+  /**
+   * The switcher hugs the cards it filters (cardGap), while those cards keep
+   * the screen's top-level rhythm between themselves (sectionGap). Both values
+   * come from `layout` — nothing here hand-picks a gap.
+   */
+  segmentBlock: {
+    gap: layout.cardGap,
+  },
+  segmentBody: {
+    gap: layout.sectionGap,
   },
   kicker: {
     ...type.micro,

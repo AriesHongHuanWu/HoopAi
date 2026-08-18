@@ -553,18 +553,34 @@ export const SHOT_FSM = {
    * byte-identical. The LIVE app defaults it ON via settingsStore, threaded
    * through adoptRim into the FSM opts exactly like useRattleGuard.
    *
-   * When ON, a shot that has TOUCHED THE RIM does not resolve the instant the
-   * ball first drops past belowY; it stays live for `settleWindowSec`, so a LATE
-   * rim bounce-out (ball dips below the rim, then pops back up over it and out)
-   * is observed rather than frozen on the first below-rim sample. A re-ascent
-   * above the rim plane AT the hoop demotes the would-be make. Bread-ball-safe:
-   * make -> 'unsure' only (never a fabricated miss); a clean or net-swallowed
-   * swish never re-ascends above the plane at the hoop, so it is untouched.
+   * When ON, a shot does NOT resolve the instant the ball first drops past
+   * belowY; it stays live for `settleWindowSec` and KEEPS COLLECTING net / cls
+   * / trajectory evidence, so (a) a LATE rim bounce-out (ball dips below the
+   * rim, then pops back up over it and out) is observed rather than frozen on
+   * the first below-rim sample, and (b) the net burst and the ball_in_basket
+   * blip — both of which happen at or BELOW the rim bottom — can actually be
+   * sampled before the call is made.
    *
-   * Three scope limits keep the window from costing makes, all of them
-   * narrowings learned from probes against the real FSM:
-   *  - rim contact required (nothing to bounce off ⇒ nothing to wait for), so a
-   *    clean swish resolves with zero added latency;
+   * WHY THE RIM-CONTACT PRECONDITION IS GONE (2026-08). The window used to arm
+   * only after `touchedRim`, on the reasoning that "a bounce-out needs
+   * something to bounce off". That reasoning is fps-coupled and it was eating
+   * real makes on slow phones: belowY - planeY is ~1.5 rim-box heights, which
+   * is LESS than one inter-frame descent at 15 fps, so the first below-rim
+   * sample routinely OVERSHOOTS the whole rim band and `touchedRim` never
+   * latches. The one mechanism that extends observation therefore never armed
+   * exactly on the devices that need it, and the shot was sealed before the
+   * net burst (netRoi starts at the rim BOTTOM, i.e. entirely after the
+   * crossing) could be sampled at all — the user-visible "it clearly went in
+   * but it ended too early" bug. Arming on EVERY belowRim trigger cannot
+   * fabricate a make: every extra net sample must still exceed
+   * netMotionThreshold AND fall inside netWindowSec of the crossing, and the
+   * fusion table is unchanged. It only lets real, already-required evidence
+   * arrive in time to be counted. Cf. NEX Team / HomeCourt US11380100B2,
+   * which explicitly keeps an attempt "unfinished" while the net has moved and
+   * the ball may still be bouncing above the hoop.
+   *
+   * Two scope limits still keep the window from costing makes, both narrowings
+   * learned from probes against the real FSM:
    *  - the exit evidence the rattle-out guard judges is FROZEN at the first
    *    below-rim sample — the window's extra frames are the noisiest boxes of
    *    the shot (ball inside/behind the net) and exist only to feed the explicit
@@ -576,11 +592,59 @@ export const SHOT_FSM = {
   useSettleWindow: false,
   /**
    * Settle window length (seconds) the belowRim resolve is deferred when
-   * useSettleWindow is ON. ~0.13s ≈ 4 frames at NOMINAL_FPS(30); this is the
-   * HARD cap on the extra make latency. A time gate (inputs-only), so the
-   * 30fps boundary is byte-identical via GATE_EPS_SEC — no frame counting.
+   * useSettleWindow is ON. This is the HARD cap on the extra make latency. A
+   * time gate (inputs-only), so the 30fps boundary is byte-identical via
+   * GATE_EPS_SEC — no frame counting.
+   *
+   * RAISED 0.13 -> 0.30 (2026-08). 0.13s is ~4 frames at NOMINAL_FPS(30) but
+   * only TWO frames at 15 fps — less than the forward half of the net
+   * acceptance window (netWindowSec 0.45), so on a slow phone the burst that
+   * proves a swish was still in the future when the shot was sealed. 0.30s
+   * guarantees at least four post-crossing samples at 15 fps and still sits
+   * comfortably inside netWindowSec, so nothing outside the already-accepted
+   * net window is ever admitted. Bread-ball: latency only — a longer window
+   * cannot lower a threshold, add a make term, or move the fusion table; it
+   * can only let evidence that already had to clear every gate be observed.
    */
-  settleWindowSec: 0.13,
+  settleWindowSec: 0.3,
+  /**
+   * Minimum net-motion samples STRICTLY AFTER the crossing reference time
+   * before a "no burst" reading may be reported as net === false.
+   *
+   * WHY: the net acceptance window is symmetric (+/- netWindowSec) around the
+   * crossing, but a swish's net burst can ONLY happen at or after it — the net
+   * ROI hangs below the rim bottom. When a shot ends within a frame of its own
+   * crossing (ball lost at the rim, maxLiveSec, a fast low-fps drop) the
+   * FORWARD half of that window was never sampled, yet `false` was reported
+   * anyway — and fuse() treats geo === true && net === false as a hard MISS.
+   * Reporting `null` (channel unavailable) instead is the honest answer for an
+   * unobserved window, and it routes to fuse()'s netless branch, which still
+   * demands an OBSERVED in-span geo crossing or (cls && occludedAtRim). cls
+   * alone still cannot decide anything. Two samples, not one: a single
+   * post-crossing frame is the frame the ball is still entering the net on.
+   */
+  netForwardMinSamples: 2,
+  /**
+   * Apex sanity guard (see shotFsm.resolve()). A parabola fitted over the
+   * WHOLE observed flight (pre-arm approach + live trajectory) whose VERTEX
+   * never rises above the rim plane describes a ball that peaked below the
+   * hoop — a bounce pass, a dribble, a ball rattling under the rim — not a
+   * shot at the rim. It may only DEMOTE a make to 'unsure' (suppression only;
+   * it can never create an outcome), and only when the fit is trustworthy:
+   * these are the trust gates.
+   */
+  apexSanity: {
+    /** Min samples in the combined approach+flight fit before the guard may act. */
+    minSamples: 6,
+    /**
+     * Min vertical R² of that fit. Pinned to the STRICT corridor bar
+     * (FLIGHT.corridorMinR2yStrict) by intent: a vertex is outcome-adjacent
+     * geometry, so a loose fit must never move a call. A rim rattle or a
+     * tracker switch fits badly and leaves the guard inert — which hands the
+     * make back, the safe direction.
+     */
+    minR2y: 0.9,
+  },
 } as const;
 
 /**

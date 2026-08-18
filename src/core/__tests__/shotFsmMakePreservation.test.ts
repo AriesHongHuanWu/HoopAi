@@ -134,6 +134,19 @@ function frames30(rows: readonly Row[]): FsmFrameInput[] {
   });
 }
 
+/**
+ * Append ball-less 30fps frames [from..to] so a DEFERRED settle-window resolve
+ * can actually fire. With settleWindowSec 0.30 the window spans nine frames at
+ * 30 fps, and a fixture that stops on the last interesting sample would simply
+ * never resolve. These frames carry no ball and no net motion, so they add
+ * exactly nothing to the evidence — they are the camera still rolling.
+ */
+function idleTail(from: number, to: number): FsmFrameInput[] {
+  const out: FsmFrameInput[] = [];
+  for (let i = from; i <= to; i++) out.push(fin(i / 30, null));
+  return out;
+}
+
 /** Plain trajectory sample for the direct caromOutObserved unit tests. */
 function s(cx: number, cy: number, t: number, predicted = false): BallSample {
   return { cx, cy, r: 10, t, score: predicted ? 0 : 0.8, predicted };
@@ -166,7 +179,12 @@ const jitterSwish: readonly Row[] = [
 
 describe('make preservation — in-net centroid jitter (D1/D2)', () => {
   test('a genuine swish with ONE 8px in-net jitter is a MAKE with both levers ON', () => {
-    const resolved = run(liveFsm(), frames30(jitterSwish));
+    // belowRimFirstT = 4/30; settleWindowSec 0.30 ⇒ the deferred resolve fires
+    // at frame 13, so the fixture is followed out to there.
+    const resolved = run(liveFsm(), [
+      ...frames30(jitterSwish),
+      ...idleTail(9, 13),
+    ]);
     expect(resolved).toHaveLength(1);
     const shot = resolved[0];
     // The evidence is a textbook geo+net make…
@@ -229,8 +247,8 @@ describe('carom-out demotions still fire (positive evidence only)', () => {
     // The prefix frozen when the settle window arms ENDS on the first
     // below-rim sample — which is exactly the out-of-span one — so freezing
     // the exit evidence cannot hide a real carom.
-    const f = frames30(caromRight);
-    f.push(fin(6 / 30, null), fin(7 / 30, null), fin(8 / 30, null), fin(9 / 30, null));
+    // belowRimFirstT = 5/30 ⇒ the deferred resolve fires at frame 14.
+    const f = [...frames30(caromRight), ...idleTail(6, 14)];
     const resolved = run(liveFsm(), f);
     expect(resolved).toHaveLength(1);
     expect(resolved[0].outcome).toBe('unsure');
@@ -251,8 +269,8 @@ describe('carom-out demotions still fire (positive evidence only)', () => {
       [5, 320, 214, -180, 0], // rising back, still below the plane
       [6, 318, 188, -160, 0], // RE-ASCENT above the plane, AT the hoop → bounce-out
     ];
-    const f = frames30(bounceOut);
-    f.push(fin(7 / 30, null), fin(8 / 30, null));
+    // belowRimFirstT = 4/30 ⇒ the deferred resolve fires at frame 13.
+    const f = [...frames30(bounceOut), ...idleTail(7, 13)];
     const resolved = run(liveFsm(), f);
     expect(resolved).toHaveLength(1);
     const shot = resolved[0];
@@ -284,7 +302,11 @@ describe('make preservation — tracker switch during the settle window (D3)', (
       [7, 322, 284, 340, 0], // deeper, in-span
       [8, 100, 150, -200, 0], // tracker switch: far-away blob, above the plane, rising
     ];
-    const resolved = run(liveFsm(), frames30(blobSwitch));
+    // belowRimFirstT = 4/30 ⇒ the deferred resolve fires at frame 13.
+    const resolved = run(liveFsm(), [
+      ...frames30(blobSwitch),
+      ...idleTail(9, 13),
+    ]);
     expect(resolved).toHaveLength(1);
     const shot = resolved[0];
     expect(shot.signals.geo).toBe(true);
@@ -353,35 +375,64 @@ describe('make preservation — settle window vs maxLiveSec (D4)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// F5 — no rim contact means nothing to wait for
+// F5 — the low-fps shot that straddles the whole rim band
+//
+// RE-PINNED (2026-08). This case used to assert the OPPOSITE: that a shot
+// which never sampled inside the rim band resolves IMMEDIATELY, because the
+// settle window armed only after `touchedRim`. That precondition was the bug.
+// At low fps the first below-rim sample overshoots the entire rim band, so
+// touchedRim never latches — meaning the one mechanism that extends
+// observation switched itself off on exactly the shots and exactly the devices
+// that needed it, and the call was frozen before the net burst (which happens
+// at and BELOW the rim bottom, i.e. strictly after that moment) could be
+// sampled. The window now arms on EVERY belowRim trigger; the assertions below
+// pin that new intent. Nothing was weakened: the make is still a make, and the
+// suite's demotion cases right above still demote.
 // ---------------------------------------------------------------------------
 
-describe('make preservation — settle window only arms after rim contact (F5)', () => {
-  test('a swish that never touched the rim region resolves immediately (no settle latency)', () => {
-    // 10 fps cadence: the ball jumps from well above the plane (cy=176) to well
-    // below the rim bottom (cy=244) without ever sampling inside the rim band,
-    // so touchedRim stays false. With no rim contact there is no bounce-out to
-    // wait for — the shot must resolve on the below-rim frame itself (t=0.3),
-    // saving 4 frames of make latency AND 4 frames of noise exposure.
-    const rows: Array<[number, number, number, number, number]> = [
-      [0.0, 320, 180, -100, 0], // arm (jump: rising in the up-zone)
-      [0.1, 320, 168, -60, 0], // apex, clear of the rim band
-      [0.2, 321, 176, 200, 0.6], // descending, clear of the rim band + net burst
-      [0.3, 322, 244, 300, 0.6], // straight past belowY, in-span → resolve HERE
-      [0.4, 323, 300, 320, 0], // trailing frames: only a deferred resolve would use them
-      [0.5, 324, 340, 340, 0],
-    ];
-    const f = rows.map(([t, cx, cy, vy, net]) =>
+describe('make preservation — the settle window arms without rim contact (F5)', () => {
+  /**
+   * 10 fps cadence: the ball jumps from well above the plane (cy=176) to well
+   * below the rim bottom (cy=244) without ever sampling inside the rim band,
+   * so `touchedRim` stays false.
+   */
+  const straddleRows: Array<[number, number, number, number, number]> = [
+    [0.0, 320, 180, -100, 0], // arm (jump: rising in the up-zone)
+    [0.1, 320, 168, -60, 0], // apex, clear of the rim band
+    [0.2, 321, 176, 200, 0], // descending, clear of the rim band
+    [0.3, 322, 244, 300, 0], // straight past belowY, in-span → window arms HERE
+    [0.4, 323, 300, 320, 0.6], // the NET BURST lands here — after the old resolve point
+    [0.5, 324, 340, 340, 0.6],
+    [0.6, 325, 380, 350, 0], // deferred resolve fires here (0.3 + settleWindowSec)
+  ];
+  const straddleFrames = (): FsmFrameInput[] =>
+    straddleRows.map(([t, cx, cy, vy, net]) =>
       fin(t, tb(cx, cy, t, vy), { netMotionScore: net }),
     );
-    const resolved = run(liveFsm(), f);
+
+  test('a 10fps swish that never touched the rim band still gets its LATE net burst sampled → make', () => {
+    const resolved = run(liveFsm(), straddleFrames());
     expect(resolved).toHaveLength(1);
     const shot = resolved[0];
     expect(shot.rimBounce).toBe(false);
-    expect(shot.tResolved).toBeCloseTo(0.3, 6);
+    // The window deferred the call by settleWindowSec, and that is what let the
+    // burst at t=0.4/0.5 (still inside netWindowSec of the crossing) be seen.
+    expect(shot.tResolved).toBeCloseTo(0.6, 6);
     expect(shot.signals.geo).toBe(true);
     expect(shot.signals.net).toBe(true);
     expect(shot.outcome).toBe('make');
+  });
+
+  test('the SAME shot with the settle window OFF never sees the burst — the window is what saved it', () => {
+    // Frozen on the first below-rim sample (t=0.3): the net has not moved yet,
+    // so the forward half of the acceptance window was never observed. The net
+    // channel honestly reports UNAVAILABLE rather than "no swish" (see
+    // SHOT_FSM.netForwardMinSamples) — never a fabricated miss.
+    const resolved = run(baselineFsm(), straddleFrames());
+    expect(resolved).toHaveLength(1);
+    const shot = resolved[0];
+    expect(shot.tResolved).toBeCloseTo(0.3, 6);
+    expect(shot.signals.net).toBeNull();
   });
 });
 

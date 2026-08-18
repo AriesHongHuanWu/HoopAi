@@ -14,14 +14,27 @@
  * three independent signals:
  *
  *  - geo — interpolated x at the rim plane on the FINAL descending crossing
- *    lies within the central rim span. `null` when the ball never crossed
- *    the plane downward.
+ *    lies within the central rim span. The crossing must be OBSERVED: both
+ *    samples of the pair are real detections, never Kalman coasts, because an
+ *    extrapolated position is not a sighting. `null` when the ball was never
+ *    seen crossing the plane downward — which is the NORMAL state of a made
+ *    shot, since rim and net occlude the ball at exactly that moment. Four
+ *    corroborators (geoExit / reappearance / virtualCross / flightCross) may
+ *    upgrade that null to true, and every one of them requires agreement from
+ *    net or cls; none may flip an explicit `false`.
  *  - net — a net-motion burst within `SHOT_FSM.netWindowSec` of the crossing
  *    (threshold raised by `netMotionRimBounceFactor` after a rim bounce).
- *    The channel is `null` (unavailable — netless hoop or no monitor) when
- *    every net-motion score during the live window was exactly 0.
+ *    The channel is `null` (UNAVAILABLE) when every net-motion score during
+ *    the live window was exactly 0 (netless hoop or no monitor), or when the
+ *    FORWARD half of the acceptance window — the only half a swish's net
+ *    motion can occupy, since the net ROI hangs below the rim bottom — was
+ *    never sampled (see `SHOT_FSM.netForwardMinSamples`).
  *  - cls — the detector's 'ball_in_basket' class fired at or above
  *    `DETECTION.ballInBasketScoreMin` at any point during the live shot.
+ *
+ * The apex of the whole flight (pre-arm approach + trajectory) is fitted at
+ * resolve and reported as diagnostics; a fitted vertex BELOW the rim plane can
+ * only ever demote a make to 'unsure' (`SHOT_FSM.apexSanity`).
  *
  * Pure TypeScript: no I/O, no wall-clock reads — time comes exclusively from
  * camera timestamps in the inputs. Per-frame allocation is bounded (one
@@ -45,6 +58,7 @@ import { selectDepthSamples } from './sampleQuality';
 import {
   ABS_MIN_FIT_SAMPLES,
   MIN_FIT_SAMPLES,
+  apexPoint,
   backfillPredictedGap,
   fitArc,
   plausibleArcCurvature,
@@ -53,6 +67,7 @@ import {
 import type {
   BallSample,
   Box,
+  FlightLanding,
   FsmFrameInput,
   FsmStepResult as FsmStepResultBase,
   ResolvedShot,
@@ -269,6 +284,22 @@ export class ShotFsm {
   private originX: number | null = null;
   private originY: number | null = null;
   private trajectory: BallSample[] = [];
+  /**
+   * (C) The pre-arm APPROACH: the real samples observed before this attempt
+   * armed that were NOT seeded into `trajectory`. Captured at arm time from
+   * the rolling pre-arm buffer (which arm() then clears).
+   *
+   * WHY IT IS A SEPARATE FIELD AND NOT PREPENDED TO `trajectory`. The judgment
+   * buffer starts at ARM, and every ball-kinematic arm path fires AT the rim —
+   * so `trajectory` has never contained a jump shot's apex, and the apex was
+   * architecturally unreachable (trajectory.apexPoint had zero production
+   * callers). Prepending the approach would fix that, but it would also move
+   * the crossing scan's indices, the exit/carom tests' sample set and fuse()'s
+   * evidence — an invisible rewrite of every pinned make/miss call. Keeping it
+   * beside the trajectory means the fit that finds the apex can see the whole
+   * flight while `trajectory` stays byte-identical for judgment.
+   */
+  private approach: BallSample[] = [];
   private netSamples: NetSample[] = [];
   private anyNetPositive = false;
   private maxClsScore = 0;
@@ -311,6 +342,16 @@ export class ShotFsm {
    * a narrowing of one demotion, not a change to the evidence.
    */
   private belowRimTrajLen: number | null = null;
+  /**
+   * (C) Newest trustworthy GLOBAL full-flight landing prediction delivered
+   * while THIS attempt was live (FsmFrameInput.flightLanding), or null when
+   * none arrived. Latched rather than sampled at resolve because the arc is
+   * most complete while the ball is still being detected — by resolve time the
+   * track is often already dark. Cleared per shot in resolve(). Consulted by
+   * exactly one thing: the second virtual-crossing corroborator, which may
+   * only upgrade an occluded geo null -> true with net/cls agreement.
+   */
+  private flightLanding: FlightLanding | null = null;
   /**
    * Settle window (flagged): a REAL sample climbed back above the rim PLANE
    * (moving up) AT THE HOOP, AFTER the ball had already dropped below the rim
@@ -489,6 +530,15 @@ export class ShotFsm {
     }
 
     // ---- SHOT_LIVE ----------------------------------------------------
+    // (C) Latch the newest GLOBAL full-flight landing prediction. Only while
+    // live, so one attempt's arc can never decide the next one; a null/absent
+    // value means "the global fit isn't trustworthy this frame" and simply
+    // leaves the previous latch alone. Recording only — nothing here branches
+    // on it; the single consumer is the corroborator in resolve(), which
+    // obeys the pinned "never without net or cls" contract.
+    if (input.flightLanding != null) {
+      this.flightLanding = input.flightLanding;
+    }
     if (input.ballInBasketScore > this.maxClsScore) {
       this.maxClsScore = input.ballInBasketScore;
     }
@@ -556,32 +606,66 @@ export class ShotFsm {
         this.rimBounce = true;
       }
       // Below-rim resolve: the flight is over once the ball drops past
-      // belowY — but only when it has already been above the plane (normal
-      // completed arc) or is clearly FALLING (vy > 0: a short airball that
-      // never reached rim height still ends promptly). A release-armed ball
-      // RISING through this band is just leaving the shooter's hands and
-      // must be allowed to climb (see wasAbovePlane).
+      // belowY — but only on a REAL sample, and only when the ball has
+      // already been above the plane (normal completed arc) or has actually
+      // been SEEN falling. A release-armed ball RISING through this band is
+      // just leaving the shooter's hands and must be allowed to climb (see
+      // wasAbovePlane).
+      //
+      // (B) `!ball.predicted` — A GHOST MAY NEVER END A SHOT. The tracker
+      // coasts on Kalman predictions for up to TRACKER.maxPredictedSec (0.5 s)
+      // after the detector loses the ball, and belowY - planeY is only ~1.5
+      // rim-box heights — LESS than one inter-frame descent at 15 fps. So a
+      // coast routinely "fell past the rim" while the real ball was still at
+      // the hoop, sealing the attempt before the net burst (netRoi hangs below
+      // the rim BOTTOM) or the ball_in_basket blip could ever be sampled. That
+      // same ghost then supplied the crossing pair the geo channel scored (see
+      // resolve()).
+      // BREAD-BALL: this can only keep an attempt OPEN. It adds no make term,
+      // moves no threshold and touches no fusion rule; the attempt still ends
+      // on a real below-rim sample, on lostBallResolveSec, or on maxLiveSec,
+      // and every make still has to clear the same table. Prior art: NEX Team /
+      // HomeCourt US11380100B2 keeps an attempt "unfinished" while the ball may
+      // still be bouncing above the hoop, and the canonical open-source FSM
+      // (avishah3/AI-Basketball-Shot-Detection-Tracker) brackets last-above /
+      // first-below rather than terminating on the triggering detection.
+      //
+      // (E) `ball.vy > 0` alone used to bypass wasAbovePlane, and vy is the
+      // Kalman estimate — gravity-biased downward the moment a track is
+      // seeded. A release-armed attempt starts at the shooter's HANDS, far
+      // below belowY, so the very first frame whose filtered vy read positive
+      // killed the attempt before the ball had left head height. Requiring a
+      // real OBSERVED descent (two consecutive real samples with cy
+      // increasing) keeps the honest airball case — a ball genuinely seen
+      // falling below the rim ends promptly — while a single filter artifact
+      // no longer can. BREAD-BALL: identical argument, it only defers an end.
       if (
+        !ball.predicted &&
         ball.cy > this.rim.belowY &&
-        (this.wasAbovePlane || ball.vy > 0)
+        (this.wasAbovePlane || (ball.vy > 0 && this.realDescentObserved()))
       ) {
-        if (this.useSettleWindow && this.touchedRim) {
+        if (this.useSettleWindow) {
           // Settle window (flagged): arm the DEFERRED belowRim resolve on the
-          // first below-rim sample instead of resolving here. Staying live a
-          // few frames lets a LATE bounce-out (ball dips below the rim, then
-          // pops back up over it and out) be observed by the explicit
-          // re-ascent detector below, instead of freezing the call on this
-          // first below-rim sample. The window-elapsed check further down
-          // performs the actual resolve, capping latency.
+          // first below-rim sample instead of resolving here. Staying live
+          // keeps net / cls / trajectory collection running (see the top of
+          // this SHOT_LIVE block), which is the entire point: the net burst
+          // and the ball_in_basket blip both happen at or BELOW the rim
+          // bottom, i.e. strictly AFTER the moment that used to seal the call.
+          // It also lets a LATE bounce-out be observed by the explicit
+          // re-ascent detector below. The window-elapsed check further down
+          // performs the actual resolve, capping latency at settleWindowSec.
           //
-          // ONLY after rim contact: a bounce-out needs something to bounce off.
-          // A ball that reached the rim bottom without ever sampling inside the
-          // rim region (a clean drop-through, and at low fps a swish whose
-          // samples straddle the whole rim band) has no carom to wait for, so
-          // waiting buys nothing and costs the user settleWindowSec of make
-          // latency plus settleWindowSec of exposure to the noisiest boxes of
-          // the shot. Strictly a narrowing: with no window armed, this resolves
-          // exactly as the flag-OFF baseline does.
+          // (D) THE `touchedRim` PRECONDITION IS GONE. It was fps-coupled: at
+          // 15 fps the first below-rim sample overshoots the entire rim band,
+          // so touchedRim never latched and the only mechanism that extends
+          // observation never armed on exactly the slow phones that need it.
+          // BREAD-BALL: arming on every belowRim trigger cannot invent
+          // evidence. Every added net sample must STILL exceed
+          // netMotionThreshold AND land inside netWindowSec of the crossing;
+          // every added cls frame must still clear ballInBasketScoreMin; the
+          // fusion table is untouched. The window only buys TIME for evidence
+          // that already had to pass every gate — and it can also demote
+          // (settleReascend), never promote.
           if (this.belowRimFirstT === null) {
             this.belowRimFirstT = t;
             // Freeze the exit evidence at THIS sample (see belowRimTrajLen).
@@ -869,6 +953,17 @@ export class ShotFsm {
         }
       }
     }
+    // (C) Capture the APPROACH — every buffered pre-arm sample that did NOT
+    // become part of the live trajectory. `seededFrom` is the first sample the
+    // trajectory already holds (the descend/release retro-seed above), so the
+    // two sets never overlap and the apex fit can't double-weight a sample.
+    // This buffer is diagnostics + the apex sanity guard only; `trajectory`,
+    // which every judgment reads, is untouched by its existence.
+    const seededFrom = this.trajectory.length > 0 ? this.trajectory[0]!.t : ball.t;
+    this.approach = [];
+    for (const s of this.preArm) {
+      if (s.t < seededFrom) this.approach.push(s);
+    }
     this.preArm = [];
     const p = input.personBox;
     if (p !== null) {
@@ -965,6 +1060,34 @@ export class ShotFsm {
   // Rim-touch test
   // -------------------------------------------------------------------------
 
+  /**
+   * Has the ball been SEEN falling? True iff the two most recent REAL
+   * (non-Kalman) samples in the live buffer have strictly increasing cy
+   * (screen +y is DOWN, so increasing cy = descending).
+   *
+   * WHY THIS EXISTS SEPARATELY FROM `ball.vy > 0`. vy is the Kalman filter's
+   * estimate, and a freshly seeded track carries a gravity-biased downward
+   * velocity before it has observed anything at all — which is precisely how a
+   * release-armed attempt, seeded at the shooter's hands far below belowY,
+   * died on its first live frame. Two consecutive real detections moving down
+   * is an OBSERVATION; one filtered vy is a guess. Used only to gate an
+   * attempt-ENDING branch, so a false answer here delays a resolve (safe) and
+   * can never create or upgrade an outcome.
+   */
+  private realDescentObserved(): boolean {
+    const traj = this.trajectory;
+    let newest = -1;
+    for (let i = traj.length - 1; i >= 0; i--) {
+      if (traj[i]!.predicted) continue;
+      if (newest < 0) {
+        newest = i;
+        continue;
+      }
+      return traj[i]!.cy < traj[newest]!.cy;
+    }
+    return false;
+  }
+
   /** Ball center in the lower half of the hoop ROI, or ball box overlapping the rim box inflated 20%. */
   private touchesRimRegion(ball: TrackedBall): boolean {
     if (pointInBox(this.hoopRoiLowerHalf, ball.cx, ball.cy)) return true;
@@ -1058,22 +1181,34 @@ export class ShotFsm {
         : traj;
 
     // --- geo: FINAL descending crossing of the rim plane -----------------
-    // Prefer the final crossing whose BOTH samples are real detections (not
-    // Kalman-predicted coasts through occlusion) over a later but predicted
-    // crossing: a brief occlusion right at the rim plane — common, since the
-    // ball is frequently hidden by the rim/net at exactly this moment — can
-    // otherwise fabricate a crossing or misplace it from extrapolated
-    // positions rather than observed ones, degrading geo/entry-angle
-    // precision exactly when it matters most.
-    let crossIdx = -1;
+    // Only a crossing whose BOTH samples are real detections counts. A brief
+    // occlusion right at the rim plane is the NORMAL presentation of a shot —
+    // the ball is hidden by rim and net at exactly this moment — and the
+    // Kalman coast through it is an extrapolation, not an observation.
+    //
+    // (B) THIS USED TO FALL BACK to the predicted pair when no real crossing
+    // existed, which FABRICATED the geo x out of filter state: a ghost drifting
+    // sideways scored an out-of-span "seen miss" (fuse returns 'miss' on geo
+    // === false) on a ball that was actually dropping through the net, and a
+    // ghost drifting inward scored an in-span "make". Forcing geo NULL when no
+    // real pair exists is the honest reading of "we did not see the crossing".
+    // BREAD-BALL: null is strictly WEAKER than true — it removes a geo make
+    // term. What remains are the existing corroborators (geoExit /
+    // reappearance / virtualCross / flightCross), every one of which is built
+    // from REAL samples and already refuses to act without net === true or
+    // (net === null && cls). Nothing new can mint a make here.
     let realCrossIdx = -1;
     for (let i = 0; i + 1 < traj.length; i++) {
-      if (traj[i].cy <= rim.planeY && traj[i + 1].cy > rim.planeY) {
-        crossIdx = i;
-        if (!traj[i].predicted && !traj[i + 1].predicted) realCrossIdx = i;
+      if (
+        traj[i].cy <= rim.planeY &&
+        traj[i + 1].cy > rim.planeY &&
+        !traj[i].predicted &&
+        !traj[i + 1].predicted
+      ) {
+        realCrossIdx = i;
       }
     }
-    if (realCrossIdx >= 0) crossIdx = realCrossIdx;
+    const crossIdx = realCrossIdx;
     let xCross: number | null = null;
     let tCross: number | null = null;
     let entryAngleDeg: number | null = null;
@@ -1138,16 +1273,57 @@ export class ShotFsm {
     // a corroborated geo upgrade after the net/cls channels are known.
     const virtual = crossIdx < 0 ? this.projectVirtualCross(traj) : null;
 
+    // --- global flight-arc crossing (second occlusion inference) -----------
+    // (C) The latched full-flight landing prediction, validated for THIS
+    // attempt. Where projectVirtualCross fits the last ~12 real samples of the
+    // live buffer, this comes from the pipeline's 64-sample weighted
+    // least-squares parabola over the WHOLE flight — far more robust to camera
+    // angle than a 2-sample local secant, and available on shots whose live
+    // tail is too short for the local fit to run at all.
+    //
+    // Validation is deliberately mechanical: the strict R² bar the FlightArc
+    // itself applies to any outcome-adjacent landing, a landing time inside
+    // this attempt, and no more than virtualCross.maxProjectSec of
+    // extrapolation past the resolve. Used for exactly two things — the net
+    // window's time reference below, and a corroborated geo upgrade after the
+    // net/cls channels are known (see the corroborator block).
+    const fl = this.flightLanding;
+    const flightCross =
+      fl !== null &&
+      fl.r2y >= FLIGHT.corridorMinR2yStrict &&
+      fl.t >= this.tStart &&
+      fl.t <= t + SHOT_FSM.virtualCross.maxProjectSec
+        ? { xCross: fl.x, tCross: fl.t, r2y: fl.r2y }
+        : null;
+
     // --- net: burst near the crossing (or resolve time) ------------------
     // For a RIM BOUNCE with a known crossing, extend the window FORWARD only:
     // the ball re-ascends and drops late, so its genuine swish burst can land
     // past the symmetric window around the early crossing (netBurstInWindow).
     let net: boolean | null = null;
+    /** Net samples strictly AFTER the reference time (see netForwardMinSamples). */
+    let netForwardCount = 0;
     if (this.anyNetPositive) {
       const threshold =
         SHOT_FSM.netMotionThreshold *
         (this.rimBounce ? SHOT_FSM.netMotionRimBounceFactor : 1);
-      const ref = tCross !== null ? tCross : virtual !== null ? virtual.tCross : t;
+      // Reference order: observed crossing, then the local occlusion
+      // projection, then the global flight-arc projection, then the resolve
+      // time. The global arc is a THIRD fallback, consulted only when neither
+      // an observed nor a locally-projected crossing exists — exactly the case
+      // where `t` (the resolve instant, often 1.5 s of ball-lost timeout after
+      // the ball actually reached the rim) is the worst possible reference.
+      // BREAD-BALL: moving the window cannot fabricate a burst. The sample
+      // still has to exceed netMotionThreshold (raised further after a rim
+      // bounce), and `net` only ever reaches a make ALONGSIDE geo.
+      const ref =
+        tCross !== null
+          ? tCross
+          : virtual !== null
+            ? virtual.tCross
+            : flightCross !== null
+              ? flightCross.tCross
+              : t;
       net = netBurstInWindow(
         this.netSamples,
         ref,
@@ -1155,6 +1331,27 @@ export class ShotFsm {
         SHOT_FSM.netWindowSec,
         this.rimBounce && tCross !== null ? SHOT_FSM.rimBounceNetGraceSec : 0,
       );
+      // (F) "No burst" is only meaningful if the window where a burst could
+      // occur was actually SAMPLED. The acceptance window is symmetric around
+      // the crossing, but a swish's net motion can only happen at or after it —
+      // the net ROI hangs below the rim BOTTOM. When the attempt ends within a
+      // frame of its own crossing (ball lost at the rim, maxLiveSec, a fast
+      // low-fps drop) the forward half was never observed, yet `false` was
+      // reported — and fuse() turns geo === true && net === false into a hard
+      // MISS. Report the channel UNAVAILABLE instead.
+      // BREAD-BALL: this does not add a make term. null routes to fuse()'s
+      // netless branch, which still requires an OBSERVED in-span geo crossing
+      // or (cls && occludedAtRim); cls alone still decides nothing. It refuses
+      // to fabricate a "no swish" verdict out of an unobserved window — the
+      // failure mode Roboflow's 2025 local shot evaluator documents verbatim
+      // ("two shots that actually went in were recorded as misses because the
+      // camera lost sight of the ball right at the hoop").
+      if (net === false) {
+        for (const ns of this.netSamples) {
+          if (ns.t > ref) netForwardCount++;
+        }
+        if (netForwardCount < SHOT_FSM.netForwardMinSamples) net = null;
+      }
     }
 
     // --- cls --------------------------------------------------------------
@@ -1204,6 +1401,75 @@ export class ShotFsm {
       geo = true;
     }
 
+    // --- global flight-arc corroborator (second virtual crossing) -----------
+    // (C) Same pinned contract as the three corroborators above, deliberately
+    // written as the same three-clause shape so the guarantee is auditable at
+    // a glance:
+    //   - `geo == null` — may ONLY upgrade an occluded crossing. It can never
+    //     flip an explicit geo === false: a SEEN out-of-span crossing beats any
+    //     projection, and a projection is not precise enough to convict either,
+    //     so an out-of-span landing leaves geo null rather than minting a miss.
+    //   - `net === true || (net === null && cls)` — never sole evidence. On a
+    //     net hoop the net must agree; on a netless hoop the ball_in_basket
+    //     class must. This is the clause that blocks the classic
+    //     naive-projection bug of turning every short miss into a make.
+    //   - in-span landing, from a fit already gated at the STRICT R² bar.
+    // WHY IT EARNS ITS PLACE: the local projectVirtualCross needs a trailing
+    // run of real, above-plane, descending samples ending at the hoop — a tail
+    // the detector very often does not deliver (that IS the occlusion). The
+    // global arc is fitted over up to FLIGHT.maxFlightSamples (64) samples
+    // spanning the entire flight, so it survives the same dropout, and being a
+    // whole-flight least-squares parabola it degrades far more gracefully with
+    // camera angle than a 2-sample local secant.
+    if (
+      geo == null &&
+      flightCross !== null &&
+      (net === true || (net === null && cls)) &&
+      flightCross.xCross >= rim.spanLeft &&
+      flightCross.xCross <= rim.spanRight
+    ) {
+      geo = true;
+    }
+
+    // --- apex of the WHOLE flight (approach + trajectory) -------------------
+    // (C) The shot's real high point, finally computed. The judgment buffer
+    // starts at ARM and every ball-kinematic arm path fires AT the rim, so
+    // `traj` alone almost never contains a jump shot's apex — which is why
+    // trajectory.apexPoint had zero production callers despite being the one
+    // number that says whether an arc was a shot at all. Fitting the separate
+    // pre-arm `approach` samples together with the flight gives the parabola
+    // enough of the rise to place a vertex.
+    //
+    // apexPoint() returns null unless the fitted vertex lies INSIDE the
+    // observed time window, so a purely ascending or purely descending
+    // observation reports nothing rather than an extrapolated guess.
+    const apexSamples =
+      this.approach.length > 0 ? this.approach.concat(traj) : traj;
+    const apexFit = fitArc(apexSamples, this.minFitSamples(MIN_FIT_SAMPLES));
+    const apexPt = apexFit !== null ? apexPoint(apexFit) : null;
+    let apex: ResolvedShot['apex'];
+    /**
+     * The fitted vertex of the whole flight sat BELOW the rim plane, on a fit
+     * trustworthy enough to say so: the ball peaked under the hoop, so nothing
+     * that happened afterwards can be a made shot at this rim. Consumed once,
+     * below, to demote a make. See SHOT_FSM.apexSanity for the trust gates.
+     */
+    let apexBelowPlane = false;
+    if (apexFit !== null && apexPt !== null) {
+      apex = {
+        x: apexPt.x,
+        y: apexPt.y,
+        aboveRimPlanePx: rim.planeY - apexPt.y,
+        r2y: apexFit.r2y,
+        nSamples: apexSamples.length,
+      };
+      apexBelowPlane =
+        apexPt.y > rim.planeY &&
+        apexFit.r2y >= SHOT_FSM.apexSanity.minR2y &&
+        apexSamples.length >= SHOT_FSM.apexSanity.minSamples &&
+        plausibleArcCurvature(apexFit.ya, rim.box.width, FLIGHT.maxArcYaRimWidths);
+    }
+
     // --- occlusion at the rim ----------------------------------------------
     const last = traj.length > 0 ? traj[traj.length - 1] : null;
     const occluded =
@@ -1248,6 +1514,31 @@ export class ShotFsm {
     if (outcome === 'make' && this.armedVia !== 'jump' && net !== true && !cls) {
       outcome = 'unsure';
       holds.push('passThrough');
+    }
+    // Apex sanity guard (C): the parabola fitted over the WHOLE observed
+    // flight — the pre-arm approach plus the live trajectory — peaked BELOW
+    // the rim plane. A ball whose high point is under the hoop never got to
+    // the rim: it is a bounce pass, a dribble, a ball rattling around beneath
+    // the net, or a tracker that latched something that is not the shot. The
+    // 2D channels cannot see this on their own — a ball passing just under the
+    // rim can still produce one jittery above-plane sample, an in-span
+    // "crossing" and a net brush, i.e. a textbook geo+net make out of a shot
+    // that never happened.
+    //
+    // BREAD-BALL, by construction, on all four counts:
+    //   - it is applied ONLY to `outcome === 'make'` and only downward
+    //     (make -> 'unsure', never a fabricated miss);
+    //   - it reads a fit, never writes one: no channel, threshold or fusion
+    //     rule changes;
+    //   - it needs a VERTEX INSIDE the observed window (apexPoint returns null
+    //     otherwise), so a shot seen only on its way down — the normal
+    //     occluded make — is untouched;
+    //   - it needs the strict R² bar, the sample floor and plausible gravity
+    //     curvature, so a rim rattle or a tracker switch (both of which fit
+    //     badly) leaves the guard inert, which HANDS THE MAKE BACK.
+    if (outcome === 'make' && apexBelowPlane) {
+      outcome = 'unsure';
+      holds.push('apexBelowRim');
     }
     // Rattle-out make guard (flagged; constructor default FALSE, ON live via
     // settingsStore). A geo+net make with an OBSERVED rim-plane crossing can
@@ -1380,6 +1671,11 @@ export class ShotFsm {
       trajectory: traj,
       ...(geoDepth ? { geoDepth } : {}),
       ...(virtual ? { virtualCross: virtual } : {}),
+      // Diagnostics: the global-arc projection that was live at resolve, and
+      // the whole-flight apex. Both omitted when unavailable, so a shot with
+      // no trustworthy global fit carries no extra payload.
+      ...(flightCross ? { flightCross } : {}),
+      ...(apex ? { apex } : {}),
       ...(releaseToRimSec !== null ? { releaseToRimSec } : {}),
       // Diagnostic only (see ShotHold): omitted entirely when nothing demoted
       // the shot, so a clean make carries no extra payload.
@@ -1393,6 +1689,8 @@ export class ShotFsm {
     this.reapp.clear();
     this.reappCorroborated = false;
     this.trajectory = [];
+    this.approach = [];
+    this.flightLanding = null;
     this.netSamples = [];
     this.anyNetPositive = false;
     this.maxClsScore = 0;

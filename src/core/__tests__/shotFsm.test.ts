@@ -601,14 +601,21 @@ describe('ShotFsm', () => {
     expect(resolved[0].outcome).not.toBe('make');
   });
 
-  test('(12) resolve prefers a real (non-predicted) descending crossing over a later predicted one', () => {
+  test('(12) resolve scores the REAL descending crossing, and a Kalman ghost neither ends nor decides the shot', () => {
     const fsm = newFsm();
     // Arm, then a REAL descending crossing well inside the span (cx=320,
     // planeY=200), followed by a brief occlusion right at the rim producing
     // Kalman-predicted samples that would (if treated identically to real
     // detections) fabricate a LATER "crossing" via extrapolated jitter
-    // outside the span. The FINAL-real-crossing preference should still
-    // score geo from the real, in-span crossing.
+    // outside the span. The real, in-span crossing is the one scored.
+    //
+    // UPDATED (2026-08) for the ghost-resolve fix: this test used to END on
+    // frame 5, a PREDICTED sample below belowY. That pinned the premature
+    // resolve — a coast sealing the attempt while the real ball may still be
+    // at the rim — so the sequence now continues, and the assertions pin the
+    // new intent instead: the ghost keeps the shot LIVE, and the attempt ends
+    // only when a REAL sample is seen below the rim. The geo assertion is
+    // unchanged and un-weakened.
     const seq: FsmFrameInput[] = [
       fin(0 / 30, tb(320, 180, 0 / 30, -100)), // arm (up-zone)
       fin(1 / 30, tb(320, 190, 1 / 30, 250)),
@@ -618,9 +625,15 @@ describe('ShotFsm', () => {
       // below the plane again — a fabricated crossing from extrapolation.
       fin(3 / 30, tb(400, 195, 3 / 30, -50, { predicted: true, score: 0 })),
       fin(4 / 30, tb(400, 205, 4 / 30, 50, { predicted: true, score: 0 })),
-      fin(5 / 30, tb(400, 232, 5 / 30, 400, { predicted: true, score: 0 })), // below belowY → resolve
+      fin(5 / 30, tb(400, 232, 5 / 30, 400, { predicted: true, score: 0 })), // GHOST below belowY
+      fin(6 / 30, tb(324, 250, 6 / 30, 420)), // the real ball reappears, genuinely deep → resolve
     ];
-    const { resolved } = run(fsm, seq);
+    const { resolved, results } = run(fsm, seq);
+
+    // The ghost frame (index 5) must NOT have ended the attempt.
+    expect(results[5].resolved).toBeNull();
+    expect(results[5].phase).toBe('SHOT_LIVE');
+    expect(results[6].resolved).not.toBeNull();
 
     expect(resolved).toHaveLength(1);
     const s = resolved[0];
@@ -1460,9 +1473,10 @@ describe('ShotFsm — settle window (useSettleWindow)', () => {
       fin(t, tb(cx, cy, t, vy), { netMotionScore: net }),
     );
     // Ball leaves upward/out (lost); the window-elapsed check still resolves.
-    // belowRimFirstT = 4/30, so the deferred resolve fires at frame 8
-    // ((8-4)/30 + GATE_EPS_SEC ≥ settleWindowSec 0.13), well before ballLost.
-    f.push(fin(7 / 30, null), fin(8 / 30, null));
+    // belowRimFirstT = 4/30, so with settleWindowSec 0.30 the deferred resolve
+    // fires at frame 13 ((13-4)/30 + GATE_EPS_SEC ≥ 0.30), well before
+    // ballLost (lostBallResolveSec 1.5s after the last ball at frame 6).
+    for (let i = 7; i <= 13; i++) f.push(fin(i / 30, null));
     return f;
   };
 
@@ -1497,10 +1511,19 @@ describe('ShotFsm — settle window (useSettleWindow)', () => {
 
   // --- false-miss protections: real makes MUST survive the settle window ----
 
+  // The synthetic arc drops past belowY at t≈1.267; with settleWindowSec 0.30
+  // the deferred resolve needs frames out to t≈1.567, so the fixtures below
+  // run 52 frames (t ≤ 1.7) instead of the default 46. Nothing about the arc
+  // changes — only how long the camera keeps rolling.
+  const SETTLE_FRAMES = 52;
+
   test('a clean swish + net burst stays a make with the settle window ON', () => {
     // Monotonic drop through the hoop, never re-ascends above the plane →
     // settleReascended stays false; the deferred resolve returns the same make.
-    const { resolved } = run(settleFsm(), arcFrames({ x0: X0_CENTER, net: swishNet }));
+    const { resolved } = run(
+      settleFsm(),
+      arcFrames({ x0: X0_CENTER, net: swishNet, frames: SETTLE_FRAMES }),
+    );
     expect(resolved).toHaveLength(1);
     expect(resolved[0].outcome).toBe('make');
     expect(resolved[0].signals).toEqual({ geo: true, net: true, cls: false });
@@ -1520,11 +1543,14 @@ describe('ShotFsm — settle window (useSettleWindow)', () => {
       [5 / 30, 320, 226, -60, 0], // net-billow jitter: cy dips to 226 (> planeY) — NOT a bounce-out
       [6 / 30, 320, 252, 300, 0], // resumes falling deep in-span
       [7 / 30, 321, 292, 340, 0], // still falling in-span
-      [8 / 30, 322, 330, 360, 0], // deferred resolve fires here (belowRimFirstT=4/30)
+      [8 / 30, 322, 330, 360, 0], // still falling in-span
     ];
     const frames = jitterSwish.map(([t, cx, cy, vy, net]) =>
       fin(t, tb(cx, cy, t, vy), { netMotionScore: net }),
     );
+    // belowRimFirstT = 4/30 → with settleWindowSec 0.30 the deferred resolve
+    // fires at frame 13. The ball is simply out of shot by then.
+    for (let i = 9; i <= 13; i++) frames.push(fin(i / 30, null));
     const { resolved } = run(settleFsm(), frames);
     expect(resolved).toHaveLength(1);
     expect(resolved[0].signals.geo).toBe(true);
@@ -1549,7 +1575,10 @@ describe('ShotFsm — settle window (useSettleWindow)', () => {
   });
 
   test('netless jump-armed geo make stays a make with the settle window ON', () => {
-    const { resolved } = run(settleFsm(), arcFrames({ x0: X0_CENTER }));
+    const { resolved } = run(
+      settleFsm(),
+      arcFrames({ x0: X0_CENTER, frames: SETTLE_FRAMES }),
+    );
     expect(resolved).toHaveLength(1);
     expect(resolved[0].signals).toEqual({ geo: true, net: null, cls: false });
     expect(resolved[0].outcome).toBe('make');
@@ -1562,12 +1591,12 @@ describe('ShotFsm — settle window (useSettleWindow)', () => {
     // never climbs back above the plane afterward → settleReascended stays
     // false → make preserved. THE key false-miss-avoidance case.
     const base = REGRESSION_FIXTURES.rimRattlerMake(); // ends at frame 9 (first below)
-    const tail = [
+    const tail: FsmFrameInput[] = [
       fin(10 / 30, tb(323, 258, 10 / 30, 420)), // deep in-span, descending
-      fin(11 / 30, null),
-      fin(12 / 30, null),
-      fin(13 / 30, null), // belowRimFirstT=9/30 → deferred resolve fires here
     ];
+    // belowRimFirstT = 9/30 → with settleWindowSec 0.30 the deferred resolve
+    // fires at frame 18.
+    for (let i = 11; i <= 18; i++) tail.push(fin(i / 30, null));
     const { resolved } = run(settleFsm(), [...base, ...tail]);
     expect(resolved).toHaveLength(1);
     const s = resolved[0];

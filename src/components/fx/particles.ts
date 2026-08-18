@@ -15,8 +15,19 @@
  *     are testable deterministically from seeds alone.
  *
  * Kept free of Skia/React/Reanimated imports so it stays trivially unit-testable.
- * Everything here is plain math and can run on the JS or UI thread; the callers
- * mark their own worklets.
+ *
+ * WORKLET BOUNDARY — read before adding anything here.
+ * The per-frame evaluator ({@link particleState} and the two helpers it calls)
+ * runs INSIDE the callers' `useDerivedValue` worklets, so each one carries its
+ * own `'worklet'` directive. A caller marking ITSELF a worklet does not
+ * workletize an imported callee: react-native-worklets serializes any captured
+ * non-worklet function as a Remote Function whose entire body is
+ * `throw new Error('[Worklets] Tried to synchronously call a Remote Function')`
+ * (see node_modules/react-native-worklets/src/memory/serializable.native.ts and
+ * remoteFunctionUnpacker.native.ts). That throw lands on the UI runtime, where
+ * no React error boundary can catch it — it takes the app down.
+ * The spawners below stay plain JS on purpose: they are called once from
+ * `useMemo` on the JS thread and never cross the boundary.
  */
 
 /**
@@ -195,6 +206,41 @@ export const GRAVITY = 900; // px/sec^2, screen-down.
 /** Air drag: velocity is scaled by exp(-DRAG * age); light so motion reads. */
 export const DRAG = 1.1;
 
+// DECLARATION ORDER IS LOAD-BEARING BELOW THIS LINE.
+// The worklets babel plugin captures a worklet's free variables EAGERLY, into a
+// closure object built where the function is defined — and workletizing a
+// `function` declaration costs it its hoisting. So a helper worklet declared
+// AFTER its caller is still in TDZ when the caller's closure is built, and the
+// call fails with "lifeAlpha is not a function" on BOTH runtimes. Helpers first,
+// callers after. (Same rule as docs/INTEGRATION-REVIEW.md Lens 4, check 1.)
+
+/** Classic smoothstep on [0,1]; clamps outside. Pure. */
+export function smoothstep(x: number): number {
+  // WHY 'worklet': reached from particleState via lifeAlpha, so it crosses the
+  // same boundary one level down — a non-worklet callee of a worklet is still a
+  // Remote Function.
+  'worklet';
+  const t = x < 0 ? 0 : x > 1 ? 1 : x;
+  return t * t * (3 - 2 * t);
+}
+
+/**
+ * lifeAlpha — 0..1 opacity envelope for a particle of the given `age` within
+ * `lifeSec`, ramping in over the first `fadeIn` fraction and out over the last
+ * `fadeOut` fraction. Returns 0 once age >= life. Exported for direct reuse by
+ * effects that drive their own alpha (and for testing the envelope in isolation).
+ */
+export function lifeAlpha(age: number, lifeSec: number, fadeIn: number, fadeOut: number): number {
+  // WHY 'worklet': particleState calls this on the UI runtime every frame per
+  // particle — see the WORKLET BOUNDARY note at the top of this file.
+  'worklet';
+  if (age <= 0 || age >= lifeSec) return 0;
+  const u = age / lifeSec; // 0..1 through life.
+  const rampIn = fadeIn > 0 ? smoothstep(u / fadeIn) : 1;
+  const rampOut = fadeOut > 0 ? smoothstep((1 - u) / fadeOut) : 1;
+  return rampIn * rampOut;
+}
+
 /**
  * particleState — the closed-form state of a particle at absolute age `tSec`
  * (seconds since the field was spawned). `lifeSec` is the field's total
@@ -226,6 +272,11 @@ export function particleState(
     shrink?: number;
   },
 ): ParticleState {
+  // WHY 'worklet': every caller invokes this from inside a useDerivedValue
+  // worklet on the UI runtime (Confetti, SuccessBurst, FlameLicks). Without the
+  // directive it is captured as a Remote Function and throws the moment the
+  // first particle field is non-empty — see the WORKLET BOUNDARY note above.
+  'worklet';
   const gravityMul = opts?.gravityMul ?? 1;
   const fadeIn = opts?.fadeIn ?? 0.08;
   const fadeOut = opts?.fadeOut ?? 0.45;
@@ -248,26 +299,6 @@ export function particleState(
   const alpha = lifeAlpha(age, lifeSec, fadeIn, fadeOut);
 
   return { x, y, rot, size, alpha, colorIndex: p.colorIndex };
-}
-
-/** Classic smoothstep on [0,1]; clamps outside. Pure. */
-export function smoothstep(x: number): number {
-  const t = x < 0 ? 0 : x > 1 ? 1 : x;
-  return t * t * (3 - 2 * t);
-}
-
-/**
- * lifeAlpha — 0..1 opacity envelope for a particle of the given `age` within
- * `lifeSec`, ramping in over the first `fadeIn` fraction and out over the last
- * `fadeOut` fraction. Returns 0 once age >= life. Exported for direct reuse by
- * effects that drive their own alpha (and for testing the envelope in isolation).
- */
-export function lifeAlpha(age: number, lifeSec: number, fadeIn: number, fadeOut: number): number {
-  if (age <= 0 || age >= lifeSec) return 0;
-  const u = age / lifeSec; // 0..1 through life.
-  const rampIn = fadeIn > 0 ? smoothstep(u / fadeIn) : 1;
-  const rampOut = fadeOut > 0 ? smoothstep((1 - u) / fadeOut) : 1;
-  return rampIn * rampOut;
 }
 
 /**

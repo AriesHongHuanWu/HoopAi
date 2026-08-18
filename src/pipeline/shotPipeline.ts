@@ -55,6 +55,7 @@ import type {
   BallSample,
   Box,
   Detection,
+  FlightLanding,
   FrameDetections,
   PoseFrame,
   ResolvedShot,
@@ -645,6 +646,41 @@ export class ShotPipeline {
             ),
           )
         : null;
+    // Global-arc LANDING corroborator for the FSM — the same one-frame-lag
+    // pattern as `corridor` directly above, and computed at the same point on
+    // purpose: the arc fitted THROUGH LAST FRAME predicts where the ball comes
+    // down, before this frame's sample has been pushed into it. That ordering
+    // is what makes the number an independent prediction rather than a fit
+    // that already contains the sample the FSM is judging on the same frame.
+    //
+    // Gated exactly like the HUD's landing ghost: FlightArc.landing() applies
+    // the STRICT R² bar (outcome-adjacent geometry never rides a loose fit)
+    // and the plausible-gravity curvature cap rejects a rim rattle's
+    // degenerate near-vertical parabola. The FSM latches it while a shot is
+    // live and may only use it to upgrade an OCCLUDED (geo null) crossing with
+    // net or cls agreement — it can never flip a seen miss or act alone, so
+    // this cannot fabricate a make.
+    let flightLanding: FlightLanding | null = null;
+    if (this.useFlight && this.lastRim) {
+      const floor = scaleFrameGate(
+        MIN_FIT_SAMPLES,
+        this.tracker.estimatedStepDt(),
+        ABS_MIN_FIT_SAMPLES,
+      );
+      const p = this.flightArc.landing(this.lastRim.planeY, floor);
+      const gfit = p ? this.flightArc.fit(floor) : null;
+      if (
+        p &&
+        gfit &&
+        plausibleArcCurvature(
+          gfit.ya,
+          this.lastRim.box.width,
+          FLIGHT.maxArcYaRimWidths,
+        )
+      ) {
+        flightLanding = { x: p.x, t: p.t, r2y: gfit.r2y };
+      }
+    }
     const ball = this.tracker.step(
       frame,
       this.lastRim?.hoopRoi ?? null,
@@ -764,6 +800,11 @@ export class ShotPipeline {
           ? { releaseEventT: this.pendingReleaseT }
           : {}),
         ...(armLockout ? { armLockout: true } : {}),
+        // One-frame-lagged global-arc landing (computed above, before this
+        // frame's sample entered the arc). Omitted entirely when there is no
+        // trustworthy fit, so the FSM keeps whatever it last latched for this
+        // attempt and an off/absent FlightArc is byte-identical to before.
+        ...(flightLanding !== null ? { flightLanding } : {}),
       });
       phase = result.phase;
       liveTrajectory = result.liveTrajectory;

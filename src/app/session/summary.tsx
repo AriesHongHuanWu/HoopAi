@@ -45,6 +45,7 @@ import { PersonalBestBanner } from '@/components/PersonalBestBanner';
 import { RecheckPanel } from '@/components/RecheckPanel';
 import { buildHeatmap } from '@/core/heatmap';
 import { FIBA_COURT } from '@/core/courtModel';
+import { SessionFormReport } from '@/components/SessionFormReport';
 import { SummaryHero, isPerfectSession } from '@/components/SummaryHero';
 import { Card, Chip, Eyebrow, PillButton, Row, Screen } from '@/components/ui';
 import { color, radius, space, type } from '@/constants/tokens';
@@ -535,6 +536,10 @@ export default function SessionSummaryScreen() {
               </View>
             </Animated.View>
           )}
+          {/* Shot of the session: the most ANALYSABLE make, given the full
+              form + coach treatment. Renders its own honest empty state when no
+              made shot carried a usable pose capture. */}
+          <SessionFormReport shots={shots} entering={enter(5)} />
           <Animated.View entering={enter(5)}>
             <Eyebrow>Box score</Eyebrow>
             <SessionRecap
