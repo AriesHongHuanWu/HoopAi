@@ -204,6 +204,9 @@ jest.mock('@/data/db', () => ({
   listSessions: jest.fn(async () => []),
   sessionShots: jest.fn(async () => []),
   shotFromRow: jest.fn((r: unknown) => r),
+  // Form Check history (v10). Default EMPTY: the Form Check card must keep
+  // today's promo verbatim with zero rows (the FORM_CARDS pin depends on it).
+  listFormSessions: jest.fn(async () => []),
 }));
 
 jest.mock('@/state/profileStore', () => ({
@@ -357,12 +360,33 @@ const FORM_CARDS = [
 ];
 const PLAN_CARDS = ['PLANNED_DRILL', 'GO DEEPER'];
 
+/** One persisted Form Check row (form_sessions v10, narrow read shape). */
+function formSessionRow(id: number, over: Partial<Record<string, unknown>> = {}) {
+  return {
+    id,
+    ts: Date.now() - 2 * 24 * 60 * 60 * 1000, // 2 d ago
+    hand: 'right',
+    handSource: 'settings',
+    repCount: 8,
+    medianPoseFps: 28,
+    elbowSpreadDeg: 4.2,
+    tempoSpreadMs: 96,
+    kneeSpreadDeg: null,
+    releaseHeightSpread: null,
+    releaseHeightM: null,
+    tiltDeg: null,
+    summaryJson: '{}',
+    ...over,
+  };
+}
+
 beforeEach(() => {
   jest.clearAllMocks();
   mockEnter.mockClear();
   db.listSessions.mockResolvedValue([sessionRow(1), sessionRow(2), sessionRow(3)]);
   db.sessionShots.mockResolvedValue([]);
   db.shotFromRow.mockImplementation((row: unknown) => row);
+  db.listFormSessions.mockResolvedValue([]);
 });
 
 // ---------------------------------------------------------------------------
@@ -500,6 +524,52 @@ describe('switching', () => {
     // change.)
     expect(indexes[0]).toBe(0);
     expect(Math.max(...indexes)).toBeLessThanOrEqual(5);
+    await unmount(r);
+  });
+});
+
+// ---------------------------------------------------------------------------
+
+describe('the Form Check card', () => {
+  it('keeps the promo verbatim with zero saved form checks', async () => {
+    const r = await render();
+    await switchTo(r, 'Your form');
+    const text = screenText(r);
+
+    expect(text).toContain('Check my shooting form');
+    expect(text).toContain('Motion only — no hoop needed.');
+    expect(text).not.toContain('Check again');
+    await unmount(r);
+  });
+
+  it('upgrades to a last-check receipt + "Check again" once history exists', async () => {
+    db.listFormSessions.mockResolvedValue([
+      formSessionRow(3),
+      formSessionRow(2, { tempoSpreadMs: 120 }),
+      formSessionRow(1, { tempoSpreadMs: 140 }),
+    ]);
+    const r = await render();
+    await switchTo(r, 'Your form');
+    const text = screenText(r);
+
+    // Receipt: real numbers from the newest row, never decoration.
+    expect(text).toContain('8 reps · tempo ±96 ms · 2 d ago');
+    expect(text).toContain('Check again');
+    expect(text).toContain('tempo spread — lower is steadier');
+    expect(text).not.toContain('Check my shooting form');
+    // The scan stays ONE query regardless of segment switches.
+    expect(db.listFormSessions).toHaveBeenCalledTimes(1);
+    await unmount(r);
+  });
+
+  it('omits the tempo part when the last check measured no spread', async () => {
+    db.listFormSessions.mockResolvedValue([formSessionRow(1, { tempoSpreadMs: null })]);
+    const r = await render();
+    await switchTo(r, 'Your form');
+    const text = screenText(r);
+
+    expect(text).toContain('8 reps · 2 d ago');
+    expect(text).not.toContain('±');
     await unmount(r);
   });
 });

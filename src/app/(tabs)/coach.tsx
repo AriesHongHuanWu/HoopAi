@@ -38,7 +38,7 @@
  * aware; every stat block carries an a11y label. Skia on this screen is
  * STATIC — JS-built paths only, no worklets (the fx/particles precedent).
  */
-import { BlurMask, Canvas, Path, Skia } from '@shopify/react-native-skia';
+import { BlurMask, Canvas, Line, Path, Skia, vec } from '@shopify/react-native-skia';
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import React, { useEffect, useMemo, useState } from 'react';
@@ -81,7 +81,7 @@ import {
   type WeeklyReport,
 } from '@/core/weeklyReport';
 import { matchArchetype, type ArchetypeMatch } from '@/core/shotLab';
-import { listSessions, sessionShots, shotFromRow } from '@/data/db';
+import { listFormSessions, listSessions, sessionShots, shotFromRow, type FormSessionRow } from '@/data/db';
 import { recomputeStats } from '@/core/stats';
 import { useProfile } from '@/state/profileStore';
 import type { ChartZone } from '@/core/types';
@@ -367,7 +367,13 @@ function CoachSkeleton() {
 type LoadState =
   | { status: 'loading' }
   | { status: 'error' }
-  | { status: 'ready'; sessions: CoachSession[]; drillResults: DrillResult[] };
+  | {
+      status: 'ready';
+      sessions: CoachSession[];
+      drillResults: DrillResult[];
+      /** Form Check history (newest first) for the [Your form] receipt card. */
+      formChecks: FormSessionRow[];
+    };
 
 function useCoachSessions(): { state: LoadState; reload: () => void } {
   const [state, setState] = useState<LoadState>({ status: 'loading' });
@@ -378,6 +384,11 @@ function useCoachSessions(): { state: LoadState; reload: () => void } {
     void (async () => {
       try {
         const rows = await listSessions(SCAN_LIMIT);
+        // Form Check history — one extra narrow query (listFormSessions
+        // deliberately excludes the bestRepJson blobs), loaded inside this
+        // same effect so a segment switch never re-runs it. Never throws
+        // (empty on failure via safe()).
+        const formChecks = await listFormSessions(8);
         // Drill history for the level ladder — parsed off the SAME rows (no
         // extra DB queries). Drills persist as finished spotShooting states.
         const drillResults = rows
@@ -404,7 +415,7 @@ function useCoachSessions(): { state: LoadState; reload: () => void } {
             };
           }),
         );
-        if (alive) setState({ status: 'ready', sessions, drillResults });
+        if (alive) setState({ status: 'ready', sessions, drillResults, formChecks });
       } catch {
         if (alive) setState({ status: 'error' });
       }
@@ -437,6 +448,70 @@ function weeksOf(sessions: readonly CoachSession[]): { startMs: number; label: s
 }
 
 // ---------------------------------------------------------------------------
+// Form Check receipt (v2) — the [Your form] card's last-session read
+// ---------------------------------------------------------------------------
+
+/** Coarse relative age — receipts need "how stale", not a timestamp. */
+function agoLabel(deltaMs: number): string {
+  const min = Math.floor(deltaMs / 60_000);
+  if (min < 1) return 'just now';
+  if (min < 60) return `${min} min ago`;
+  const h = Math.floor(min / 60);
+  if (h < 24) return `${h} h ago`;
+  return `${Math.floor(h / 24)} d ago`;
+}
+
+/**
+ * One-line last-check receipt, e.g. "8 reps · tempo ±96 ms · 2 d ago". The
+ * tempo part appears only when that session actually measured a spread —
+ * an unmeasured spread is omitted, never rendered as ±0.
+ */
+export function formCheckReceiptLine(row: FormSessionRow, nowMs: number): string {
+  const parts = [`${row.repCount} ${row.repCount === 1 ? 'rep' : 'reps'}`];
+  if (row.tempoSpreadMs != null) parts.push(`tempo ±${Math.round(row.tempoSpreadMs)} ms`);
+  parts.push(agoLabel(Math.max(0, nowMs - row.ts)));
+  return parts.join(' · ');
+}
+
+/** Spark geometry. */
+const SPARK_W = 132;
+const SPARK_H = 26;
+const SPARK_PAD = 4;
+
+/**
+ * Tiny STATIC tempo-spread sparkline across form checks (oldest → newest;
+ * down = steadier). JS-built Skia Lines only — this screen's no-worklet
+ * contract (charts/Sparkline animates, so it is deliberately NOT used here).
+ */
+function SpreadSpark({ values }: { values: readonly number[] }) {
+  const pts = useMemo(() => {
+    if (values.length < 2) return null;
+    const max = Math.max(...values);
+    const min = Math.min(...values);
+    const span = max - min || 1;
+    return values.map((v, i) => ({
+      x: SPARK_PAD + (i / (values.length - 1)) * (SPARK_W - SPARK_PAD * 2),
+      y: SPARK_PAD + ((v - min) / span) * (SPARK_H - SPARK_PAD * 2),
+    }));
+  }, [values]);
+  if (pts == null) return null;
+  return (
+    <Canvas style={{ width: SPARK_W, height: SPARK_H }}>
+      {pts.slice(1).map((p, i) => (
+        <Line
+          key={i}
+          p1={vec(pts[i]!.x, pts[i]!.y)}
+          p2={vec(p.x, p.y)}
+          strokeWidth={2}
+          strokeCap="round"
+          color={color.accent}
+        />
+      ))}
+    </Canvas>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Screen
 // ---------------------------------------------------------------------------
 
@@ -451,6 +526,7 @@ export default function CoachScreen() {
 
   const sessions = load.status === 'ready' ? load.sessions : [];
   const drillResults = load.status === 'ready' ? load.drillResults : [];
+  const formChecks = load.status === 'ready' ? load.formChecks : [];
   const weeks = useMemo(() => weeksOf(sessions), [sessions]);
   const activeWeek = weeks[Math.min(weekIndex, Math.max(0, weeks.length - 1))];
 
@@ -540,6 +616,18 @@ export default function CoachScreen() {
 
   // Pose/form data coverage across the whole scan window (not week-scoped).
   const readiness = useMemo(() => formReadiness(sessions.flatMap((s) => s.shots)), [sessions]);
+
+  // Form Check tempo-spread trend, oldest → newest (listFormSessions returns
+  // newest first). Only sessions that MEASURED a spread contribute — the
+  // spark never plots a fabricated point.
+  const formCheckSpreads = useMemo(
+    () =>
+      formChecks
+        .map((r) => r.tempoSpreadMs)
+        .filter((v): v is number => v != null)
+        .reverse(),
+    [formChecks],
+  );
 
   // Drill progression per planned drill: current level + the level prescription.
   const planLevels = useMemo(() => {
@@ -771,27 +859,61 @@ export default function CoachScreen() {
                       MOTION alone (no ball tracking, so it can never claim a
                       make or a miss — the one line below says so), and it
                       needs no logged sessions, which is exactly why it renders
-                      unconditionally. Routes to the feature screen; the full
-                      what-and-how copy lives there, not on this promo. */}
+                      unconditionally. With saved form_sessions history the
+                      promo upgrades to a last-check receipt + tempo-spread
+                      trend (down = steadier); zero rows keep the promo
+                      verbatim. Routes to the feature screen either way. */}
                   <Card entering={cardEnter(4)}>
                     <Row gap={space.sm} style={styles.promoHead}>
                       <Ionicons name="scan-outline" size={18} color={color.accent} />
                       <Text style={styles.promoTitle} numberOfLines={1}>
                         Form Check
                       </Text>
-                      <Chip label="NEW" tone="accent" compact />
+                      {formChecks.length === 0 && <Chip label="NEW" tone="accent" compact />}
                     </Row>
-                    <Text style={styles.body}>Motion only — no hoop needed.</Text>
-                    <Pressable
-                      accessibilityRole="button"
-                      accessibilityLabel="Check your shooting form with the camera. Motion only, no ball needed. Opens Form Check."
-                      onPress={() => router.push('/formcheck')}
-                      style={({ pressed }) => [styles.promoRow, pressed && { opacity: 0.6 }]}
-                    >
-                      <Ionicons name="body-outline" size={iconSize.sm} color={color.accent} />
-                      <Text style={styles.promoRowText}>Check my shooting form</Text>
-                      <Ionicons name="chevron-forward" size={iconSize.sm} color={color.textFaint} />
-                    </Pressable>
+                    {formChecks.length === 0 ? (
+                      <>
+                        <Text style={styles.body}>Motion only — no hoop needed.</Text>
+                        <Pressable
+                          accessibilityRole="button"
+                          accessibilityLabel="Check your shooting form with the camera. Motion only, no ball needed. Opens Form Check."
+                          onPress={() => router.push('/formcheck')}
+                          style={({ pressed }) => [styles.promoRow, pressed && { opacity: 0.6 }]}
+                        >
+                          <Ionicons name="body-outline" size={iconSize.sm} color={color.accent} />
+                          <Text style={styles.promoRowText}>Check my shooting form</Text>
+                          <Ionicons name="chevron-forward" size={iconSize.sm} color={color.textFaint} />
+                        </Pressable>
+                      </>
+                    ) : (
+                      <>
+                        <Text style={styles.body}>
+                          {formCheckReceiptLine(formChecks[0]!, Date.now())}
+                        </Text>
+                        {formCheckSpreads.length >= 2 && (
+                          <View
+                            style={styles.formCheckSpark}
+                            accessible
+                            accessibilityLabel={`Tempo spread across your last ${formCheckSpreads.length} form checks — lower is steadier.`}
+                          >
+                            <SpreadSpark values={formCheckSpreads} />
+                            <Text style={styles.formCheckSparkLabel}>
+                              tempo spread — lower is steadier
+                            </Text>
+                          </View>
+                        )}
+                        <Pressable
+                          accessibilityRole="button"
+                          accessibilityLabel="Check your shooting form again. Motion only, no ball needed. Opens Form Check."
+                          onPress={() => router.push('/formcheck')}
+                          style={({ pressed }) => [styles.promoRow, pressed && { opacity: 0.6 }]}
+                        >
+                          <Ionicons name="body-outline" size={iconSize.sm} color={color.accent} />
+                          <Text style={styles.promoRowText}>Check again</Text>
+                          <Ionicons name="chevron-forward" size={iconSize.sm} color={color.textFaint} />
+                        </Pressable>
+                      </>
+                    )}
                   </Card>
 
                   {/* Form-data readiness — how much of the coach's form read is
@@ -938,6 +1060,19 @@ const styles = StyleSheet.create({
     color: color.accent,
     flex: 1,
     minWidth: 0,
+  },
+
+  // Form Check receipt spark (history state of the Form Check card)
+  formCheckSpark: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: space.sm,
+    marginTop: space.sm,
+  },
+  formCheckSparkLabel: {
+    ...type.micro,
+    color: color.textFaint,
+    flexShrink: 1,
   },
 
   // Hero top row: eyebrow + compact share icon pill

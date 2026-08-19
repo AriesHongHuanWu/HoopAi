@@ -278,6 +278,37 @@ async function migrate(db: SQLite.SQLiteDatabase): Promise<void> {
       PRAGMA user_version = 9;
     `);
   }
+  if (version < 10) {
+    // v10: Form Check session history — a standalone table (the jumps-table
+    // v7 precedent: additive CREATE TABLE touching nothing in sessions/shots;
+    // a Form Check run has no hoop, no shots, no make/miss, so it is NOT a
+    // shooting session). Scalar spread columns exist so the Coach card's
+    // trend reads never parse JSON; nullable spread = honestly unmeasured
+    // (the reason lives in summaryJson). bestRepJson carries exactly ONE
+    // encoded FormSequence (~4 KB) — captured at write time (the only
+    // chance) for a future history-replay screen — and is deliberately
+    // EXCLUDED from the list query below so scans never page the blob.
+    await db.execAsync(`
+      CREATE TABLE IF NOT EXISTS form_sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts INTEGER NOT NULL,
+        hand TEXT NOT NULL,
+        handSource TEXT NOT NULL DEFAULT 'settings',
+        repCount INTEGER NOT NULL,
+        medianPoseFps REAL NOT NULL,
+        elbowSpreadDeg REAL,
+        tempoSpreadMs REAL,
+        kneeSpreadDeg REAL,
+        releaseHeightSpread REAL,
+        releaseHeightM REAL,
+        tiltDeg REAL,
+        summaryJson TEXT NOT NULL DEFAULT '{}',
+        bestRepJson TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_form_sessions_ts ON form_sessions(ts);
+      PRAGMA user_version = 10;
+    `);
+  }
 }
 
 /** Run a DB operation; on ANY failure log + return the fallback (never throw). */
@@ -290,8 +321,12 @@ async function safe<T>(op: string, fallback: T, fn: () => Promise<T>): Promise<T
   }
 }
 
-/** JSON.parse that can never throw (corrupt persisted rows). */
-function parseJson<T>(raw: string, fallback: T): T {
+/**
+ * JSON.parse that can never throw (corrupt persisted rows). Exported (v10)
+ * so consumers of form_sessions.summaryJson — the Coach card and the report
+ * layer — decode with the same corrupt-row fallback the shot readers use.
+ */
+export function parseJson<T>(raw: string, fallback: T): T {
   try {
     return JSON.parse(raw) as T;
   } catch {
@@ -1104,6 +1139,124 @@ export async function deleteJump(id: number): Promise<void> {
   return safe('deleteJump', undefined, async () => {
     const db = await getDb();
     await db.runAsync('DELETE FROM jumps WHERE id = ?', id);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Form Check sessions (v10)
+// ---------------------------------------------------------------------------
+
+/**
+ * One persisted Form Check session (form_sessions table, v10) — the narrow
+ * row every list scan sees. Nullable spread columns mean "honestly
+ * unmeasured" (the reason strings live inside summaryJson); releaseHeightM
+ * is the session-median metric release height and exists only when the
+ * height scale was calibrated; tiltDeg is the COMPENSATED camera roll (null
+ * when the tilt estimate was unconfident and nothing was compensated).
+ */
+export interface FormSessionRow {
+  id: number;
+  /** Epoch ms at End session. */
+  ts: number;
+  /** 'left' | 'right'. */
+  hand: string;
+  /** 'auto' | 'manual' | 'settings'. */
+  handSource: string;
+  repCount: number;
+  medianPoseFps: number;
+  elbowSpreadDeg: number | null;
+  tempoSpreadMs: number | null;
+  kneeSpreadDeg: number | null;
+  releaseHeightSpread: number | null;
+  releaseHeightM: number | null;
+  tiltDeg: number | null;
+  /** FormCheckSessionSummary JSON: per-rep metrics+phases+flags (NO
+   *  sequences), spreads with reasons, best-rep reason, calibration receipt,
+   *  archetype used for similarity. Decode via {@link parseJson}. */
+  summaryJson: string;
+}
+
+/** Full row: adds the one ~4 KB best-rep blob (single-row reads only). */
+export interface FormSessionFullRow extends FormSessionRow {
+  /** { index, metrics, tips, sequence: FormSequence } — exactly ONE encoded
+   *  sequence, or null when no rep decoded. */
+  bestRepJson: string | null;
+}
+
+/**
+ * Persist one finished Form Check session (the insertJump precedent: called
+ * from End session). Returns -1 when persistence failed — the report screen
+ * then keeps its "not saved" honesty line and the session lives only until
+ * the screen is left.
+ */
+export async function insertFormSession(
+  row: Omit<FormSessionFullRow, 'id'>,
+): Promise<number> {
+  return safe('insertFormSession', -1, async () => {
+    const db = await getDb();
+    const res = await db.runAsync(
+      `INSERT INTO form_sessions (
+         ts, hand, handSource, repCount, medianPoseFps,
+         elbowSpreadDeg, tempoSpreadMs, kneeSpreadDeg, releaseHeightSpread,
+         releaseHeightM, tiltDeg, summaryJson, bestRepJson
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      row.ts,
+      row.hand,
+      row.handSource,
+      row.repCount,
+      row.medianPoseFps,
+      row.elbowSpreadDeg,
+      row.tempoSpreadMs,
+      row.kneeSpreadDeg,
+      row.releaseHeightSpread,
+      row.releaseHeightM,
+      row.tiltDeg,
+      row.summaryJson,
+      row.bestRepJson,
+    );
+    return res.lastInsertRowId;
+  });
+}
+
+/**
+ * Form Check history, newest first. Explicit column list that deliberately
+ * EXCLUDES bestRepJson (the sessionShotOutcomes narrow-read precedent — the
+ * Coach card's trend scan must not page ~4 KB sequence blobs it never
+ * renders). Never throws (empty on failure).
+ */
+export async function listFormSessions(limit = 30): Promise<FormSessionRow[]> {
+  return safe('listFormSessions', [], async () => {
+    const db = await getDb();
+    return db.getAllAsync<FormSessionRow>(
+      `SELECT id, ts, hand, handSource, repCount, medianPoseFps,
+              elbowSpreadDeg, tempoSpreadMs, kneeSpreadDeg, releaseHeightSpread,
+              releaseHeightM, tiltDeg, summaryJson
+       FROM form_sessions
+       ORDER BY ts DESC
+       LIMIT ?`,
+      limit,
+    );
+  });
+}
+
+/** One full Form Check session (including bestRepJson), or null. Never throws. */
+export async function getFormSession(
+  id: number,
+): Promise<FormSessionFullRow | null> {
+  return safe<FormSessionFullRow | null>('getFormSession', null, async () => {
+    const db = await getDb();
+    return db.getFirstAsync<FormSessionFullRow>(
+      'SELECT * FROM form_sessions WHERE id = ?',
+      id,
+    );
+  });
+}
+
+/** Delete one Form Check session. Never throws. */
+export async function deleteFormSession(id: number): Promise<void> {
+  return safe('deleteFormSession', undefined, async () => {
+    const db = await getDb();
+    await db.runAsync('DELETE FROM form_sessions WHERE id = ?', id);
   });
 }
 

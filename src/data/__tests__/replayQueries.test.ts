@@ -29,9 +29,9 @@ interface FakeDatabase {
 function fakeDatabase(): FakeDatabase {
   return {
     execAsync: jest.fn().mockResolvedValue(undefined),
-    // migrate() reads PRAGMA user_version; report 9 = already migrated
-    // (arcJson column present).
-    getFirstAsync: jest.fn().mockResolvedValue({ user_version: 9 }),
+    // migrate() reads PRAGMA user_version; report 10 = already migrated
+    // (arcJson column + form_sessions table present).
+    getFirstAsync: jest.fn().mockResolvedValue({ user_version: 10 }),
     getAllAsync: jest.fn().mockResolvedValue([]),
     runAsync: jest.fn().mockResolvedValue({ lastInsertRowId: 5, changes: 1 }),
     withTransactionAsync: jest.fn(async (fn: () => Promise<void>) => fn()),
