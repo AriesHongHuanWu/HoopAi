@@ -28,6 +28,7 @@ import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import Animated, {
   FadeIn,
   FadeInDown,
+  FadeOut,
   ReduceMotion,
   useAnimatedStyle,
   useReducedMotion,
@@ -182,7 +183,9 @@ export default function OnboardingScreen() {
       {
         eyebrow: 'Welcome',
         title: "Let's build your player card",
-        body: 'A few quick questions tailor your coaching and keep comparisons fair. Every one is optional, and your answers stay on this phone — nothing is uploaded.',
+        // Text diet: the primer row below carries the full on-device/skip
+        // promise, so the lede stays one line.
+        body: 'A few optional questions to tailor your coaching.',
         content: (
           <Row gap={space.sm} style={styles.primer}>
             <Ionicons name="lock-closed" size={iconSize.md} color={color.make} />
@@ -220,7 +223,7 @@ export default function OnboardingScreen() {
       {
         eyebrow: 'Step 2 · Measurements',
         title: 'How tall are you?',
-        body: 'Used to calibrate release height and jump — never shared.',
+        body: 'Calibrates release height and jump — never shared.',
         content: (
           <NumberSlider
             label="Height"
@@ -415,7 +418,11 @@ export default function OnboardingScreen() {
       {
         eyebrow: 'Step 10 · Almost there',
         title: 'The camera does the counting',
-        body: 'When you start a session, we ask for camera access. Every frame is analyzed right here on your phone — no video ever leaves the device unless you choose to share a clip.',
+        // Text diet: the shield primer row below keeps the "we ask on the
+        // setup screen" detail; the lede holds the on-device promise WITH its
+        // one honest exception — clip sharing is user-initiated export, so an
+        // absolute "never leaves" claim would over-promise.
+        body: 'Every frame is analyzed on your phone — video never leaves it unless you share a clip.',
         content: (
           <Row gap={space.sm} style={styles.primer}>
             <Ionicons name="shield-checkmark-outline" size={iconSize.md} color={color.make} />
@@ -569,16 +576,25 @@ export default function OnboardingScreen() {
         )}
       </Row>
 
-      {/* The one question. Re-keyed by step so the whole block re-animates. */}
+      {/* The one question. Re-keyed by step so the whole block re-animates;
+          the outgoing step dissolves (FadeOut) instead of hard-cutting. */}
       <View style={styles.body} key={step}>
-        <Animated.View entering={enter(0)} style={styles.copyBlock}>
+        <Animated.View
+          entering={enter(0)}
+          exiting={FadeOut.duration(motion.quick).reduceMotion(ReduceMotion.System)}
+          style={styles.copyBlock}
+        >
           <Text style={styles.eyebrow}>{current.eyebrow.toUpperCase()}</Text>
           <Text style={styles.title} accessibilityRole="header">
             {current.title}
           </Text>
           {current.body != null && <Text style={styles.bodyText}>{current.body}</Text>}
         </Animated.View>
-        <Animated.View entering={enter(1)} style={styles.control}>
+        <Animated.View
+          entering={enter(1)}
+          exiting={FadeOut.duration(motion.quick).reduceMotion(ReduceMotion.System)}
+          style={styles.control}
+        >
           {current.content}
         </Animated.View>
       </View>

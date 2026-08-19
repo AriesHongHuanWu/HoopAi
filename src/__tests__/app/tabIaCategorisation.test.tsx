@@ -36,8 +36,9 @@ jest.mock('react-native-reanimated', () => ({
     createAnimatedComponent: (component: unknown) => component,
   },
   FadeIn: { duration: () => ({ reduceMotion: () => ({}) }) },
-  FadeInDown: { duration: () => ({ delay: () => ({}) }) },
-  LinearTransition: { duration: () => ({}) },
+  FadeInDown: { duration: () => ({ delay: () => ({}), reduceMotion: () => ({}) }) },
+  // Chainable: History's session-list reflow attaches .reduceMotion(System).
+  LinearTransition: { duration: () => ({ reduceMotion: () => ({}) }) },
   ReduceMotion: { System: 'system' },
   useReducedMotion: () => true,
   useSharedValue: (value: unknown) => ({ value }),

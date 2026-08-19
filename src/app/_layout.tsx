@@ -105,6 +105,14 @@ export default function RootLayout() {
               // "I went one level deeper" has the SAME shape and the same
               // timing on both platforms, and so the classes below read as
               // deliberate exceptions to a stated rule instead of noise.
+              // Routes that DELIBERATELY stay Class 1 (no per-route entry —
+              // an entry whose options equal the default would be noise):
+              // trends, records, scoreboard, jump, formcheck, formstudio,
+              // formstudio3d, shotlab, leaderboard, history/[id], video/[id],
+              // reel/[sessionId], session/setup, session/analyze,
+              // settings-advanced, calibration-guide, and the legal sub-pages
+              // (privacy, terms, licenses). All of them are "one level deeper
+              // into your shooting" — or deeper into a panel — so they slide.
               animation: drillDown,
               animationDuration: motion.standard,
             }}
@@ -138,10 +146,11 @@ export default function RootLayout() {
               options={{ animation: 'fade', gestureEnabled: false }}
             />
 
-            {/* CLASS 4 — UTILITY PANEL. Settings, storage and the legal hub
-                are not "deeper into your shooting" — they are app machinery
-                summoned from wherever you were, so they rise from the bottom
-                instead of sliding in from the side.
+            {/* CLASS 4 — UTILITY PANEL. Settings, storage, the legal hub and
+                the how-it-works explainer are not "deeper into your shooting"
+                — they are app machinery summoned from wherever you were
+                (Settings row, the first-summary nudge, receipt HintChips), so
+                they rise from the bottom instead of sliding in from the side.
                 WHY animation and not `presentation: 'modal'`: Settings is a
                 HUB that pushes six further routes, and react-navigation
                 auto-promotes every screen pushed after a modal to a modal
@@ -156,6 +165,7 @@ export default function RootLayout() {
             <Stack.Screen name="settings" options={{ animation: utilityPanel }} />
             <Stack.Screen name="storage" options={{ animation: utilityPanel }} />
             <Stack.Screen name="legal/index" options={{ animation: utilityPanel }} />
+            <Stack.Screen name="how-it-works" options={{ animation: utilityPanel }} />
           </Stack>
         </ErrorBoundary>
       </ThemeProvider>

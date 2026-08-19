@@ -19,9 +19,10 @@ import { Canvas, Circle, DashPathEffect, Line, Path, vec } from '@shopify/react-
 import { router, useFocusEffect } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
-import Animated from 'react-native-reanimated';
+import Animated, { LinearTransition, ReduceMotion } from 'react-native-reanimated';
 
 import { useCardStagger } from '@/components/motion';
+import { SectionEyebrow } from '@/components/ScreenHeader';
 import {
   PipRow,
   formatSessionDate,
@@ -125,6 +126,14 @@ const PAGE_SIZE = 30;
  * suites that stub the Skia canvas never render.)
  */
 const SKELETON_DELAY_MS = 150;
+
+/**
+ * Session-list reflow grammar (shared disclosure motion): tag-filter switches,
+ * deletes and "Show older sessions" appends slide the surviving cards into
+ * place instead of hard-jumping. Collapse/removal stays instant by design —
+ * no exiting animation anywhere on this screen.
+ */
+const listReflow = LinearTransition.duration(motion.quick).reduceMotion(ReduceMotion.System);
 
 /**
  * History reads through listVisibleSessions — the free-tier retention
@@ -290,8 +299,10 @@ export default function HistoryScreen() {
     <Screen scroll>
       <Eyebrow>Your sessions</Eyebrow>
       <Text style={styles.title}>Data</Text>
+      {/* Text-diet trim; must keep matching /trends and records/i (pinned by
+          tabIaCategorisation — the lede maps the sub-nav tiles below it). */}
       <Text style={styles.lede}>
-        Everything you have tracked: session history below, trends and records one tap away.
+        Session history below — trends and records one tap away.
       </Text>
 
       <View style={styles.subNav}>
@@ -317,6 +328,13 @@ export default function HistoryScreen() {
           ]}
         />
       </View>
+
+      {/* Section kicker over the log — the tag filter and every session card
+          (and the skeletons/empty cards while loading) sit under it, so the
+          list is never an orphan and every state keeps the same anatomy. */}
+      <SectionEyebrow icon="time-outline" style={styles.sectionKicker}>
+        Session log
+      </SectionEyebrow>
 
       {items !== null && distinctTags.length > 0 && (
         <ScrollView
@@ -384,8 +402,7 @@ export default function HistoryScreen() {
             No sessions yet
           </Text>
           <Text style={[styles.dim, { marginTop: space.xs }]}>
-            Finish your first tracked session and it will show up here with
-            makes, misses and shot angles.
+            Finish your first tracked session and it lands here.
           </Text>
           <PillButton
             label="Start a session"
@@ -407,7 +424,9 @@ export default function HistoryScreen() {
           />
         </Card>
       ) : (
-        <View style={{ gap: layout.cardGap }}>
+        // listReflow on the container (and each card below) so filter/delete/
+        // append changes glide instead of snapping — see the const's comment.
+        <Animated.View style={{ gap: layout.cardGap }} layout={listReflow}>
           {(visibleItems ?? []).map(({ row, pips }, index) => {
             const makes = row.makes ?? 0;
             const fg = Math.round(row.fgPct * 100);
@@ -502,6 +521,7 @@ export default function HistoryScreen() {
               <Animated.View
                 key={row.id}
                 entering={enter(Math.min(index, STAGGER_CAP))}
+                layout={listReflow}
               >
                 {card}
               </Animated.View>
@@ -516,7 +536,7 @@ export default function HistoryScreen() {
               onPress={() => setPageLimit((limit) => limit + PAGE_SIZE)}
             />
           )}
-        </View>
+        </Animated.View>
       )}
 
       {items !== null && items.length > 0 && (
@@ -558,6 +578,10 @@ const styles = StyleSheet.create({
   },
   subNav: {
     marginBottom: space.xl,
+  },
+  /** SectionEyebrow leaves margins to the call site (screens own rhythm). */
+  sectionKicker: {
+    marginBottom: space.md,
   },
   heading: {
     ...type.heading,

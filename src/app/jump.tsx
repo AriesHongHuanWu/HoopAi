@@ -29,9 +29,24 @@ import { router } from 'expo-router';
 import { useKeepAwake } from 'expo-keep-awake';
 import { NitroModules } from 'react-native-nitro-modules';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Linking, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
-import Animated, { FadeIn } from 'react-native-reanimated';
-import { useSharedValue } from 'react-native-reanimated';
+import {
+  Linking,
+  Platform,
+  Pressable,
+  StyleSheet,
+  Text,
+  View,
+  useWindowDimensions,
+  type StyleProp,
+  type TextStyle,
+} from 'react-native';
+import Animated, {
+  FadeIn,
+  FadeInDown,
+  LinearTransition,
+  ReduceMotion,
+  useSharedValue,
+} from 'react-native-reanimated';
 import { scheduleOnRN } from 'react-native-worklets';
 import {
   Camera,
@@ -47,8 +62,10 @@ import {
 
 import { Sparkline } from '@/components/charts/Sparkline';
 import { CountUp, SuccessBurst, useCardStagger } from '@/components/motion';
+// Concrete import — the ScreenHeader precedent (never via a barrel).
+import { SectionEyebrow } from '@/components/ScreenHeader';
 import { Card, Chip, PillButton, Row, Screen } from '@/components/ui';
-import { color, font, layout, radius, space, type } from '@/constants/tokens';
+import { color, font, layout, motion, radius, space, type } from '@/constants/tokens';
 import { haptic } from '@/utils/haptics';
 import {
   PLYO_PROGRAMS,
@@ -77,6 +94,13 @@ const CAPTURE_MS = 2600;
 const ASSUMED_HEIGHT_CM = 175;
 
 type MeasurePhase = 'idle' | 'ready' | 'capturing' | 'scoring' | 'result';
+
+/**
+ * Disclosure motion grammar: each top-level block wears this layout
+ * transition so a More/Less or program expanding above it SLIDES the blocks
+ * below instead of popping them. Fresh builder per view.
+ */
+const reflow = () => LinearTransition.duration(motion.quick).reduceMotion(ReduceMotion.System);
 
 /** RN 0.86 dropped StyleSheet.absoluteFillObject — local equivalent (see live.tsx). */
 const absoluteFill = {
@@ -229,6 +253,52 @@ function useJumpPose(active: boolean, sink: (s: JumpSample) => void) {
 }
 
 // ---------------------------------------------------------------------------
+// More/Less disclosure — the settings.tsx ToggleRow `detail` idiom, local to
+// this screen. Text diet: one honest line stays in place on the card; the
+// FULL original wording lives here, never deleted. The revealed copy enters
+// with the app's disclosure grammar (FadeInDown, quick, reduced-motion aware);
+// collapse unmounts instantly by design (no exiting).
+// ---------------------------------------------------------------------------
+
+function MoreDetail({
+  topic,
+  detail,
+  textStyle,
+}: {
+  /** Read by screen readers: "More about {topic}". */
+  topic: string;
+  /** The full long-form copy, verbatim. */
+  detail: string;
+  /** Match the surrounding text rank (defaults to body/textDim). */
+  textStyle?: StyleProp<TextStyle>;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <>
+      {expanded && (
+        <Animated.View
+          entering={FadeInDown.duration(motion.quick).reduceMotion(ReduceMotion.System)}
+        >
+          <Text style={textStyle ?? styles.detailText}>{detail}</Text>
+        </Animated.View>
+      )}
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={expanded ? `Less about ${topic}` : `More about ${topic}`}
+        accessibilityState={{ expanded }}
+        hitSlop={space.sm}
+        onPress={() => {
+          haptic.selection();
+          setExpanded((v) => !v);
+        }}
+      >
+        <Text style={styles.moreLink}>{expanded ? 'Less' : 'More'}</Text>
+      </Pressable>
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Screen
 // ---------------------------------------------------------------------------
 
@@ -354,51 +424,53 @@ export default function JumpLabScreen() {
           </Text>
         </View>
 
-        {/* Hero measure card */}
-        <Card entering={cardEnter(0)}>
-          <Row gap={6} style={styles.eyebrowRow}>
-            <Ionicons name="pulse" size={12} color={color.accent} />
-            <Text style={styles.eyebrowText}>MEASURE</Text>
-          </Row>
-          {estimate == null || estimate.method === 'none' ? (
-            <>
-              <Text style={styles.measureLead}>
-                Measure your vertical from hang time — no tape measure, no wall.
-              </Text>
-              <Text style={styles.measureBody}>
-                Prop the phone so your WHOLE body is in frame, tap Measure, and
-                jump straight up with both feet. Needs at least 15 fps pose and
-                good light — if the phone can't keep up, it'll say so instead of
-                guessing.
-              </Text>
-              {estimate?.method === 'none' && (
-                <View style={styles.refuseBox}>
-                  <Ionicons name="alert-circle-outline" size={16} color={color.unsure} />
-                  <Text style={styles.refuseText}>{estimate.note}</Text>
-                </View>
-              )}
-            </>
-          ) : (
-            <JumpResult estimate={estimate} isNewPb={isNewPb} />
-          )}
-          <PillButton
-            label={estimate?.method === 'hang-time' ? 'Measure again' : 'Measure my jump'}
-            icon="body-outline"
-            onPress={() => setPhase('ready')}
-            style={styles.measureCta}
-          />
-        </Card>
+        {/* Hero measure card. Text diet: lede is one line; the honest-refusal
+            claim ("says so instead of guessing") is compressed in place and
+            the full how-to lives behind More, verbatim. */}
+        <Animated.View layout={reflow()}>
+          <Card entering={cardEnter(0)}>
+            <SectionEyebrow icon="pulse" style={styles.sectionKicker}>
+              Measure
+            </SectionEyebrow>
+            {estimate == null || estimate.method === 'none' ? (
+              <>
+                <Text style={styles.measureLead}>Measure your vertical from hang time.</Text>
+                <Text style={styles.measureBody}>
+                  Whole body in frame — if the phone can't keep up, it says so
+                  instead of guessing.
+                </Text>
+                <MoreDetail
+                  topic="measuring"
+                  detail="No tape measure, no wall. Prop the phone so your WHOLE body is in frame, tap Measure, and jump straight up with both feet. Needs at least 15 fps pose and good light — if the phone can't keep up, it'll say so instead of guessing."
+                />
+                {estimate?.method === 'none' && (
+                  <View style={styles.refuseBox}>
+                    <Ionicons name="alert-circle-outline" size={16} color={color.unsure} />
+                    <Text style={styles.refuseText}>{estimate.note}</Text>
+                  </View>
+                )}
+              </>
+            ) : (
+              <JumpResult estimate={estimate} isNewPb={isNewPb} />
+            )}
+            <PillButton
+              label={estimate?.method === 'hang-time' ? 'Measure again' : 'Measure my jump'}
+              icon="body-outline"
+              onPress={() => setPhase('ready')}
+              style={styles.measureCta}
+            />
+          </Card>
+        </Animated.View>
 
         {/* History + PB */}
+        <Animated.View layout={reflow()}>
         <Card entering={cardEnter(1)}>
-          <Row gap={6} style={styles.eyebrowRow}>
-            <Ionicons name="trending-up" size={12} color={color.accent} />
-            <Text style={styles.eyebrowText}>YOUR NUMBERS</Text>
-          </Row>
+          <SectionEyebrow icon="trending-up" style={styles.sectionKicker}>
+            Your numbers
+          </SectionEyebrow>
           {stats.count === 0 ? (
             <Text style={styles.measureBody}>
-              No jumps logged yet. Your personal best and trend will show up here
-              after your first measurement.
+              No jumps yet — your personal best and trend land here.
             </Text>
           ) : (
             <>
@@ -433,32 +505,43 @@ export default function JumpLabScreen() {
             </>
           )}
         </Card>
+        </Animated.View>
 
-        {/* Training */}
-        <View>
-          <Row gap={6} style={styles.eyebrowRow}>
-            <Ionicons name="barbell-outline" size={12} color={color.accent} />
-            <Text style={styles.eyebrowText}>TRAIN YOUR JUMP</Text>
-          </Row>
+        {/* Training. Text diet: one-line intro; the quality-over-quantity
+            coaching point moved behind More, verbatim. */}
+        <Animated.View layout={reflow()}>
+          <SectionEyebrow icon="barbell-outline" style={styles.sectionKicker}>
+            Train your jump
+          </SectionEyebrow>
           <Text style={styles.trainingIntro}>
-            Pick the program that matches where you are. Plyometrics are about
-            quality and full recovery — a few explosive reps beat many tired
-            ones.
+            Pick the program that matches where you are.
           </Text>
-        </View>
+          <MoreDetail
+            topic="the training programs"
+            detail="Plyometrics are about quality and full recovery — a few explosive reps beat many tired ones."
+          />
+        </Animated.View>
         {PLYO_PROGRAMS.map((p, i) => (
-          <ProgramCard key={p.level} program={p} entering={cardEnter(2 + i)} />
+          <Animated.View key={p.level} layout={reflow()}>
+            <ProgramCard program={p} entering={cardEnter(2 + i)} />
+          </Animated.View>
         ))}
 
-        <View style={styles.disclaimer}>
+        {/* Honesty line: "not medical advice" is compressed in place, never
+            deleted — the full caution stays reachable behind More, verbatim. */}
+        <Animated.View layout={reflow()} style={styles.disclaimer}>
           <Ionicons name="information-circle-outline" size={15} color={color.textFaint} />
-          <Text style={styles.disclaimerText}>
-            Not medical advice. These are general training guidelines, not a
-            personalized program. Warm up first, stop if anything hurts, and
-            check with a doctor or a qualified coach before starting a new
-            training plan.
-          </Text>
-        </View>
+          <View style={styles.disclaimerBody}>
+            <Text style={styles.disclaimerText}>
+              Not medical advice — general guidance only. Stop if anything hurts.
+            </Text>
+            <MoreDetail
+              topic="this guidance"
+              detail="These are general training guidelines, not a personalized program. Warm up first, stop if anything hurts, and check with a doctor or a qualified coach before starting a new training plan."
+              textStyle={styles.disclaimerDetail}
+            />
+          </View>
+        </Animated.View>
       </View>
 
       {/* Full-screen measure overlay (camera + READY/JUMP!/scoring) */}
@@ -538,10 +621,11 @@ function MeasureOverlay({
           {phase === 'ready' && (
             <>
               <Text style={styles.overlayTitle}>Get set</Text>
+              {/* Text diet: two short lines at the moment of action — the full
+                  walkthrough lives on the measure card's More disclosure. */}
               <Text style={styles.overlaySub}>
-                Stand so your whole body — head to feet — is in frame. When you
-                tap Jump, you'll have a moment, then jump straight up with both
-                feet and land in the same spot.
+                Whole body in frame, head to feet. Tap Jump, then jump straight
+                up and land in frame.
               </Text>
               {!pose.modelLoaded && (
                 <Text style={styles.overlayWarming}>Warming up the pose model…</Text>
@@ -556,14 +640,20 @@ function MeasureOverlay({
             </>
           )}
           {phase === 'capturing' && (
-            <Animated.View entering={FadeIn} style={styles.captureBadge}>
+            <Animated.View
+              entering={FadeIn.duration(motion.quick).reduceMotion(ReduceMotion.System)}
+              style={styles.captureBadge}
+            >
               <Text style={styles.captureBig}>JUMP!</Text>
               <Text style={styles.captureSub}>Explode straight up — land in frame</Text>
               <CaptureProgress framesSv={pose.framesSv} />
             </Animated.View>
           )}
           {phase === 'scoring' && (
-            <Animated.View entering={FadeIn} style={styles.captureBadge}>
+            <Animated.View
+              entering={FadeIn.duration(motion.quick).reduceMotion(ReduceMotion.System)}
+              style={styles.captureBadge}
+            >
               <Text style={styles.captureBig}>Measuring…</Text>
               <Text style={styles.captureSub}>Reading your hang time</Text>
             </Animated.View>
@@ -604,7 +694,9 @@ function JumpResult({ estimate, isNewPb }: { estimate: JumpEstimate; isNewPb: bo
     conf >= 0.75 ? 'make' : conf >= 0.5 ? 'accent' : 'unsure';
 
   return (
-    <Animated.View entering={FadeIn}>
+    <Animated.View
+      entering={FadeIn.duration(motion.standard).reduceMotion(ReduceMotion.System)}
+    >
       {isNewPb && (
         <Row gap={6} style={styles.pbRow}>
           <Ionicons name="trophy" size={14} color={color.accent} />
@@ -684,7 +776,14 @@ function ProgramCard({
   const tone = LEVEL_TONE[program.level];
   return (
     <Card entering={entering}>
-      <Pressable onPress={() => setOpen((o) => !o)} accessibilityRole="button">
+      <Pressable
+        onPress={() => {
+          haptic.selection();
+          setOpen((o) => !o);
+        }}
+        accessibilityRole="button"
+        accessibilityState={{ expanded: open }}
+      >
         <Row style={styles.programHead}>
           <View style={{ flex: 1 }}>
             <Row gap={space.sm} style={{ alignItems: 'baseline', flexWrap: 'wrap' }}>
@@ -708,7 +807,11 @@ function ProgramCard({
       </Row>
 
       {open && (
-        <Animated.View entering={FadeIn}>
+        // Disclosure grammar: reveal fades in at motion.quick; collapse
+        // unmounts instantly by design (no exiting).
+        <Animated.View
+          entering={FadeInDown.duration(motion.quick).reduceMotion(ReduceMotion.System)}
+        >
           <View style={styles.exerciseList}>
             {program.exercises.map((e, i) => (
               <Row key={e.name} style={[styles.exerciseRow, i > 0 && styles.exerciseDivider]}>
@@ -847,13 +950,21 @@ const styles = StyleSheet.create({
     ...type.title,
     color: color.text,
   },
-  eyebrowRow: {
+  /** Section kicker spacing — the SectionEyebrow rows above each block. */
+  sectionKicker: {
     marginBottom: space.sm,
   },
-  eyebrowText: {
-    ...type.caption,
-    color: color.textFaint,
-    letterSpacing: 1,
+  /** Long-form copy revealed by a MoreDetail disclosure. */
+  detailText: {
+    ...type.body,
+    color: color.textDim,
+    marginTop: space.sm,
+  },
+  /** The "More"/"Less" disclosure link (settings.tsx moreLink recipe). */
+  moreLink: {
+    ...type.bodyMedium,
+    color: color.accent,
+    marginTop: space.xs,
   },
   measureLead: {
     ...type.headingLarge,
@@ -1047,11 +1158,21 @@ const styles = StyleSheet.create({
     alignItems: 'flex-start',
     marginTop: space.xs,
   },
+  /** Text column beside the info glyph (holds the line + its More link). */
+  disclaimerBody: {
+    flex: 1,
+  },
   disclaimerText: {
     ...type.caption,
     color: color.textFaint,
-    flex: 1,
     lineHeight: 17,
+  },
+  /** Disclosed full caution — same caption rank as the compressed line. */
+  disclaimerDetail: {
+    ...type.caption,
+    color: color.textFaint,
+    lineHeight: 17,
+    marginTop: space.xs,
   },
   // overlay
   overlay: {

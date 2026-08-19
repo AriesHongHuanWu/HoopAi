@@ -14,6 +14,7 @@ import { StyleSheet, Text, View } from 'react-native';
 import Animated from 'react-native-reanimated';
 
 import { AnimatedProgressBar, ArcReveal, MotionStat, useCardStagger } from '@/components/motion';
+import { SectionEyebrow } from '@/components/ScreenHeader';
 import { AchievementRow } from '@/components/AchievementRow';
 import { ProBadge } from '@/components/ProBadge';
 import { BackPill } from '@/components/ShotList';
@@ -275,8 +276,7 @@ export default function RecordsScreen() {
           <Card>
             <Text style={styles.heading}>Your trophy shelf is waiting</Text>
             <Text style={[styles.dim, { marginTop: space.xs }]}>
-              Every make, streak and session counts toward a badge. Track one
-              session and First bucket is basically yours.
+              Every make, streak and session counts toward a badge.
             </Text>
             <PillButton
               variant="ghost"
@@ -291,9 +291,10 @@ export default function RecordsScreen() {
         {unlocked.length > 0 && (
           <View>
             <Row style={styles.sectionHeader}>
-              <View style={styles.eyebrowTrim}>
-                <Eyebrow>Unlocked</Eyebrow>
-              </View>
+              {/* SectionEyebrow carries no bottom margin, so the old
+                  eyebrowTrim counter-margin hack is gone with the ui.tsx
+                  Eyebrow it existed to cancel. */}
+              <SectionEyebrow icon="trophy-outline">Unlocked</SectionEyebrow>
               <Chip label={`${unlocked.length} of ${ACHIEVEMENTS.length}`} tone="accent" />
             </Row>
             {/* Board completion — decorative; the chip above carries the count
@@ -313,7 +314,7 @@ export default function RecordsScreen() {
         {lockedByProgress.length > 0 && (
           <View>
             <Row style={styles.sectionHeader}>
-              <Eyebrow>In progress</Eyebrow>
+              <SectionEyebrow icon="hourglass-outline">In progress</SectionEyebrow>
             </Row>
             <BadgeList defs={lockedByProgress} totals={totals} unlocked={false} />
           </View>
@@ -379,13 +380,6 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     marginBottom: space.xs,
-  },
-  // Eyebrow (src/components/ui.tsx) bakes in its own marginBottom: space.sm,
-  // which pushes its text off-center against a trailing Chip in this Row.
-  // Cancel it locally so the Row's `alignItems: 'center'` aligns the actual
-  // text baseline against the Chip instead of the Eyebrow's padded box.
-  eyebrowTrim: {
-    marginBottom: -space.sm,
   },
   badgeList: {
     gap: space.sm,

@@ -343,12 +343,13 @@ export default function LeaderboardScreen() {
       </Text>
 
       <Card style={styles.card} entering={enter(0)}>
+        {/* The heading is a test-pinned honesty line; the body is the claim
+            COMPRESSED (text diet), not softened: no server, only what was
+            shared, self-reported. */}
         <Text style={styles.cardHeading}>Results that reached this phone</Text>
         <Text style={styles.body}>
-          There is no server and no account behind this board. A challenge travels as a link or a
-          spoken code, your friend shoots it on their own phone, and their result travels back the
-          same way. So this is only what has actually been shared with you — never a world ranking,
-          never complete, and every score is self-reported.
+          No server, no account — challenges and results travel as links between phones. Only
+          what was shared with you shows here, and every score is self-reported.
         </Text>
       </Card>
 
@@ -400,8 +401,8 @@ export default function LeaderboardScreen() {
               </Text>
             </Row>
             <Text style={styles.hint}>
-              Your friend gets a challenge to beat {recentRow.makes} makes. The share sheet is where
-              AirDrop, Messages and the rest live.
+              Your friend gets a challenge to beat {recentRow.makes} makes — sent over AirDrop,
+              Messages or anything on the share sheet.
             </Text>
           </>
         )}
@@ -425,9 +426,9 @@ export default function LeaderboardScreen() {
             <Text style={styles.code} accessibilityLabel={`Challenge code ${shared.code}`}>
               {shared.code}
             </Text>
+            {/* Honesty compressed: the code confirms, only the link carries. */}
             <Text style={styles.hint}>
-              Read this out to check you are both on the same challenge. It confirms a challenge —
-              it can&apos;t rebuild one, so the link below is what actually carries it.
+              Read it out to confirm the same challenge — the link is what carries it.
             </Text>
             <Text style={styles.link} selectable numberOfLines={3}>
               {shared.link}
@@ -446,8 +447,7 @@ export default function LeaderboardScreen() {
       <Card style={styles.card} entering={enter(2)}>
         <Text style={styles.cardHeading}>Add a friend&apos;s challenge or result</Text>
         <Text style={styles.body}>
-          Paste the whole link they sent (or the code from it). It is read on this phone — nothing
-          is looked up anywhere.
+          Paste the whole link they sent — read on this phone, looked up nowhere.
         </Text>
         <TextInput
           accessibilityLabel="Paste a challenge link or code"
@@ -547,7 +547,9 @@ export default function LeaderboardScreen() {
           <Text style={styles.hint}>
             {activeInvite !== null
               ? `From ${activeInvite.fromName} · beat ${activeInvite.target} ${activeInvite.kind}`
-              : "You don't have this challenge's invite on this phone, so its target and title are unknown. The results below are still exactly what was shared with you."}
+              : // Unknown-invite honesty, compressed to one line — the claim
+                // (nothing invented, shown exactly as shared) survives intact.
+                'No invite on this phone — results shown exactly as shared.'}
           </Text>
 
           {rows.length === 0 ? (

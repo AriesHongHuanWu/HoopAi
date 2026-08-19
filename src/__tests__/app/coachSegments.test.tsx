@@ -349,6 +349,10 @@ const FORM_CARDS = [
   // is now two honest entry rows; the 3D row names its estimate and routes to
   // /formstudio3d, so THAT copy is the pin.
   'Orbit your shot in 3D',
+  // The hoop-free Form Check entry card (motion-only; sits between Form
+  // Studio and the readiness honesty line). Pinned by its action row so the
+  // card can't silently drift out of the form segment.
+  'Check my shooting form',
   'FORM_READINESS_CARD',
 ];
 const PLAN_CARDS = ['PLANNED_DRILL', 'GO DEEPER'];
@@ -489,10 +493,13 @@ describe('switching', () => {
     await switchTo(r, 'Your form');
 
     const indexes = [...new Set(mockEnter.mock.calls.map(([i]) => i))].sort((a, b) => a - b);
-    // Form owns five cards: 0..4, starting at 0 — never continuing a ladder
-    // from wherever the previous segment left off.
+    // Form owns six cards: 0..5, starting at 0 — never continuing a ladder
+    // from wherever the previous segment left off. (Re-pinned from 0..4 when
+    // the Form Check entry card landed between Form Studio and the readiness
+    // honesty line — the segment gained a card, the ladder contract did not
+    // change.)
     expect(indexes[0]).toBe(0);
-    expect(Math.max(...indexes)).toBeLessThanOrEqual(4);
+    expect(Math.max(...indexes)).toBeLessThanOrEqual(5);
     await unmount(r);
   });
 });

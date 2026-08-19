@@ -11,15 +11,17 @@
  */
 // RecommendedHero draws its static arc through the motion module (arcMotif +
 // a Skia canvas). Neither Reanimated's worklets runtime nor Skia's native
-// bindings load under jest, so both are stubbed at the module boundary — the
-// component never CALLS them here (the arc is a static draw gated behind
-// onLayout, which react-test-renderer never fires).
+// bindings load under jest, so both are stubbed at the module boundary.
+// Animated.View passes through to a plain View (ModeSectionHeader wraps its
+// chevron in one — swallowing children would hide the glyph from the tree);
+// useReducedMotion → true keeps every shared-value pose snapped.
 jest.mock('react-native-reanimated', () => ({
   __esModule: true,
-  default: { View: () => null },
+  default: { View: require('react-native').View },
   useReducedMotion: () => true,
   useSharedValue: (v: unknown) => ({ value: v }),
   useDerivedValue: (fn: () => unknown) => ({ value: fn() }),
+  useAnimatedStyle: () => ({}),
   withTiming: (v: unknown) => v,
   Easing: { out: (f: unknown) => f, cubic: (t: number) => t },
 }));
@@ -329,7 +331,7 @@ describe('ModeSectionHeader', () => {
     expect(onToggle).toHaveBeenCalledTimes(1);
   });
 
-  it('toggle form collapsed: chevron-forward, expand hint, lede hidden', () => {
+  it('toggle form collapsed: expand hint, lede hidden, same single chevron glyph', () => {
     const r = render(
       <ModeSectionHeader
         title="Games"
@@ -342,7 +344,12 @@ describe('ModeSectionHeader', () => {
     const row = findButton(r.root);
     expect(row.props.accessibilityHint).toBe('Expands this section');
     expect(row.props.accessibilityState).toEqual({ expanded: false });
-    expect(r.root.findByType(Ionicons).props.name).toBe('chevron-forward');
+    // RE-PINNED (motion sweep): the chevron is now ONE 'chevron-down' glyph
+    // rotated -90° by a shared-value pose when collapsed (the
+    // CollapsibleSection idiom), so the NAME no longer flips to
+    // 'chevron-forward'. Collapsed state stays fully pinned above through the
+    // a11y hint + expanded:false — the semantics moved, they did not weaken.
+    expect(r.root.findByType(Ionicons).props.name).toBe('chevron-down');
     expect(texts(r.root)).not.toContain('Pick a game and prop your phone up.');
   });
 

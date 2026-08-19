@@ -10,8 +10,14 @@ import { Ionicons } from '@expo/vector-icons';
 import { createAudioPlayer, type AudioPlayer } from 'expo-audio';
 import Constants from 'expo-constants';
 import { router } from 'expo-router';
-import { useEffect, useRef, useState, type ComponentProps } from 'react';
+import { useEffect, useRef, useState, type ComponentProps, type ReactNode } from 'react';
 import { Linking, Modal, Pressable, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
+import Animated, {
+  FadeIn,
+  FadeInDown,
+  LinearTransition,
+  ReduceMotion,
+} from 'react-native-reanimated';
 
 import {
   getSoundSource,
@@ -22,10 +28,10 @@ import {
 import { BackPill } from '@/components/ShotList';
 import { CalibrationHealthCard } from '@/components/CalibrationHealthCard';
 import { Card, Eyebrow, Row, Screen } from '@/components/ui';
-import { color, iconSize, layout, radius, space, touch, type } from '@/constants/tokens';
+import { color, iconSize, layout, motion, radius, space, touch, type } from '@/constants/tokens';
 import type { ShootingHand } from '@/core/types';
 import { runBackupExport, runBackupImport } from '@/data/backupRunner';
-import { useCardStagger } from '@/components/motion';
+import { useCardStagger, type EnteringProp } from '@/components/motion';
 import { haptic } from '@/utils/haptics';
 import {
   CLIP_POST_ROLL_MAX,
@@ -149,22 +155,30 @@ const DEVICE_TIER_OPTIONS: { value: 'auto' | DeviceTier; label: string; blurb: s
 const PRESET_OPTIONS: {
   value: Exclude<TrackingPreset, 'custom'>;
   label: string;
+  /** ONE line on the row (text diet); the full pre-diet blurb is `detail`. */
   blurb: string;
+  detail: string;
 }[] = [
   {
     value: 'accuracy',
     label: 'Best accuracy · recommended',
-    blurb: 'YOLOX on CPU — numerically exact, the same path the Test AI screen uses. The most reliable ball tracking; runs in real time on most phones.',
+    blurb: 'CPU — numerically exact, the most reliable tracking.',
+    detail:
+      'YOLOX on CPU — numerically exact, the same path the Test AI screen uses. The most reliable ball tracking; runs in real time on most phones.',
   },
   {
     value: 'balanced',
     label: 'Balanced',
-    blurb: 'YOLOX on the GPU — faster on phones where the CPU can’t keep up, at a small cost to precision on some devices.',
+    blurb: 'GPU — faster where the CPU can’t keep up.',
+    detail:
+      'YOLOX on the GPU — faster on phones where the CPU can’t keep up, at a small cost to precision on some devices.',
   },
   {
     value: 'smooth',
     label: 'Smooth · newest phones',
-    blurb: 'YOLOX on the GPU, analysing every frame — the smoothest tracking, best on recent phones with power to spare.',
+    blurb: 'GPU, every frame — for recent phones.',
+    detail:
+      'YOLOX on the GPU, analysing every frame — the smoothest tracking, best on recent phones with power to spare.',
   },
 ];
 
@@ -172,6 +186,17 @@ const PRESET_OPTIONS: {
 function tick() {
   haptic.selection();
 }
+
+// ---------------------------------------------------------------------------
+// Disclosure motion grammar (text-diet sweep): the container that reflows
+// rides a quick LinearTransition, revealed copy fades in on the same token,
+// and collapse stays an instant unmount by design (no exiting animation).
+// Both builders defer to the system Reduce Motion switch.
+// ---------------------------------------------------------------------------
+
+const cardReflow = LinearTransition.duration(motion.quick).reduceMotion(ReduceMotion.System);
+const detailFade = FadeIn.duration(motion.quick).reduceMotion(ReduceMotion.System);
+const revealFade = FadeInDown.duration(motion.quick).reduceMotion(ReduceMotion.System);
 
 // ---------------------------------------------------------------------------
 // Sound pack preview — plays the pack's make sound on select
@@ -210,6 +235,47 @@ function SectionHeader({ icon, children }: { icon: IconName; children: string })
   );
 }
 
+/**
+ * Card whose box grows/shrinks smoothly when a More/Less disclosure (or the
+ * Debug reveal) changes its content height. The layout transition rides an
+ * inner Animated.View because ui.tsx's Card is read-only and forwards no
+ * layout prop — the ShotReceipt expanding-column idiom.
+ */
+function ReflowCard({ entering, children }: { entering?: EnteringProp; children: ReactNode }) {
+  return (
+    <Card entering={entering}>
+      <Animated.View layout={cardReflow}>{children}</Animated.View>
+    </Card>
+  );
+}
+
+/**
+ * "More"/"Less" disclosure — the settings-wide text-diet pattern. Long-form
+ * copy is parked here so a row's visible description stays ONE honest
+ * sentence; nothing is deleted, it just waits behind one tap.
+ */
+function MoreDetail({ label, detail }: { label: string; detail: string }) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <>
+      {expanded && (
+        <Animated.View entering={detailFade}>
+          <Text style={styles.settingDesc}>{detail}</Text>
+        </Animated.View>
+      )}
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={expanded ? `Less about ${label}` : `More about ${label}`}
+        accessibilityState={{ expanded }}
+        hitSlop={space.sm}
+        onPress={() => setExpanded((v) => !v)}
+      >
+        <Text style={styles.moreLink}>{expanded ? 'Less' : 'More'}</Text>
+      </Pressable>
+    </>
+  );
+}
+
 function ToggleRow({
   label,
   description,
@@ -230,7 +296,6 @@ function ToggleRow({
   experimental?: boolean;
   onValueChange: (v: boolean) => void;
 }) {
-  const [expanded, setExpanded] = useState(false);
   return (
     <Row style={[styles.settingRow, disabled === true && styles.disabled]} gap={space.lg}>
       <View style={styles.settingText}>
@@ -244,20 +309,7 @@ function ToggleRow({
           )}
         </View>
         {description != null && <Text style={styles.settingDesc}>{description}</Text>}
-        {detail != null && (
-          <>
-            {expanded && <Text style={styles.settingDesc}>{detail}</Text>}
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={expanded ? `Less about ${label}` : `More about ${label}`}
-              accessibilityState={{ expanded }}
-              hitSlop={space.sm}
-              onPress={() => setExpanded((v) => !v)}
-            >
-              <Text style={styles.moreLink}>{expanded ? 'Less' : 'More'}</Text>
-            </Pressable>
-          </>
-        )}
+        {detail != null && <MoreDetail label={label} detail={detail} />}
       </View>
       <Switch
         accessibilityLabel={experimental === true ? `${label} (experimental)` : label}
@@ -319,11 +371,15 @@ function SelectChip({
 function PresetRow({
   label,
   blurb,
+  detail,
   selected,
   onPress,
 }: {
   label: string;
+  /** ONE honest sentence — the full story lives behind `detail`. */
   blurb: string;
+  /** Collapsed long-form copy behind a "More" disclosure. Never deleted. */
+  detail?: string;
   selected: boolean;
   onPress: () => void;
 }) {
@@ -331,7 +387,9 @@ function PresetRow({
     <Pressable
       accessibilityRole="radio"
       accessibilityLabel={label}
-      accessibilityHint={blurb}
+      // The radio Pressable groups its children away from screen readers, so
+      // the hint must carry the FULL story, not just the one-line blurb.
+      accessibilityHint={detail != null ? `${blurb} ${detail}` : blurb}
       accessibilityState={{ selected }}
       onPress={onPress}
       style={({ pressed }) => [
@@ -343,6 +401,7 @@ function PresetRow({
       <View style={styles.settingText}>
         <Text style={styles.settingLabel}>{label}</Text>
         <Text style={styles.settingDesc}>{blurb}</Text>
+        {detail != null && <MoreDetail label={label} detail={detail} />}
       </View>
       {selected ? (
         <Ionicons name="checkmark-circle" size={22} color={color.accent} />
@@ -356,12 +415,16 @@ function PresetRow({
 function OptionRow({
   label,
   blurb,
+  detail,
   selected,
   disabled,
   onPress,
 }: {
   label: string;
+  /** ONE honest sentence — the full story lives behind `detail`. */
   blurb: string;
+  /** Collapsed long-form copy behind a "More" disclosure. Never deleted. */
+  detail?: string;
   selected: boolean;
   disabled?: boolean;
   onPress: () => void;
@@ -370,7 +433,9 @@ function OptionRow({
     <Pressable
       accessibilityRole="radio"
       accessibilityLabel={label}
-      accessibilityHint={blurb}
+      // Grouped children are invisible to screen readers — the hint carries
+      // the full story when a detail disclosure exists.
+      accessibilityHint={detail != null ? `${blurb} ${detail}` : blurb}
       accessibilityState={{ selected, disabled: disabled === true }}
       disabled={disabled}
       onPress={onPress}
@@ -383,6 +448,7 @@ function OptionRow({
       <View style={styles.settingText}>
         <Text style={styles.settingLabel}>{label}</Text>
         <Text style={styles.settingDesc}>{blurb}</Text>
+        {detail != null && <MoreDetail label={label} detail={detail} />}
       </View>
       <View style={[styles.radioOuter, selected && { borderColor: color.accent }]}>
         {selected && <View style={styles.radioInner} />}
@@ -675,7 +741,7 @@ export default function SettingsScreen() {
         </Text>
 
         {/* Feedback */}
-        <Card entering={enter(0)}>
+        <ReflowCard entering={enter(0)}>
           <SectionHeader icon="volume-high">Feedback</SectionHeader>
           <ToggleRow
             label="Sounds"
@@ -737,17 +803,19 @@ export default function SettingsScreen() {
               />
             ))}
           </View>
-        </Card>
+        </ReflowCard>
 
         {/* Detection */}
-        <Card entering={enter(1)}>
+        <ReflowCard entering={enter(1)}>
           <SectionHeader icon="scan">Detection</SectionHeader>
           <View style={styles.settingText}>
             <Text style={styles.settingLabel}>Tracking mode</Text>
-            <Text style={styles.settingDesc}>
-              One choice that trades accuracy against speed for your phone. Most
-              people never need the advanced controls.
-            </Text>
+            {/* Text diet: one line; the pre-diet intro waits behind More. */}
+            <Text style={styles.settingDesc}>One choice — accuracy vs speed on your phone.</Text>
+            <MoreDetail
+              label="Tracking mode"
+              detail="One choice that trades accuracy against speed for your phone. Most people never need the advanced controls."
+            />
           </View>
           <View style={styles.presetList}>
             {PRESET_OPTIONS.map((opt) => (
@@ -755,6 +823,7 @@ export default function SettingsScreen() {
                 key={opt.value}
                 label={opt.label}
                 blurb={opt.blurb}
+                detail={opt.detail}
                 selected={activePreset === opt.value}
                 onPress={() => {
                   tick();
@@ -775,11 +844,16 @@ export default function SettingsScreen() {
               wants max quality. */}
           <View style={styles.settingText}>
             <Text style={styles.settingLabel}>Your device</Text>
+            {/* Text diet: the live device·tier read stays on the row (it is
+                the receipt); the teaching sentence waits behind More. */}
             <Text style={styles.settingDesc}>
               {deviceName} · tuned for{' '}
-              <Text style={{ color: color.accent }}>{tierLabel(resolvedTier)}</Text>. We pick the
-              detector model and speed that fit your phone. Override only if you know better.
+              <Text style={{ color: color.accent }}>{tierLabel(resolvedTier)}</Text>.
             </Text>
+            <MoreDetail
+              label="Your device"
+              detail="We pick the detector model and speed that fit your phone. Override only if you know better."
+            />
           </View>
           <View style={styles.presetList}>
             {DEVICE_TIER_OPTIONS.map((opt) => (
@@ -802,7 +876,9 @@ export default function SettingsScreen() {
               reach the off switch without first discovering Debug mode. */}
           <ToggleRow
             label="Rattle-out guard"
-            description="If the ball visibly rattles back OUT of the rim, the shot is held as 'unsure' — it can only downgrade a make to unsure, never invent a miss."
+            // Guard honesty COMPRESSED, not deleted: the can-only-downgrade
+            // claim stays on the row; the full wording stays in `detail`.
+            description="Holds a visible rattle-out as unsure — never invents a miss."
             detail="If you SEE the ball carom back out of the rim — landing outside the hoop, or popping back up above it — hold that shot as 'unsure' instead of counting a make. It now needs to actually see the ball leave the rim; it no longer holds a shot back just because the drop-through was hidden by the net. It can only downgrade a make to unsure, never invent a miss. Turn it off if makes still go uncounted."
             value={rattleGuard}
             onValueChange={(v) => {
@@ -813,7 +889,8 @@ export default function SettingsScreen() {
           <View style={styles.divider} />
           <ToggleRow
             label="Late bounce-out check"
-            description="Waits ~0.13s after a rim-touch shot drops, to catch a late bounce-out — it can only downgrade a make to unsure."
+            // Same compression rule as the rattle guard above.
+            description="Waits ~0.13s after a rim-touch drop — can only downgrade to unsure."
             detail="After a shot that TOUCHED the rim drops below it, wait a few frames (~0.13s) to catch a late bounce-out — the ball dips in, then pops back over the rim and out. A clean swish no longer waits, so makes register immediately. Like the guard above, it can only downgrade a make to unsure."
             value={settleWindow}
             onValueChange={(v) => {
@@ -826,7 +903,7 @@ export default function SettingsScreen() {
               the settings stay a 30-second read for everyone else. */}
           <ToggleRow
             label="Debug mode"
-            description="Show live detector diagnostics and unlock the advanced detection & diagnostics screen below."
+            description="Show live diagnostics and unlock the advanced screen below."
             value={debugMode}
             onValueChange={(v) => {
               tick();
@@ -834,38 +911,39 @@ export default function SettingsScreen() {
             }}
           />
           {debugMode && (
-            <>
+            <Animated.View entering={revealFade}>
               <View style={styles.divider} />
               {/* The 14-knob debug block lives on its own pushed screen so
                   the Detection card stays scannable even with Debug on. */}
               <ActionRow
                 label="Advanced detection & diagnostics"
-                description="Benchmark, detector model and engine, experiments, guards and the hard-example export."
+                description="Benchmark, detector internals, experiments and exports."
                 onPress={() => {
                   tick();
                   router.push('/settings-advanced');
                 }}
               />
-            </>
+            </Animated.View>
           )}
-        </Card>
+        </ReflowCard>
 
         {/* Coaching */}
-        <Card entering={enter(2)}>
+        <ReflowCard entering={enter(2)}>
           <SectionHeader icon="school">Coaching</SectionHeader>
           <ToggleRow
             label="Shooting form analysis"
-            description="Analyzes your elbow, knee, release and follow-through with a pose model, gives one cue per shot, and unlocks Form Studio's side-by-side comparison against an NBA reference. It runs a second model, so on older phones it samples at a lower rate (about 10 times a second) rather than every frame — enough for the dip, set, release and follow-through it compares."
+            description="One cue per shot from a pose model."
+            detail="Analyzes your elbow, knee, release and follow-through with a pose model, gives one cue per shot, and unlocks Form Studio's side-by-side comparison against an NBA reference. It runs a second model, so on older phones it samples at a lower rate (about 10 times a second) rather than every frame — enough for the dip, set, release and follow-through it compares."
             value={formAnalysis}
             onValueChange={(v) => {
               tick();
               set('formAnalysis', v);
             }}
           />
-        </Card>
+        </ReflowCard>
 
         {/* Goals */}
-        <Card entering={enter(3)}>
+        <ReflowCard entering={enter(3)}>
           <SectionHeader icon="flag">Goals</SectionHeader>
           <StepperRow
             label="Daily goal"
@@ -887,15 +965,15 @@ export default function SettingsScreen() {
               dependency lands, this becomes a working hour-picker toggle. */}
           <ToggleRow
             label="Daily reminder"
-            description="A gentle nudge to get some shots up each day. Coming in a store build — needs a notifications capability this preview build doesn't include."
+            description="Coming in a store build — this preview can't schedule notifications."
             value={false}
             disabled
             onValueChange={() => {}}
           />
-        </Card>
+        </ReflowCard>
 
         {/* Video */}
-        <Card entering={enter(4)}>
+        <ReflowCard entering={enter(4)}>
           <SectionHeader icon="videocam">Video</SectionHeader>
           <ToggleRow
             label="Record sessions"
@@ -946,7 +1024,9 @@ export default function SettingsScreen() {
             }}
           />
           {debugMode && (
-          <>
+          // Same reveal grammar as the Advanced row: Debug-gated content fades
+          // in; hiding it stays an instant unmount.
+          <Animated.View entering={revealFade}>
           <View style={styles.divider} />
           <StepperRow
             label="Seconds before a make"
@@ -969,21 +1049,21 @@ export default function SettingsScreen() {
             disabled={!recordVideo || keepMode === 'none'}
             onChange={(v) => set('clipPostRollSec', v)}
           />
-          </>
+          </Animated.View>
           )}
           <View style={styles.divider} />
           <ActionRow
             label="Manage storage"
-            description="See how much space session recordings use and delete old videos. Your stats are always kept — only the video files go."
+            description="Delete old session videos — your stats are always kept."
             onPress={() => {
               tick();
               router.push('/storage');
             }}
           />
-        </Card>
+        </ReflowCard>
 
         {/* Player */}
-        <Card entering={enter(5)}>
+        <ReflowCard entering={enter(5)}>
           <SectionHeader icon="person">Player</SectionHeader>
           <View style={styles.settingText}>
             <Text style={styles.settingLabel}>Shooting hand</Text>
@@ -1006,9 +1086,12 @@ export default function SettingsScreen() {
           <View style={styles.settingText}>
             <Text style={styles.settingLabel}>Ball size</Text>
             <Text style={styles.settingDesc}>
-              The ball is used as a real-world size reference for depth checks
-              and distance estimates — set it to what you actually play with.
+              A real-world size reference — set what you actually play with.
             </Text>
+            <MoreDetail
+              label="Ball size"
+              detail="The ball is used as a real-world size reference for depth checks and distance estimates — set it to what you actually play with."
+            />
           </View>
           <View style={styles.chipWrap}>
             {BALL_OPTIONS.map((opt) => (
@@ -1027,9 +1110,12 @@ export default function SettingsScreen() {
           <View style={styles.settingText}>
             <Text style={styles.settingLabel}>Rim height</Text>
             <Text style={styles.settingDesc}>
-              The rim's height is the ruler for the metric distance estimate —
-              set it to the hoop you actually shoot on.
+              The ruler for distance estimates — set your actual hoop.
             </Text>
+            <MoreDetail
+              label="Rim height"
+              detail="The rim's height is the ruler for the metric distance estimate — set it to the hoop you actually shoot on."
+            />
           </View>
           {RIM_HEIGHT_OPTIONS.map((opt, i) => (
             <View key={opt.value}>
@@ -1049,10 +1135,12 @@ export default function SettingsScreen() {
           <View style={styles.settingText}>
             <Text style={styles.settingLabel}>Court range</Text>
             <Text style={styles.settingDesc}>
-              Pin whether your makes score as 2 or 3 when you're shooting from one
-              range — accurate scoring without any line setup. Leave on Automatic
-              for mixed sessions.
+              Score makes as 2 or 3 without any line setup.
             </Text>
+            <MoreDetail
+              label="Court range"
+              detail="Pin whether your makes score as 2 or 3 when you're shooting from one range — accurate scoring without any line setup. Leave on Automatic for mixed sessions."
+            />
           </View>
           {COURT_RANGE_OPTIONS.map((opt, i) => (
             <View key={opt.value}>
@@ -1096,10 +1184,10 @@ export default function SettingsScreen() {
               />
             </Row>
           </Row>
-        </Card>
+        </ReflowCard>
 
         {/* Calibration */}
-        <Card entering={enter(6)}>
+        <ReflowCard entering={enter(6)}>
           <SectionHeader icon="locate">Calibration</SectionHeader>
           {/* `bare` — the health card renders content-only inside this Card. */}
           <CalibrationHealthCard
@@ -1107,21 +1195,21 @@ export default function SettingsScreen() {
             bare
             onOpenGuide={() => router.push('/calibration-guide')}
           />
-        </Card>
+        </ReflowCard>
 
         {/* Data */}
-        <Card entering={enter(7)}>
+        <ReflowCard entering={enter(7)}>
           <SectionHeader icon="cloud-download">Data</SectionHeader>
           <ActionRow
             label={backupBusy ? 'Exporting…' : 'Export all data'}
-            description="Save a backup file of your sessions, shots, jumps, achievements and challenge points. No video is included — just your stats."
+            description="Back up sessions, shots, jumps and awards — no video, just stats."
             disabled={backupBusy}
             onPress={() => void runExportAll()}
           />
           <View style={styles.divider} />
           <ActionRow
             label="Import data"
-            description="Paste a backup file to merge it in. Existing sessions are kept — only new ones are added, nothing is overwritten."
+            description="Paste a backup to merge it in — nothing existing is overwritten."
             disabled={backupBusy}
             onPress={() => {
               tick();
@@ -1130,10 +1218,10 @@ export default function SettingsScreen() {
             }}
           />
           {backupNotice != null && <Text style={styles.tutorialNotice}>{backupNotice}</Text>}
-        </Card>
+        </ReflowCard>
 
         {/* Help */}
-        <Card entering={enter(8)}>
+        <ReflowCard entering={enter(8)}>
           <SectionHeader icon="help-buoy">Help</SectionHeader>
           <ActionRow
             label="How detection works"
@@ -1155,10 +1243,10 @@ export default function SettingsScreen() {
             description="See the welcome walkthrough again from the start."
             onPress={replayOnboarding}
           />
-        </Card>
+        </ReflowCard>
 
         {/* About */}
-        <Card entering={enter(9)}>
+        <ReflowCard entering={enter(9)}>
           <SectionHeader icon="information-circle">About</SectionHeader>
           <Row style={styles.settingRow} gap={space.lg}>
             <Text style={styles.settingLabel}>Version</Text>
@@ -1167,12 +1255,15 @@ export default function SettingsScreen() {
           <View style={styles.divider} />
           <View style={styles.settingText}>
             <Text style={styles.settingLabel}>Models & licenses</Text>
+            {/* Attribution is NEVER deleted — the one-liner names the license
+                classes and the full CC BY 4.0 / MIT credits sit one tap away. */}
             <Text style={styles.aboutBody}>
-              Shot detection is trained on Roboflow Universe datasets — "Basketball and rim",
-              "Basketball Detection" and "basketball-player-detection-3" — used under CC BY 4.0.
-              Make/miss logic references the MIT-licensed projects
-              josephattalla/Basketball-Shot-Detection and Ed-Zh/Basketball-Analytics.
+              Trained on CC BY 4.0 Roboflow datasets + MIT projects.
             </Text>
+            <MoreDetail
+              label="Models and licenses"
+              detail='Shot detection is trained on Roboflow Universe datasets — "Basketball and rim", "Basketball Detection" and "basketball-player-detection-3" — used under CC BY 4.0. Make/miss logic references the MIT-licensed projects josephattalla/Basketball-Shot-Detection and Ed-Zh/Basketball-Analytics.'
+            />
           </View>
           <View style={styles.divider} />
           <ActionRow
@@ -1186,7 +1277,7 @@ export default function SettingsScreen() {
             description="Questions or an issue with a session? We read every email."
             onPress={() => void Linking.openURL(SUPPORT_EMAIL_URL)}
           />
-        </Card>
+        </ReflowCard>
       </View>
 
       {/* Import paste sheet — no clipboard/document-picker dependency in this

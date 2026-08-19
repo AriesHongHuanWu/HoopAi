@@ -10,28 +10,25 @@
  * Layout: portrait stacks Home / center controls / Away top to bottom;
  * landscape places the two scorebug panels side by side with the center
  * column (clock, period, leading-by, swap, reset) between them so it reads
- * like a real scoreboard propped up courtside. Panels cascade in with a
- * small stagger; under reduced motion they render statically.
+ * like a real scoreboard propped up courtside. Panels cascade in through the
+ * canonical card stagger (useCardStagger — static under reduced motion).
+ *
+ * The whole scorebug is the screen's single hero composition — not a card
+ * stack — so it carries no SectionEyebrow headers; each panel already names
+ * itself (HOME/AWAY tags inside TeamPanel, PERIOD in the center column).
  */
 import { Ionicons } from '@expo/vector-icons';
-import * as Haptics from 'expo-haptics';
 import { Alert, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
-import Animated, { FadeInDown, useReducedMotion } from 'react-native-reanimated';
+import Animated from 'react-native-reanimated';
 
 import { BackPill } from '@/components/ShotList';
 import { GameClock } from '@/components/scoreboard/GameClock';
 import { TeamPanel } from '@/components/scoreboard/TeamPanel';
+import { useCardStagger } from '@/components/motion';
 import { Chip, Screen } from '@/components/ui';
-import { color, motion, radius, space, touch, type } from '@/constants/tokens';
-import { useSettings } from '@/state/settingsStore';
+import { color, radius, space, touch, type } from '@/constants/tokens';
+import { haptic } from '@/utils/haptics';
 import { useScoreboard } from '@/state/scoreboardStore';
-
-/** Cascade step between the two panels and the center column (ms). */
-const STAGGER_MS = 60;
-
-function tick() {
-  if (useSettings.getState().hapticsEnabled) void Haptics.selectionAsync();
-}
 
 function leadingByLabel(homeName: string, awayName: string, homeScore: number, awayScore: number): string {
   const diff = homeScore - awayScore;
@@ -43,11 +40,9 @@ function leadingByLabel(homeName: string, awayName: string, homeScore: number, a
 export default function ScoreboardScreen() {
   const { width, height } = useWindowDimensions();
   const isLandscape = width > height;
-  const reducedMotion = useReducedMotion();
-  const enter = (i: number) =>
-    reducedMotion
-      ? undefined
-      : FadeInDown.duration(motion.standard).delay(i * STAGGER_MS);
+  // Canonical entrance (motion sweep): the hand-rolled FadeInDown ladder is
+  // gone — useCardStagger owns step/duration and the reduced-motion gate.
+  const enter = useCardStagger();
 
   const homeName = useScoreboard((s) => s.homeName);
   const awayName = useScoreboard((s) => s.awayName);
@@ -61,7 +56,7 @@ export default function ScoreboardScreen() {
   const resetGame = useScoreboard((s) => s.reset);
 
   const confirmAndReset = () => {
-    tick();
+    haptic.selection();
     Alert.alert(
       'Reset the game?',
       'Both scores and the period go back to the start. Team names are kept.',
@@ -72,9 +67,7 @@ export default function ScoreboardScreen() {
           style: 'destructive',
           onPress: () => {
             resetGame();
-            if (useSettings.getState().hapticsEnabled) {
-              void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-            }
+            haptic.success();
           },
         },
       ],
@@ -89,7 +82,7 @@ export default function ScoreboardScreen() {
         accessibilityRole="button"
         accessibilityLabel={`Period ${period}. Tap to advance to the next period`}
         onPress={() => {
-          tick();
+          haptic.selection();
           nextPeriod();
         }}
         style={({ pressed }) => [styles.periodChip, pressed && styles.periodChipPressed]}
@@ -111,7 +104,7 @@ export default function ScoreboardScreen() {
           accessibilityLabel="Swap sides"
           accessibilityHint="Swaps home and away team names and scores"
           onPress={() => {
-            tick();
+            haptic.selection();
             swapSides();
           }}
           style={({ pressed }) => [styles.utilityButton, pressed && styles.utilityButtonPressed]}
@@ -141,7 +134,7 @@ export default function ScoreboardScreen() {
       tint={color.accent}
       onRename={(name) => setName('home', name)}
       onAdd={(delta) => {
-        tick();
+        haptic.selection();
         scoreAction('home', delta);
       }}
     />
@@ -154,7 +147,7 @@ export default function ScoreboardScreen() {
       tint={color.info}
       onRename={(name) => setName('away', name)}
       onAdd={(delta) => {
-        tick();
+        haptic.selection();
         scoreAction('away', delta);
       }}
     />

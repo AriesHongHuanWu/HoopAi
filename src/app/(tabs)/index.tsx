@@ -292,7 +292,8 @@ export default function HomeScreen() {
       },
       {
         title: 'Everything else is in the tabs',
-        text: 'The bar at the bottom is always there: Train for game modes and drills, Data for your history, trends and records, Coach for your weekly report, and You for your profile and settings.',
+        // Text diet: the tab word IS the map — one clause per tab, no tour.
+        text: 'Train for modes and drills, Data for history, Coach for your report, You for settings.',
         // No anchor — the tab bar lives outside this screen, so this step centers.
         targetRect: undefined,
       },

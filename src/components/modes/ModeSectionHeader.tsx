@@ -8,14 +8,22 @@
  * cannot carry the count chip — ui.tsx stays untouched).
  *
  * Fully prop-driven: collapse state lives in the caller (in-memory, defaults
- * expanded), and the caller owns haptics — none fire here. No self-animation;
- * the only motion is the pressed-state opacity.
+ * expanded), and the caller owns haptics — none fire here. Motion: the chevron
+ * is ONE glyph flipped by a shared-value pose (the CollapsibleSection idiom —
+ * withTiming at motion.quick, snapped under reduced motion); the only other
+ * motion is the pressed-state opacity.
  */
 import { Ionicons } from '@expo/vector-icons';
-import React from 'react';
+import React, { useEffect } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
+import Animated, {
+  useAnimatedStyle,
+  useReducedMotion,
+  useSharedValue,
+  withTiming,
+} from 'react-native-reanimated';
 
-import { color, space, touch, type } from '@/constants/tokens';
+import { color, motion, space, touch, type } from '@/constants/tokens';
 
 export interface ModeSectionHeaderProps {
   /** 'Games', 'Drills', 'Quick start', 'Training tools'. */
@@ -37,6 +45,24 @@ export function ModeSectionHeader({
   collapsed,
   onToggle,
 }: ModeSectionHeaderProps): React.JSX.Element {
+  const reducedMotion = useReducedMotion();
+
+  // Chevron pose: 0 = collapsed (points forward), 1 = expanded (points down).
+  // Seeded from the mount-time state so first paint needs no animation. Hooks
+  // run for the static form too (harmless — it renders no chevron).
+  const chevronPose = useSharedValue(collapsed ? 0 : 1);
+  useEffect(() => {
+    const target = collapsed ? 0 : 1;
+    // Snap instantly under reduced motion; otherwise a quick timed flip.
+    chevronPose.value = reducedMotion
+      ? target
+      : withTiming(target, { duration: motion.quick });
+  }, [collapsed, reducedMotion, chevronPose]);
+  const chevronStyle = useAnimatedStyle(() => ({
+    // One chevron-down glyph rotated -90° when collapsed reads as forward.
+    transform: [{ rotate: `${(chevronPose.value - 1) * 90}deg` }],
+  }));
+
   const a11yLabel = `${title}${count != null ? `, ${count} options` : ''}`;
   const showLede = lede != null && lede.length > 0 && !collapsed;
 
@@ -70,11 +96,9 @@ export function ModeSectionHeader({
         style={({ pressed }) => [styles.toggleRow, pressed && styles.pressed]}
       >
         {titleCluster}
-        <Ionicons
-          name={collapsed ? 'chevron-forward' : 'chevron-down'}
-          size={16}
-          color={color.textDim}
-        />
+        <Animated.View style={chevronStyle}>
+          <Ionicons name="chevron-down" size={16} color={color.textDim} />
+        </Animated.View>
       </Pressable>
       {showLede && <Text style={styles.lede}>{lede}</Text>}
     </View>

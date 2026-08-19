@@ -15,19 +15,25 @@
  * from a sibling route.
  */
 import { Ionicons } from '@expo/vector-icons';
-import { useEffect, useRef, useState, type ComponentProps } from 'react';
+import { useEffect, useRef, useState, type ComponentProps, type ReactNode } from 'react';
 import { Pressable, StyleSheet, Switch, Text, View } from 'react-native';
+import Animated, {
+  FadeIn,
+  FadeInDown,
+  LinearTransition,
+  ReduceMotion,
+} from 'react-native-reanimated';
 
 import { BackPill } from '@/components/ShotList';
 import { ScreenHeader, SectionEyebrow } from '@/components/ScreenHeader';
 import { Card, Row, Screen } from '@/components/ui';
-import { color, iconSize, layout, radius, space, touch, type } from '@/constants/tokens';
+import { color, iconSize, layout, motion, radius, space, touch, type } from '@/constants/tokens';
 import {
   HARD_EXAMPLE_EXPORT_LIMIT,
   countHardExamples,
   exportHardExamples,
 } from '@/data/hardExamples';
-import { useCardStagger } from '@/components/motion';
+import { useCardStagger, type EnteringProp } from '@/components/motion';
 import { haptic } from '@/utils/haptics';
 import { useSettings, type DetectionRate } from '@/state/settingsStore';
 
@@ -42,6 +48,13 @@ function tick() {
   haptic.selection();
 }
 
+// Disclosure motion grammar (text-diet sweep), mirroring settings.tsx: the
+// reflowing container rides a quick LinearTransition, revealed copy fades in
+// on the same token, collapse stays an instant unmount. Reduce Motion wins.
+const cardReflow = LinearTransition.duration(motion.quick).reduceMotion(ReduceMotion.System);
+const detailFade = FadeIn.duration(motion.quick).reduceMotion(ReduceMotion.System);
+const revealFade = FadeInDown.duration(motion.quick).reduceMotion(ReduceMotion.System);
+
 /** Human copy for the measured device tier, from the last on-device benchmark. */
 function benchmarkSummary(bench: { delegate: string; ms: number } | null): string {
   if (bench == null) return 'Run a session once to benchmark this phone.';
@@ -54,6 +67,46 @@ const AUTO_PRECISE_MAX_MS = 55;
 
 /** Ionicons glyph name — section eyebrows, chip checks, chevrons. */
 type IconName = ComponentProps<typeof Ionicons>['name'];
+
+/**
+ * Card whose box grows/shrinks smoothly when a More/Less disclosure changes
+ * its content height (mirrors settings.tsx — ui.tsx's Card is read-only and
+ * forwards no layout prop, so the transition rides an inner Animated.View).
+ */
+function ReflowCard({ entering, children }: { entering?: EnteringProp; children: ReactNode }) {
+  return (
+    <Card entering={entering}>
+      <Animated.View layout={cardReflow}>{children}</Animated.View>
+    </Card>
+  );
+}
+
+/**
+ * "More"/"Less" disclosure (mirrors settings.tsx) — long-form copy parked
+ * behind one tap so a row's visible description stays ONE honest sentence.
+ * Nothing is deleted; collapse unmounts instantly by design.
+ */
+function MoreDetail({ label, detail }: { label: string; detail: string }) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <>
+      {expanded && (
+        <Animated.View entering={detailFade}>
+          <Text style={styles.settingDesc}>{detail}</Text>
+        </Animated.View>
+      )}
+      <Pressable
+        accessibilityRole="button"
+        accessibilityLabel={expanded ? `Less about ${label}` : `More about ${label}`}
+        accessibilityState={{ expanded }}
+        hitSlop={space.sm}
+        onPress={() => setExpanded((v) => !v)}
+      >
+        <Text style={styles.moreLink}>{expanded ? 'Less' : 'More'}</Text>
+      </Pressable>
+    </>
+  );
+}
 
 function ToggleRow({
   label,
@@ -75,7 +128,6 @@ function ToggleRow({
   experimental?: boolean;
   onValueChange: (v: boolean) => void;
 }) {
-  const [expanded, setExpanded] = useState(false);
   return (
     <Row style={[styles.settingRow, disabled === true && styles.disabled]} gap={space.lg}>
       <View style={styles.settingText}>
@@ -89,20 +141,7 @@ function ToggleRow({
           )}
         </View>
         {description != null && <Text style={styles.settingDesc}>{description}</Text>}
-        {detail != null && (
-          <>
-            {expanded && <Text style={styles.settingDesc}>{detail}</Text>}
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={expanded ? `Less about ${label}` : `More about ${label}`}
-              accessibilityState={{ expanded }}
-              hitSlop={space.sm}
-              onPress={() => setExpanded((v) => !v)}
-            >
-              <Text style={styles.moreLink}>{expanded ? 'Less' : 'More'}</Text>
-            </Pressable>
-          </>
-        )}
+        {detail != null && <MoreDetail label={label} detail={detail} />}
       </View>
       <Switch
         accessibilityLabel={experimental === true ? `${label} (experimental)` : label}
@@ -294,11 +333,11 @@ export default function SettingsAdvancedScreen() {
         </Row>
         <ScreenHeader
           title="Advanced detection"
-          lede="Benchmark, detector internals and diagnostics. Defaults are tuned for your phone — change one thing at a time."
+          lede="Defaults fit your phone — change one thing at a time."
         />
 
         {/* Model & engine */}
-        <Card entering={enter(0)}>
+        <ReflowCard entering={enter(0)}>
           <SectionHeaderRow icon="hardware-chip">Model & engine</SectionHeaderRow>
           <View style={styles.settingText}>
             <Text style={styles.settingLabel}>Device benchmark</Text>
@@ -307,11 +346,14 @@ export default function SettingsAdvancedScreen() {
           <View style={styles.divider} />
           <View style={styles.settingText}>
             <Text style={styles.settingLabel}>Detector model</Text>
+            {/* Text diet: one line; the pre-diet teaching copy waits in More. */}
             <Text style={styles.settingDesc}>
-              Auto measures your phone at start and picks the best fit —
-              precise on recent phones, standard on older ones. You can also
-              pin one manually.
+              Auto benchmarks your phone and picks the fit — or pin one.
             </Text>
+            <MoreDetail
+              label="Detector model"
+              detail="Auto measures your phone at start and picks the best fit — precise on recent phones, standard on older ones. You can also pin one manually."
+            />
           </View>
           <View style={styles.chipWrap}>
             <SelectChip
@@ -349,11 +391,12 @@ export default function SettingsAdvancedScreen() {
           <View style={styles.settingText}>
             <Text style={styles.settingLabel}>Detector engine</Text>
             <Text style={styles.settingDesc}>
-              YOLOX is the default — an Apache-licensed detector the iPhone GPU
-              runs directly for faster, steadier boxes and a clean licence. YOLO11
-              is the older fallback (and the Detector model / Performance settings
-              apply to it). Switch anytime.
+              YOLOX is the default; YOLO11 is the older fallback.
             </Text>
+            <MoreDetail
+              label="Detector engine"
+              detail="YOLOX is the default — an Apache-licensed detector the iPhone GPU runs directly for faster, steadier boxes and a clean licence. YOLO11 is the older fallback (and the Detector model / Performance settings apply to it). Switch anytime."
+            />
           </View>
           <View style={styles.chipWrap}>
             <SelectChip
@@ -374,17 +417,18 @@ export default function SettingsAdvancedScreen() {
             />
           </View>
           {detectorEngine === 'yolox' && (
-            <>
+            // Engine-gated block fades in with the shared reveal grammar.
+            <Animated.View entering={revealFade}>
               <View style={styles.divider} />
               <View style={styles.settingText}>
                 <Text style={styles.settingLabel}>YOLOX accelerator</Text>
                 <Text style={styles.settingDesc}>
-                  CPU is the most accurate (it's what the Test AI screen uses) and
-                  runs YOLOX in real time on most phones. GPU is faster but can make
-                  the boxes less accurate on some devices. If live tracking looks
-                  worse than Test AI, use CPU; if it feels laggy, try GPU. The
-                  debug overlay shows the live fps during a session.
+                  CPU is the most accurate; GPU is faster on some phones.
                 </Text>
+                <MoreDetail
+                  label="YOLOX accelerator"
+                  detail="CPU is the most accurate (it's what the Test AI screen uses) and runs YOLOX in real time on most phones. GPU is faster but can make the boxes less accurate on some devices. If live tracking looks worse than Test AI, use CPU; if it feels laggy, try GPU. The debug overlay shows the live fps during a session."
+                />
               </View>
               <View style={styles.chipWrap}>
                 <SelectChip
@@ -404,18 +448,18 @@ export default function SettingsAdvancedScreen() {
                   }}
                 />
               </View>
-            </>
+            </Animated.View>
           )}
           <View style={styles.divider} />
           <View style={styles.settingText}>
             <Text style={styles.settingLabel}>Performance</Text>
             <Text style={styles.settingDesc}>
-              Input resolution — the biggest accuracy/speed lever. Quality feeds
-              the detector a larger image so the small, fast BALL is seen in ~2×
-              more frames (YOLOX 640) — best for tracking the ball, but slower.
-              Speed is lighter and faster (YOLOX 416) with a hit on a tiny/far
-              ball. If the ball keeps getting missed, use Quality.
+              Input resolution — the biggest accuracy/speed lever.
             </Text>
+            <MoreDetail
+              label="Performance"
+              detail="Quality feeds the detector a larger image so the small, fast BALL is seen in ~2× more frames (YOLOX 640) — best for tracking the ball, but slower. Speed is lighter and faster (YOLOX 416) with a hit on a tiny/far ball. If the ball keeps getting missed, use Quality."
+            />
           </View>
           <View style={styles.chipWrap}>
             <SelectChip
@@ -456,14 +500,16 @@ export default function SettingsAdvancedScreen() {
               />
             </View>
           ))}
-        </Card>
+        </ReflowCard>
 
         {/* Tracking & rescue */}
-        <Card entering={enter(1)}>
+        <ReflowCard entering={enter(1)}>
           <SectionHeaderRow icon="analytics">Tracking & rescue</SectionHeaderRow>
           <ToggleRow
             label="Full-flight tracking"
-            description="Tracks the ball across its WHOLE flight with one fitted parabola — it only recovers real detections and can't invent a make."
+            // Honesty compressed, not deleted — can't-invent-a-make stays on
+            // the row; the full wording keeps living in `detail`.
+            description="One fitted parabola tracks the whole flight — can't invent a make."
             detail="Fits one parabola over the WHOLE shot so the ball keeps being tracked across its entire flight — from the release, under the basket, all the way to the rim — not just near the hoop. On by default; it only recovers real ball detections along the physics path and can't invent a make. Turn off only if a specific phone misbehaves."
             value={useFlightArc}
             onValueChange={(v) => {
@@ -475,7 +521,7 @@ export default function SettingsAdvancedScreen() {
           <ToggleRow
             label="nano-v2 detector"
             experimental
-            description="A noisier small-ball model for the Nano rung — finds the ball in more frames but can flash phantom boxes, so it runs a higher confidence bar."
+            description="Noisier small-ball model — more frames, higher confidence bar."
             detail="An aggressive small-ball model for the fast (Nano) rung. Finds a small or fast ball in more frames, but is noisier — it can flash phantom boxes on ceiling lights, rafters or a background hoop, so it runs with a higher confidence bar to hold those back. OFF uses the cleaner conservative model. Only affects the Nano rung (slow phones / Speed); the Tiny model is unchanged. Reloads the detector when toggled."
             value={nanoV2}
             onValueChange={(v) => {
@@ -487,7 +533,8 @@ export default function SettingsAdvancedScreen() {
           <ToggleRow
             label="Metric 2/3 distance"
             experimental
-            description="Uses the rim's real size (0.45m) and height (3.05m) as a ruler to compute your TRUE shooting distance in meters for the 2/3-point call, instead of the rough on-screen estimate. Falls back automatically when the camera angle can't support it. A successful FT-line calibration on the live screen switches this path on for that session even with this toggle off."
+            description="Measures your true shooting distance with the rim as a ruler."
+            detail="Uses the rim's real size (0.45m) and height (3.05m) as a ruler to compute your TRUE shooting distance in meters for the 2/3-point call, instead of the rough on-screen estimate. Falls back automatically when the camera angle can't support it. A successful FT-line calibration on the live screen switches this path on for that session even with this toggle off."
             value={metric23}
             onValueChange={(v) => {
               tick();
@@ -497,7 +544,9 @@ export default function SettingsAdvancedScreen() {
           <View style={styles.divider} />
           <ToggleRow
             label="Parallax guard (optical-illusion)"
-            description="Uses your ball's real size vs the rim's to catch a ball that crosses the rim line while flying IN FRONT of (or behind) the hoop — the airball that 'looks like it went in' — instead of counting it as a make. Veto-only: it can cancel a fake make, never invent one, and stays silent beyond its verified range (~1m separation up to ~6m; needs the right Ball size set in Player). ON by default; when it overturns a shot the receipt shows an 'IN FRONT' tag. Takes effect at the next rim lock."
+            // Veto-only honesty stays on the row; full wording in `detail`.
+            description="Catches the airball that 'looks in' — veto-only, never invents a make."
+            detail="Uses your ball's real size vs the rim's to catch a ball that crosses the rim line while flying IN FRONT of (or behind) the hoop — the airball that 'looks like it went in' — instead of counting it as a make. Veto-only: it can cancel a fake make, never invent one, and stays silent beyond its verified range (~1m separation up to ~6m; needs the right Ball size set in Player). ON by default; when it overturns a shot the receipt shows an 'IN FRONT' tag. Takes effect at the next rim lock."
             value={depthVeto}
             onValueChange={(v) => {
               tick();
@@ -507,7 +556,8 @@ export default function SettingsAdvancedScreen() {
           <View style={styles.divider} />
           <ToggleRow
             label="Ghost-swish rescue"
-            description="When the ball disappears into the net and reappears below the rim on the same flight path, count the make it implies — but only when the net motion or the in-basket detector agrees, so it can never invent a make. Recovers clean swishes the net swallows. ON by default; hardened against rim-bounces and putback fakes."
+            description="Recovers net-swallowed swishes — only when a second signal agrees."
+            detail="When the ball disappears into the net and reappears below the rim on the same flight path, count the make it implies — but only when the net motion or the in-basket detector agrees, so it can never invent a make. Recovers clean swishes the net swallows. ON by default; hardened against rim-bounces and putback fakes."
             value={reappearance}
             onValueChange={(v) => {
               tick();
@@ -518,7 +568,8 @@ export default function SettingsAdvancedScreen() {
           <ToggleRow
             label="Rim zoom"
             experimental
-            description="When the ball is missed near the basket, re-run the detector on a magnified crop of the rim to recover it at the make/miss moment. Self-limiting — only fires during a shot, only when needed, and only on phones fast enough. Watch the 'roi zoom' row in the debug overlay to see it working."
+            description="Re-checks a magnified rim crop when the ball is lost near the basket."
+            detail="When the ball is missed near the basket, re-run the detector on a magnified crop of the rim to recover it at the make/miss moment. Self-limiting — only fires during a shot, only when needed, and only on phones fast enough. Watch the 'roi zoom' row in the debug overlay to see it working."
             value={roiZoom}
             onValueChange={(v) => {
               tick();
@@ -529,24 +580,25 @@ export default function SettingsAdvancedScreen() {
           <ToggleRow
             label="Motion assist"
             experimental
-            description="When the detector loses the ball mid-flight, use frame-to-frame motion to keep following the strongest mover. Can mistake other movement for the ball — leave off unless testing."
+            description="Follows the strongest mover when the ball is lost — can be fooled."
+            detail="When the detector loses the ball mid-flight, use frame-to-frame motion to keep following the strongest mover. Can mistake other movement for the ball — leave off unless testing."
             value={motionAssist}
             onValueChange={(v) => {
               tick();
               set('motionAssist', v);
             }}
           />
-        </Card>
+        </ReflowCard>
 
         {/* Detection guards — suppression/advisory-only safety nets. None of
             them can ever create a make call; each toggle is an escape hatch.
             The two MAKE-SUPPRESSING guards (rattle-out, late bounce-out) stay
             on the main Settings page on purpose — see the comment there. */}
-        <Card entering={enter(2)}>
+        <ReflowCard entering={enter(2)}>
           <SectionHeaderRow icon="shield-checkmark">Detection guards</SectionHeaderRow>
           <ToggleRow
             label="Multi-ball guard"
-            description="Pause new shot detection while several balls are in the air. Prevents false calls during warmups."
+            description="Pauses new shots while several balls fly — no warmup false calls."
             value={multiBallGuard}
             onValueChange={(v) => {
               tick();
@@ -566,7 +618,8 @@ export default function SettingsAdvancedScreen() {
           <View style={styles.divider} />
           <ToggleRow
             label="Track rescue"
-            description="Recovers a ball the detector keeps seeing but the tracker won’t start on (raised-gate models only). Detection-side only — never changes make/miss judging."
+            description="Restarts a stuck track — never changes make/miss judging."
+            detail="Recovers a ball the detector keeps seeing but the tracker won’t start on (raised-gate models only). Detection-side only — never changes make/miss judging."
             value={trackerRescue}
             onValueChange={(v) => {
               tick();
@@ -593,17 +646,21 @@ export default function SettingsAdvancedScreen() {
               set('lensCheck', v);
             }}
           />
-        </Card>
+        </ReflowCard>
 
         {/* Correction flywheel — fully manual, opt-in, one tap. */}
-        <Card entering={enter(3)}>
+        <ReflowCard entering={enter(3)}>
           <SectionHeaderRow icon="trending-up">Improve detection</SectionHeaderRow>
           <View style={styles.settingText}>
+            {/* On-device privacy claim COMPRESSED, not deleted — the full
+                wording waits behind More. */}
             <Text style={styles.settingDesc}>
-              Export a manifest of your corrected and unsure shots — the exact
-              clips the AI got wrong — to help train better models. Video stays
-              on your phone; the export is a text manifest.
+              Share the shots the AI got wrong — video stays on your phone.
             </Text>
+            <MoreDetail
+              label="Improve detection"
+              detail="Export a manifest of your corrected and unsure shots — the exact clips the AI got wrong — to help train better models. Video stays on your phone; the export is a text manifest."
+            />
           </View>
           <ActionRow
             // Displayed count is capped at the export limit — advertising an
@@ -618,7 +675,7 @@ export default function SettingsAdvancedScreen() {
             onPress={() => void runHardExampleExport()}
           />
           {exportNotice != null && <Text style={styles.exportNotice}>{exportNotice}</Text>}
-        </Card>
+        </ReflowCard>
       </View>
     </Screen>
   );

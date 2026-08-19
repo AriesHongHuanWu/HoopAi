@@ -8,7 +8,9 @@
  * FadeInDown — deliberately NO height animation, so there are no layout
  * animation dependencies and no per-frame allocations. The chevron flip is a
  * single shared value driven by withTiming; both are snapped/skipped under
- * reduced motion.
+ * reduced motion. Sibling reflow on expand/collapse is the PARENT's job:
+ * setup.tsx puts a LinearTransition on each section wrapper so the sections
+ * below slide instead of popping — that transition never lives in here.
  */
 import React, { useEffect } from 'react';
 import { Pressable, StyleSheet, Text, View, type LayoutChangeEvent } from 'react-native';

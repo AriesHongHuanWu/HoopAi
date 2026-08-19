@@ -39,9 +39,13 @@ jest.mock('react-native-reanimated', () => ({
     View: require('react-native').View,
     createAnimatedComponent: (component: unknown) => component,
   },
-  FadeIn: { duration: () => ({}) },
-  FadeInDown: { duration: () => ({ delay: () => ({}) }) },
-  LinearTransition: { duration: () => ({}) },
+  // Chainable builder stubs — the data screens attach
+  // .reduceMotion(ReduceMotion.System) to these per the sweep's shared
+  // disclosure grammar (trends lens swap, history list reflow, detail chip).
+  FadeIn: { duration: () => ({ reduceMotion: () => ({}) }) },
+  FadeInDown: { duration: () => ({ delay: () => ({}), reduceMotion: () => ({}) }) },
+  LinearTransition: { duration: () => ({ reduceMotion: () => ({}) }) },
+  ReduceMotion: { System: 'system' },
   useReducedMotion: () => true,
   useSharedValue: (value: unknown) => ({ value }),
   useAnimatedStyle: () => ({}),

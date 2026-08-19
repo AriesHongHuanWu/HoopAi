@@ -3,7 +3,8 @@
  *
  * A weekly-report hero card (broadcast box-score idiom, like SummaryHero) with
  * a Mon–Sun week selector, then the insight cards — arc profile, four-week
- * timeline, season strip, NBA twin, weekly plan (+ Form Studio entries), form
+ * timeline, season strip, NBA twin, weekly plan (+ Form Studio and Form Check
+ * entries), form
  * readiness — and the ranked coach findings for that week: severity-toned cards
  * carrying the user's OWN evidence numbers and a prescription chip. The hero's
  * WSS wears the signature arc treatment: a static Skia progress ring (GoalRing
@@ -766,6 +767,33 @@ export default function CoachScreen() {
                     </Pressable>
                   </Card>
 
+                  {/* Form Check — the hoop-free door. It grades the shooting
+                      MOTION alone (no ball tracking, so it can never claim a
+                      make or a miss — the one line below says so), and it
+                      needs no logged sessions, which is exactly why it renders
+                      unconditionally. Routes to the feature screen; the full
+                      what-and-how copy lives there, not on this promo. */}
+                  <Card entering={cardEnter(4)}>
+                    <Row gap={space.sm} style={styles.promoHead}>
+                      <Ionicons name="scan-outline" size={18} color={color.accent} />
+                      <Text style={styles.promoTitle} numberOfLines={1}>
+                        Form Check
+                      </Text>
+                      <Chip label="NEW" tone="accent" compact />
+                    </Row>
+                    <Text style={styles.body}>Motion only — no hoop needed.</Text>
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel="Check your shooting form with the camera. Motion only, no ball needed. Opens Form Check."
+                      onPress={() => router.push('/formcheck')}
+                      style={({ pressed }) => [styles.promoRow, pressed && { opacity: 0.6 }]}
+                    >
+                      <Ionicons name="body-outline" size={iconSize.sm} color={color.accent} />
+                      <Text style={styles.promoRowText}>Check my shooting form</Text>
+                      <Ionicons name="chevron-forward" size={iconSize.sm} color={color.textFaint} />
+                    </Pressable>
+                  </Card>
+
                   {/* Form-data readiness — how much of the coach's form read is
                       fed. It lands LAST in this segment on purpose: it is the
                       honesty line under everything above it. */}
@@ -773,7 +801,7 @@ export default function CoachScreen() {
                     readiness={readiness}
                     onOpenSettings={() => router.push('/settings')}
                     onOpenFormStudio={() => router.push('/formstudio')}
-                    entering={cardEnter(4)}
+                    entering={cardEnter(5)}
                   />
                 </View>
               )}
@@ -805,9 +833,10 @@ export default function CoachScreen() {
                     <SectionEyebrow icon="flask-outline" style={styles.eyebrow}>
                       Go deeper
                     </SectionEyebrow>
+                    {/* Text diet: one line — "Go deeper" already says whose job
+                        the Shot Lab is; the lab explains itself once open. */}
                     <Text style={styles.body}>
-                      Coach's Corner reads across your whole week. For a single session — make-vs-miss
-                      breakdowns, shot-by-shot form and a drill plan — open the Shot Lab.
+                      For one session — make-vs-miss and shot-by-shot form — open the Shot Lab.
                     </Text>
                     <PillButton
                       label="Open Shot Lab"

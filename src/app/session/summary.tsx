@@ -45,6 +45,9 @@ import { HintChip } from '@/components/hud/HintChip';
 import { Confetti, useCardStagger } from '@/components/motion';
 import { PersonalBestBanner } from '@/components/PersonalBestBanner';
 import { RecheckPanel } from '@/components/RecheckPanel';
+// Concrete import (not a barrel) — sessionSummaryRender.test.tsx mounts this
+// screen with real children, and a barrel stub would resolve it to undefined.
+import { SectionEyebrow } from '@/components/ScreenHeader';
 import { buildHeatmap } from '@/core/heatmap';
 import { FIBA_COURT } from '@/core/courtModel';
 import { SessionFormReport } from '@/components/SessionFormReport';
@@ -515,7 +518,9 @@ export default function SessionSummaryScreen() {
           )}
           {videoPath != null && sessionId != null && (
             <Animated.View entering={enter(2)} style={styles.mediaSection}>
-              <Eyebrow>Watch it back</Eyebrow>
+              <SectionEyebrow icon="play-circle-outline" style={styles.sectionEyebrow}>
+                Watch it back
+              </SectionEyebrow>
               <View ref={replayRef} onLayout={() => {
                 replayRef.current?.measureInWindow((x, y, w, h) =>
                   setReplayRect({ x, y, width: w, height: h }),
@@ -566,7 +571,7 @@ export default function SessionSummaryScreen() {
               {unsureCount > 0 && (
                 <PillButton
                   variant="ghost"
-                  label="Doubt a call? Test the detector on your own clip"
+                  label="Test the detector on your clip"
                   icon="videocam-outline"
                   onPress={() => router.push('/session/analyze')}
                   style={{ marginTop: space.md }}
@@ -576,7 +581,9 @@ export default function SessionSummaryScreen() {
           )}
           {heatmap.totalAttempts >= 4 && (
             <Animated.View entering={enter(3)} style={styles.heatSection}>
-              <Eyebrow>Shot map</Eyebrow>
+              <SectionEyebrow icon="map-outline" style={styles.sectionEyebrow}>
+                Shot map
+              </SectionEyebrow>
               <View style={styles.heatCard}>
                 <CourtHeatmap heatmap={heatmap} />
               </View>
@@ -584,7 +591,9 @@ export default function SessionSummaryScreen() {
           )}
           {courtPlaced >= 3 && (
             <Animated.View entering={enter(4)} style={styles.heatSection}>
-              <Eyebrow>Court map · calibrated</Eyebrow>
+              <SectionEyebrow icon="locate-outline" style={styles.sectionEyebrow}>
+                Court map · calibrated
+              </SectionEyebrow>
               <View style={styles.heatCard}>
                 <CourtPlacementMap shots={shots} spec={FIBA_COURT} />
               </View>
@@ -595,7 +604,9 @@ export default function SessionSummaryScreen() {
               made shot carried a usable pose capture. */}
           <SessionFormReport shots={shots} entering={enter(5)} />
           <Animated.View entering={enter(5)}>
-            <Eyebrow>Box score</Eyebrow>
+            <SectionEyebrow icon="stats-chart-outline" style={styles.sectionEyebrow}>
+              Box score
+            </SectionEyebrow>
             {/* hero={false}: SummaryHero up top is this screen's ONE
                 arc-crowned hero — the recap's own HeroArcStat + pip row would
                 duplicate it. History detail keeps the default (true). */}
@@ -615,7 +626,9 @@ export default function SessionSummaryScreen() {
             </View>
           )}
           <Animated.View entering={enter(6)} style={styles.actionsSection}>
-            <Eyebrow>Next up</Eyebrow>
+            <SectionEyebrow icon="arrow-forward-circle-outline" style={styles.sectionEyebrow}>
+              Next up
+            </SectionEyebrow>
             {/* First-summary explainer nudge — how-it-works.tsx flips the
                 persisted flag on mount, so this row retires itself after one
                 visit (from anywhere); the Settings entry remains. */}
@@ -822,6 +835,12 @@ const styles = StyleSheet.create({
   },
   mediaSection: {
     marginBottom: space.xl,
+  },
+  // Shared SectionEyebrow leaves margins to the call site (screens own
+  // rhythm) — this replicates ui.tsx Eyebrow's built-in bottom margin, so
+  // the icon swap moved no layout.
+  sectionEyebrow: {
+    marginBottom: space.sm,
   },
   heatSection: {
     marginBottom: space.xl,

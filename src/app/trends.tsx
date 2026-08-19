@@ -17,8 +17,10 @@ import { Canvas, Rect, RoundedRect } from '@shopify/react-native-skia';
 import { router, useFocusEffect } from 'expo-router';
 import React, { useCallback, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
+import Animated, { FadeIn, ReduceMotion } from 'react-native-reanimated';
 
 import { CountUp, MotionStat, useCardStagger } from '@/components/motion';
+import { SectionEyebrow } from '@/components/ScreenHeader';
 import { BackPill } from '@/components/ShotList';
 import {
   AngleHistogram,
@@ -164,6 +166,13 @@ function TrendBars({
 /** The hero's chart styles — one slot, same series, user-picked lens. */
 type ChartKind = 'line' | 'bars';
 
+/**
+ * Lens-swap entrance: the chart-slot subtree is keyed on the lens, so picking
+ * Line/Bars remounts it and the new lens cross-fades in (no exiting — the old
+ * lens unmounts instantly by design, per the shared disclosure grammar).
+ */
+const lensSwap = FadeIn.duration(motion.quick).reduceMotion(ReduceMotion.System);
+
 export default function TrendsScreen() {
   const [trend, setTrend] = useState<TrendPoint[] | null>(null);
   /** Which lens the hero chart slot shows. State-local; Line is the default. */
@@ -244,7 +253,9 @@ export default function TrendsScreen() {
         <Card entering={enter(0)} style={styles.monthCard}>
           <Row style={styles.monthRow}>
             <View style={styles.monthText}>
-              <Eyebrow>This month</Eyebrow>
+              <SectionEyebrow icon="calendar-outline" style={styles.cardKicker}>
+                This month
+              </SectionEyebrow>
               <Text style={styles.monthMeta}>
                 {`${monthly.thisMonth.makes} makes · ${monthly.thisMonth.sessions} session${
                   monthly.thisMonth.sessions === 1 ? '' : 's'
@@ -271,7 +282,9 @@ export default function TrendsScreen() {
       ) : (
         <View style={styles.cardStack}>
           <Card entering={enter(0)}>
-            <Eyebrow>Field goal %</Eyebrow>
+            <SectionEyebrow icon="trending-up" style={styles.cardKicker}>
+              Field goal %
+            </SectionEyebrow>
             <Row style={{ justifyContent: 'space-between' }}>
               <View
                 accessible
@@ -302,57 +315,63 @@ export default function TrendsScreen() {
               accessibilityLabel="Chart style"
               style={{ marginTop: space.lg }}
             />
-            {chartKind === 'line' ? (
-              <>
-                <View style={{ marginTop: space.lg }}>
-                  <MeasuredWidth
-                    accessibilityLabel={`FG% trend across ${points.length} sessions, latest ${Math.round(latest * 100)} percent`}
-                  >
-                    {(w) => (
-                      // progress opts the line into its left-to-right draw-on
-                      // (static under reduced motion — see Sparkline).
-                      <Sparkline data={points} width={w} height={SPARK_H} progress={1} />
-                    )}
-                  </MeasuredWidth>
-                </View>
-                <Row
-                  style={{ justifyContent: 'space-between', marginTop: space.xs }}
-                >
-                  <Text style={styles.micro}>OLDEST</Text>
-                  <Text style={styles.micro}>{`${points.length} SESSIONS`}</Text>
-                  <Text style={styles.micro}>LATEST</Text>
-                </Row>
-              </>
-            ) : (
-              <>
-                <Row style={{ alignItems: 'stretch', marginTop: space.lg }} gap={space.sm}>
-                  <View style={styles.axisGutter}>
-                    <Text style={styles.micro}>100</Text>
-                    <Text style={styles.micro}>50</Text>
-                    <Text style={styles.micro}>0</Text>
-                  </View>
-                  <View style={{ flex: 1 }}>
+            {/* Keyed on the lens: a SegmentedTabs switch remounts this subtree
+                and the incoming chart fades in (see lensSwap). */}
+            <Animated.View key={chartKind} entering={lensSwap}>
+              {chartKind === 'line' ? (
+                <>
+                  <View style={{ marginTop: space.lg }}>
                     <MeasuredWidth
-                      accessibilityLabel={`Bar chart of FG% for the last ${points.length} sessions`}
+                      accessibilityLabel={`FG% trend across ${points.length} sessions, latest ${Math.round(latest * 100)} percent`}
                     >
-                      {(w) => <TrendBars data={points} width={w} height={BARS_H} />}
+                      {(w) => (
+                        // progress opts the line into its left-to-right draw-on
+                        // (static under reduced motion — see Sparkline).
+                        <Sparkline data={points} width={w} height={SPARK_H} progress={1} />
+                      )}
                     </MeasuredWidth>
                   </View>
-                </Row>
-                <Row
-                  style={{ justifyContent: 'space-between', marginTop: space.xs }}
-                >
-                  <Text style={styles.caption}>
-                    One bar per session — the latest runs hot.
-                  </Text>
-                  <Text style={styles.micro}>FG%</Text>
-                </Row>
-              </>
-            )}
+                  <Row
+                    style={{ justifyContent: 'space-between', marginTop: space.xs }}
+                  >
+                    <Text style={styles.micro}>OLDEST</Text>
+                    <Text style={styles.micro}>{`${points.length} SESSIONS`}</Text>
+                    <Text style={styles.micro}>LATEST</Text>
+                  </Row>
+                </>
+              ) : (
+                <>
+                  <Row style={{ alignItems: 'stretch', marginTop: space.lg }} gap={space.sm}>
+                    <View style={styles.axisGutter}>
+                      <Text style={styles.micro}>100</Text>
+                      <Text style={styles.micro}>50</Text>
+                      <Text style={styles.micro}>0</Text>
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <MeasuredWidth
+                        accessibilityLabel={`Bar chart of FG% for the last ${points.length} sessions`}
+                      >
+                        {(w) => <TrendBars data={points} width={w} height={BARS_H} />}
+                      </MeasuredWidth>
+                    </View>
+                  </Row>
+                  <Row
+                    style={{ justifyContent: 'space-between', marginTop: space.xs }}
+                  >
+                    <Text style={styles.caption}>
+                      One bar per session — the latest runs hot.
+                    </Text>
+                    <Text style={styles.micro}>FG%</Text>
+                  </Row>
+                </>
+              )}
+            </Animated.View>
           </Card>
 
           <Card entering={enter(1)}>
-            <Eyebrow>{`Across ${points.length} sessions`}</Eyebrow>
+            <SectionEyebrow icon="stats-chart-outline" style={styles.cardKicker}>
+              {`Across ${points.length} sessions`}
+            </SectionEyebrow>
             <View style={styles.statGrid}>
               <View style={styles.statCell}>
                 <MotionStat
@@ -387,14 +406,18 @@ export default function TrendsScreen() {
 
           {lastAngles != null && (
             <Card entering={enter(2)}>
-              <Eyebrow>Entry angles — last session</Eyebrow>
+              <SectionEyebrow icon="analytics-outline" style={styles.cardKicker}>
+                Entry angles — last session
+              </SectionEyebrow>
               <AngleHistogram angles={lastAngles} />
             </Card>
           )}
 
           {zones != null && zones.totalAttempts >= ZONE_MIN_ATTEMPTS && (
             <Card entering={enter(3)}>
-              <Eyebrow>{`Court zones · last ${ZONE_SESSION_SCAN} sessions`}</Eyebrow>
+              <SectionEyebrow icon="map-outline" style={styles.cardKicker}>
+                {`Court zones · last ${ZONE_SESSION_SCAN} sessions`}
+              </SectionEyebrow>
               <View style={{ marginTop: space.sm }}>
                 <CourtHeatmap heatmap={zones} />
               </View>
@@ -406,7 +429,9 @@ export default function TrendsScreen() {
 
           {lifetime != null && lifetime.sessions > 0 && (
             <Card entering={enter(4)}>
-              <Eyebrow>Lifetime</Eyebrow>
+              <SectionEyebrow icon="infinite-outline" style={styles.cardKicker}>
+                Lifetime
+              </SectionEyebrow>
               <View style={styles.statGrid}>
                 <View style={styles.statCell}>
                   <MotionStat
@@ -451,6 +476,13 @@ const styles = StyleSheet.create({
   monthRow: {
     justifyContent: 'space-between',
     alignItems: 'center',
+  },
+  /**
+   * SectionEyebrow ships no margins (screens own rhythm); this restores the
+   * space.sm the old ui.tsx Eyebrow baked in under every card kicker.
+   */
+  cardKicker: {
+    marginBottom: space.sm,
   },
   monthText: {
     flex: 1,

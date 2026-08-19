@@ -233,7 +233,8 @@ export default function StorageScreen() {
         ) : items.length === 0 ? (
           <EmptyState
             title="No session recordings on this phone"
-            body="Session videos you keep show up here. Deleting a recording only ever removes the video file — every session's stats are kept."
+            // Text diet: one line, keeping the stats-are-kept claim.
+            body="Kept session videos land here — deleting one only ever removes the video, never your stats."
           />
         ) : (
           <>

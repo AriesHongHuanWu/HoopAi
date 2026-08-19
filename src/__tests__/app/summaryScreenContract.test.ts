@@ -144,8 +144,13 @@ describe('section entrance stagger', () => {
 
 describe('trust bridge to the analyze screen', () => {
   it('links the detector test at the moment of doubt (unsure shots only)', () => {
+    // RE-PINNED for the app-wide text diet: the label compressed from
+    // "Doubt a call? Test the detector on your own clip" — the pinned INTENT
+    // (a bridge to testing the SAME detector on a clip the user trusts,
+    // offered exactly when unsure shots exist) is unchanged, and the typed
+    // route below still carries it.
     expect(src).toContain(
-      'label="Doubt a call? Test the detector on your own clip"',
+      'label="Test the detector on your clip"',
     );
     // Typed literal route — never a string variable (typedRoutes contract).
     expect(src).toMatch(/onPress=\{\(\) => router\.push\('\/session\/analyze'\)\}/);

@@ -38,7 +38,12 @@ import React, {
   type ComponentProps,
 } from 'react';
 import { Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
-import Animated, { FadeIn, ReduceMotion } from 'react-native-reanimated';
+import Animated, {
+  FadeIn,
+  FadeInDown,
+  LinearTransition,
+  ReduceMotion,
+} from 'react-native-reanimated';
 
 import { LEADERBOARD_TILE, NavTileRow } from '@/components/NavTiles';
 import { WeeklyChallengeCard } from '@/components/WeeklyChallengeCard';
@@ -84,6 +89,14 @@ import { haptic } from '@/utils/haptics';
 
 /** How many recent raceable sessions the ghost card offers. */
 const GHOST_SOURCE_LIMIT = 5;
+
+/**
+ * Disclosure motion grammar: every block whose position shifts when a section
+ * collapses (or the ghost picker / Pro card opens) wears this layout
+ * transition, so siblings slide instead of popping. Fresh builder per view —
+ * never a shared instance.
+ */
+const reflow = () => LinearTransition.duration(motion.quick).reduceMotion(ReduceMotion.System);
 
 // Section copy lives in core (modeCatalogSections.ts) so the taxonomy is
 // testable pure TS; this screen only renders it.
@@ -327,9 +340,13 @@ export default function ModePickerScreen() {
             first half of the lede now, so the friendly voice survives without
             costing the tab bar its label. */}
         <Text style={styles.title}>Train</Text>
+        {/* Text diet: one line. "How do you want to play?" is pinned by
+            tabIaCategorisation; the auto-tracking promise stands in for the
+            old "prop your phone up" half. Section ledes stay in core
+            (modeCatalogSections.ts) — a protected surface this sweep does
+            not edit. */}
         <Text style={styles.lede}>
-          How do you want to play? Every mode runs on the same automatic make/miss tracking —
-          pick a game and prop your phone up.
+          How do you want to play? Every mode tracks makes and misses automatically.
         </Text>
       </Animated.View>
 
@@ -396,8 +413,11 @@ export default function ModePickerScreen() {
         )}
       </View>
 
-      {/* GAMES — the seven non-free modes; collapsible. */}
-      <View style={styles.sectionGap}>
+      {/* GAMES — the seven non-free modes; collapsible. The layout transition
+          makes a collapse SLIDE the sections below up instead of popping; the
+          body enters with the app-wide disclosure grammar (FadeInDown, quick,
+          no exiting — unmount on collapse stays instant by design). */}
+      <Animated.View layout={reflow()} style={styles.sectionGap}>
         <ModeSectionHeader
           title={gamesSection.title}
           count={GAME_SECTION_MODES.length}
@@ -407,7 +427,8 @@ export default function ModePickerScreen() {
         />
         {!collapsed.games && (
           <Animated.View
-            entering={FadeIn.duration(motion.quick).reduceMotion(ReduceMotion.System)}
+            entering={FadeInDown.duration(motion.quick).reduceMotion(ReduceMotion.System)}
+            layout={reflow()}
             style={styles.sectionList}
           >
             {/* 2-column cartridge grid — every game except Ghost. Saves the
@@ -457,15 +478,15 @@ export default function ModePickerScreen() {
             </Animated.View>
           </Animated.View>
         )}
-      </View>
+      </Animated.View>
 
       {/* CHALLENGES — the one section where "challenge" means a scored goal:
           this week's set, and the friend board you can send a score to. The
           card is display-only here (see the CHALLENGES data block above); the
           leaderboard tile is placed EXPLICITLY rather than injected by
           NavTileRow, so no copy edit can delete the app's only social entry
-          point. */}
-      <View style={styles.sectionGap}>
+          point. layout: this block is what SLIDES when GAMES collapses. */}
+      <Animated.View layout={reflow()} style={styles.sectionGap}>
         <ModeSectionHeader
           title={challengesSection.title}
           lede={challengesSection.lede}
@@ -480,11 +501,12 @@ export default function ModePickerScreen() {
             <NavTileRow tiles={[LEADERBOARD_TILE]} />
           </Animated.View>
         </View>
-      </View>
+      </Animated.View>
 
       {/* DRILLS — structured HomeCourt-style workouts. They run as spot
-          shooting under the hood but read as their own cartridges here. */}
-      <View style={styles.sectionGap}>
+          shooting under the hood but read as their own cartridges here.
+          Same disclosure grammar as GAMES above. */}
+      <Animated.View layout={reflow()} style={styles.sectionGap}>
         <ModeSectionHeader
           title={drillsSection.title}
           count={DRILLS.length}
@@ -494,7 +516,8 @@ export default function ModePickerScreen() {
         />
         {!collapsed.drills && (
           <Animated.View
-            entering={FadeIn.duration(motion.quick).reduceMotion(ReduceMotion.System)}
+            entering={FadeInDown.duration(motion.quick).reduceMotion(ReduceMotion.System)}
+            layout={reflow()}
             style={styles.sectionList}
           >
             {DRILLS.map((drill, i) => (
@@ -515,13 +538,13 @@ export default function ModePickerScreen() {
             ))}
           </Animated.View>
         )}
-      </View>
+      </Animated.View>
 
       {/* TRAINING TOOLS — 2-column ToolCard entry cards with the one-line
           hint made VISIBLE (the old NavTiles hid it in the a11y tree). The
           Leaderboard NavTile stays in CHALLENGES above — this section never
-          renders NavTileRow. */}
-      <View style={styles.sectionGap}>
+          renders NavTileRow. layout: slides when GAMES/DRILLS collapse. */}
+      <Animated.View layout={reflow()} style={styles.sectionGap}>
         <ModeSectionHeader title={toolsSection.title} />
         <View style={styles.sectionList}>
           <View style={styles.tileRow}>
@@ -542,7 +565,7 @@ export default function ModePickerScreen() {
             <ToolCard
               icon="body"
               label="Form Studio"
-              hint="Compare your shooting form to NBA archetypes"
+              hint="Compare your form to NBA archetypes"
               onPress={() => router.push('/formstudio')}
             />
             <ToolCard
@@ -553,10 +576,10 @@ export default function ModePickerScreen() {
             />
           </View>
         </View>
-      </View>
+      </Animated.View>
 
       {hasProModes && (
-        <View style={styles.proSection}>
+        <Animated.View layout={reflow()} style={styles.proSection}>
           <Pressable
             accessibilityRole="button"
             accessibilityLabel={proOpen ? 'Hide what Pro unlocks' : 'What does Pro unlock?'}
@@ -580,9 +603,11 @@ export default function ModePickerScreen() {
           {proOpen && (
             <Animated.View entering={FadeIn.duration(motion.quick).reduceMotion(ReduceMotion.System)}>
               <Card style={styles.proCard}>
+                {/* Entitlement honesty, compressed to one line — the claim
+                    (free now, paid later) survives intact and already sits
+                    behind the proOpen disclosure. */}
                 <Text style={styles.proCardNote}>
-                  Everything below is unlocked and free during beta. This is what stays part of
-                  Hoopilot Pro after launch.
+                  Free during beta — this is what stays Pro at launch.
                 </Text>
                 <View style={styles.proFeatureList}>
                   {PRO_FEATURES.map((f) => (
@@ -595,7 +620,7 @@ export default function ModePickerScreen() {
               </Card>
             </Animated.View>
           )}
-        </View>
+        </Animated.View>
       )}
     </Screen>
   );
@@ -628,6 +653,10 @@ function GhostCatalogCard({
   // Skeleton row width: window minus the screen (lg) and card (md) padding.
   const ghostRowW = useWindowDimensions().width - space.lg * 2 - space.md * 2;
   const disabled = sources != null && sources.length === 0;
+  // Text diet: the inked tagline is one line; the FULL honesty sentence (what
+  // to do, and that recent runs will surface here) stays reachable verbatim
+  // through the accessibility hint below.
+  const disabledTagline = `Needs a session with ${GHOST_MIN_MAKES}+ tracked makes`;
   const disabledReason = `Finish a session with ${GHOST_MIN_MAKES}+ tracked makes first — your recent runs will appear here to race.`;
 
   const toggle = () => {
@@ -657,7 +686,7 @@ function GhostCatalogCard({
     <ModeCatalogCard
       icon={identity.icon}
       name={mode.name}
-      tagline={disabled ? disabledReason : mode.tagline}
+      tagline={disabled ? disabledTagline : mode.tagline}
       accent={identity.accent}
       tint={identity.tint}
       selected={selected}
@@ -670,9 +699,15 @@ function GhostCatalogCard({
       }
       onPress={toggle}
     >
-      {/* Inline source picker: the last few raceable sessions. */}
+      {/* Inline source picker: the last few raceable sessions. Disclosure
+          grammar — the list fades in and the card grows smoothly (layout);
+          collapse unmounts instantly by design (no exiting). */}
       {open && !disabled && (
-        <View style={styles.ghostList}>
+        <Animated.View
+          entering={FadeInDown.duration(motion.quick).reduceMotion(ReduceMotion.System)}
+          layout={reflow()}
+          style={styles.ghostList}
+        >
           {sources == null ? (
             // Two skeletons shaped like the real ghostRow (48px, radius.md) —
             // the app's one loading language, no dim placeholder text.
@@ -725,7 +760,7 @@ function GhostCatalogCard({
               {rowError}
             </Text>
           )}
-        </View>
+        </Animated.View>
       )}
     </ModeCatalogCard>
   );

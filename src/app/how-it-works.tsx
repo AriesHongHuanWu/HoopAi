@@ -17,8 +17,9 @@ import Animated from 'react-native-reanimated';
 import { Canvas, Path } from '@shopify/react-native-skia';
 
 import { ArcReveal, arcMotif, useCardStagger } from '@/components/motion';
+import { SectionEyebrow } from '@/components/ScreenHeader';
 import { BackPill } from '@/components/ShotList';
-import { Card, Chip, Eyebrow, PillButton, Row, Screen } from '@/components/ui';
+import { Card, Chip, PillButton, Row, Screen } from '@/components/ui';
 import { color, confidenceColor, iconSize, motion, radius, space, type } from '@/constants/tokens';
 import { EXPLAINER, type ExplainerSignalKey } from '@/core/detectionExplainer';
 import {
@@ -50,12 +51,14 @@ const RIM_HALF = 28;
 const WEDGE_R = 18;
 
 /**
- * Static schematic of the PATH signal: the signature arc (the same arcMotif
- * every hero moment draws) crossing DOWN through a rim line, with the entry
- * angle wedged at the crossing point. Deliberately unlabeled — it teaches the
+ * Schematic of the PATH signal: the signature arc (the same arcMotif every
+ * hero moment draws) crossing DOWN through a rim line, with the entry angle
+ * wedged at the crossing point. Deliberately unlabeled — it teaches the
  * SHAPE of the test and never a number the pipeline doesn't measure that
- * precisely. All geometry is plain JS-thread math; the Skia overlay is
- * declarative Paths only, no worklet callbacks.
+ * precisely. The arc draws itself in via ArcReveal (reduced-motion aware
+ * internally — it renders the finished frame on that path); the rim/wedge
+ * overlay stays static. All geometry is plain JS-thread math; the Skia
+ * overlay is declarative Paths only, no worklet callbacks.
  */
 function ArcDiagram() {
   const [w, setW] = useState(0);
@@ -91,7 +94,7 @@ function ArcDiagram() {
     >
       {motif != null && (
         <>
-          <ArcReveal width={w} height={DIAGRAM_H} animate={false} />
+          <ArcReveal width={w} height={DIAGRAM_H} />
           <Canvas style={styles.diagramOverlay} pointerEvents="none">
             <Path path={rimPath} style="stroke" strokeWidth={2} color={color.textDim} opacity={0.7} />
             <Path path={throughPath} style="stroke" strokeWidth={2} color={color.accent} opacity={0.35} />
@@ -143,7 +146,7 @@ export default function HowItWorksScreen() {
         <BackPill />
       </Row>
       <Animated.View entering={enter(0)}>
-        <Eyebrow>How detection works</Eyebrow>
+        <SectionEyebrow icon="scan-outline">How detection works</SectionEyebrow>
       </Animated.View>
 
       {/* SIGNALS — the three fusion channels, in receipt order. */}
@@ -189,7 +192,7 @@ export default function HowItWorksScreen() {
 
       {/* RULES — the honesty contract, one row per rule. */}
       <Card entering={enter(2)} style={styles.card}>
-        <Eyebrow>The rules that keep it honest</Eyebrow>
+        <SectionEyebrow icon="shield-checkmark-outline">The rules that keep it honest</SectionEyebrow>
         {EXPLAINER.rules.map((rule, i) => (
           <Row key={rule.title} style={[styles.ruleRow, i > 0 && styles.ruleRowGap]} gap={space.md}>
             <Ionicons name={rule.icon} size={iconSize.sm} color={color.textDim} style={styles.ruleIcon} />
@@ -203,7 +206,7 @@ export default function HowItWorksScreen() {
 
       {/* CONFIDENCE — the one scale every detection surface speaks. */}
       <Card entering={enter(3)} style={styles.card}>
-        <Eyebrow>One confidence scale</Eyebrow>
+        <SectionEyebrow icon="speedometer-outline">One confidence scale</SectionEyebrow>
         <Row style={styles.tierRow} gap={space.sm}>
           {CONFIDENCE_TIERS.map((level) => (
             <TierChip key={level} level={level} />

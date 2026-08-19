@@ -16,7 +16,12 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useCallback, useState, type ComponentProps, type ReactNode } from 'react';
 import { Modal, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
-import Animated, { FadeIn, useReducedMotion } from 'react-native-reanimated';
+import Animated, {
+  FadeIn,
+  LinearTransition,
+  ReduceMotion,
+  useReducedMotion,
+} from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { router, useFocusEffect } from 'expo-router';
@@ -28,7 +33,7 @@ import { NumberSlider } from '@/components/profile/NumberSlider';
 import { SeasonCard } from '@/components/SeasonCard';
 import { SectionEyebrow } from '@/components/ScreenHeader';
 import { Card, Chip, PillButton, PressableCard, Row, Screen, StatNumber } from '@/components/ui';
-import { color, font, iconSize, layout, palette, radius, space, touch, type } from '@/constants/tokens';
+import { color, font, iconSize, layout, motion, palette, radius, space, touch, type } from '@/constants/tokens';
 import {
   ACHIEVEMENTS,
   evaluate,
@@ -494,34 +499,46 @@ export default function ProfileScreen() {
           </View>
         </Card>
 
-        {/* Why we ask — expandable, privacy-first */}
+        {/* Why we ask — expandable, privacy-first. The disclosure grammar:
+            the reflowing container rides a quick LinearTransition so opening
+            GROWS the card instead of popping it; the revealed body keeps its
+            quick FadeIn. Layout lives on an inner Animated.View because Card
+            (read-only ui.tsx) forwards no layout prop — the same idiom as
+            ShotReceipt's expanding column. */}
         <Card entering={enter(8)}>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityState={{ expanded: whyOpen }}
-            accessibilityLabel="Why we ask"
-            accessibilityHint="Explains how your profile is used and stored"
-            onPress={() => setWhyOpen((v) => !v)}
-            style={styles.whyHeader}
+          <Animated.View
+            layout={LinearTransition.duration(motion.quick).reduceMotion(ReduceMotion.System)}
           >
-            <Row gap={space.sm}>
-              <Ionicons name="lock-closed" size={iconSize.sm} color={color.make} />
-              <Text style={styles.whyTitle}>Why we ask</Text>
-            </Row>
-            <Ionicons name={whyOpen ? 'chevron-up' : 'chevron-down'} size={iconSize.md} color={color.textFaint} />
-          </Pressable>
-          {whyOpen && (
-            <Animated.View entering={reducedMotion ? undefined : FadeIn.duration(160)} style={styles.whyBody}>
-              <Text style={styles.whyText}>
-                Your profile personalizes coaching cues and lets us compare you fairly with
-                players of a similar age and experience — not against everyone at once.
-              </Text>
-              <Text style={styles.whyText}>
-                It all stays on this phone. Nothing here is uploaded, and none of it is health
-                or fitness advice — just context to make the numbers mean more to you.
-              </Text>
-            </Animated.View>
-          )}
+            <Pressable
+              accessibilityRole="button"
+              accessibilityState={{ expanded: whyOpen }}
+              accessibilityLabel="Why we ask"
+              accessibilityHint="Explains how your profile is used and stored"
+              onPress={() => setWhyOpen((v) => !v)}
+              style={styles.whyHeader}
+            >
+              <Row gap={space.sm}>
+                <Ionicons name="lock-closed" size={iconSize.sm} color={color.make} />
+                <Text style={styles.whyTitle}>Why we ask</Text>
+              </Row>
+              <Ionicons name={whyOpen ? 'chevron-up' : 'chevron-down'} size={iconSize.md} color={color.textFaint} />
+            </Pressable>
+            {whyOpen && (
+              <Animated.View
+                entering={reducedMotion ? undefined : FadeIn.duration(motion.quick)}
+                style={styles.whyBody}
+              >
+                <Text style={styles.whyText}>
+                  Your profile personalizes coaching cues and lets us compare you fairly with
+                  players of a similar age and experience — not against everyone at once.
+                </Text>
+                <Text style={styles.whyText}>
+                  It all stays on this phone. Nothing here is uploaded, and none of it is health
+                  or fitness advice — just context to make the numbers mean more to you.
+                </Text>
+              </Animated.View>
+            )}
+          </Animated.View>
         </Card>
       </View>
 

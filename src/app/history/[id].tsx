@@ -16,9 +16,10 @@ import { Ionicons } from '@expo/vector-icons';
 import { router, useLocalSearchParams } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
-import Animated from 'react-native-reanimated';
+import Animated, { FadeInDown, LinearTransition, ReduceMotion } from 'react-native-reanimated';
 
 import { useCardStagger } from '@/components/motion';
+import { SectionEyebrow } from '@/components/ScreenHeader';
 import { haptic } from '@/utils/haptics';
 import { shareSessionCard } from '@/components/ShareCard';
 import { FramePickerModal } from '@/components/FramePickerModal';
@@ -41,7 +42,7 @@ import { RecheckPanel } from '@/components/RecheckPanel';
 import { ReelEntryButton } from '@/components/ReelEntryButton';
 import { ModeMark } from '@/components/modes/modeIdentity';
 import { Card, Chip, ErrorCard, Eyebrow, PillButton, Row, Screen, SkeletonCard } from '@/components/ui';
-import { color, radius, space, touch, type } from '@/constants/tokens';
+import { color, motion, radius, space, touch, type } from '@/constants/tokens';
 import { getModeDef, type ModeState } from '@/core/gameModes';
 import type { SessionStats } from '@/core/types';
 import { listSessions, sessionStatsFromDb, updateSessionLabel } from '@/data/db';
@@ -112,6 +113,14 @@ interface PreviousSession {
 }
 
 /**
+ * Shared disclosure grammar for the action block: when the share-failed chip
+ * appears, it fades/slides in and the pill row below reflows into place; its
+ * dismissal (collapse) stays an instant unmount by design — no exiting.
+ */
+const blockReflow = LinearTransition.duration(motion.quick).reduceMotion(ReduceMotion.System);
+const chipReveal = FadeInDown.duration(motion.quick).reduceMotion(ReduceMotion.System);
+
+/**
  * Mode breakdown card — a quiet, non-celebratory read of the ModeState
  * snapshot persisted at session end (see SessionRow.modeResultJson). Mirrors
  * ModeComplete's headline logic but scoped to History, since ModeComplete is
@@ -138,7 +147,9 @@ function ModeBreakdownCard({ modeId, resultJson }: { modeId: string; resultJson:
 
   return (
     <Card>
-      <Eyebrow>Game mode</Eyebrow>
+      <SectionEyebrow icon="game-controller-outline" style={styles.cardKicker}>
+        Game mode
+      </SectionEyebrow>
       <Row gap={space.sm}>
         {/* Shared Ionicons identity mark — same glyph/tint as the picker and
             live banner, replacing the legacy catalog emoji. */}
@@ -392,11 +403,11 @@ export default function SessionDetailScreen() {
           </Animated.View>
           {/* Block 2 — compact action row beneath the hero: the three stacked
               full-width pills, collapsed. Tools follow the score. */}
-          <Animated.View entering={enter(2)}>
+          <Animated.View entering={enter(2)} layout={blockReflow}>
             {shareFailed && (
-              <View style={{ marginTop: space.md }}>
+              <Animated.View entering={chipReveal} style={{ marginTop: space.md }}>
                 <Chip label="Couldn't share — try again" tone="unsure" />
-              </View>
+              </Animated.View>
             )}
             <Row gap={space.sm} style={{ marginTop: space.lg }}>
               <PillButton
@@ -466,7 +477,9 @@ export default function SessionDetailScreen() {
           <View style={styles.analysisSection}>
             {prev != null && (
               <Card entering={enter(5)}>
-                <Eyebrow>Vs previous session</Eyebrow>
+                <SectionEyebrow icon="git-compare-outline" style={styles.cardKicker}>
+                  Vs previous session
+                </SectionEyebrow>
                 <Text style={styles.compareMeta}>
                   Compared with {formatSessionDate(prev.startedAt)}
                 </Text>
@@ -474,7 +487,9 @@ export default function SessionDetailScreen() {
               </Card>
             )}
             <Card entering={enter(6)}>
-              <Eyebrow>Entry angles</Eyebrow>
+              <SectionEyebrow icon="analytics-outline" style={styles.cardKicker}>
+                Entry angles
+              </SectionEyebrow>
               <AngleHistogram angles={entryAngles} />
             </Card>
           </View>
@@ -567,6 +582,13 @@ const styles = StyleSheet.create({
   dim: {
     ...type.body,
     color: color.textDim,
+  },
+  /**
+   * SectionEyebrow ships no margins (screens own rhythm); this restores the
+   * space.sm the old ui.tsx Eyebrow baked in under every card kicker.
+   */
+  cardKicker: {
+    marginBottom: space.sm,
   },
   compareMeta: {
     ...type.caption,

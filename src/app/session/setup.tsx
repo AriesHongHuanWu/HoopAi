@@ -24,7 +24,11 @@ import {
 } from 'react-native';
 import { router, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import Animated, { useReducedMotion } from 'react-native-reanimated';
+import Animated, {
+  LinearTransition,
+  ReduceMotion,
+  useReducedMotion,
+} from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   useCameraPermission,
@@ -298,8 +302,8 @@ export default function SessionSetupScreen() {
               </View>
               <View style={styles.ftTipBody}>
                 <Text style={styles.ftTipText}>
-                  Optional: shoot your first shot from the free-throw line — it
-                  calibrates real distances.
+                  Optional: first shot from the free-throw line calibrates real
+                  distances.
                 </Text>
               </View>
             </Row>
@@ -381,8 +385,15 @@ export default function SessionSetupScreen() {
         </Animated.View>
 
         {SETUP_SECTION_ORDER.map((id, idx) => (
-          <View
+          // Disclosure motion grammar: the wrapper whose siblings reflow
+          // carries the layout transition, so expanding one section pushes
+          // the ones below it smoothly instead of popping. The wrapper stays
+          // a DIRECT child of the content container and keeps onLayout —
+          // positions animate via transform AFTER layout, so the recorded Y
+          // is still the final scroll target for the hero chips.
+          <Animated.View
             key={id}
+            layout={LinearTransition.duration(motion.quick).reduceMotion(ReduceMotion.System)}
             onLayout={(e) => {
               sectionY.current[id] = e.nativeEvent.layout.y;
             }}
@@ -397,7 +408,7 @@ export default function SessionSetupScreen() {
             >
               {sectionBody(id)}
             </CollapsibleSection>
-          </View>
+          </Animated.View>
         ))}
       </ScrollView>
 
