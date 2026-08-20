@@ -572,6 +572,60 @@ describe('the Form Check card', () => {
     expect(text).not.toContain('±');
     await unmount(r);
   });
+
+  // Form Check is allowed to relax a gate so a rep gets counted, and the live
+  // report says so. Persistence must not strip that: a saved run counted at
+  // 11 fps has to keep reading as coarse here, not as a clean check.
+  it('carries the relaxed-gate caveat from a SAVED session into the receipt', async () => {
+    db.listFormSessions.mockResolvedValue([
+      formSessionRow(1, {
+        summaryJson: JSON.stringify({ lowConfidence: { reps: 2, reasons: ['angledStance'] } }),
+      }),
+    ]);
+    const r = await render();
+    await switchTo(r, 'Your form');
+
+    expect(screenText(r)).toContain('8 reps · tempo ±96 ms · low-confidence · 2 d ago');
+    await unmount(r);
+  });
+
+  it('marks a row saved under the fps floor even with no receipt in its blob', async () => {
+    // Rows written before the receipt existed keep no reasons — medianPoseFps
+    // is its own column and is enough to refuse to call the row clean.
+    db.listFormSessions.mockResolvedValue([formSessionRow(1, { medianPoseFps: 11 })]);
+    const r = await render();
+    await switchTo(r, 'Your form');
+
+    expect(screenText(r)).toContain('low-confidence');
+    await unmount(r);
+  });
+
+  it('labels the tempo trend when some of the plotted checks were coarse', async () => {
+    db.listFormSessions.mockResolvedValue([
+      formSessionRow(3),
+      formSessionRow(2, { tempoSpreadMs: 120, medianPoseFps: 11 }),
+      formSessionRow(1, { tempoSpreadMs: 140 }),
+    ]);
+    const r = await render();
+    await switchTo(r, 'Your form');
+    const text = screenText(r);
+
+    expect(text).toContain('tempo spread — lower is steadier');
+    expect(text).toContain('1 low-confidence — coarse tempo');
+    await unmount(r);
+  });
+
+  it('says nothing about confidence when every plotted check was clean', async () => {
+    db.listFormSessions.mockResolvedValue([
+      formSessionRow(2, { tempoSpreadMs: 120 }),
+      formSessionRow(1, { tempoSpreadMs: 140 }),
+    ]);
+    const r = await render();
+    await switchTo(r, 'Your form');
+
+    expect(screenText(r)).not.toContain('low-confidence');
+    await unmount(r);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -589,6 +643,38 @@ describe('states that are not segmented', () => {
     ).toHaveLength(0);
     // The day-one card the empty state carries is untouched by segmentation.
     expect(screenText(r)).toContain('BODY_DIRECTION_CARD');
+    await unmount(r);
+  });
+
+  // REGRESSION PIN: Form Check grades the shooting MOTION alone, so it needs no
+  // hoop, no ball and no logged sessions — it is the only coaching surface that
+  // works on a fresh install. Its richer card lives in the populated branch,
+  // which never renders when there are zero sessions, so the feature used to be
+  // completely unreachable until the user had already tracked a session at a
+  // hoop. That is exactly backwards, and it is invisible to anyone testing on a
+  // phone that already has history.
+  it('still reaches Form Check with zero sessions, the one state that needs it most', async () => {
+    db.listSessions.mockResolvedValue([]);
+    const r = await render();
+
+    expect(screenText(r)).toContain('No sessions to coach yet');
+    expect(screenText(r)).toContain('Form Check');
+    expect(screenText(r)).toContain('Check my shooting form');
+
+    const entry = r.root.findAll(
+      (n) =>
+        typeof n.type !== 'string' &&
+        typeof n.props?.accessibilityLabel === 'string' &&
+        n.props.accessibilityLabel.includes('Opens Form Check'),
+    );
+    expect(entry.length).toBeGreaterThan(0);
+
+    // Same accessor idiom the db mock uses above: the module is mocked at the
+    // top of the file, so reach the spy through requireMock rather than an
+    // import the file does not otherwise need.
+    const { router } = jest.requireMock('expo-router') as { router: Record<string, jest.Mock> };
+    entry[0]!.props.onPress();
+    expect(router.push).toHaveBeenCalledWith('/formcheck');
     await unmount(r);
   });
 });

@@ -43,6 +43,24 @@
  * Honest about limits: needs ≥ 15 fps pose and your WHOLE body + shooting arm
  * in frame; below any gate the screen pauses rep counting and says why
  * (Jump Lab's refuse-below-15fps contract, reused).
+ *
+ * ── V3 — stage hardening ─────────────────────────────────────────────────────
+ * Everything here removes a stall, relaxes a gate, makes a failure
+ * recoverable or makes a state legible. Nothing new is measured.
+ *  - the pose model runs TWO throwaway inferences before it is published, so
+ *    the CoreML graph compile happens while the guide is on screen instead of
+ *    on the first camera frame (useShotEngine's warm-up, which this screen's
+ *    verbatim loader copy had dropped);
+ *  - the loader ladder no longer swallows its failure: a watchdog and a
+ *    Retry pill replace an eternal "Warming up the pose model…";
+ *  - the live view is an EARLY RETURN, not an absolute child of the guide's
+ *    ScrollView — Zone A used to render above the viewport;
+ *  - "Starting the camera…" is a state of its own, so a camera that has not
+ *    produced a frame yet stops blaming the room's lighting;
+ *  - readiness is stated POSITIVELY ("Ready — shoot when you like.") and at a
+ *    size that reads from three metres;
+ *  - every relaxed gate the core now reports ({@link FormCheckRep.lowConfidence})
+ *    is rendered. A relaxed capture is never presented as a clean one.
  */
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
@@ -84,7 +102,10 @@ import {
   loadTensorflowModel,
   type TensorflowModel,
 } from 'react-native-fast-tflite';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Canvas, Circle, Line, Path, Skia, vec } from '@shopify/react-native-skia';
+
+import { useAppStateGuard } from '@/camera/useAppStateGuard';
 
 import { FormMotionStage, type StagePhase } from '@/components/charts/FormMotionStage';
 import { PhaseBars } from '@/components/charts/PhaseBars';
@@ -98,12 +119,14 @@ import { color, font, iconSize, layout, radius, space, type } from '@/constants/
 import { FORM } from '@/core/config';
 import {
   ELBOW_SPREAD_FLAG_DEG,
+  FPS_OVERRIDE_MIN,
   FormCheckSession,
   KNEE_SPREAD_FLAG_DEG,
   MIN_POSE_FPS,
   MIN_SPREAD_REPS,
   RELEASE_HEIGHT_SPREAD_FLAG,
   SHADOW_REPS_TARGET,
+  SIDE_PROFILE_TRUSTED,
   TEMPO_SPREAD_FLAG_MS,
   TILT_MAX_COMP_DEG,
   type CalibrationState,
@@ -111,10 +134,11 @@ import {
   type FormCheckRep,
   type FormCheckSessionReport,
   type HandSource,
+  type RepConfidenceReason,
   type RepPhaseTiming,
   type SpreadStat,
 } from '@/core/formCheck';
-import { decodeSequence } from '@/core/formSequence';
+import { decodeSequence, type DecodedFrame } from '@/core/formSequence';
 import { PLAYER_ARCHETYPES, type PlayerArchetype } from '@/core/nbaBenchmarks';
 import { referenceSequence } from '@/core/nbaReferenceForms';
 import { formSimilarity, type FormSimilarity } from '@/core/formSimilarity';
@@ -142,8 +166,41 @@ const OVERLAY_POLL_MS = 80;
 /** Live rail poll interval, ms (~4 Hz — readiness + calibration snapshot). */
 const READINESS_POLL_MS = 250;
 
-/** How long the "Calibrated — scoring armed" ArcReveal owns the rail, ms. */
-const ARMED_BANNER_MS = 2600;
+/**
+ * How long the "Calibrated — scoring armed" ArcReveal owns the rail, ms.
+ * 1200, not 2600: the shooter has just been told scoring is armed, so they
+ * shoot immediately — a celebration longer than one shooting motion blanks
+ * the readiness chips over exactly the window in which they matter. The chip
+ * row now renders UNDER the armed text as well, so nothing is hidden at all.
+ */
+const ARMED_BANNER_MS = 1200;
+
+/**
+ * Watchdog on the pose loader, ms. A hung asset load looks exactly like a
+ * slow one from the outside, and "Warming up the pose model…" forever is a
+ * screen the presenter cannot act on. Past this the rail offers Retry.
+ * Generous on purpose — a cold first load on an A11/A12 is seconds, not
+ * milliseconds, and a premature Retry offer would be its own stumble.
+ */
+const MODEL_LOAD_TIMEOUT_MS = 12000;
+
+/**
+ * Frames that must have arrived before the rail stops saying "Starting the
+ * camera…". Below this the readiness gauges are measuring a camera that has
+ * not delivered a frame yet — a red FPS/BODY/ARM row there is not a
+ * diagnosis, it is noise.
+ */
+const WARMUP_FRAMES = 8;
+
+/**
+ * Frame timestamps are nanoseconds on Android and CMTime SECONDS since boot
+ * on iOS. This used to be guessed from the magnitude (`timestamp > 1e6`),
+ * which silently inverts on an iPhone that has been up for more than 11.6
+ * days (1e6 s): every timestamp would be divided by 1e9, the clock would
+ * crawl, and the debounce would never lapse again — exactly one rep, ever,
+ * with every gate green. A captured boolean primitive is worklet-safe.
+ */
+const TS_IS_NANOS = Platform.OS !== 'ios';
 
 /** Below this sideness the guidance says "turn 90°" instead of "a little". */
 const SIDE_TURN_HINT = 0.35;
@@ -171,6 +228,39 @@ interface FormPoseSample {
 }
 
 /**
+ * Two throwaway inferences on a dummy frame, BEFORE the model is published.
+ *
+ * `loadTensorflowModel` resolves as soon as the interpreter and its delegate
+ * are constructed — the CoreML delegate does its graph partitioning and ANE
+ * compilation lazily, on the FIRST Invoke. Without this, that first Invoke is
+ * the `runSync` inside the frame worklet on the first camera frame after the
+ * presenter taps Start, while the screen has already stopped saying it is
+ * warming up: a live preview, no skeleton, 0 REPS DETECTED, no explanation.
+ * useShotEngine has always done this ("the second one is timed"); this
+ * screen's verbatim copy of the loader had dropped it.
+ *
+ * Async `run`, never `runSync`, so it cannot block the JS thread. Any failure
+ * is swallowed — a model that will not take a dummy frame must still be
+ * published and allowed to fail honestly on real ones.
+ */
+async function warmUpPose(m: TensorflowModel): Promise<void> {
+  try {
+    // Size from the model's own input tensor; fall back to what the resizer
+    // is configured to emit (uint8 192×192×3 interleaved).
+    const shape = m.inputs[0]?.shape;
+    const elems =
+      shape != null && shape.length > 0
+        ? shape.reduce((a, b) => a * Math.max(1, b), 1)
+        : POSE_INPUT * POSE_INPUT * 3;
+    const dummy = new Uint8Array(elems).buffer;
+    await m.run([dummy]);
+    await m.run([dummy]);
+  } catch (err) {
+    console.warn('[formcheck] pose warm-up skipped', err);
+  }
+}
+
+/**
  * Runs MoveNet on the camera and ships one full {@link FormPoseSample} per
  * analysed frame to `sink`. Active only while `active` is true, so the model
  * isn't burning battery on the guide or report screens. Structure copied from
@@ -182,36 +272,91 @@ function useFormPose(
   sink: (s: FormPoseSample) => void,
 ) {
   const device = useCameraDevice(position);
-  const { hasPermission, requestPermission } = useCameraPermission();
+  const { hasPermission, canRequestPermission, requestPermission } = useCameraPermission();
 
   const [model, setModel] = useState<TensorflowModel | null>(null);
+  /** Non-null once BOTH loader rungs have failed (or the watchdog fired). */
+  const [modelErr, setModelErr] = useState<string | null>(null);
+  const [loadNonce, setLoadNonce] = useState(0);
   const boxedPoseSv = useSharedValue<ReturnType<typeof NitroModules.box> | null>(null);
   const framesSv = useSharedValue(0);
 
+  // Ask for the camera at SCREEN MOUNT, not at Start: the OS dialog then
+  // resolves while the presenter is reading the guide instead of landing in
+  // the middle of the demo. Ref-guarded — `requestPermission` is not
+  // guaranteed to be referentially stable across renders.
+  const askedRef = useRef(false);
+  useEffect(() => {
+    if (askedRef.current || hasPermission) return;
+    askedRef.current = true;
+    void requestPermission().catch(() => {
+      // A refusal is a state, not a crash — the guide/live wall handles it.
+    });
+  }, [hasPermission, requestPermission]);
+
+  // Foreground guard (live.tsx's contract): a call, a Control Center pull or
+  // an app switch interrupts the AVCaptureSession, and VisionCamera left
+  // nominally active across the transition comes back with a black preview
+  // and a stopped frame processor. Stopping and restarting cleanly is the
+  // difference between a 1 s reacquire and a frozen screen with no message.
+  const [foreground, setForeground] = useState(true);
+  useAppStateGuard({
+    onBackground: () => {
+      setForeground(false);
+      // The rail's "Starting the camera…" state is keyed off this counter, so
+      // a restart reads as starting rather than as stale green chips.
+      framesSv.value = 0;
+    },
+    onForeground: () => setForeground(true),
+  });
+
   // Load MoveNet once (fast delegate → CPU fallback), mirroring useShotEngine's
   // pose loader. Boxed into a SharedValue so the frame worklet reads it fresh.
+  // Runs at screen mount (deps carry no `active`), so the warm-up above is
+  // paid while the guide is on screen.
   useEffect(() => {
     let alive = true;
+    setModelErr(null);
+    // A retry must not leave the previous model boxed: the worklet already
+    // no-ops on a null box, so this parks the frame path during the reload.
+    boxedPoseSv.value = null;
+    const watchdog = setTimeout(() => {
+      if (alive) setModelErr('the pose model took too long to load');
+    }, MODEL_LOAD_TIMEOUT_MS);
     void (async () => {
       const accel: ('core-ml' | 'android-gpu')[] =
         Platform.OS === 'ios' ? ['core-ml'] : ['android-gpu'];
+      let lastError = '';
       for (const d of [accel, [] as ('core-ml' | 'android-gpu')[]]) {
         try {
           const m = await loadTensorflowModel(POSE_ASSET, d);
           if (!alive) return;
+          await warmUpPose(m);
+          if (!alive) return;
+          clearTimeout(watchdog);
           setModel(m);
+          setModelErr(null);
           boxedPoseSv.value = NitroModules.box(m);
           return;
-        } catch {
-          // try next (CPU) rung
+        } catch (err) {
+          // Try the next (CPU) rung — but KEEP the reason. A ladder that
+          // exhausts itself silently leaves the screen warming up forever.
+          lastError = String(err).slice(0, 160);
         }
+      }
+      if (alive) {
+        clearTimeout(watchdog);
+        setModelErr(lastError || 'the pose model could not be loaded');
       }
     })();
     return () => {
       alive = false;
+      clearTimeout(watchdog);
       boxedPoseSv.value = null;
     };
-  }, [boxedPoseSv]);
+  }, [boxedPoseSv, loadNonce]);
+
+  const retryModel = useCallback(() => setLoadNonce((n) => n + 1), []);
 
   // MoveNet wants NHWC uint8 192×192 (interleaved) — same config as the
   // engine's pose resizer.
@@ -251,8 +396,8 @@ function useFormPose(
           const buf = resized.getPixelBuffer();
           const out = tflite.runSync([buf]);
           // Camera presentation timestamp → seconds (iOS seconds; Android ns).
-          const tSec =
-            frame.timestamp > 1e6 ? frame.timestamp / 1e9 : frame.timestamp;
+          // Platform-decided, never magnitude-guessed — see TS_IS_NANOS.
+          const tSec = TS_IS_NANOS ? frame.timestamp / 1e9 : frame.timestamp;
           // De-normalize into the 192-square analysis space — the detector's
           // vy threshold and the sequence packer both live there.
           const pose = parseMoveNet(
@@ -281,9 +426,13 @@ function useFormPose(
   return {
     device,
     hasPermission,
+    canRequestPermission,
     requestPermission,
     outputs: [frameOutput],
     modelLoaded: model != null,
+    modelErr,
+    retryModel,
+    foreground,
     framesSv,
   };
 }
@@ -367,12 +516,17 @@ export function armChipLabel(hand: ShootingHand, source: HandSource): string {
 }
 
 /**
- * The ONE guidance banner, chosen by priority: model warmup → fps → full
- * body → arm → side-profile → tilt advisory. Hard gates pause rep counting
- * (the caller appends the paused line); the tilt advisory never pauses —
- * the detector degrades under heavy roll, so we ask for a level phone rather
- * than pretend to fix it. While `collecting`, the arm branch is skipped
- * (calibration is what determines the arm) and no tilt exists yet.
+ * The ONE guidance banner, chosen by priority: model error → model warmup →
+ * camera warmup → fps → full body → arm → side-profile → low-confidence
+ * advisories → all clear. Hard gates pause rep counting (the caller appends
+ * the paused line); the advisories never pause — the capture is degraded,
+ * not refused, and the honest move is to say so and keep counting.
+ * While `collecting`, the arm branch is skipped (calibration is what
+ * determines the arm) and no tilt exists yet.
+ *
+ * V3 adds `opts` as a TRAILING optional argument on purpose: every existing
+ * five-argument call site (and its pinned test) keeps compiling and keeps
+ * its exact string.
  */
 export function guidanceBanner(
   modelLoaded: boolean,
@@ -380,12 +534,31 @@ export function guidanceBanner(
   hand: ShootingHand,
   calib: CalibrationState | null,
   collecting: boolean,
+  opts: {
+    /** Both loader rungs failed (or the watchdog fired) — Retry is offered. */
+    modelErr?: string | null;
+    /** No camera frame has arrived yet. */
+    warming?: boolean;
+    /** Front camera in a dim room has a recovery the presenter can perform. */
+    camPosition?: 'front' | 'back';
+  } = {},
 ): { text: string; pauses: boolean } | null {
+  if (opts.modelErr != null) {
+    return { text: "The pose model didn't load — tap Retry.", pauses: true };
+  }
   if (!modelLoaded) return { text: 'Warming up the pose model…', pauses: true };
   if (r == null) return null;
+  // "No data yet" is NOT "measured and too slow". Blaming the room's light
+  // before a single frame has landed is the first thing the audience reads.
+  if (opts.warming === true || r.fps <= 0) {
+    return { text: 'Starting the camera…', pauses: true };
+  }
   if (!r.fpsOk) {
     return {
-      text: `Pose is at ${Math.round(r.fps)} fps — too slow. More light helps.`,
+      text:
+        opts.camPosition === 'front'
+          ? `Pose is at ${Math.round(r.fps)} fps — too slow. Tap flip for the back camera.`
+          : `Pose is at ${Math.round(r.fps)} fps — too slow. More light helps.`,
       pauses: true,
     };
   }
@@ -402,11 +575,55 @@ export function guidanceBanner(
       pauses: true,
     };
   }
+  // — advisories: counting continues, confidence is stated —
+  if (r.fpsOverridden === true) {
+    return {
+      text: `Counting below the ${MIN_POSE_FPS} fps floor — timing numbers are low-confidence.`,
+      pauses: false,
+    };
+  }
+  // Measured-but-angled: the gate passes at SIDE_PROFILE_MIN, the ANGLES do
+  // not survive the same tolerance. An unmeasurable stance (sideness null)
+  // says nothing either way and earns no claim.
+  if (r.sideTrusted === false && r.sideness != null) {
+    return { text: 'Angled to the camera — elbow and knee angles read low.', pauses: false };
+  }
   const tilt = calib?.tilt;
   if (tilt != null && Math.abs(tilt.tiltDeg) > TILT_MAX_COMP_DEG) {
     return { text: 'Straighten the phone.', pauses: false };
   }
   return null;
+}
+
+/** Short chip word per low-confidence reason (rep rows + the report banner). */
+const CONFIDENCE_WORD: Record<RepConfidenceReason, string> = {
+  lowPoseFps: 'low pose fps',
+  gateDropout: 'landmarks dropped',
+  angledStance: 'angled stance',
+};
+
+/** What each reason actually costs, in plain words. */
+const CONFIDENCE_REASON: Record<RepConfidenceReason, string> = {
+  lowPoseFps: `pose ran under ${MIN_POSE_FPS} fps, so tempo and phase timing are coarse`,
+  gateDropout: 'landmarks dropped mid-motion, so some numbers are missing',
+  angledStance: 'the stance was angled to the camera, so 2D angles read low',
+};
+
+/**
+ * The report's low-confidence line, or null when every counted rep had a
+ * clean capture. The core relaxed its gates so the demo could happen; this
+ * is the other half of that bargain — the reps are real, their numbers are
+ * worth less, and the report says which and why.
+ */
+export function lowConfidenceLine(report: FormCheckSessionReport): string | null {
+  const lc = report.lowConfidence;
+  if (lc == null || lc.reps <= 0 || lc.reasons.length === 0) return null;
+  const why = lc.reasons.map((k) => CONFIDENCE_REASON[k]).join('; ');
+  const which =
+    lc.reps === report.repCount
+      ? `All ${lc.reps} ${lc.reps === 1 ? 'rep was' : 'reps were'}`
+      : `${lc.reps} of ${report.repCount} reps were`;
+  return `${which} caught under a relaxed gate — ${why}. Really measured, just lower-confidence.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -467,6 +684,12 @@ export function sessionPhaseStats(reps: readonly FormCheckRep[]): {
  * to capture bestRepJson). summaryJson carries per-rep metrics + phases +
  * flags but NO sequences — exactly ONE encoded sequence rides in bestRepJson,
  * so a marathon session's row stays bounded.
+ *
+ * The relaxed-gate receipt (`lowConfidence`, per rep AND session-level) is
+ * written HERE for the same reason the live report shows it: saving a
+ * session must not launder it. Without these two keys a run the presenter
+ * counted at 11 fps would reappear in the Coach receipt and the tempo trend
+ * indistinguishable from a clean check. See core `savedLowConfidenceOf`.
  */
 export function formSessionRowOf(
   report: FormCheckSessionReport,
@@ -482,12 +705,17 @@ export function formSessionRowOf(
       metrics: r.metrics,
       phases: r.phases,
       flags: r.flags,
+      /** Why this rep's numbers are worth less. Empty = clean capture. */
+      lowConfidence: r.lowConfidence ?? [],
       releaseHeightM: r.releaseHeightM,
       tips: r.tips.map((t) => t.title),
     })),
     spreads: report.spreads,
     best: report.best,
     verdict: report.verdict,
+    /** Session-level relaxed-gate receipt — the half saved-session surfaces
+     *  read back (they never page the per-rep array). */
+    lowConfidence: report.lowConfidence ?? { reps: 0, reasons: [] },
     calibration: calib,
     /** The archetype the report screen scores similarity against by default. */
     similarityArchetype: PLAYER_ARCHETYPES[0]!.name,
@@ -547,6 +775,13 @@ export default function FormCheckScreen() {
   const sessionRef = useRef<FormCheckSession | null>(null);
   const latestRef = useRef<FormPoseSample | null>(null);
   const handRef = useRef<ShootingHand>(settingsHand);
+  /**
+   * Which session's auto-save the report is allowed to believe. The screen no
+   * longer unmounts between runs (Check again / Restart), so a slow insert
+   * from the PREVIOUS session could otherwise land on the NEXT session's
+   * report and stamp it "Saved on this phone" against a row that is not it.
+   */
+  const saveTokenRef = useRef(0);
 
   const sink = useCallback((s: FormPoseSample) => {
     latestRef.current = s;
@@ -576,6 +811,12 @@ export default function FormCheckScreen() {
   const live = phase === 'live';
   const pose = useFormPose(live, camPosition, sink);
 
+  /**
+   * Start (or restart) a live session IN PLACE. The screen never unmounts, so
+   * the loaded + warmed TensorflowModel and its boxed SharedValue survive —
+   * a second take costs zero warm-up. Clears the previous report so the
+   * report early-return cannot flash stale numbers on the way through.
+   */
   const startLive = useCallback(() => {
     handRef.current = hand;
     sessionRef.current = new FormCheckSession({
@@ -584,8 +825,12 @@ export default function FormCheckScreen() {
       heightCm: heightCm ?? null,
     });
     latestRef.current = null;
+    saveTokenRef.current++;
     setRepCount(0);
     setLastRep(null);
+    setReport(null);
+    setReps([]);
+    setSavedId(null);
     setPhase('live');
     haptic.impactMedium();
   }, [hand, heightCm]);
@@ -614,8 +859,14 @@ export default function FormCheckScreen() {
     // persist a row (or flip the Coach card's NEW promo). Defense-in-depth —
     // the End session pill is already disabled at zero reps.
     if (sessionReport.repCount > 0) {
+      const token = ++saveTokenRef.current;
       void insertFormSession(formSessionRowOf(sessionReport, sessionReps, Date.now())).then(
-        (id) => setSavedId(id),
+        (id) => {
+          // A restart happened while this insert was in flight — the row is
+          // still saved, it just isn't THIS report's receipt any more.
+          if (saveTokenRef.current !== token) return;
+          setSavedId(id);
+        },
       );
     }
   }, []);
@@ -640,8 +891,11 @@ export default function FormCheckScreen() {
   const cardEnter = (i: number) =>
     reducedMotion ? undefined : FadeInDown.delay(i * 70).duration(360);
 
-  // Camera permission gate — only matters once the user starts a check.
-  const needsPermission = pose.device != null && !pose.hasPermission;
+  // Camera permission gate. NOT conditioned on a device object existing:
+  // useCameraDevice can return null until permission is granted, and the old
+  // `device != null && …` form left a fresh install with a black live view,
+  // no system prompt and no way into one.
+  const needsPermission = !pose.hasPermission;
 
   if (phase === 'report' && report != null) {
     return (
@@ -656,10 +910,42 @@ export default function FormCheckScreen() {
             hand={hand}
             savedId={savedId}
             heightCm={heightCm ?? null}
+            onAgain={startLive}
             onDone={() => router.back()}
           />
         </View>
       </Screen>
+    );
+  }
+
+  // The live view is its OWN root, not an absolute child of the guide's
+  // ScrollView. Inside the scroller its absoluteFill resolved against a
+  // content box ~1000pt tall, so Zone A — the calibration stepper and every
+  // guidance banner — rendered above the viewport and the presenter never saw
+  // it. As a bonus the guide's cards and Skia diagram unmount while the
+  // camera and MoveNet run.
+  if (live) {
+    return (
+      <View style={styles.liveRoot}>
+        <LiveOverlay
+          pose={pose}
+          needsPermission={needsPermission}
+          camPosition={camPosition}
+          onFlipCamera={() =>
+            setCamPosition((p) => (p === 'front' ? 'back' : 'front'))
+          }
+          hand={hand}
+          onFlipHand={flipHand}
+          onRecalibrate={recalibrate}
+          latestRef={latestRef}
+          sessionRef={sessionRef}
+          repCount={repCount}
+          lastRep={lastRep}
+          onEnd={endSession}
+          onRestart={startLive}
+          onCancel={cancelLive}
+        />
+      </View>
     );
   }
 
@@ -709,10 +995,30 @@ export default function FormCheckScreen() {
             text={`Take ${SHADOW_REPS_TARGET} practice motions first — they calibrate the check and are never scored.`}
           />
           <Text style={styles.footnote}>
-            Needs at least {MIN_POSE_FPS} fps pose. Below that the screen
-            refuses to count reps rather than guess.
+            Form Check counts shooting MOTIONS, deliberately sensitively — a
+            raised arm can count. Needs at least {MIN_POSE_FPS} fps pose;
+            below that the screen refuses to count reps rather than guess.
           </Text>
         </Card>
+
+        {/* Permission is requested at mount; this is the DENIED path, on the
+            guide where there is time to fix it — never mid-demo. */}
+        {needsPermission && (
+          <PillButton
+            label={
+              pose.canRequestPermission
+                ? 'Allow camera access'
+                : 'Open settings for camera access'
+            }
+            icon="camera-outline"
+            variant="ghost"
+            onPress={() =>
+              pose.canRequestPermission
+                ? void pose.requestPermission().catch(() => {})
+                : void Linking.openSettings()
+            }
+          />
+        )}
 
         <PillButton
           label="Start form check"
@@ -721,27 +1027,6 @@ export default function FormCheckScreen() {
           style={styles.startCta}
         />
       </View>
-
-      {/* Full-screen live overlay */}
-      {live && (
-        <LiveOverlay
-          pose={pose}
-          needsPermission={needsPermission}
-          camPosition={camPosition}
-          onFlipCamera={() =>
-            setCamPosition((p) => (p === 'front' ? 'back' : 'front'))
-          }
-          hand={hand}
-          onFlipHand={flipHand}
-          onRecalibrate={recalibrate}
-          latestRef={latestRef}
-          sessionRef={sessionRef}
-          repCount={repCount}
-          lastRep={lastRep}
-          onEnd={endSession}
-          onCancel={cancelLive}
-        />
-      )}
     </Screen>
   );
 }
@@ -813,6 +1098,7 @@ function LiveOverlay({
   repCount,
   lastRep,
   onEnd,
+  onRestart,
   onCancel,
 }: {
   pose: ReturnType<typeof useFormPose>;
@@ -827,9 +1113,18 @@ function LiveOverlay({
   repCount: number;
   lastRep: FormCheckRep | null;
   onEnd: () => void;
+  /** Fresh session, still live — the one-tap recovery from any stumble. */
+  onRestart: () => void;
   onCancel: () => void;
 }) {
-  const { canRequestPermission } = useCameraPermission();
+  const insets = useSafeAreaInsets();
+  /** "Hold to recalibrate" — a tap must not silently reset the session. */
+  const [holdHint, setHoldHint] = useState(false);
+  useEffect(() => {
+    if (!holdHint) return undefined;
+    const id = setTimeout(() => setHoldHint(false), 1600);
+    return () => clearTimeout(id);
+  }, [holdHint]);
 
   // Permission overlay — jump.tsx's MeasureOverlay branch, same promise.
   if (needsPermission) {
@@ -842,9 +1137,9 @@ function LiveOverlay({
             mechanics. Everything stays on this phone.
           </Text>
           <PillButton
-            label={canRequestPermission ? 'Allow camera access' : 'Open settings'}
+            label={pose.canRequestPermission ? 'Allow camera access' : 'Open settings'}
             onPress={() =>
-              canRequestPermission
+              pose.canRequestPermission
                 ? void pose.requestPermission()
                 : void Linking.openSettings()
             }
@@ -856,18 +1151,45 @@ function LiveOverlay({
     );
   }
 
+  // Permission granted but no camera enumerated (an iPad, a hardware hiccup,
+  // an enumeration still in flight). Previously this rendered a black scrim
+  // whose only content was a rail blaming the room's lighting.
+  if (pose.device == null) {
+    return (
+      <View style={styles.overlay}>
+        <View style={styles.overlayContent}>
+          <Text style={styles.overlayTitle}>No camera available</Text>
+          <Text style={styles.overlaySub}>
+            This phone reported no usable camera, so there is nothing to read a
+            shooting motion from.
+          </Text>
+          <PillButton label="Cancel" variant="ghost" onPress={onCancel} />
+        </View>
+      </View>
+    );
+  }
+
   return (
     <View style={styles.overlay}>
-      {pose.device != null && (
-        <Camera
-          style={StyleSheet.absoluteFill}
-          isActive
-          device={pose.device}
-          outputs={pose.outputs}
-          resizeMode="contain"
-          orientationSource="interface"
-        />
-      )}
+      <Camera
+        style={StyleSheet.absoluteFill}
+        // Stop cleanly across a background transition instead of being
+        // interrupted mid-flight and coming back black (live.tsx's contract).
+        isActive={pose.foreground}
+        device={pose.device}
+        outputs={pose.outputs}
+        // Pin the frame duration. Left unconstrained, AVFoundation is free to
+        // stretch exposure indoors and drop capture toward 15-20 fps — which
+        // this screen's own MIN_POSE_FPS floor then reads as a refusal the
+        // presenter cannot act on. A darker image is a far cheaper price than
+        // a session that will not count.
+        constraints={[{ fps: 30 }]}
+        // Never trade frame rate for exposure (the library's default, stated
+        // here because the fps floor is load-bearing on this screen).
+        enableLowLightBoost={false}
+        resizeMode="contain"
+        orientationSource="interface"
+      />
       {/* Zone B: presentation-only skeleton — a front preview is mirrored, so
           the overlay x-flips to match. Never feeds metrics. Nothing else may
           overlap the body. */}
@@ -881,10 +1203,17 @@ function LiveOverlay({
         <LiveRail
           sessionRef={sessionRef}
           modelLoaded={pose.modelLoaded}
+          modelErr={pose.modelErr}
+          onRetryModel={pose.retryModel}
+          framesSv={pose.framesSv}
+          camPosition={camPosition}
           onFlipHand={onFlipHand}
         />
         {/* Zone C: the big rep numeral, the last-rep phase line, actions. */}
-        <View style={styles.liveBottom} pointerEvents="box-none">
+        <View
+          style={[styles.liveBottom, { paddingBottom: insets.bottom + space.lg }]}
+          pointerEvents="box-none"
+        >
           <View style={styles.repBlock}>
             <Text style={styles.repBig}>{repCount}</Text>
             <Text style={styles.repLabel}>REPS DETECTED</Text>
@@ -908,10 +1237,17 @@ function LiveOverlay({
             >
               <Ionicons name="camera-reverse-outline" size={iconSize.lg} color={color.text} />
             </Pressable>
+            {/* Long-press only. A stray tap beside the flip pill used to drop
+                an ARMED session back into calibration — the rep counter
+                freezes and nothing at the bottom of the screen, where the
+                presenter is looking, changes. */}
             <Pressable
-              onPress={onRecalibrate}
+              onPress={() => setHoldHint(true)}
+              onLongPress={onRecalibrate}
+              delayLongPress={450}
               accessibilityRole="button"
               accessibilityLabel="Recalibrate"
+              accessibilityHint="Hold to recalibrate"
               style={styles.flipPill}
             >
               <Ionicons name="refresh-outline" size={iconSize.lg} color={color.text} />
@@ -923,7 +1259,24 @@ function LiveOverlay({
               style={{ flex: 1 }}
             />
           </Row>
-          <PillButton label="Cancel" variant="ghost" onPress={onCancel} />
+          {holdHint && <Text style={styles.holdHint}>Hold to recalibrate</Text>}
+          <Row gap={space.sm}>
+            {/* play-outline, not refresh-outline: the Recalibrate pill one
+                row up already owns that glyph and they do different things. */}
+            <PillButton
+              label="Restart"
+              icon="play-outline"
+              variant="ghost"
+              onPress={onRestart}
+              style={{ flex: 1 }}
+            />
+            <PillButton
+              label="Cancel"
+              variant="ghost"
+              onPress={onCancel}
+              style={{ flex: 1 }}
+            />
+          </Row>
         </View>
       </View>
     </View>
@@ -967,19 +1320,36 @@ function railSnapOf(session: FormCheckSession | null): RailSnap | null {
 function LiveRail({
   sessionRef,
   modelLoaded,
+  modelErr,
+  onRetryModel,
+  framesSv,
+  camPosition,
   onFlipHand,
 }: {
   sessionRef: React.MutableRefObject<FormCheckSession | null>;
   modelLoaded: boolean;
+  modelErr: string | null;
+  onRetryModel: () => void;
+  /** Frame counter written by the worklet; read ONLY inside the poll below. */
+  framesSv: { value: number };
+  camPosition: 'front' | 'back';
   onFlipHand: () => void;
 }) {
   const { width: winW } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
   const [snap, setSnap] = useState<RailSnap | null>(() => railSnapOf(sessionRef.current));
+  const [warming, setWarming] = useState(true);
   useEffect(() => {
-    const id = setInterval(() => setSnap(railSnapOf(sessionRef.current)), READINESS_POLL_MS);
+    const id = setInterval(() => {
+      setSnap(railSnapOf(sessionRef.current));
+      // A SharedValue read on the JS thread is legal in a callback, never in
+      // a render body — this is the file's existing poll pattern.
+      setWarming((framesSv?.value ?? 0) < WARMUP_FRAMES);
+    }, READINESS_POLL_MS);
     return () => clearInterval(id);
-  }, [sessionRef]);
+  }, [sessionRef, framesSv]);
   const refresh = useCallback(() => setSnap(railSnapOf(sessionRef.current)), [sessionRef]);
+  const stripStyle = [styles.readyStrip, { paddingTop: insets.top + space.md }];
 
   // The armed moment: fires once on the collecting → done edge (a completed
   // calibration — a Skip earns no celebration, it calibrated nothing).
@@ -1008,12 +1378,44 @@ function LiveRail({
     calib?.hand ?? 'right',
     calib,
     collecting,
+    { modelErr, warming, camPosition },
+  );
+
+  /**
+   * The ONE action attached to the banner. Both are escapes from a state the
+   * presenter cannot otherwise leave on stage: a loader that gave up, and a
+   * room + phone that cannot make the fps floor. "Count anyway" is offered
+   * only above FPS_OVERRIDE_MIN, below which the core refuses it because no
+   * velocity sample survives and it would be a promise it can't keep.
+   *
+   * No "already overridden" test is needed: while the override is doing the
+   * work `fpsOk` is true, and below FPS_OVERRIDE_MIN the rate test hides the
+   * pill anyway — which is exactly where the core would refuse it.
+   */
+  const canOverrideFps =
+    readiness != null && !readiness.fpsOk && readiness.fps >= FPS_OVERRIDE_MIN;
+  const bannerAction: { label: string; onPress: () => void } | null =
+    modelErr != null
+      ? { label: 'Retry', onPress: onRetryModel }
+      : canOverrideFps
+        ? {
+            label: 'Count anyway',
+            onPress: () => {
+              sessionRef.current?.overrideFpsFloor();
+              haptic.impactMedium();
+              refresh();
+            },
+          }
+        : null;
+
+  const chipRow = (
+    <ChipRow readiness={readiness} calib={calib} onFlipHand={onFlipHand} />
   );
 
   if (collecting && calib != null) {
     const step = Math.min(calib.shadowReps + 1, SHADOW_REPS_TARGET);
     return (
-      <View style={styles.readyStrip}>
+      <View style={stripStyle}>
         <View style={styles.railCard}>
           <Row gap={space.md}>
             <PulsingStepRing progress={calib.shadowReps / SHADOW_REPS_TARGET} />
@@ -1031,6 +1433,16 @@ function LiveRail({
             </Text>
           )}
           <Row gap={space.sm} style={styles.stepActions}>
+            {bannerAction != null && (
+              <Pressable
+                onPress={bannerAction.onPress}
+                accessibilityRole="button"
+                accessibilityLabel={bannerAction.label}
+                style={[styles.stepPill, styles.stepPillPrimary]}
+              >
+                <Text style={styles.stepPillPrimaryText}>{bannerAction.label}</Text>
+              </Pressable>
+            )}
             {calib.shadowReps >= 1 && (
               <Pressable
                 onPress={() => {
@@ -1065,43 +1477,24 @@ function LiveRail({
 
   if (justArmed) {
     return (
-      <View style={styles.readyStrip}>
+      <View style={stripStyle}>
         <View style={styles.railCard}>
           <ArmedReveal width={railW} />
           {/* Static carrier — reduced motion still reads the state change. */}
           <Text style={styles.armedText}>Calibrated — scoring armed</Text>
+          {/* The chips stay UNDER the celebration: the shooter shoots the
+              instant they read "armed", and a blank rail through exactly that
+              window is how a rep silently fails to count. */}
+          {chipRow}
         </View>
       </View>
     );
   }
 
-  const fps = readiness?.fps ?? 0;
-  const fpsOk = readiness?.fpsOk ?? false;
-  const fullBodyOk = readiness?.fullBodyOk ?? false;
-  const armOk = readiness?.armOk ?? false;
-  const sideOk = readiness?.sideOk ?? true;
-  const chipHand = calib?.hand ?? 'right';
-  const chipSource = calib?.handSource ?? 'settings';
-
   return (
-    <View style={styles.readyStrip}>
-      <Row gap={space.sm} style={{ flexWrap: 'wrap' }}>
-        <Chip label={`${Math.round(fps)} FPS`} tone={fpsOk ? 'make' : 'unsure'} compact />
-        <Chip label="BODY" tone={fullBodyOk ? 'make' : 'unsure'} compact />
-        <Pressable
-          onPress={onFlipHand}
-          accessibilityRole="button"
-          accessibilityLabel={`Watching your ${chipHand} arm (${chipSource === 'auto' ? 'auto-detected' : chipSource === 'manual' ? 'your pick' : 'assumed from Settings'}). Tap to watch the other arm.`}
-        >
-          <Chip
-            label={armChipLabel(chipHand, chipSource)}
-            tone={armOk ? 'make' : 'unsure'}
-            compact
-          />
-        </Pressable>
-        <SideChip sideness={readiness?.sideness ?? null} ok={sideOk} />
-      </Row>
-      {banner != null && (
+    <View style={stripStyle}>
+      {chipRow}
+      {banner != null ? (
         <View style={[styles.readyBanner, !banner.pauses && styles.readyBannerInfo]}>
           <Ionicons
             name={banner.pauses ? 'alert-circle-outline' : 'information-circle-outline'}
@@ -1113,9 +1506,87 @@ function LiveRail({
           >
             {banner.pauses ? `${banner.text} Rep counting is paused.` : banner.text}
           </Text>
+          {bannerAction != null && (
+            <Pressable
+              onPress={bannerAction.onPress}
+              accessibilityRole="button"
+              accessibilityLabel={bannerAction.label}
+              style={[styles.stepPill, styles.stepPillPrimary]}
+            >
+              <Text style={styles.stepPillPrimaryText}>{bannerAction.label}</Text>
+            </Pressable>
+          )}
         </View>
+      ) : (
+        // The POSITIVE state. Without it, "the app is measuring you" was
+        // signalled only by the absence of a warning — four 10pt chips on
+        // translucent pills, unreadable from three metres.
+        readiness?.ready === true && (
+          <View style={[styles.readyBanner, styles.readyBannerOk]}>
+            <Ionicons
+              name="checkmark-circle-outline"
+              size={iconSize.md}
+              color={color.make}
+            />
+            <Text style={[styles.readyBannerText, styles.readyBannerTextOk]}>
+              Ready — shoot when you like.
+            </Text>
+          </View>
+        )
       )}
     </View>
+  );
+}
+
+/**
+ * The four readiness chips. Extracted so the armed celebration can render
+ * them underneath itself instead of replacing them.
+ */
+function ChipRow({
+  readiness,
+  calib,
+  onFlipHand,
+}: {
+  readiness: FormCheckReadiness | null;
+  calib: CalibrationState | null;
+  onFlipHand: () => void;
+}) {
+  const fps = readiness?.fps ?? 0;
+  const fpsOk = readiness?.fpsOk ?? false;
+  const overridden = readiness?.fpsOverridden === true;
+  const fullBodyOk = readiness?.fullBodyOk ?? false;
+  const armOk = readiness?.armOk ?? false;
+  const sideOk = readiness?.sideOk ?? true;
+  const chipHand = calib?.hand ?? 'right';
+  const chipSource = calib?.handSource ?? 'settings';
+
+  return (
+    <Row gap={space.sm} style={{ flexWrap: 'wrap' }}>
+      {/* An overridden rate is NOT a passing rate — the chip stays amber and
+          says so, however green the gate now reads. */}
+      <Chip
+        label={overridden ? `${Math.round(fps)} FPS · OVERRIDE` : `${Math.round(fps)} FPS`}
+        tone={fpsOk && !overridden ? 'make' : 'unsure'}
+        compact
+      />
+      <Chip label="BODY" tone={fullBodyOk ? 'make' : 'unsure'} compact />
+      <Pressable
+        onPress={onFlipHand}
+        accessibilityRole="button"
+        accessibilityLabel={`Watching your ${chipHand} arm (${chipSource === 'auto' ? 'auto-detected' : chipSource === 'manual' ? 'your pick' : 'assumed from Settings'}). Tap to watch the other arm.`}
+      >
+        <Chip
+          label={armChipLabel(chipHand, chipSource)}
+          tone={armOk ? 'make' : 'unsure'}
+          compact
+        />
+      </Pressable>
+      <SideChip
+        sideness={readiness?.sideness ?? null}
+        ok={sideOk}
+        trusted={readiness?.sideTrusted !== false}
+      />
+    </Row>
   );
 }
 
@@ -1204,11 +1675,28 @@ function ArmedReveal({ width }: { width: number }) {
   return <ArcReveal width={width} height={44} rimInset={24} />;
 }
 
-/** Tiny 0–1 side-profile arc meter chip. Null = the gauge honestly can't
- *  vote (occlusion) — the chip shows a dash and the gate PASSES. */
-function SideChip({ sideness, ok }: { sideness: number | null; ok: boolean }) {
+/**
+ * Tiny 0–1 side-profile arc meter chip. Null = the gauge honestly can't vote
+ * (occlusion) — the chip shows a dash and the gate PASSES.
+ *
+ * Three states, not two: the gate now passes from SIDE_PROFILE_MIN (≈40° of
+ * tolerance, so an ordinary room can be used) but 2D joint angles are only
+ * trustworthy from SIDE_PROFILE_TRUSTED. A passing-but-angled stance stays
+ * amber — green would be the screen claiming a squareness it measured itself
+ * to not have.
+ */
+function SideChip({
+  sideness,
+  ok,
+  trusted = true,
+}: {
+  sideness: number | null;
+  ok: boolean;
+  trusted?: boolean;
+}) {
   const w = 18;
   const h = 11;
+  const clean = ok && trusted;
   const track = useMemo(() => {
     const p = Skia.Path.Make();
     p.addArc(Skia.XYWHRect(2, 2, w - 4, (h - 3) * 2), 180, 180);
@@ -1216,15 +1704,20 @@ function SideChip({ sideness, ok }: { sideness: number | null; ok: boolean }) {
   }, []);
   return (
     <View
-      style={[styles.sideChip, { backgroundColor: ok ? color.makeTint : 'rgba(232,184,79,0.14)' }]}
+      style={[
+        styles.sideChip,
+        { backgroundColor: clean ? color.makeTint : 'rgba(232,184,79,0.14)' },
+      ]}
       accessible
       accessibilityLabel={
         sideness != null
-          ? `Side-on ${Math.round(sideness * 100)} percent`
+          ? `Side-on ${Math.round(sideness * 100)} percent${clean ? '' : ', angles read low'}`
           : 'Side-on not measurable'
       }
     >
-      <Text style={[styles.sideChipLabel, { color: ok ? color.make : color.unsure }]}>SIDE</Text>
+      <Text style={[styles.sideChipLabel, { color: clean ? color.make : color.unsure }]}>
+        SIDE
+      </Text>
       {sideness != null ? (
         <Canvas style={{ width: w, height: h }}>
           <Path path={track} style="stroke" strokeWidth={2.5} color={color.border} />
@@ -1233,7 +1726,7 @@ function SideChip({ sideness, ok }: { sideness: number | null; ok: boolean }) {
             style="stroke"
             strokeWidth={2.5}
             strokeCap="round"
-            color={ok ? color.make : color.unsure}
+            color={clean ? color.make : color.unsure}
             start={0}
             end={Math.max(0, Math.min(1, sideness))}
           />
@@ -1394,12 +1887,153 @@ interface SpreadRowSpec {
   format: (v: number) => string;
 }
 
+/**
+ * The Skia stage plus its transport (autoplay + scrub; a frame stepper under
+ * reduced motion). EXTRACTED from FormCheckReport on purpose: the rAF loop
+ * calls setPos once per animation frame, and while `pos` lived on the report
+ * that reconciled the verdict hero, four spread rows, the tabs, the receipt
+ * and the stage 60 times a second on an A12 — exactly when the presenter
+ * presses Play to show the theater off. Owning `pos` here confines the
+ * re-render to the stage, the track and the phase label. Pure extraction:
+ * the caller keys this by rep/archetype where it used to reset on a effect.
+ */
+function MotionTheater({
+  seq,
+  reference,
+  hand,
+  repIndex,
+  archetypeName,
+  width,
+  reducedMotion,
+}: {
+  seq: readonly DecodedFrame[];
+  reference: readonly DecodedFrame[];
+  hand: ShootingHand;
+  repIndex: number;
+  archetypeName: string;
+  width: number;
+  reducedMotion: boolean;
+}) {
+  const [pos, setPos] = useState(0);
+  const [playing, setPlaying] = useState(false);
+  const rafRef = useRef<number | null>(null);
+  const lastTs = useRef(0);
+  useEffect(() => {
+    if (!playing || reducedMotion) return;
+    const step = (ts: number) => {
+      if (lastTs.current === 0) lastTs.current = ts;
+      const dt = (ts - lastTs.current) / 1000;
+      lastTs.current = ts;
+      setPos((p) => {
+        const next = p + dt / 1.4;
+        return next >= 1 ? 0 : next;
+      });
+      rafRef.current = requestAnimationFrame(step);
+    };
+    rafRef.current = requestAnimationFrame(step);
+    return () => {
+      if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
+      lastTs.current = 0;
+    };
+  }, [playing, reducedMotion]);
+
+  const trackWidthRef = useRef(1);
+  const seekFromEvent = (e: GestureResponderEvent) => {
+    const x = e.nativeEvent.locationX;
+    setPos(Math.max(0, Math.min(1, x / trackWidthRef.current)));
+  };
+  const frameCount = seq.length;
+  const stepFrame = (dir: 1 | -1) => {
+    const cur = Math.round(pos * (frameCount - 1));
+    const next = Math.max(0, Math.min(frameCount - 1, cur + dir));
+    setPos(frameCount <= 1 ? 0 : next / (frameCount - 1));
+  };
+  const stagePhase = phaseForPos(pos);
+  const stageW = Math.min(width - 40, 560);
+  const stageH = Math.round(stageW * 0.62);
+
+  return (
+    <>
+      <View style={{ alignItems: 'center' }}>
+        <FormMotionStage
+          user={seq}
+          reference={reference}
+          pos={pos}
+          hand={hand}
+          phase={stagePhase}
+          width={stageW}
+          height={stageH}
+          accessibilityLabel={`Rep ${repIndex}'s motion at the ${stagePhase} phase beside a synthesized ${archetypeName} reference form`}
+        />
+      </View>
+      {/* Scrub track (formstudio transport). */}
+      <View
+        style={styles.track}
+        onLayout={(e) => {
+          trackWidthRef.current = e.nativeEvent.layout.width;
+        }}
+        onStartShouldSetResponder={() => true}
+        onMoveShouldSetResponder={() => true}
+        onResponderGrant={(e) => {
+          setPlaying(false);
+          seekFromEvent(e);
+        }}
+        onResponderMove={seekFromEvent}
+        accessibilityRole="adjustable"
+        accessibilityLabel="Scrub the shooting motion"
+        accessibilityValue={{ now: Math.round(pos * 100), min: 0, max: 100 }}
+      >
+        <View style={styles.trackFill} />
+        <View style={[styles.trackProgress, { width: `${pos * 100}%` }]} />
+        <View style={[styles.trackThumb, { left: `${pos * 100}%` }]} />
+      </View>
+      {reducedMotion ? (
+        <Row gap={space.md} style={styles.transport}>
+          <Pressable
+            onPress={() => stepFrame(-1)}
+            accessibilityRole="button"
+            accessibilityLabel="Previous frame"
+            style={styles.stepBtn}
+          >
+            <Ionicons name="play-back" size={18} color={color.text} />
+          </Pressable>
+          <Text style={styles.phaseInline}>{stagePhase}</Text>
+          <Pressable
+            onPress={() => stepFrame(1)}
+            accessibilityRole="button"
+            accessibilityLabel="Next frame"
+            style={styles.stepBtn}
+          >
+            <Ionicons name="play-forward" size={18} color={color.text} />
+          </Pressable>
+        </Row>
+      ) : (
+        <Row gap={space.md} style={styles.transport}>
+          <Pressable
+            onPress={() => {
+              lastTs.current = 0;
+              setPlaying((p) => !p);
+            }}
+            accessibilityRole="button"
+            accessibilityLabel={playing ? 'Pause' : 'Play'}
+            style={styles.playBtn}
+          >
+            <Ionicons name={playing ? 'pause' : 'play'} size={20} color={color.onAccent} />
+          </Pressable>
+          <Text style={styles.phaseInline}>{stagePhase}</Text>
+        </Row>
+      )}
+    </>
+  );
+}
+
 export function FormCheckReport({
   reps,
   report,
   hand,
   savedId,
   heightCm = null,
+  onAgain,
   onDone,
 }: {
   reps: readonly FormCheckRep[];
@@ -1409,11 +2043,32 @@ export function FormCheckReport({
   savedId: number | null;
   /** Profile height (for the receipt's honest "why no metres" branch). */
   heightCm?: number | null;
+  /** One tap back into a fresh live session — the screen never unmounts. */
+  onAgain?: () => void;
   onDone?: () => void;
 }) {
   const { width } = useWindowDimensions();
   const reducedMotion = useReducedMotion();
-  const [seg, setSeg] = useState<ReportSeg>('overview');
+
+  // Theater: reps whose sequence decodes. Computed BEFORE `seg` so the report
+  // can open on the segment that actually has something in it.
+  const theaterReps = useMemo(
+    () =>
+      reps
+        .map((rep) => ({
+          rep,
+          seq: rep.sequence != null ? decodeSequence(rep.sequence) : [],
+        }))
+        .filter((r) => r.seq.length >= 2),
+    [reps],
+  );
+
+  // A short stage demo is two or three reps, which lands Overview on a nag
+  // headline and four em dashes. When a rep captured a decodable motion the
+  // report opens ON the theater instead; otherwise it falls back to Overview.
+  const [seg, setSeg] = useState<ReportSeg>(() =>
+    theaterReps.length > 0 ? 'compare' : 'overview',
+  );
 
   const calib = report.calibration;
   const contentW = Math.max(160, Math.min(width, 600) - space.lg * 4);
@@ -1449,17 +2104,6 @@ export function FormCheckReport({
     },
   ];
 
-  // Theater: reps whose sequence decodes.
-  const theaterReps = useMemo(
-    () =>
-      reps
-        .map((rep) => ({
-          rep,
-          seq: rep.sequence != null ? decodeSequence(rep.sequence) : [],
-        }))
-        .filter((r) => r.seq.length >= 2),
-    [reps],
-  );
   const [theaterIdx, setTheaterIdx] = useState(0);
   const [archIdx, setArchIdx] = useState(0);
   const selected =
@@ -1505,50 +2149,6 @@ export function FormCheckReport({
 
   const pStats = useMemo(() => sessionPhaseStats(reps), [reps]);
 
-  // Transport (formstudio pattern: autoplay + scrub; stepper under reduced
-  // motion).
-  const [pos, setPos] = useState(0);
-  const [playing, setPlaying] = useState(false);
-  const rafRef = useRef<number | null>(null);
-  const lastTs = useRef(0);
-  useEffect(() => {
-    if (!playing || reducedMotion) return;
-    const step = (ts: number) => {
-      if (lastTs.current === 0) lastTs.current = ts;
-      const dt = (ts - lastTs.current) / 1000;
-      lastTs.current = ts;
-      setPos((p) => {
-        const next = p + dt / 1.4;
-        return next >= 1 ? 0 : next;
-      });
-      rafRef.current = requestAnimationFrame(step);
-    };
-    rafRef.current = requestAnimationFrame(step);
-    return () => {
-      if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
-      lastTs.current = 0;
-    };
-  }, [playing, reducedMotion]);
-  useEffect(() => {
-    setPlaying(false);
-    setPos(0);
-  }, [theaterIdx, archIdx]);
-
-  const trackWidthRef = useRef(1);
-  const seekFromEvent = (e: GestureResponderEvent) => {
-    const x = e.nativeEvent.locationX;
-    setPos(Math.max(0, Math.min(1, x / trackWidthRef.current)));
-  };
-  const frameCount = selected ? selected.seq.length : 1;
-  const stepFrame = (dir: 1 | -1) => {
-    const cur = Math.round(pos * (frameCount - 1));
-    const next = Math.max(0, Math.min(frameCount - 1, cur + dir));
-    setPos(frameCount <= 1 ? 0 : next / (frameCount - 1));
-  };
-  const stagePhase = phaseForPos(pos);
-  const stageW = Math.min(width - 40, 560);
-  const stageH = Math.round(stageW * 0.62);
-
   const jumpToCompare = useCallback(
     (repIndex: number) => {
       const i = theaterReps.findIndex((tr) => tr.rep.index === repIndex);
@@ -1574,6 +2174,7 @@ export function FormCheckReport({
     },
   ];
 
+  const lowConfLine = lowConfidenceLine(report);
   const savedLine =
     savedId != null && savedId >= 0
       ? 'Saved on this phone — nothing leaves it.'
@@ -1596,6 +2197,15 @@ export function FormCheckReport({
         {savedId != null && savedId >= 0 && <Chip label="Saved" tone="make" />}
         {savedId === -1 && <Chip label="Not saved" tone="unsure" />}
       </Row>
+
+      {/* The other half of the relaxed-gate bargain: the reps are real, the
+          numbers are worth less, and the report says which and why. */}
+      {lowConfLine != null && (
+        <View style={styles.lowConfBanner}>
+          <Ionicons name="alert-circle-outline" size={iconSize.md} color={color.unsure} />
+          <Text style={styles.lowConfText}>{lowConfLine}</Text>
+        </View>
+      )}
 
       {/* HERO — the consistency verdict, above the tabs (coach.tsx idiom). */}
       <Card style={styles.verdictCard}>
@@ -1734,9 +2344,12 @@ export function FormCheckReport({
               <ReceiptRow
                 label="Side-on"
                 value={
-                  calib.sidenessAvg != null
-                    ? `${Math.round(calib.sidenessAvg * 100)}% side-on`
-                    : '—'
+                  calib.sidenessAvg == null
+                    ? '—'
+                    : calib.sidenessAvg < SIDE_PROFILE_TRUSTED
+                      ? // The gate passes here, the ANGLES do not survive it.
+                        `${Math.round(calib.sidenessAvg * 100)}% side-on — 2D angles read low when you're angled toward the camera`
+                      : `${Math.round(calib.sidenessAvg * 100)}% side-on`
                 }
               />
               <ReceiptRow
@@ -1843,79 +2456,18 @@ export function FormCheckReport({
                     </Pressable>
                   ))}
                 </Row>
-                <View style={{ alignItems: 'center' }}>
-                  <FormMotionStage
-                    user={selected.seq}
-                    reference={reference}
-                    pos={pos}
-                    hand={hand}
-                    phase={stagePhase}
-                    width={stageW}
-                    height={stageH}
-                    accessibilityLabel={`Rep ${selected.rep.index}'s motion at the ${stagePhase} phase beside a synthesized ${archetype.name} reference form`}
-                  />
-                </View>
-                {/* Scrub track (formstudio transport). */}
-                <View
-                  style={styles.track}
-                  onLayout={(e) => {
-                    trackWidthRef.current = e.nativeEvent.layout.width;
-                  }}
-                  onStartShouldSetResponder={() => true}
-                  onMoveShouldSetResponder={() => true}
-                  onResponderGrant={(e) => {
-                    setPlaying(false);
-                    seekFromEvent(e);
-                  }}
-                  onResponderMove={seekFromEvent}
-                  accessibilityRole="adjustable"
-                  accessibilityLabel="Scrub the shooting motion"
-                  accessibilityValue={{ now: Math.round(pos * 100), min: 0, max: 100 }}
-                >
-                  <View style={styles.trackFill} />
-                  <View style={[styles.trackProgress, { width: `${pos * 100}%` }]} />
-                  <View style={[styles.trackThumb, { left: `${pos * 100}%` }]} />
-                </View>
-                {reducedMotion ? (
-                  <Row gap={space.md} style={styles.transport}>
-                    <Pressable
-                      onPress={() => stepFrame(-1)}
-                      accessibilityRole="button"
-                      accessibilityLabel="Previous frame"
-                      style={styles.stepBtn}
-                    >
-                      <Ionicons name="play-back" size={18} color={color.text} />
-                    </Pressable>
-                    <Text style={styles.phaseInline}>{stagePhase}</Text>
-                    <Pressable
-                      onPress={() => stepFrame(1)}
-                      accessibilityRole="button"
-                      accessibilityLabel="Next frame"
-                      style={styles.stepBtn}
-                    >
-                      <Ionicons name="play-forward" size={18} color={color.text} />
-                    </Pressable>
-                  </Row>
-                ) : (
-                  <Row gap={space.md} style={styles.transport}>
-                    <Pressable
-                      onPress={() => {
-                        lastTs.current = 0;
-                        setPlaying((p) => !p);
-                      }}
-                      accessibilityRole="button"
-                      accessibilityLabel={playing ? 'Pause' : 'Play'}
-                      style={styles.playBtn}
-                    >
-                      <Ionicons
-                        name={playing ? 'pause' : 'play'}
-                        size={20}
-                        color={color.onAccent}
-                      />
-                    </Pressable>
-                    <Text style={styles.phaseInline}>{stagePhase}</Text>
-                  </Row>
-                )}
+                {/* The rAF transport owns its own `pos` — see MotionTheater.
+                    The key resets it when the rep or the archetype changes. */}
+                <MotionTheater
+                  key={`${theaterIdx}-${archIdx}`}
+                  seq={selected.seq}
+                  reference={reference}
+                  hand={hand}
+                  repIndex={selected.rep.index}
+                  archetypeName={archetype.name}
+                  width={width}
+                  reducedMotion={reducedMotion}
+                />
 
                 {/* Rep-vs-reference similarity — a STYLE MATCH, never a
                     quality score; refuses below 5 measured rules. */}
@@ -1980,7 +2532,13 @@ export function FormCheckReport({
         Form Studio compares TRACKED shots from live sessions — Form Check reps
         are motion-only and are not shots.
       </Text>
-      {onDone != null && <PillButton label="Done" onPress={onDone} />}
+      {/* One tap back into a live session. Done leaves the screen entirely,
+          which re-mounts it and re-pays the model load — the worst thing to
+          do right after a stumble. */}
+      {onAgain != null && (
+        <PillButton label="Check again" icon="refresh-outline" onPress={onAgain} />
+      )}
+      {onDone != null && <PillButton label="Done" variant="ghost" onPress={onDone} />}
     </View>
   );
 }
@@ -2191,6 +2749,15 @@ function FlagChip({ label }: { label: string }) {
   );
 }
 
+/** Amber sibling of FlagChip — a relaxed-gate reason, not an observation. */
+function UnsureChip({ label }: { label: string }) {
+  return (
+    <View style={styles.unsureChip}>
+      <Text style={styles.unsureChipText}>{label}</Text>
+    </View>
+  );
+}
+
 function RepRow({
   rep,
   best,
@@ -2202,6 +2769,7 @@ function RepRow({
 }) {
   const [open, setOpen] = useState(false);
   const headline = rep.tips.find((t) => t.severity === 3) ?? rep.tips[0] ?? null;
+  const lowConf = rep.lowConfidence ?? [];
   return (
     <View style={styles.repRowWrap}>
       <Pressable
@@ -2222,11 +2790,16 @@ function RepRow({
             <View style={styles.repRowBar}>
               <PhaseBars phases={rep.phases} width={148} compact />
             </View>
-            {(sim != null || rep.flags.length > 0) && (
+            {(sim != null || rep.flags.length > 0 || lowConf.length > 0) && (
               <Row gap={space.xs} style={styles.repChipRow}>
                 {sim != null && <FlagChip label={`match ${sim.score}`} />}
                 {rep.flags.includes('shallowDip') && <FlagChip label="shallow dip" />}
                 {rep.flags.includes('stanceDrift') && <FlagChip label="stance drift" />}
+                {/* Amber, not info-blue: these are not observations about the
+                    shot, they are the price of a relaxed gate. */}
+                {lowConf.map((k) => (
+                  <UnsureChip key={k} label={CONFIDENCE_WORD[k]} />
+                ))}
               </Row>
             )}
           </View>
@@ -2242,6 +2815,13 @@ function RepRow({
           {headline != null && (
             <Text style={styles.repCue}>
               {headline.title}: {headline.message}
+            </Text>
+          )}
+          {lowConf.length > 0 && (
+            <Text style={styles.repLowConf}>
+              {`Caught under a relaxed gate — ${lowConf
+                .map((k) => CONFIDENCE_REASON[k])
+                .join('; ')}.`}
             </Text>
           )}
           {REP_ROWS.map((row) => {
@@ -2367,6 +2947,11 @@ const styles = StyleSheet.create({
     marginTop: space.xs,
   },
   // live overlay
+  /** The live phase's own root — NOT a child of the guide's ScrollView. */
+  liveRoot: {
+    flex: 1,
+    backgroundColor: color.bg,
+  },
   overlay: {
     ...absoluteFill,
     backgroundColor: color.bg,
@@ -2394,7 +2979,9 @@ const styles = StyleSheet.create({
     alignSelf: 'stretch',
   },
   readyStrip: {
-    paddingTop: space.hero,
+    // paddingTop is set at the call site from the safe-area inset: the strip
+    // is now pinned to the TRUE top of the screen, so the notch is the only
+    // thing between it and the status bar.
     paddingHorizontal: space.lg,
     gap: space.sm,
   },
@@ -2407,7 +2994,11 @@ const styles = StyleSheet.create({
     gap: space.sm,
   },
   stepTitle: {
-    ...type.eyebrow,
+    // headingLarge, not eyebrow: this line is the presenter's only read of
+    // where calibration is, on a phone that may be three metres away or
+    // mirrored to a projector. letterSpacing restated — headingLarge drops it.
+    ...type.headingLarge,
+    letterSpacing: 1.2,
     color: color.accent,
   },
   stepSub: {
@@ -2458,13 +3049,28 @@ const styles = StyleSheet.create({
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: color.info,
   },
+  readyBannerOk: {
+    // The positive state, given the same weight as a warning: "the app is
+    // measuring you" must be as loud as "the app is refusing".
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: color.make,
+  },
   readyBannerText: {
-    ...type.body,
+    // heading, not body — this is the one line that has to read at distance.
+    ...type.heading,
     color: color.unsure,
     flex: 1,
   },
   readyBannerTextInfo: {
     color: color.info,
+  },
+  readyBannerTextOk: {
+    color: color.make,
+  },
+  holdHint: {
+    ...type.caption,
+    color: color.textDim,
+    textAlign: 'center',
   },
   sideChip: {
     flexDirection: 'row',
@@ -2677,6 +3283,36 @@ const styles = StyleSheet.create({
   flagChipText: {
     ...type.micro,
     color: color.info,
+  },
+  unsureChip: {
+    borderRadius: radius.pill,
+    backgroundColor: 'rgba(232,184,79,0.14)',
+    paddingHorizontal: space.sm,
+    paddingVertical: 2,
+  },
+  unsureChipText: {
+    ...type.micro,
+    color: color.unsure,
+  },
+  repLowConf: {
+    ...type.caption,
+    color: color.unsure,
+    paddingBottom: space.sm,
+  },
+  lowConfBanner: {
+    flexDirection: 'row',
+    gap: space.sm,
+    alignItems: 'flex-start',
+    backgroundColor: 'rgba(232,184,79,0.10)',
+    borderRadius: radius.md,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: color.unsure,
+    padding: space.md,
+  },
+  lowConfText: {
+    ...type.body,
+    color: color.unsure,
+    flex: 1,
   },
   repTable: {
     marginTop: space.sm,

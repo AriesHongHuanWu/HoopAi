@@ -27,23 +27,34 @@ import {
   computePhaseTiming,
   computeRepMetrics,
   estimateTilt,
+  FOLLOW_TAIL_SEC,
+  FORM_MOTION,
   FormCheckSession,
+  FormMotionDetector,
+  FPS_OVERRIDE_MIN,
   frameVisibility,
   heightScaleOf,
   MIN_POSE_FPS,
   MIN_SPREAD_REPS,
+  MOTION_MAX_VY_GAP_SEC,
   NOSE_TO_ANKLE_STATURE_FRAC,
   pickBestRep,
   readinessOf,
+  REP_CONFIDENCE_REASONS,
+  savedLowConfidenceOf,
   sessionSpreads,
+  READINESS_WINDOW_SEC,
+  READY_LATCH_SEC,
   SHADOW_REPS_TARGET,
   SIDE_PROFILE_MIN,
+  SIDE_PROFILE_TRUSTED,
   sideProfileOf,
   TILT_MAX_COMP_DEG,
   TILT_STD_MAX_DEG,
   type FormCheckRep,
   type ReadinessSample,
 } from '@/core/formCheck';
+import { RELEASE } from '@/core/config';
 import { decodeSequence, type RawSeqFrame } from '@/core/formSequence';
 import { angleAtDeg } from '@/core/geometry';
 import type {
@@ -317,14 +328,42 @@ describe('readiness', () => {
     expect(readinessOf([]).ready).toBe(false);
   });
 
-  test('frameVisibility needs both hips, an ankle, a head and the shooting arm', () => {
+  // RE-PINNED (v3 demo hardening): the gate used to demand BOTH hips and an
+  // ANKLE. At a true side profile the far hip routinely scores under the
+  // keypoint floor, and a cramped room may not have the floor space the
+  // centre-square crop needs before head AND feet both fit — both bricked
+  // the whole screen with no override. It now needs a head, ONE hip and a
+  // lower-body base (ankle or knee). The refusals below are the ones that
+  // still matter: no anchor at all, and the wrong arm.
+  test('frameVisibility needs a head, a hip, a lower-body base and the shooting arm', () => {
     const full = poseAt(0, 0, 20);
     expect(frameVisibility(full, 'right')).toEqual({ fullBody: true, arm: true });
 
-    // Far-side hip missing → full body fails (can't anchor the sequence).
+    // Far-side hip missing → still measurable (pairMid falls back to one hip).
     const noLeftHip = poseAt(0, 0, 20);
     delete noLeftHip.keypoints.left_hip;
-    expect(frameVisibility(noLeftHip, 'right').fullBody).toBe(false);
+    expect(frameVisibility(noLeftHip, 'right').fullBody).toBe(true);
+
+    // BOTH hips missing → no trunk anchor at all → refuses.
+    const noHips = poseAt(0, 0, 20);
+    delete noHips.keypoints.left_hip;
+    delete noHips.keypoints.right_hip;
+    expect(frameVisibility(noHips, 'right').fullBody).toBe(false);
+
+    // Ankles out of frame but knees visible → knees are an honest base
+    // (bodyHeightOf already falls back to them; kneeFlexionDeg goes null).
+    const noAnkles = poseAt(0, 0, 20);
+    delete noAnkles.keypoints.left_ankle;
+    delete noAnkles.keypoints.right_ankle;
+    expect(frameVisibility(noAnkles, 'right').fullBody).toBe(true);
+
+    // Nothing below the hips at all → refuses.
+    const noLegs = poseAt(0, 0, 20);
+    delete noLegs.keypoints.left_ankle;
+    delete noLegs.keypoints.right_ankle;
+    delete noLegs.keypoints.left_knee;
+    delete noLegs.keypoints.right_knee;
+    expect(frameVisibility(noLegs, 'right').fullBody).toBe(false);
 
     // Watching the LEFT arm of a right-armed fixture → arm gate fails.
     expect(frameVisibility(full, 'left').arm).toBe(false);
@@ -392,21 +431,42 @@ describe('FormCheckSession', () => {
     expect(Math.abs(markerT - reps[0]!.releaseT)).toBeLessThanOrEqual(0.25);
   });
 
-  test('a second snap inside the 1.5 s debounce cannot mint a second rep', () => {
+  // RE-PINNED (v3 demo hardening): the debounce moved off the live-game
+  // RELEASE cooldown (1.5 s) onto FORM_MOTION.debounceSec (0.8 s) — a
+  // presenter fires three or four motions in four seconds and the counter
+  // has to move. The ASSERTION is unchanged (a repeat signature inside the
+  // debounce mints nothing); only the fixture's spacing tracks the new
+  // value, and the companion test below pins the case the old value ate.
+  test('a repeat signature inside FORM_MOTION.debounceSec cannot mint a second rep', () => {
     const session = new FormCheckSession({ hand: 'right', frameHeight: FRAME, calibrate: false });
     const reps: FormCheckRep[] = [];
-    // Two back-to-back snap cycles: 10-frame dip + 5-frame snap + 8-frame
-    // park = 0.767 s per cycle, so the second signature completes well inside
-    // RELEASE.debounceSec of the first.
-    reps.push(...runRep(session, { t0: 0, dipFrames: 10, parkFrames: 8 }));
-    reps.push(...runRep(session, { t0: 23 / 30, dipFrames: 10, parkFrames: 8 }));
+    // First signature completes at f13 (0.433 s); the second at f27
+    // (0.900 s) — 0.467 s later, inside the 0.8 s debounce.
+    reps.push(...runRep(session, { t0: 0, dipFrames: 10, parkFrames: 3 }));
+    reps.push(...runRep(session, { t0: 18 / 30, dipFrames: 6, parkFrames: 8 }));
     // Trailing frames so the first rep's follow tail can complete.
     for (let i = 0; i < 20; i++) {
-      const rep = session.push(poseAt(46 / 30 + i / 30, 25, 10));
+      const rep = session.push(poseAt(37 / 30 + i / 30, 25, 10));
       if (rep != null) reps.push(rep);
     }
     expect(reps).toHaveLength(1);
     expect(session.reps).toHaveLength(1);
+  });
+
+  test('two deliberate motions a second apart BOTH count', () => {
+    // The live-game 1.5 s cooldown ate the second one, so the counter read 2
+    // when the room had watched 4. The debounce must still clear the
+    // follow-through tail, or a pending rep would swallow the next event.
+    expect(FORM_MOTION.debounceSec).toBeGreaterThan(FOLLOW_TAIL_SEC);
+
+    const session = new FormCheckSession({ hand: 'right', frameHeight: FRAME, calibrate: false });
+    const reps: FormCheckRep[] = [];
+    // Signatures at f13 (0.433 s) and f43 (1.433 s): exactly 1.0 s apart.
+    reps.push(...runRep(session, { t0: 0, dipFrames: 10, parkFrames: 15 }));
+    reps.push(...runRep(session, { t0: 1, dipFrames: 10, parkFrames: 20 }));
+    expect(reps).toHaveLength(2);
+    expect(session.reps).toHaveLength(2);
+    expect(reps[1]!.releaseT - reps[0]!.releaseT).toBeCloseTo(1, 6);
   });
 
   test('sub-15 fps pose refuses to count reps at all', () => {
@@ -418,18 +478,46 @@ describe('FormCheckSession', () => {
     expect(session.readiness.ready).toBe(false);
   });
 
-  test('a shooter without the full body in frame counts zero reps', () => {
+  // RE-PINNED (v3 demo hardening): the old fixture kept both KNEES, which
+  // the relaxed gate now honestly accepts as a lower-body base. The refusal
+  // being pinned is unchanged — a body with no anchor below the hips cannot
+  // be measured — so the fixture drops the knees too.
+  test('a shooter with nothing below the hips in frame counts zero reps', () => {
     const session = new FormCheckSession({ hand: 'right', frameHeight: FRAME, calibrate: false });
     for (let i = 0; i < 45; i++) {
       const pose = poseAt(i * DT, i, 20);
-      // Legs out of frame (too close to the camera): no ankles, no far hip.
-      delete pose.keypoints.left_hip;
+      // Legs out of frame (too close to the camera): no ankles, no knees.
       delete pose.keypoints.left_ankle;
       delete pose.keypoints.right_ankle;
+      delete pose.keypoints.left_knee;
+      delete pose.keypoints.right_knee;
       expect(session.push(pose)).toBeNull();
     }
     expect(session.reps).toHaveLength(0);
     expect(session.readiness.fullBodyOk).toBe(false);
+  });
+
+  test('ankles out of frame: the rep counts and the knee angle stays NULL', () => {
+    // The relaxation buys back a shooter standing too close for the centre-
+    // square crop to hold their feet. It must not buy back a NUMBER: every
+    // ankle-dependent metric refuses rather than being estimated from knees.
+    const session = new FormCheckSession({ hand: 'right', frameHeight: FRAME, calibrate: false });
+    const reps: FormCheckRep[] = [];
+    for (let i = 0; i < 45; i++) {
+      const pose = poseAt(i * DT, i, 20);
+      delete pose.keypoints.left_ankle;
+      delete pose.keypoints.right_ankle;
+      delete pose.keypoints.left_hip; // far hip lost at a true side profile
+      const rep = session.push(pose);
+      if (rep != null) reps.push(rep);
+    }
+    expect(session.readiness.fullBodyOk).toBe(true);
+    expect(reps).toHaveLength(1);
+    expect(reps[0]!.metrics.kneeFlexionDeg).toBeNull();
+    expect(reps[0]!.releaseHeightM).toBeNull();
+    // The arm metrics it COULD measure are still measured.
+    expect(reps[0]!.metrics.setPointElbowDeg).not.toBeNull();
+    expectNoNaN(reps[0]!.metrics);
   });
 
   test('finalizeSession flushes a pending rep and reports median fps', () => {
@@ -1399,5 +1487,589 @@ describe('FormCheckSession calibration', () => {
     expect(report.calibration.phase).toBe('skipped');
     expect(report.calibration.tilt).toBeNull();
     expect(report.calibration.scale).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// V3 demo hardening — the slow, ball-free, room-distance demo motion
+// ---------------------------------------------------------------------------
+
+/**
+ * Fixture: a shooter standing far enough back that the whole body is ~128 px
+ * of the 192 analysis square (the stage case — 2.5-3 m from the phone), side
+ * on, performing a DELIBERATE ball-free shooting motion: the wrist rises
+ * ~59 px and the elbow opens to ~138° in a push that never fully extends.
+ *
+ * This is the motion the live-game RELEASE tuning refuses outright, with
+ * every readiness chip green — the fixture exists to pin that it now counts.
+ */
+const FAR_BODY: Partial<Record<PoseKeypointName, [number, number]>> = {
+  nose: [100, 30],
+  right_shoulder: [98, 50],
+  left_shoulder: [94, 50],
+  right_hip: [99, 100],
+  left_hip: [96, 100],
+  right_knee: [99, 128],
+  left_knee: [96, 128],
+  right_ankle: [99, 158],
+  left_ankle: [96, 158],
+};
+/** Set point: elbow under the shoulder, forearm out — elbow ~90°. */
+const SLOW_DIP = { elbow: [101, 76] as const, wrist: [118, 74] as const };
+/** Top of the push: elbow flared forward, wrist overhead — elbow ~138°. */
+const SLOW_TOP = { elbow: [104, 38] as const, wrist: [97.6, 14.9] as const };
+/** Wrist rise over the whole motion, px (74 -> 14.9). */
+const SLOW_RISE_PX = SLOW_DIP.wrist[1] - SLOW_TOP.wrist[1];
+/** The upward-speed floor in px/s for this frame size. */
+const VY_FLOOR_PX = FORM_MOTION.minUpwardWristVyFracPerSec * FRAME;
+
+/** The slow motion frozen at progress `u` (0 = set point, 1 = top). */
+function slowPose(t: number, u: number, score = 0.9): PoseFrame {
+  const c = Math.max(0, Math.min(1, u));
+  const lerp = (a: number, b: number) => a + (b - a) * c;
+  return poseOf(
+    t,
+    {
+      ...FAR_BODY,
+      right_elbow: [
+        lerp(SLOW_DIP.elbow[0], SLOW_TOP.elbow[0]),
+        lerp(SLOW_DIP.elbow[1], SLOW_TOP.elbow[1]),
+      ],
+      right_wrist: [
+        lerp(SLOW_DIP.wrist[0], SLOW_TOP.wrist[0]),
+        lerp(SLOW_DIP.wrist[1], SLOW_TOP.wrist[1]),
+      ],
+    },
+    score,
+  );
+}
+
+/**
+ * The slow motion rising at EXACTLY `vyPxPerSec`: `holdSec` at the set
+ * point, the rise, then `tailSec` held at the top. `maxU` stops the motion
+ * short of full extension (a push that never opens the elbow).
+ */
+function slowMotion(opts: {
+  vyPxPerSec: number;
+  t0?: number;
+  fps?: number;
+  holdSec?: number;
+  tailSec?: number;
+  maxU?: number;
+}): PoseFrame[] {
+  const { vyPxPerSec, t0 = 0, fps = 30, holdSec = 1, tailSec = 1, maxU = 1 } = opts;
+  const hold = Math.round(holdSec * fps);
+  const rise = Math.round((SLOW_RISE_PX * maxU) / (vyPxPerSec / fps));
+  const tail = Math.round(tailSec * fps);
+  const frames: PoseFrame[] = [];
+  for (let i = 0; i < hold + rise + tail; i++) {
+    const u =
+      i <= hold
+        ? 0
+        : Math.min(maxU, ((i - hold) * (vyPxPerSec / fps)) / SLOW_RISE_PX);
+    frames.push(slowPose(t0 + i / fps, u));
+  }
+  return frames;
+}
+
+function feed(
+  session: FormCheckSession,
+  frames: readonly PoseFrame[],
+): FormCheckRep[] {
+  const reps: FormCheckRep[] = [];
+  for (const f of frames) {
+    const rep = session.push(f);
+    if (rep != null) reps.push(rep);
+  }
+  return reps;
+}
+
+/** Peak elbow angle of the slow fixture at progress `u`. */
+function slowElbowDeg(u: number): number {
+  const p = slowPose(0, u);
+  return angleAtDeg(
+    p.keypoints.right_shoulder!,
+    p.keypoints.right_elbow!,
+    p.keypoints.right_wrist!,
+  )!;
+}
+
+describe('the slow ball-free demo motion', () => {
+  test('the live-game RELEASE tuning refuses it — that is why FORM_MOTION exists', () => {
+    // The motion's own numbers, measured off the fixture: both sit under the
+    // live tuning's floors, so the shared detector fires NOTHING while every
+    // readiness chip reads green. This is the demo-killer being fixed, and
+    // this assertion is what breaks if anyone re-points Form Check at
+    // RELEASE (or narrows FORM_MOTION back toward it).
+    expect(slowElbowDeg(1)).toBeLessThan(RELEASE.minElbowExtensionDeg);
+    expect(slowElbowDeg(1)).toBeGreaterThanOrEqual(
+      FORM_MOTION.minElbowExtensionDeg,
+    );
+
+    // A 1.2 s rise — an unhurried demonstration motion.
+    const vy = SLOW_RISE_PX / 1.2;
+    expect(vy).toBeLessThan(RELEASE.minUpwardWristVyFracPerSec * FRAME);
+    expect(vy).toBeGreaterThan(VY_FLOOR_PX);
+  });
+
+  test('it is fully READY — nothing on screen would explain a zero count', () => {
+    const session = new FormCheckSession({
+      hand: 'right',
+      frameHeight: FRAME,
+      calibrate: false,
+    });
+    feed(session, slowMotion({ vyPxPerSec: SLOW_RISE_PX / 1.2 }));
+    const r = session.readiness;
+    expect(r.fpsOk).toBe(true);
+    expect(r.fullBodyOk).toBe(true);
+    expect(r.armOk).toBe(true);
+    expect(r.sideOk).toBe(true);
+    expect(r.sideTrusted).toBe(true);
+    expect(r.ready).toBe(true);
+  });
+
+  test('it counts exactly one rep, with honest metrics and no ball numbers', () => {
+    const session = new FormCheckSession({
+      hand: 'right',
+      frameHeight: FRAME,
+      calibrate: false,
+    });
+    const reps = feed(session, slowMotion({ vyPxPerSec: SLOW_RISE_PX / 1.2 }));
+    expect(reps).toHaveLength(1);
+    expect(reps[0]!.metrics.releaseAngleDeg).toBeNull();
+    expect(reps[0]!.metrics.entryAngleDeg).toBeNull();
+    expect(reps[0]!.lowConfidence).toEqual([]);
+    expectNoNaN(reps[0]!.metrics);
+  });
+
+  test('a push that never opens the elbow past the floor counts NOTHING', () => {
+    // maxU 0.8 tops out under FORM_MOTION.minElbowExtensionDeg. The floor is
+    // relaxed, not removed: an arm that only half-lifts is still not a
+    // shooting motion.
+    expect(slowElbowDeg(0.8)).toBeLessThan(FORM_MOTION.minElbowExtensionDeg);
+    const session = new FormCheckSession({
+      hand: 'right',
+      frameHeight: FRAME,
+      calibrate: false,
+    });
+    const reps = feed(
+      session,
+      slowMotion({ vyPxPerSec: SLOW_RISE_PX / 1.2, maxU: 0.8 }),
+    );
+    expect(session.readiness.ready).toBe(true);
+    expect(reps).toHaveLength(0);
+  });
+
+  test('above the upward-speed floor it counts; below it, it does not', () => {
+    const run = (vyPxPerSec: number) => {
+      const session = new FormCheckSession({
+        hand: 'right',
+        frameHeight: FRAME,
+        calibrate: false,
+      });
+      return feed(session, slowMotion({ vyPxPerSec, holdSec: 1, tailSec: 1.5 }));
+    };
+    // +8% over the floor: a ~2.4 s rise. Counted.
+    expect(run(VY_FLOOR_PX * 1.08)).toHaveLength(1);
+    // -8% under it: a ~2.8 s rise, slower than any shooting motion. Refused,
+    // because a wrist drifting that slowly is not a release signature.
+    expect(run(VY_FLOOR_PX * 0.92)).toHaveLength(0);
+  });
+});
+
+describe('FormMotionDetector thresholds', () => {
+  const detect = (frames: readonly PoseFrame[]) => {
+    const d = new FormMotionDetector({ hand: 'right', frameHeight: FRAME });
+    let fired = 0;
+    for (const f of frames) if (d.push(f) != null) fired++;
+    return fired;
+  };
+
+  test('fires AT the upward-speed floor and refuses a hair below it', () => {
+    expect(detect(slowMotion({ vyPxPerSec: VY_FLOOR_PX * 1.001 }))).toBe(1);
+    expect(detect(slowMotion({ vyPxPerSec: VY_FLOOR_PX * 0.999 }))).toBe(0);
+  });
+
+  test('fires AT the elbow floor and refuses a hair below it', () => {
+    // Walk the motion's progress until its elbow angle brackets the floor.
+    let atU = 1;
+    for (let u = 0.8; u <= 1.0001; u += 0.005) {
+      if (slowElbowDeg(u) >= FORM_MOTION.minElbowExtensionDeg) {
+        atU = u;
+        break;
+      }
+    }
+    expect(slowElbowDeg(atU)).toBeGreaterThanOrEqual(
+      FORM_MOTION.minElbowExtensionDeg,
+    );
+    expect(slowElbowDeg(atU - 0.02)).toBeLessThan(
+      FORM_MOTION.minElbowExtensionDeg,
+    );
+    const fast = SLOW_RISE_PX / 1.2;
+    expect(detect(slowMotion({ vyPxPerSec: fast, maxU: atU }))).toBe(1);
+    expect(detect(slowMotion({ vyPxPerSec: fast, maxU: atU - 0.02 }))).toBe(0);
+  });
+
+  test('a completed signature is CONSUMED — a still wrist never re-fires it', () => {
+    // The shortened debounce made a standing set of conditions dangerous: it
+    // would mint a rep the instant the cooldown lapsed, off a wrist that had
+    // been motionless for hundreds of ms. Hold the top for 3 s (well past
+    // FORM_MOTION.debounceSec) and nothing more may fire.
+    expect(detect(slowMotion({ vyPxPerSec: SLOW_RISE_PX / 1.2, tailSec: 3 }))).toBe(
+      1,
+    );
+  });
+
+  test('a wrist sampled further apart than the velocity gap cannot fire', () => {
+    // The gap guard is what makes FPS_OVERRIDE_MIN a real floor rather than a
+    // promise: past it no two samples make a velocity, so no relaxation
+    // anywhere can rescue the session.
+    expect(FPS_OVERRIDE_MIN).toBeGreaterThanOrEqual(1 / MOTION_MAX_VY_GAP_SEC);
+    const fps = 5; // dt 0.2 s > MOTION_MAX_VY_GAP_SEC
+    expect(detect(slowMotion({ vyPxPerSec: SLOW_RISE_PX / 1.2, fps }))).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// V3 demo hardening — relaxed gates and the confidence they cost
+// ---------------------------------------------------------------------------
+
+describe('the fps floor and its labeled override', () => {
+  const at = (fps: number) =>
+    Array.from({ length: 20 }, (_, i) => ({
+      t: i / fps,
+      fullBody: true,
+      arm: true,
+      sideness: 0.9,
+    }));
+
+  test('the floor itself never moves', () => {
+    // The override is relief, not a redefinition: MIN_POSE_FPS is shared
+    // with Jump Lab's refuse-don't-guess contract and stays where it is.
+    expect(MIN_POSE_FPS).toBe(15);
+    expect(readinessOf(at(12)).fpsOk).toBe(false);
+    expect(readinessOf(at(12)).ready).toBe(false);
+  });
+
+  test('with the override the session counts, and SAYS the rate is low', () => {
+    const r = readinessOf(at(12), { fpsFloorOverride: true });
+    expect(r.ready).toBe(true);
+    expect(r.fpsOk).toBe(true);
+    expect(r.fpsOverridden).toBe(true);
+    // The measured rate is reported unchanged — no rounding it up to the
+    // floor, no pretending the timing is worth what 30 fps timing is worth.
+    expect(r.fps).toBeCloseTo(12, 6);
+  });
+
+  test('a healthy rate is never marked overridden', () => {
+    const r = readinessOf(at(30), { fpsFloorOverride: true });
+    expect(r.fpsOk).toBe(true);
+    expect(r.fpsOverridden).toBe(false);
+  });
+
+  test('the override refuses below FPS_OVERRIDE_MIN and on an empty window', () => {
+    // Below the velocity-gap floor nothing can fire however open the gate
+    // is, so the honest answer is to keep refusing rather than promise a
+    // rescue that cannot arrive.
+    const tooSlow = readinessOf(at(6), { fpsFloorOverride: true });
+    expect(tooSlow.fpsOk).toBe(false);
+    expect(tooSlow.fpsOverridden).toBe(false);
+    expect(tooSlow.ready).toBe(false);
+
+    // fps 0 is "no data yet", not "a slow camera" — never override it.
+    const empty = readinessOf([], { fpsFloorOverride: true });
+    expect(empty.fps).toBe(0);
+    expect(empty.fpsOk).toBe(false);
+    expect(empty.ready).toBe(false);
+  });
+
+  test('a session at 10 fps counts nothing until the presenter overrides', () => {
+    const strict = new FormCheckSession({
+      hand: 'right',
+      frameHeight: FRAME,
+      calibrate: false,
+    });
+    expect(runRep(strict, { fps: 10, dipFrames: 20, parkFrames: 20 })).toHaveLength(0);
+
+    const relaxed = new FormCheckSession({
+      hand: 'right',
+      frameHeight: FRAME,
+      calibrate: false,
+    });
+    relaxed.overrideFpsFloor();
+    expect(relaxed.fpsFloorOverridden).toBe(true);
+    const reps = runRep(relaxed, { fps: 10, dipFrames: 20, parkFrames: 20 });
+
+    expect(reps).toHaveLength(1);
+    expect(relaxed.readiness.fpsOverridden).toBe(true);
+    // The rep is real and its numbers were measured — they are just coarse,
+    // and the rep says so rather than passing as a clean capture.
+    expect(reps[0]!.lowConfidence).toContain('lowPoseFps');
+    expect(reps[0]!.poseFps).toBeLessThan(MIN_POSE_FPS);
+    expect(reps[0]!.metrics.releaseTimeMs).not.toBeNull();
+
+    const report = relaxed.finalizeSession();
+    expect(report.lowConfidence).toEqual({ reps: 1, reasons: ['lowPoseFps'] });
+  });
+
+  test('switching the override back off restores the refusal', () => {
+    const session = new FormCheckSession({
+      hand: 'right',
+      frameHeight: FRAME,
+      calibrate: false,
+    });
+    session.overrideFpsFloor();
+    runRep(session, { fps: 10, dipFrames: 20, parkFrames: 20 });
+    expect(session.reps).toHaveLength(1);
+    session.overrideFpsFloor(false);
+    expect(session.fpsFloorOverridden).toBe(false);
+    runRep(session, { t0: 10, fps: 10, dipFrames: 20, parkFrames: 20 });
+    expect(session.reps).toHaveLength(1);
+    expect(session.readiness.fpsOk).toBe(false);
+  });
+});
+
+describe('the readiness latch around a keypoint dropout', () => {
+  /** The same pose with everything below the shoulders lost. */
+  const dropLowerBody = (pose: PoseFrame): PoseFrame => {
+    delete pose.keypoints.left_hip;
+    delete pose.keypoints.right_hip;
+    delete pose.keypoints.left_knee;
+    delete pose.keypoints.right_knee;
+    delete pose.keypoints.left_ankle;
+    delete pose.keypoints.right_ankle;
+    return pose;
+  };
+
+  test('a dropout at the top of the motion no longer swallows the rep', () => {
+    // The gates are trailing-window fractions, so ~0.4 s of lost keypoints
+    // flips them — and the top of a shooting motion is exactly when
+    // keypoints go missing. A hard gate stopped feeding the detector
+    // mid-signature and the rep vanished with nothing on screen to explain
+    // it. The latch carries the feed through; the rep is REPORTED as caught
+    // through a dropout, and the strict verdict stays false so the strip
+    // cannot go green on a capture it did not have.
+    const session = new FormCheckSession({
+      hand: 'right',
+      frameHeight: FRAME,
+      calibrate: false,
+    });
+    const reps: FormCheckRep[] = [];
+    for (let i = 0; i < 45; i++) {
+      const pose = poseAt(i * DT, i, 20);
+      if (i >= 10 && i <= 30) dropLowerBody(pose);
+      const rep = session.push(pose);
+      if (rep != null) reps.push(rep);
+    }
+    expect(reps).toHaveLength(1);
+    expect(reps[0]!.lowConfidence).toContain('gateDropout');
+    expect(session.finalizeSession().lowConfidence).toEqual({
+      reps: 1,
+      reasons: ['gateDropout'],
+    });
+  });
+
+  test('the latch is finite — a long dropout still refuses', () => {
+    // READY_LATCH_SEC buys a motion through a blink, not a session through a
+    // shooter who has walked out of frame.
+    expect(READY_LATCH_SEC).toBeLessThanOrEqual(READINESS_WINDOW_SEC);
+    const session = new FormCheckSession({
+      hand: 'right',
+      frameHeight: FRAME,
+      calibrate: false,
+    });
+    const reps: FormCheckRep[] = [];
+    // Clean until f29, then lost for the rest — the snap lands at f78,
+    // more than READY_LATCH_SEC after the gates last passed.
+    for (let i = 0; i < 100; i++) {
+      const pose = poseAt(i * DT, i, 75);
+      if (i >= 30) dropLowerBody(pose);
+      const rep = session.push(pose);
+      if (rep != null) reps.push(rep);
+    }
+    expect(reps).toHaveLength(0);
+    expect(session.readiness.fullBodyOk).toBe(false);
+  });
+});
+
+describe('the side-profile gate and the angle confidence it costs', () => {
+  test('the floor brackets: 0.34 refuses, 0.36 counts', () => {
+    const win = (sideness: number) =>
+      readinessOf(
+        Array.from({ length: 30 }, (_, i) => ({
+          t: i * DT,
+          fullBody: true,
+          arm: true,
+          sideness,
+        })),
+      );
+    expect(SIDE_PROFILE_MIN).toBeLessThan(SIDE_PROFILE_TRUSTED);
+    expect(win(SIDE_PROFILE_MIN - 0.01).sideOk).toBe(false);
+    expect(win(SIDE_PROFILE_MIN + 0.01).sideOk).toBe(true);
+    // Counting is not the same as trusting the angles.
+    expect(win(SIDE_PROFILE_MIN + 0.01).sideTrusted).toBe(false);
+    expect(win(SIDE_PROFILE_TRUSTED + 0.05).sideTrusted).toBe(true);
+  });
+
+  /** The fixture turned ~40° toward the camera (sideness ≈ 0.45). */
+  const angledPose = (t: number, i: number, dipFrames: number): PoseFrame => {
+    const pose = poseAt(t, i, dipFrames);
+    pose.keypoints.left_shoulder = { x: 76.5, y: 45, score: 0.9 };
+    pose.keypoints.left_hip = { x: 81.5, y: 95, score: 0.9 };
+    return pose;
+  };
+
+  /** Square to the camera (sideness ≈ 0.2) — still a measured refusal. */
+  const faceOnPose = (t: number, i: number, dipFrames: number): PoseFrame => {
+    const pose = poseAt(t, i, dipFrames);
+    pose.keypoints.left_shoulder = { x: 68, y: 45, score: 0.9 };
+    pose.keypoints.left_hip = { x: 73, y: 95, score: 0.9 };
+    return pose;
+  };
+
+  const run = (
+    build: (t: number, i: number, dipFrames: number) => PoseFrame,
+  ): { session: FormCheckSession; reps: FormCheckRep[] } => {
+    const session = new FormCheckSession({
+      hand: 'right',
+      frameHeight: FRAME,
+      calibrate: false,
+    });
+    const reps: FormCheckRep[] = [];
+    for (let i = 0; i < 45; i++) {
+      const rep = session.push(build(i * DT, i, 20));
+      if (rep != null) reps.push(rep);
+    }
+    return { session, reps };
+  };
+
+  test('an angled stance counts, and every rep carries the foreshortening', () => {
+    // At 0.6 the gate paused the whole session with no override, in a room
+    // where the shooter stands where the furniture allows. It now counts —
+    // and states that the 2D elbow and knee angles read small.
+    const { session, reps } = run(angledPose);
+    const sideness = session.readiness.sideness!;
+    expect(sideness).toBeGreaterThan(SIDE_PROFILE_MIN);
+    expect(sideness).toBeLessThan(SIDE_PROFILE_TRUSTED);
+    expect(session.readiness.sideOk).toBe(true);
+    expect(session.readiness.sideTrusted).toBe(false);
+    expect(reps).toHaveLength(1);
+    expect(reps[0]!.lowConfidence).toContain('angledStance');
+    expect(session.finalizeSession().lowConfidence).toEqual({
+      reps: 1,
+      reasons: ['angledStance'],
+    });
+  });
+
+  test('a measured face-on stance is still refused', () => {
+    const { session, reps } = run(faceOnPose);
+    expect(session.readiness.sideness!).toBeLessThan(SIDE_PROFILE_MIN);
+    expect(session.readiness.sideOk).toBe(false);
+    expect(reps).toHaveLength(0);
+  });
+
+  test('a clean side-on session reports no low-confidence reps at all', () => {
+    const session = new FormCheckSession({
+      hand: 'right',
+      frameHeight: FRAME,
+      calibrate: false,
+    });
+    runRep(session, { dipFrames: 20, parkFrames: 20 });
+    const report = session.finalizeSession();
+    expect(report.repCount).toBe(1);
+    expect(report.lowConfidence).toEqual({ reps: 0, reasons: [] });
+    expect(session.reps[0]!.lowConfidence).toEqual([]);
+  });
+});
+
+describe('calibration under a relaxed gate', () => {
+  test('the fps override unsticks a calibration that could never complete', () => {
+    // Calibration is the FIRST thing that runs on stage, and its shadow
+    // detectors are gated on the same fps verdict — so a room the phone
+    // cannot hold 15 fps in freezes the stepper on "practice motion 1 of 2"
+    // before a single rep is ever attempted. The override has to reach here
+    // too, or the escape hatch arrives after the session is already dead.
+    const stuck = new FormCheckSession({ hand: 'right', frameHeight: FRAME });
+    runRep(stuck, { t0: 0, fps: 10, dipFrames: 20, parkFrames: 20 });
+    runRep(stuck, { t0: 10, fps: 10, dipFrames: 20, parkFrames: 20 });
+    expect(stuck.calibration.shadowReps).toBe(0);
+    expect(stuck.armed).toBe(false);
+
+    const session = new FormCheckSession({ hand: 'right', frameHeight: FRAME });
+    session.overrideFpsFloor();
+    runRep(session, { t0: 0, fps: 10, dipFrames: 20, parkFrames: 20 });
+    runRep(session, { t0: 10, fps: 10, dipFrames: 20, parkFrames: 20 });
+    expect(session.calibration.shadowReps).toBe(SHADOW_REPS_TARGET);
+    expect(session.armed).toBe(true);
+  });
+});
+
+describe('savedLowConfidenceOf (the receipt after persistence)', () => {
+  // The live report shows the relaxed-gate caveat; every surface that renders
+  // a SAVED session's numbers has to be able to show it too, or a run counted
+  // at 11 fps reappears in history indistinguishable from a clean one.
+  const CLEAN = JSON.stringify({ lowConfidence: { reps: 0, reasons: [] } });
+
+  test('a clean saved session qualifies nothing', () => {
+    expect(savedLowConfidenceOf({ summaryJson: CLEAN, medianPoseFps: 28 })).toBeNull();
+  });
+
+  test('the persisted receipt round-trips reps and reasons', () => {
+    const json = JSON.stringify({
+      lowConfidence: { reps: 2, reasons: ['lowPoseFps', 'angledStance'] },
+    });
+    expect(savedLowConfidenceOf({ summaryJson: json, medianPoseFps: 28 })).toEqual({
+      reps: 2,
+      reasons: ['lowPoseFps', 'angledStance'],
+    });
+  });
+
+  test('median fps is a SECOND witness — a row with no receipt is still marked', () => {
+    // Rows written before the receipt existed carry no lowConfidence key, and
+    // a missing key is not evidence of a clean capture. medianPoseFps is its
+    // own persisted column, so the commonest case is still recoverable.
+    const old = { summaryJson: '{"reps":[]}', medianPoseFps: 11 };
+    expect(savedLowConfidenceOf(old)).toEqual({ reps: 0, reasons: ['lowPoseFps'] });
+    // ...but it never INVENTS a rep count it did not read.
+    expect(savedLowConfidenceOf(old)!.reps).toBe(0);
+    // A clean-fps row with no receipt claims nothing either way.
+    expect(savedLowConfidenceOf({ summaryJson: '{"reps":[]}', medianPoseFps: 28 })).toBeNull();
+  });
+
+  test('the fps witness fires exactly at the floor, and never on a 0-rep row', () => {
+    const at = { summaryJson: CLEAN, medianPoseFps: MIN_POSE_FPS };
+    expect(savedLowConfidenceOf(at)).toBeNull();
+    const under = { summaryJson: CLEAN, medianPoseFps: MIN_POSE_FPS - 1 };
+    expect(savedLowConfidenceOf(under)!.reasons).toEqual(['lowPoseFps']);
+    // medianPoseFps is 0 with no reps — an absence, not a slow session.
+    expect(savedLowConfidenceOf({ summaryJson: CLEAN, medianPoseFps: 0 })).toBeNull();
+  });
+
+  test('a corrupt blob falls through to fps instead of throwing', () => {
+    const corrupt = '{"lowConfidence": {truncated';
+    expect(savedLowConfidenceOf({ summaryJson: corrupt, medianPoseFps: 11 })).toEqual({
+      reps: 0,
+      reasons: ['lowPoseFps'],
+    });
+    expect(savedLowConfidenceOf({ summaryJson: corrupt, medianPoseFps: 28 })).toBeNull();
+  });
+
+  test('unknown reason strings from a stored blob are dropped, not rendered', () => {
+    const json = JSON.stringify({
+      lowConfidence: { reps: 1, reasons: ['lowPoseFps', 'nonsense', 7] },
+    });
+    expect(savedLowConfidenceOf({ summaryJson: json, medianPoseFps: 28 })).toEqual({
+      reps: 1,
+      reasons: ['lowPoseFps'],
+    });
+  });
+
+  test('every reason in the union is a valid decode key', () => {
+    for (const reason of REP_CONFIDENCE_REASONS) {
+      const json = JSON.stringify({ lowConfidence: { reps: 1, reasons: [reason] } });
+      expect(savedLowConfidenceOf({ summaryJson: json, medianPoseFps: 28 })!.reasons).toEqual([
+        reason,
+      ]);
+    }
   });
 });

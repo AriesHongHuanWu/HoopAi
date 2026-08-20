@@ -4,11 +4,11 @@
  * The Form Check screen (src/app/formcheck.tsx) points the camera at the
  * SHOOTER, not the hoop: no ball is ever tracked, so nothing here can — or
  * ever tries to — claim a make or a miss. A "rep" is a detected shooting
- * MOTION: the existing pose-only {@link ReleaseDetector} (wrist above the
- * shoulder + an upward wrist-velocity spike + elbow extension, debounced
- * RELEASE.debounceSec) fires on the wrist-snap signature, and this module
- * turns each event into pose-only {@link FormMetrics} plus a packed
- * {@link FormSequence} for the motion theater.
+ * MOTION: the pose-only {@link FormMotionDetector} (wrist above the shoulder
+ * + an upward wrist-velocity spike + elbow extension, debounced) fires on
+ * the wrist-snap signature, and this module turns each event into pose-only
+ * {@link FormMetrics} plus a packed {@link FormSequence} for the motion
+ * theater.
  *
  * WHY NOT FormAnalyzer: its stage machine is structurally ball-gated — the
  * WAIT→PICKUP transition and checkRelease() both require a TrackedBall, so
@@ -52,6 +52,35 @@
  *    an anthropometric constant; it must never feed the spreads (those stay
  *    in normalized units so the verdict is scale-independent).
  *
+ * V3 — DEMO HARDENING: the room a Form Check runs in is not a gym. Four
+ * gates were tuned for a live-game shot and refused a deliberate, slow,
+ * BALL-FREE demo motion outright; every relaxation below is paired with the
+ * confidence consequence it carries, reported in the data so the screen can
+ * say it out loud:
+ *  - motion detection moved off the live-game {@link RELEASE} tuning onto
+ *    {@link FORM_MOTION} ({@link FormMotionDetector}) — a slow arm rise and
+ *    a 130° "push" that never fully extends now count. The trade is stated,
+ *    not hidden: this is a deliberately SENSITIVE motion counter, and a
+ *    raised arm can count as a rep. It still cannot fabricate a metric —
+ *    every number stays computed from the captured window, or null.
+ *  - the side-profile gate opens to {@link SIDE_PROFILE_MIN} (≈40° of
+ *    tolerance); a rep captured below {@link SIDE_PROFILE_TRUSTED} carries
+ *    the 'angledStance' reason, because 2D angles foreshorten when the
+ *    shooter is turned toward the camera.
+ *  - full-body visibility accepts ONE hip and knees-as-base; nothing is
+ *    fabricated because every metric that needs the missing landmark
+ *    (kneeFlexionDeg, the metre scale) is already null-gated.
+ *  - the {@link MIN_POSE_FPS} floor gains an explicit, labeled override
+ *    ({@link FormCheckSession.overrideFpsFloor}) instead of being lowered:
+ *    reps counted under it carry the 'lowPoseFps' reason and the floor
+ *    itself never moves.
+ *  - the detector feed is latched for {@link READY_LATCH_SEC} so a keypoint
+ *    dropout at the top of a motion cannot silently swallow the rep; a rep
+ *    captured through a dropout carries the 'gateDropout' reason.
+ * Reasons live on {@link FormCheckRep.lowConfidence} and are counted in
+ * {@link FormCheckSessionReport.lowConfidence}. RELAXING A GATE IS ALLOWED;
+ * CLAIMING A CLEAN CAPTURE THAT DID NOT HAPPEN IS NOT.
+ *
  * Pure TypeScript: no I/O, no wall clock — time comes exclusively from the
  * camera timestamps on each {@link PoseFrame}.
  */
@@ -64,7 +93,6 @@ import {
 } from './formSequence';
 import { angleAtDeg, clamp } from './geometry';
 import { metersPerPxFromHeight } from './jumpLab';
-import { ReleaseDetector } from './releaseDetector';
 import type {
   CoachingTip,
   FormMetrics,
@@ -82,8 +110,83 @@ import type {
 /** Refuse to count reps below this pose rate (Jump Lab's MIN_FPS contract). */
 export const MIN_POSE_FPS = 15;
 
+/**
+ * Floor the presenter's fps override still respects. Below it the override
+ * buys nothing to override WITH: {@link MOTION_MAX_VY_GAP_SEC} (0.15 s)
+ * rejects every velocity sample once frames are further apart than that, so
+ * no motion can fire however open the gate is. 8 fps ⇒ dt 0.125 s, the last
+ * rate where consecutive wrist samples still make a velocity.
+ */
+export const FPS_OVERRIDE_MIN = 8;
+
+/**
+ * How long the motion detector keeps being fed after the readiness gates
+ * drop. The gates are trailing-window fractions, and the top of a shooting
+ * motion is exactly when keypoints go missing (the raised wrist can leave
+ * the analysis crop) — an ungated feed would stop mid-signature and the rep
+ * would silently vanish. The latch feeds the detector THROUGH the dropout;
+ * the banner, the chips and the calibration collector keep using the strict
+ * verdict, and any rep captured across a latched frame is reported
+ * 'gateDropout' rather than passed off as a clean capture.
+ */
+export const READY_LATCH_SEC = 1.0;
+
+/**
+ * Motion-detection tuning, Form-Check-local by design.
+ *
+ * {@link RELEASE} in config.ts is the LIVE-GAME release tuning: it assumes a
+ * ball to push against and a shot at game speed (0.3 frame-heights/s of
+ * upward wrist travel, a 150° elbow, a 1.5 s cooldown between shots). Form
+ * Check points the camera at a shooter with NO ball, often a slow deliberate
+ * demonstration motion, standing far enough away that the whole body is
+ * ~130 px of the 192 analysis square — dip-to-overhead wrist travel is then
+ * ~50-60 px, so a 1 s rise peaks near 50 px/s against a 57.6 px/s floor, and
+ * a ball-free "push" routinely stops the elbow at 130-145°. Under the live
+ * tuning that motion fires NOTHING while every readiness chip reads green.
+ *
+ * These values buy that motion back. The cost is stated plainly in the
+ * module contract: this is a deliberately sensitive MOTION counter, not a
+ * shot detector, and a raised arm can count. config.ts is deliberately NOT
+ * touched — src/pipeline/shotPipeline.ts must keep the strict live tuning.
+ */
+export const FORM_MOTION = {
+  /** Upward wrist-speed floor, frame-heights/sec (RELEASE's is 0.3). */
+  minUpwardWristVyFracPerSec: 0.12,
+  /** Elbow-extension floor, degrees (RELEASE's is 150). */
+  minElbowExtensionDeg: 130,
+  /**
+   * Co-occurrence window, seconds. DELIBERATELY LEFT at RELEASE's 0.3 after
+   * a widened 0.5 was tried and reverted: with the shortened debounce below,
+   * a 0.5 s window lets the wrist-above-shoulder and elbow-extended
+   * conditions left over from the END of one motion pair with the fresh
+   * upward spike at the START of the next and mint a rep nobody performed.
+   * Lowering the elbow floor makes extension land EARLIER in a slow rise,
+   * not later, so the slow-motion fixtures co-occur comfortably inside
+   * 0.3 s — the window was never what refused them.
+   */
+  windowSec: 0.3,
+  /**
+   * Minimum spacing between counted motions, seconds (RELEASE's is 1.5 — a
+   * live-game shot cooldown). A presenter demonstrating for an audience
+   * fires three or four motions in four seconds and the counter has to
+   * move. MUST stay above {@link FOLLOW_TAIL_SEC}: an event arriving while
+   * a rep is still pending its tail is dropped, so a shorter debounce would
+   * silently swallow reps again — the exact bug this fixes.
+   */
+  debounceSec: 0.8,
+} as const;
+
 /** Trailing window the readiness gates are judged over, seconds. */
 export const READINESS_WINDOW_SEC = 2.0;
+
+/**
+ * How often the readiness verdict is recomputed, seconds. Samples are still
+ * collected and pruned every frame — only the summary is throttled, and a
+ * verdict may therefore be up to this stale. 10 Hz against a 2 s window and
+ * a 4 Hz UI poll: invisible to both, and it keeps a per-frame triple array
+ * allocation off the JS thread on an old phone.
+ */
+const READINESS_POLL_SEC = 0.1;
 
 /**
  * Fraction of trailing frames that must pass a visibility check for its gate
@@ -131,8 +234,24 @@ export const RELEASE_HEIGHT_SPREAD_FLAG = 0.04;
 /** Shadow (unscored practice) reps that complete calibration. */
 export const SHADOW_REPS_TARGET = 2;
 
-/** Side-profile gauge floor for the readiness side gate (0..1, 1 = side-on). */
-export const SIDE_PROFILE_MIN = 0.6;
+/**
+ * Side-profile gauge floor for the readiness side gate (0..1, 1 = side-on).
+ * 0.35 ≈ 40° of tolerance off a true profile. It was 0.6 (≈24°), which in an
+ * unknown room — where the shooter stands where the furniture allows —
+ * pauses the whole session with no override and no way to comply. The gate
+ * still fails a MEASURED face-on stance, and still passes when the gauge
+ * cannot vote (occlusion is not evidence of facing the camera).
+ */
+export const SIDE_PROFILE_MIN = 0.35;
+
+/**
+ * Above this the side view is square enough to trust 2D joint angles.
+ * Between {@link SIDE_PROFILE_MIN} and here the session still counts reps —
+ * refusing would brick a workable setup — but elbow and knee angles are
+ * foreshortened and read SMALLER than truth, so those reps carry the
+ * 'angledStance' reason and the UI must qualify them.
+ */
+export const SIDE_PROFILE_TRUSTED = 0.6;
 
 /** Tilt estimates spread wider than this (deg, sample std) are unconfident. */
 export const TILT_STD_MAX_DEG = 3;
@@ -152,6 +271,36 @@ export const NOSE_TO_ANKLE_STATURE_FRAC = 0.9;
 export type HandSource = 'settings' | 'auto' | 'manual';
 export type CalibrationPhase = 'collecting' | 'done' | 'skipped';
 export type RepFlag = 'shallowDip' | 'stanceDrift';
+
+/**
+ * Why a counted rep is LOW CONFIDENCE — the price of a relaxed gate, carried
+ * in the data so the UI can state it instead of quietly presenting a relaxed
+ * capture as a clean one. Never a reason to hide a rep: the rep was really
+ * observed, its numbers were really computed, they are simply worth less.
+ *  - 'lowPoseFps'   — the rep's own window ran under {@link MIN_POSE_FPS}, so
+ *                     dip→release tempo and phase timing are coarse. Usually
+ *                     the presenter's fps override, but NOT only that: this
+ *                     is the median over the REP's window while the gate
+ *                     reads the readiness window, so a brief dip the gate
+ *                     never saw can still land here.
+ *  - 'gateDropout'  — readiness dropped inside the rep's window and
+ *                     {@link READY_LATCH_SEC} carried the detector through
+ *                     it; some landmarks were missing while it was captured.
+ *  - 'angledStance' — the shooter was measurably angled toward the camera
+ *                     (< {@link SIDE_PROFILE_TRUSTED}), so 2D elbow and knee
+ *                     angles are foreshortened and read small.
+ */
+export type RepConfidenceReason = 'lowPoseFps' | 'gateDropout' | 'angledStance';
+
+/**
+ * Runtime witness for {@link RepConfidenceReason}. Decoding a receipt out of
+ * a stored blob must not promote arbitrary strings into the union.
+ */
+export const REP_CONFIDENCE_REASONS: readonly RepConfidenceReason[] = [
+  'lowPoseFps',
+  'gateDropout',
+  'angledStance',
+];
 
 /**
  * MIRRORED from FormAnalyzer (private there): the wrist must rise this many
@@ -226,7 +375,7 @@ const STANCE_DRIFT_FRAC = 0.25;
 
 /** Per-frame visibility verdicts for the two readiness gates. */
 export interface FrameVisibility {
-  /** Head-or-shoulders AND both hips AND at least one ankle all visible. */
+  /** Head-or-shoulders AND a hip AND a lower-body base (ankle or knee). */
   fullBody: boolean;
   /** Shooting-side shoulder + elbow + wrist all visible. */
   arm: boolean;
@@ -263,6 +412,23 @@ export interface FormCheckReadiness {
   sideOk: boolean;
   /** All four gates pass — reps may be counted. */
   ready: boolean;
+  /**
+   * The measured rate is BELOW {@link MIN_POSE_FPS} and only the presenter's
+   * explicit override is carrying `fpsOk`. The floor itself never moved:
+   * timing numbers really are low-confidence here and the UI must say so.
+   * Optional so existing readiness fixtures still compile — `readinessOf`
+   * always sets it (the same idiom as {@link ReadinessSample.sideness}).
+   */
+  fpsOverridden?: boolean;
+  /**
+   * The stance is square enough ({@link SIDE_PROFILE_TRUSTED}) for 2D joint
+   * angles to be taken at face value. False with a measured-but-angled
+   * stance — the session still counts, the angles just read small — and
+   * ALSO false when `sideness` is null, because an unmeasurable stance is
+   * not a trusted one; read `sideness` to tell the two apart. Optional for
+   * the same fixture-compatibility reason as {@link fpsOverridden}.
+   */
+  sideTrusted?: boolean;
 }
 
 /** Score-gated keypoint lookup (FORM.keypointScoreMin, same gate app-wide). */
@@ -273,10 +439,20 @@ function visible(pose: PoseFrame, name: PoseKeypointName): boolean {
 
 /**
  * Visibility of one frame for the readiness gates. Full body = head OR a
- * shoulder, AND both hips, AND at least one ankle — the same landmarks the
- * sequence normalizer needs to anchor and scale a frame. The arm gate watches
- * the SHOOTING side specifically: at a side view the far arm is routinely
- * occluded, and metrics from the wrong arm are plausible-looking garbage.
+ * shoulder, AND at least one hip, AND a lower-body base (an ankle, or a knee
+ * when the ankles are out of frame). The arm gate watches the SHOOTING side
+ * specifically: at a side view the far arm is routinely occluded, and metrics
+ * from the wrong arm are plausible-looking garbage.
+ *
+ * V3 relaxation — this used to demand BOTH hips and an ANKLE, which two
+ * ordinary room hazards break: at a true side profile the far hip routinely
+ * scores under FORM.keypointScoreMin, and a cramped room may not have the
+ * ~3 m of clear floor the centre-square analysis crop needs before head AND
+ * feet both land inside it. Neither relaxation can fabricate anything: the
+ * downstream primitives already degrade honestly — pairMid() falls back to a
+ * single hip, bodyHeightOf() falls back to knees, computeRepMetrics returns
+ * kneeFlexionDeg null without an ankle, and heightScaleOf refuses without
+ * nose + ankle so metres simply stay off.
  */
 export function frameVisibility(
   pose: PoseFrame,
@@ -286,8 +462,12 @@ export function frameVisibility(
     visible(pose, 'nose') ||
     visible(pose, 'left_shoulder') ||
     visible(pose, 'right_shoulder');
-  const hips = visible(pose, 'left_hip') && visible(pose, 'right_hip');
-  const ankle = visible(pose, 'left_ankle') || visible(pose, 'right_ankle');
+  const hips = visible(pose, 'left_hip') || visible(pose, 'right_hip');
+  const ankle =
+    visible(pose, 'left_ankle') ||
+    visible(pose, 'right_ankle') ||
+    visible(pose, 'left_knee') ||
+    visible(pose, 'right_knee');
   const arm =
     visible(pose, `${hand}_shoulder` as PoseKeypointName) &&
     visible(pose, `${hand}_elbow` as PoseKeypointName) &&
@@ -329,9 +509,18 @@ function median(values: readonly number[]): number | null {
  * V2: samples may carry a `sideness` vote. The side gate fails only on a
  * MEASURED face-on stance; too few votes (< {@link SIDE_VOTE_MIN_FRAC} of
  * the window) degrade the gauge to null and the gate to PASS.
+ *
+ * V3: `opts.fpsFloorOverride` is the presenter's on-stage escape from a
+ * pose rate the room cannot fix. It does NOT lower {@link MIN_POSE_FPS} —
+ * the measured rate and the `fpsOverridden` flag both stay in the verdict so
+ * every consumer can label the reps it produces. It refuses below
+ * {@link FPS_OVERRIDE_MIN}, where no velocity sample survives anyway, and it
+ * never manufactures readiness out of an empty window (fps 0 = no data yet,
+ * not a slow camera).
  */
 export function readinessOf(
   samples: readonly ReadinessSample[],
+  opts: { fpsFloorOverride?: boolean } = {},
 ): FormCheckReadiness {
   const n = samples.length;
   const fps = medianFps(samples.map((s) => s.t));
@@ -350,7 +539,10 @@ export function readinessOf(
   const fullBodyFrac = n > 0 ? fullBody / n : 0;
   const armFrac = n > 0 ? arm / n : 0;
   const sideness = n > 0 && sideN >= SIDE_VOTE_MIN_FRAC * n ? sideSum / sideN : null;
-  const fpsOk = fps >= MIN_POSE_FPS;
+  const measuredFpsOk = fps >= MIN_POSE_FPS;
+  const fpsOverridden =
+    opts.fpsFloorOverride === true && !measuredFpsOk && fps >= FPS_OVERRIDE_MIN;
+  const fpsOk = measuredFpsOk || fpsOverridden;
   const fullBodyOk = n > 0 && fullBodyFrac >= VISIBILITY_MIN_FRAC;
   const armOk = n > 0 && armFrac >= VISIBILITY_MIN_FRAC;
   const sideOk = sideness == null || sideness >= SIDE_PROFILE_MIN;
@@ -364,7 +556,153 @@ export function readinessOf(
     armOk,
     sideOk,
     ready: fpsOk && fullBodyOk && armOk && sideOk,
+    fpsOverridden,
+    sideTrusted: sideness != null && sideness >= SIDE_PROFILE_TRUSTED,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Motion detection — the Form-Check-tuned mirror of ReleaseDetector
+// ---------------------------------------------------------------------------
+
+/**
+ * Max spacing between two wrist samples for a finite-difference velocity to
+ * mean anything. MIRRORED from ReleaseDetector's private MAX_VY_GAP_SEC and
+ * for the same reason: past a few dropped frames the wrist may have gone
+ * down and back up between samples, and a Δy over half a second says nothing
+ * about a rise. It also sets {@link FPS_OVERRIDE_MIN} — below 1/0.15 fps no
+ * pair of frames is close enough to produce a velocity at all.
+ */
+export const MOTION_MAX_VY_GAP_SEC = 0.15;
+
+/**
+ * Streaming shooting-MOTION detector, one instance per watched arm.
+ *
+ * A deliberate mirror of {@link ReleaseDetector} (src/core/releaseDetector.ts)
+ * — same three-condition signature, same raw (unfiltered) landmarks, same
+ * co-occurrence-window logic, same score gate — running on {@link FORM_MOTION}
+ * instead of config.ts's live-game RELEASE tuning. It is a copy rather than a
+ * parameterization because RELEASE.* is shared with the live shot FSM
+ * (src/pipeline/shotPipeline.ts), which must keep the strict values: a shot
+ * detector that fires on a raised arm would mint fake attempts against a real
+ * hoop. Form Check has no hoop and no ball and counts motions, so it can — and
+ * for a slow ball-free demonstration MUST — be the sensitive one.
+ *
+ * The signature: within a trailing {@link FORM_MOTION.windowSec}, the wrist
+ * (a) sits above the shoulder, (b) rises faster than
+ * {@link FORM_MOTION.minUpwardWristVyFracPerSec} of the frame height per
+ * second, and (c) the elbow opens past
+ * {@link FORM_MOTION.minElbowExtensionDeg}. Each condition may land on a
+ * different frame — a motion is a sequence, not a pose — but all three must
+ * be recent together. At most one event per {@link FORM_MOTION.debounceSec}.
+ *
+ * Missing landmarks (below FORM.keypointScoreMin) simply leave their
+ * condition un-refreshed that frame: never a throw, never a stale emit.
+ */
+export class FormMotionDetector {
+  private readonly hand: ShootingHand;
+  private readonly frameHeight: number;
+
+  /** Last VALID wrist sample (for the finite-difference vy). */
+  private lastWrist: { x: number; y: number; t: number } | null = null;
+
+  // Most recent time each signature condition held (-Infinity = never).
+  private aboveShoulderT = -Infinity;
+  private vySpikeT = -Infinity;
+  private elbowExtendedT = -Infinity;
+
+  /** Time of the last emitted event (debounce). */
+  private lastEmitT = -Infinity;
+
+  constructor(opts: { hand: ShootingHand; frameHeight: number }) {
+    this.hand = opts.hand;
+    this.frameHeight = opts.frameHeight;
+  }
+
+  /**
+   * Feed one pose frame (camera-timestamp order). Returns the motion event
+   * exactly on the completing frame, otherwise null.
+   */
+  push(pose: PoseFrame): MotionEvent | null {
+    const t = pose.t;
+    const side = this.hand;
+    const wrist = this.keypoint(pose, `${side}_wrist` as PoseKeypointName);
+    const elbow = this.keypoint(pose, `${side}_elbow` as PoseKeypointName);
+    const shoulder = this.keypoint(pose, `${side}_shoulder` as PoseKeypointName);
+
+    // (b) Upward velocity: finite difference between CONSECUTIVE valid wrist
+    // samples only — a long detection gap makes Δy/Δt meaningless.
+    if (wrist !== null) {
+      const prev = this.lastWrist;
+      if (prev !== null && t > prev.t && t - prev.t <= MOTION_MAX_VY_GAP_SEC) {
+        const vy = (wrist.y - prev.y) / (t - prev.t); // +y down: rising < 0
+        const floor =
+          FORM_MOTION.minUpwardWristVyFracPerSec * this.frameHeight;
+        if (vy <= -floor) this.vySpikeT = t;
+      }
+      this.lastWrist = { x: wrist.x, y: wrist.y, t };
+    }
+
+    // (a) Wrist above the shoulder (strictly: smaller y = higher).
+    if (wrist !== null && shoulder !== null && wrist.y < shoulder.y) {
+      this.aboveShoulderT = t;
+    }
+
+    // (c) Elbow opened past the extension floor.
+    if (wrist !== null && elbow !== null && shoulder !== null) {
+      const deg = angleAtDeg(shoulder, elbow, wrist);
+      if (deg !== null && deg >= FORM_MOTION.minElbowExtensionDeg) {
+        this.elbowExtendedT = t;
+      }
+    }
+
+    // Fire when all three conditions co-occurred within the window. The
+    // event needs a wrist THIS frame (its position is the payload) — with
+    // the wrist missing the conditions cannot have refreshed anyway.
+    const horizon = t - FORM_MOTION.windowSec;
+    if (
+      wrist === null ||
+      this.aboveShoulderT < horizon ||
+      this.vySpikeT < horizon ||
+      this.elbowExtendedT < horizon
+    ) {
+      return null;
+    }
+
+    // A completed signature is CONSUMED whether or not it can be emitted.
+    // ReleaseDetector does not need this — its 0.3 s window expires long
+    // inside its 1.5 s cooldown — but at FORM_MOTION.debounceSec a set of
+    // conditions left standing would re-fire the instant the debounce
+    // lapsed, minting a rep off a wrist that had been still for 300 ms. A
+    // debounced motion is dropped, never queued: a rep must be a signature
+    // observed in full, on its own frames.
+    this.aboveShoulderT = -Infinity;
+    this.vySpikeT = -Infinity;
+    this.elbowExtendedT = -Infinity;
+
+    if (t - this.lastEmitT < FORM_MOTION.debounceSec) return null;
+    this.lastEmitT = t;
+    return { t, wristX: wrist.x, wristY: wrist.y };
+  }
+
+  /** Score-gated keypoint lookup (below FORM.keypointScoreMin = missing). */
+  private keypoint(
+    pose: PoseFrame,
+    name: PoseKeypointName,
+  ): { x: number; y: number } | null {
+    const kp = pose.keypoints[name];
+    if (!kp || kp.score < FORM.keypointScoreMin) return null;
+    return kp;
+  }
+}
+
+/** A fired motion event (analysis-frame px / camera seconds). */
+export interface MotionEvent {
+  /** Camera time of the frame that completed the motion signature. */
+  t: number;
+  /** Shooting-hand wrist position on that frame. */
+  wristX: number;
+  wristY: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -1155,6 +1493,14 @@ export interface FormCheckRep {
   tips: CoachingTip[];
   /** Median pose rate across this rep's window, fps. */
   poseFps: number;
+  /**
+   * Empty = every gate was clean while this rep was captured. Non-empty =
+   * the rep is real but was caught under a relaxed gate; the UI must qualify
+   * it. Optional so existing rep fixtures still compile (the same idiom as
+   * {@link ReadinessSample.sideness}) — a session-produced rep ALWAYS
+   * carries the array.
+   */
+  lowConfidence?: readonly RepConfidenceReason[];
 }
 
 export interface FormCheckSessionReport {
@@ -1167,6 +1513,72 @@ export interface FormCheckSessionReport {
   calibration: CalibrationState;
   /** Hero ring numbers: spreads at/below their flag / spreads measured. */
   verdict: { steady: number; measured: number };
+  /**
+   * How much of the session was caught under a relaxed gate: `reps` counts
+   * reps carrying at least one reason, `reasons` is the de-duplicated union.
+   * `reps: 0` means every counted rep had a clean capture. Optional so
+   * existing report fixtures still compile; finalizeSession always sets it.
+   */
+  lowConfidence?: {
+    reps: number;
+    reasons: readonly RepConfidenceReason[];
+  };
+}
+
+/**
+ * The relaxed-gate receipt as it survives PERSISTENCE.
+ *
+ * WHY it lives in core: the Form Check screen writes it into a saved
+ * session's summaryJson and the Coach card reads it back, so the shape has
+ * to be owned by something both sides import. Without it, a session caught
+ * under a relaxed gate reappears in history looking exactly as certain as a
+ * clean one — which is the one thing a relaxation is never allowed to do.
+ *
+ * `reps` is 0 when the count could not be recovered (an older row, or a
+ * corrupt blob). It is never invented; the label just omits the count.
+ */
+export interface SavedLowConfidence {
+  reps: number;
+  reasons: readonly RepConfidenceReason[];
+}
+
+/**
+ * Decode a SAVED session's relaxed-gate receipt, or null when there is
+ * nothing to qualify.
+ *
+ * `medianPoseFps` is a second, INDEPENDENT witness: it is its own persisted
+ * column, so a row written before the receipt existed — or one whose
+ * summaryJson is corrupt — is still marked when the session plainly ran
+ * under {@link MIN_POSE_FPS}. A missing receipt is never read as evidence of
+ * a clean capture; it just cannot add anything beyond what fps already says.
+ */
+export function savedLowConfidenceOf(row: {
+  summaryJson: string;
+  medianPoseFps: number;
+}): SavedLowConfidence | null {
+  let reps = 0;
+  const reasons = new Set<RepConfidenceReason>();
+  try {
+    const lc = (JSON.parse(row.summaryJson) as { lowConfidence?: unknown }).lowConfidence;
+    if (lc != null && typeof lc === 'object') {
+      const raw = lc as { reps?: unknown; reasons?: unknown };
+      if (typeof raw.reps === 'number' && Number.isFinite(raw.reps)) {
+        reps = Math.max(0, Math.floor(raw.reps));
+      }
+      if (Array.isArray(raw.reasons)) {
+        for (const r of raw.reasons) {
+          if (REP_CONFIDENCE_REASONS.includes(r as RepConfidenceReason)) {
+            reasons.add(r as RepConfidenceReason);
+          }
+        }
+      }
+    }
+  } catch {
+    // Corrupt blob: fall through to the fps witness rather than throwing.
+  }
+  if (row.medianPoseFps > 0 && row.medianPoseFps < MIN_POSE_FPS) reasons.add('lowPoseFps');
+  if (reps <= 0 && reasons.size === 0) return null;
+  return { reps, reasons: [...reasons] };
 }
 
 /** Per-shadow-motion stats, captured for BOTH arms at event time (the
@@ -1210,10 +1622,19 @@ export class FormCheckSession {
   private handSide: ShootingHand;
   private readonly frameHeight: number;
   private readonly heightCm: number | null;
-  private detector: ReleaseDetector;
+  private detector: FormMotionDetector;
 
   private readonly readySamples: ReadinessSample[] = [];
   private cachedReadiness: FormCheckReadiness = readinessOf([]);
+  /** Camera time of the last readiness recompute (see READINESS_POLL_SEC). */
+  private lastReadinessT = -Infinity;
+  /** Presenter's labeled escape from the MIN_POSE_FPS floor. */
+  private fpsFloorOverride = false;
+
+  /** Last frame on which the STRICT readiness verdict passed (latch anchor). */
+  private lastStrictReadyT = -Infinity;
+  /** Last frame fed to the detector THROUGH the latch (gates were down). */
+  private lastLatchedFeedT = -Infinity;
 
   /** Rolling raw window (REP_BUFFER_SEC) the rep capture slices from. */
   private buffer: RawSeqFrame[] = [];
@@ -1230,7 +1651,7 @@ export class FormCheckSession {
   private manualLock = false;
 
   /** Dual shadow detectors (both arms) — allocated only while collecting. */
-  private shadowDetectors: { left: ReleaseDetector; right: ReleaseDetector } | null =
+  private shadowDetectors: { left: FormMotionDetector; right: FormMotionDetector } | null =
     null;
   private shadowMotions: ShadowMotion[] = [];
   /** Ghost-merge settle horizon after the target shadow rep, camera secs. */
@@ -1275,7 +1696,7 @@ export class FormCheckSession {
     this.handSide = opts.hand;
     this.frameHeight = opts.frameHeight ?? 192;
     this.heightCm = opts.heightCm ?? null;
-    this.detector = new ReleaseDetector({
+    this.detector = new FormMotionDetector({
       hand: opts.hand,
       frameHeight: this.frameHeight,
     });
@@ -1316,6 +1737,29 @@ export class FormCheckSession {
     return this.calibPhase !== 'collecting';
   }
 
+  /** Whether the fps-floor override is currently switched on. */
+  get fpsFloorOverridden(): boolean {
+    return this.fpsFloorOverride;
+  }
+
+  /**
+   * Count reps even though the measured pose rate is under
+   * {@link MIN_POSE_FPS} — the presenter's one-tap escape from a room and a
+   * phone that cannot make the floor (a dim room stretches exposure, an old
+   * phone thermally throttles, and "more light" is not an instruction anyone
+   * can follow on stage). The floor is NOT lowered: `readiness.fpsOverridden`
+   * stays true for as long as the override is doing the work, and every rep
+   * captured under it carries the 'lowConfidence' reason 'lowPoseFps'. It
+   * still refuses below {@link FPS_OVERRIDE_MIN}, where no rep could fire
+   * anyway. Takes effect on the next pushed frame.
+   */
+  overrideFpsFloor(on = true): void {
+    this.fpsFloorOverride = on;
+    // Force a recompute so the strip flips on the very next frame instead of
+    // waiting out the readiness poll.
+    this.lastReadinessT = -Infinity;
+  }
+
   /**
    * Switch the watched shooting arm (the live screen's tap-to-flip chip).
    * Resets the detector and any pending rep — a half-captured rep from the
@@ -1331,7 +1775,7 @@ export class FormCheckSession {
     if (source === 'manual') this.manualLock = true;
     if (hand === this.handSide) return;
     this.handSide = hand;
-    this.detector = new ReleaseDetector({
+    this.detector = new FormMotionDetector({
       hand,
       frameHeight: this.frameHeight,
     });
@@ -1413,7 +1857,17 @@ export class FormCheckSession {
     while (this.readySamples.length > 0 && this.readySamples[0]!.t < rCut) {
       this.readySamples.shift();
     }
-    this.cachedReadiness = readinessOf(this.readySamples);
+    // readinessOf allocates three arrays per call to summarize a 2 s window
+    // the UI reads 4×/s; at camera rate that is a steady young-gen GC source
+    // on an A12, and the jank lands exactly where the skeleton should look
+    // smooth. Recomputing at READINESS_POLL_SEC is still 2.5× the UI poll and
+    // vastly faster than the window it summarizes.
+    if (t - this.lastReadinessT >= READINESS_POLL_SEC) {
+      this.lastReadinessT = t;
+      this.cachedReadiness = readinessOf(this.readySamples, {
+        fpsFloorOverride: this.fpsFloorOverride,
+      });
+    }
 
     // 2. Raw window (always buffered — capture gating lives on the trigger).
     if (raw != null) {
@@ -1421,7 +1875,9 @@ export class FormCheckSession {
       const bCut = t - REP_BUFFER_SEC;
       let drop = 0;
       while (drop < this.buffer.length && this.buffer[drop]!.t < bCut) drop++;
-      if (drop > 0) this.buffer = this.buffer.slice(drop);
+      // splice, not slice: in place, no per-frame array allocation. Nothing
+      // else retains this.buffer (finalizeRep copies via .filter).
+      if (drop > 0) this.buffer.splice(0, drop);
     }
 
     // 3. Calibration collection owns the frame while 'collecting' — the
@@ -1442,11 +1898,21 @@ export class FormCheckSession {
       this.pendingReleaseT = null;
     }
 
-    // 5. The rep TRIGGER — only while every readiness gate passes (paused
-    // capture means paused, the strip says why). The detector's debounce
-    // (RELEASE.debounceSec 1.5 s) exceeds the tail, so a pending rep always
-    // completes before the next event can fire.
-    if (this.cachedReadiness.ready) {
+    // 5. The rep TRIGGER. The gates decide when capture is honest, but they
+    // are trailing-window fractions and the TOP of a motion is exactly when
+    // keypoints go missing — a hard gate here stops feeding the detector
+    // mid-signature and the rep vanishes with no trace on screen. So the
+    // feed is LATCHED for READY_LATCH_SEC past the last strictly-ready
+    // frame; reps captured across a latched frame are reported
+    // 'gateDropout'. The strip, the chips and the calibration collector keep
+    // reading the strict verdict — the screen must not go green on a capture
+    // it did not have. FORM_MOTION.debounceSec exceeds the tail, so a
+    // pending rep always completes before the next event can fire.
+    const strictReady = this.cachedReadiness.ready;
+    if (strictReady) this.lastStrictReadyT = t;
+    const latched = !strictReady && t - this.lastStrictReadyT <= READY_LATCH_SEC;
+    if (strictReady || latched) {
+      if (latched) this.lastLatchedFeedT = t;
       const ev = this.detector.push(pose);
       if (ev != null && this.pendingReleaseT == null) {
         this.pendingReleaseT = ev.t;
@@ -1483,6 +1949,17 @@ export class FormCheckSession {
     gauge(spreads.kneeSpreadDeg, KNEE_SPREAD_FLAG_DEG);
     gauge(spreads.releaseHeightSpread, RELEASE_HEIGHT_SPREAD_FLAG);
 
+    // Relaxed-gate receipt for the whole session — the report must be able
+    // to say how much of it was caught under a relaxed gate, and why.
+    let lowConfidenceReps = 0;
+    const reasonSet = new Set<RepConfidenceReason>();
+    for (const r of this.repsList) {
+      const reasons = r.lowConfidence ?? [];
+      if (reasons.length === 0) continue;
+      lowConfidenceReps++;
+      for (const reason of reasons) reasonSet.add(reason);
+    }
+
     return {
       repCount: this.repsList.length,
       medianPoseFps,
@@ -1490,6 +1967,10 @@ export class FormCheckSession {
       best: pickBestRep(this.repsList, spreads),
       calibration: this.calibration,
       verdict: { steady, measured },
+      lowConfidence: {
+        reps: lowConfidenceReps,
+        reasons: [...reasonSet],
+      },
     };
   }
 
@@ -1499,8 +1980,8 @@ export class FormCheckSession {
 
   private startCollecting(): void {
     this.shadowDetectors = {
-      left: new ReleaseDetector({ hand: 'left', frameHeight: this.frameHeight }),
-      right: new ReleaseDetector({ hand: 'right', frameHeight: this.frameHeight }),
+      left: new FormMotionDetector({ hand: 'left', frameHeight: this.frameHeight }),
+      right: new FormMotionDetector({ hand: 'right', frameHeight: this.frameHeight }),
     };
     this.wristTracks = {
       left: { fy: new OneEuroFilter(FORM.oneEuro), y: null, t: 0 },
@@ -1547,7 +2028,9 @@ export class FormCheckSession {
     while (drop < this.scoreSamples.length && this.scoreSamples[drop]!.t < sCut) {
       drop++;
     }
-    if (drop > 0) this.scoreSamples = this.scoreSamples.slice(drop);
+    // splice, not slice — calibration is the most expensive per-frame path
+    // on the screen and it runs in the first seconds on stage.
+    if (drop > 0) this.scoreSamples.splice(0, drop);
 
     // Standing (READY-frame) collector for tilt / height / baselines.
     if (raw != null) this.trackStanding(raw, t);
@@ -1738,7 +2221,7 @@ export class FormCheckSession {
           // Commit: the chip may say the arm was detected, not assumed.
           if (winner !== this.handSide) {
             this.handSide = winner;
-            this.detector = new ReleaseDetector({
+            this.detector = new FormMotionDetector({
               hand: winner,
               frameHeight: this.frameHeight,
             });
@@ -1851,6 +2334,7 @@ export class FormCheckSession {
         (this.standingAnkleY - releaseWristY) * this.lockedScale.metersPerPx;
     }
 
+    const poseFps = medianFps(window.map((f) => f.t));
     const rep: FormCheckRep = {
       index: this.repsList.length + 1,
       releaseT,
@@ -1860,13 +2344,58 @@ export class FormCheckSession {
       releaseHeightM,
       flags: this.repFlags(window, releaseT),
       tips: [],
-      poseFps: medianFps(window.map((f) => f.t)),
+      poseFps,
+      lowConfidence: this.repConfidence(window, poseFps, lo),
     };
     // coachingTips already skips null metrics, so the ball-derived nulls
     // simply produce no ball tips — never a fabricated one.
     rep.tips = coachingTips(rep.metrics);
     this.repsList.push(rep);
     return rep;
+  }
+
+  /**
+   * What this rep's capture cost in confidence — the relaxed-gate receipt.
+   * Reported, never hidden and never used to suppress the rep: the motion
+   * happened and its numbers were measured, they are simply worth less than
+   * a clean capture's. Each reason is decided from what was actually
+   * observed over the rep's own window, not from a session-wide setting.
+   */
+  private repConfidence(
+    window: readonly RawSeqFrame[],
+    poseFps: number,
+    windowStartT: number,
+  ): RepConfidenceReason[] {
+    const reasons: RepConfidenceReason[] = [];
+
+    // The floor itself never moved, so a rep here really did run on coarse
+    // timing. Usually the presenter's override — but this median is over the
+    // REP's window while the gate reads the readiness window, so a dip the
+    // gate never saw (READY_LATCH_SEC carried it) also lands here.
+    if (poseFps > 0 && poseFps < MIN_POSE_FPS) reasons.push('lowPoseFps');
+
+    // The latch fed the detector through a gate dropout inside this window.
+    if (this.lastLatchedFeedT >= windowStartT) reasons.push('gateDropout');
+
+    // Measurably angled toward the camera ⇒ foreshortened 2D angles. An
+    // unmeasurable stance abstains (occlusion is not evidence of anything).
+    let sideSum = 0;
+    let sideN = 0;
+    for (const f of window) {
+      const s = sideProfileOfRaw(f);
+      if (s != null) {
+        sideSum += s;
+        sideN++;
+      }
+    }
+    if (
+      sideN >= SIDE_VOTE_MIN_FRAC * window.length &&
+      sideN > 0 &&
+      sideSum / sideN < SIDE_PROFILE_TRUSTED
+    ) {
+      reasons.push('angledStance');
+    }
+    return reasons;
   }
 
   /**

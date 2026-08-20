@@ -80,6 +80,7 @@ import {
   weekStart,
   type WeeklyReport,
 } from '@/core/weeklyReport';
+import { savedLowConfidenceOf } from '@/core/formCheck';
 import { matchArchetype, type ArchetypeMatch } from '@/core/shotLab';
 import { listFormSessions, listSessions, sessionShots, shotFromRow, type FormSessionRow } from '@/data/db';
 import { recomputeStats } from '@/core/stats';
@@ -465,10 +466,16 @@ function agoLabel(deltaMs: number): string {
  * One-line last-check receipt, e.g. "8 reps · tempo ±96 ms · 2 d ago". The
  * tempo part appears only when that session actually measured a spread —
  * an unmeasured spread is omitted, never rendered as ±0.
+ *
+ * A session caught under a relaxed gate keeps its caveat here: Form Check is
+ * allowed to relax a gate to count a rep, and the live report says so, so
+ * the saved copy has to say so too. Otherwise a run counted at 11 fps would
+ * read exactly like a clean check once it lands in history.
  */
 export function formCheckReceiptLine(row: FormSessionRow, nowMs: number): string {
   const parts = [`${row.repCount} ${row.repCount === 1 ? 'rep' : 'reps'}`];
   if (row.tempoSpreadMs != null) parts.push(`tempo ±${Math.round(row.tempoSpreadMs)} ms`);
+  if (savedLowConfidenceOf(row) != null) parts.push('low-confidence');
   parts.push(agoLabel(Math.max(0, nowMs - row.ts)));
   return parts.join(' · ');
 }
@@ -628,6 +635,14 @@ export default function CoachScreen() {
         .reverse(),
     [formChecks],
   );
+  // How many of the PLOTTED checks were caught under a relaxed gate (same
+  // filter as above). A coarse tempo is still a real measurement, but it
+  // must not sit in the trend looking like a clean one.
+  const formCheckLowConf = useMemo(
+    () =>
+      formChecks.filter((r) => r.tempoSpreadMs != null && savedLowConfidenceOf(r) != null).length,
+    [formChecks],
+  );
 
   // Drill progression per planned drill: current level + the level prescription.
   const planLevels = useMemo(() => {
@@ -696,9 +711,38 @@ export default function CoachScreen() {
               onAction={() => router.push('/session/setup')}
             />
 
+            {/* Form Check is the ONLY coaching surface that works on day one:
+                it grades the shooting MOTION alone, so it needs no hoop, no
+                ball and no logged sessions. The populated branch below carries
+                its own richer card, but that branch never renders on a fresh
+                install — which used to leave the feature completely
+                unreachable until the user had tracked a session at a hoop.
+                Duplicating the entry here rather than hoisting the card keeps
+                the populated path byte-identical. */}
+            <Card entering={cardEnter(1)}>
+              <Row gap={space.sm} style={styles.promoHead}>
+                <Ionicons name="scan-outline" size={18} color={color.accent} />
+                <Text style={styles.promoTitle} numberOfLines={1}>
+                  Form Check
+                </Text>
+                <Chip label="NEW" tone="accent" compact />
+              </Row>
+              <Text style={styles.body}>Motion only — no hoop needed.</Text>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Check your shooting form with the camera. Motion only, no ball needed. Opens Form Check."
+                onPress={() => router.push('/formcheck')}
+                style={({ pressed }) => [styles.promoRow, pressed && { opacity: 0.6 }]}
+              >
+                <Ionicons name="body-outline" size={iconSize.sm} color={color.accent} />
+                <Text style={styles.promoRowText}>Check my shooting form</Text>
+                <Ionicons name="chevron-forward" size={iconSize.sm} color={color.textFaint} />
+              </Pressable>
+            </Card>
+
             {/* Body sets the direction — this half needs the profile, not
                 shots, so it is the one thing the coach can say on day one. */}
-            <BodyDirectionCard shots={allShots} entering={cardEnter(1)} />
+            <BodyDirectionCard shots={allShots} entering={cardEnter(2)} />
           </>
         ) : (
           <>
@@ -894,12 +938,21 @@ export default function CoachScreen() {
                           <View
                             style={styles.formCheckSpark}
                             accessible
-                            accessibilityLabel={`Tempo spread across your last ${formCheckSpreads.length} form checks — lower is steadier.`}
+                            accessibilityLabel={`Tempo spread across your last ${formCheckSpreads.length} form checks — lower is steadier.${
+                              formCheckLowConf > 0
+                                ? ` ${formCheckLowConf} of them ran under a relaxed gate, so their tempo is coarse.`
+                                : ''
+                            }`}
                           >
                             <SpreadSpark values={formCheckSpreads} />
                             <Text style={styles.formCheckSparkLabel}>
                               tempo spread — lower is steadier
                             </Text>
+                            {formCheckLowConf > 0 && (
+                              <Text style={styles.formCheckSparkLabel}>
+                                {`${formCheckLowConf} low-confidence — coarse tempo`}
+                              </Text>
+                            )}
                           </View>
                         )}
                         <Pressable

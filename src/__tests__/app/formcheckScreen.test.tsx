@@ -22,8 +22,21 @@
  *     synthesized reference and refuses when too few joints were seen; the
  *     saved/not-saved footer follows the insert result.
  *  5. Pure copy/write-path helpers (repCallout, verdictHeadline,
- *     guidanceBanner, armChipLabel, formSessionRowOf) — including the
- *     summaryJson-carries-no-sequences contract.
+ *     guidanceBanner, lowConfidenceLine, armChipLabel, formSessionRowOf) —
+ *     including the summaryJson-carries-no-sequences contract.
+ *  6. V3 STAGE HARDENING — the loader warms the interpreter up before
+ *     publishing it and reports a dead ladder with a Retry instead of an
+ *     eternal "warming up"; permission is asked at MOUNT; a null device says
+ *     so rather than blaming the room; "Starting the camera…" is its own
+ *     state; Recalibrate is a hold; Restart and Check again are the two
+ *     one-tap recoveries; and every relaxed-gate reason the core reports is
+ *     rendered on the rep and in the report.
+ *
+ * What these CANNOT reach: anything downstream of a real pose frame. The
+ * frame output is stubbed inert, so the session never receives a sample and
+ * the "Ready — shoot when you like." rail state (readiness.ready true) has no
+ * render path here — its trigger is pinned instead as guidanceBanner
+ * returning null, which is exactly the condition the rail branches on.
  *
  * Mock set follows src/__tests__/app/sessionFormReport.test.tsx.
  */
@@ -50,7 +63,17 @@ jest.mock('react-native-reanimated', () => ({
   LinearTransition: { duration: () => ({}) },
   ReduceMotion: { System: 'system' },
   useReducedMotion: () => true,
-  useSharedValue: (value: unknown) => ({ value }),
+  // The real useSharedValue returns a STABLE object across renders (it is a
+  // ref underneath). The old `(value) => ({ value })` handed back a fresh
+  // object every render, so any effect listing one in its deps re-ran on
+  // every render — invisible while the tflite mock never resolved, an
+  // infinite loop the moment it does. Backed by a ref so the mock keeps the
+  // contract the screen is written against.
+  useSharedValue: (value: unknown) => {
+    const ref = (require('react') as typeof React).useRef<{ value: unknown } | null>(null);
+    if (ref.current === null) ref.current = { value };
+    return ref.current;
+  },
   useDerivedValue: (fn: () => unknown) => ({ value: fn() }),
   useAnimatedStyle: () => ({}),
   withRepeat: (value: unknown) => value,
@@ -171,16 +194,19 @@ jest.mock('@/components/motion', () => ({
   ArcReveal: () => null,
 }));
 
-// The camera stack: inert stubs. Permission state is per-test mutable.
+// The camera stack: inert stubs. Permission + device state is per-test
+// mutable — v3 drops the `device != null` precondition on the permission
+// wall, and adds a "no camera on this device" branch, so both need driving.
 const mockCameraState = {
   hasPermission: false,
   canRequestPermission: true,
   requestPermission: jest.fn(async () => false),
+  device: { id: 'mock-front' } as { id: string } | null,
 };
 jest.mock('react-native-vision-camera', () => ({
   __esModule: true,
   Camera: () => null,
-  useCameraDevice: () => ({ id: 'mock-front' }),
+  useCameraDevice: () => mockCameraState.device,
   useCameraPermission: () => ({
     hasPermission: mockCameraState.hasPermission,
     canRequestPermission: mockCameraState.canRequestPermission,
@@ -192,11 +218,38 @@ jest.mock('react-native-vision-camera-resizer', () => ({
   __esModule: true,
   useResizer: () => ({ resizer: null }),
 }));
+
+/**
+ * The pose loader is per-test mutable (v3): the loader ladder now warms the
+ * interpreter up before publishing it, reports its failure instead of
+ * swallowing it, and offers a Retry that re-enters the effect — none of which
+ * is observable while the mock never resolves.
+ *
+ * 'pending' is the v2 default and stays the default: the effect hangs, so
+ * there is no act() noise and the states under test never need a model.
+ */
+const mockTflite: {
+  mode: 'pending' | 'ok' | 'fail';
+  calls: number;
+  warmRuns: number;
+} = { mode: 'pending', calls: 0, warmRuns: 0 };
 jest.mock('react-native-fast-tflite', () => ({
   __esModule: true,
-  // Never resolves: the loader effect stays pending — no act() noise, and
-  // the non-camera states under test never need a model.
-  loadTensorflowModel: () => new Promise(() => {}),
+  loadTensorflowModel: () => {
+    mockTflite.calls++;
+    if (mockTflite.mode === 'pending') return new Promise(() => {});
+    if (mockTflite.mode === 'fail') return Promise.reject(new Error('no delegate'));
+    return Promise.resolve({
+      inputs: [{ name: 'in', dataType: 'uint8', shape: [1, 192, 192, 3] }],
+      outputs: [],
+      delegates: [],
+      runSync: () => [],
+      run: async () => {
+        mockTflite.warmRuns++;
+        return [];
+      },
+    });
+  },
 }));
 jest.mock('react-native-nitro-modules', () => ({
   __esModule: true,
@@ -219,6 +272,7 @@ import FormCheckScreen, {
   armChipLabel,
   formSessionRowOf,
   guidanceBanner,
+  lowConfidenceLine,
   repCallout,
   verdictHeadline,
 } from '@/app/formcheck';
@@ -434,7 +488,11 @@ beforeEach(() => {
   mockCameraState.hasPermission = false;
   mockCameraState.canRequestPermission = true;
   mockCameraState.requestPermission.mockClear();
+  mockCameraState.device = { id: 'mock-front' };
   mockProfileState.heightCm = null;
+  mockTflite.mode = 'pending';
+  mockTflite.calls = 0;
+  mockTflite.warmRuns = 0;
 });
 
 // ---------------------------------------------------------------------------
@@ -460,6 +518,95 @@ describe('FormCheck — guide', () => {
     expect(text).toMatch(/at least\s+15\s+fps pose/);
     expect(text).toContain('refuses to count reps');
 
+    await unmount(r);
+  });
+
+  it('names the sensitivity the relaxed motion thresholds bought', async () => {
+    // The core now counts a slow, ball-free motion on purpose. The guide has
+    // to say what that costs BEFORE the room sees an arm raise count.
+    const r = await render(<FormCheckScreen />);
+    const text = textOf(r.toJSON());
+    expect(text).toContain('counts shooting MOTIONS');
+    expect(text).toContain('a raised arm can count');
+    await unmount(r);
+  });
+
+  it('asks for the camera at MOUNT, and offers the fix on the guide if refused', async () => {
+    // The OS dialog must resolve while the presenter reads the guide, never
+    // three interactions deep in front of judges.
+    const r = await render(<FormCheckScreen />);
+    expect(mockCameraState.requestPermission).toHaveBeenCalledTimes(1);
+    expect(textOf(r.toJSON())).toContain('Allow camera access');
+    await unmount(r);
+  });
+
+  it('a permanently refused camera points at Settings from the guide', async () => {
+    mockCameraState.canRequestPermission = false;
+    const r = await render(<FormCheckScreen />);
+    expect(textOf(r.toJSON())).toContain('Open settings for camera access');
+    await unmount(r);
+  });
+
+  it('a granted camera adds no permission pill', async () => {
+    mockCameraState.hasPermission = true;
+    const r = await render(<FormCheckScreen />);
+    expect(mockCameraState.requestPermission).not.toHaveBeenCalled();
+    expect(textOf(r.toJSON())).not.toContain('Allow camera access');
+    await unmount(r);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Pose loader (v3): warm-up, the failure that used to be swallowed, Retry
+
+describe('FormCheck — pose model loading', () => {
+  beforeEach(() => {
+    mockCameraState.hasPermission = true;
+  });
+
+  it('warms the interpreter up BEFORE publishing the model', async () => {
+    // loadTensorflowModel resolves as soon as the delegate is constructed —
+    // the CoreML graph compile happens on the first Invoke. Without these two
+    // throwaway runs that Invoke is the first camera frame, on stage, with
+    // the screen already claiming it has finished warming up.
+    mockTflite.mode = 'ok';
+    const r = await render(<FormCheckScreen />);
+    expect(mockTflite.warmRuns).toBe(2);
+    await unmount(r);
+  });
+
+  it('a loaded model stops the warmup line and says the camera is starting', async () => {
+    mockTflite.mode = 'ok';
+    const r = await render(<FormCheckScreen />);
+    await pressButton(r, 'Start form check');
+    const text = textOf(r.toJSON());
+
+    expect(text).not.toContain('Warming up the pose model');
+    // Zero frames so far: "no data yet" is its OWN state. Blaming the room's
+    // lighting before a frame has landed is the first thing an audience reads.
+    expect(text).toContain('Starting the camera…');
+    expect(text).not.toContain('More light helps');
+    expect(text).not.toContain('Pose is at');
+    await unmount(r);
+  });
+
+  it('both rungs failing says so and offers Retry, which reloads', async () => {
+    mockTflite.mode = 'fail';
+    const r = await render(<FormCheckScreen />);
+    await pressButton(r, 'Start form check');
+
+    const text = textOf(r.toJSON());
+    expect(text).toContain("The pose model didn't load — tap Retry.");
+    // Still the honest paused contract, never a silent dead screen.
+    expect(text).toContain('paused');
+
+    // Both rungs (accelerated + CPU) were tried before giving up.
+    expect(mockTflite.calls).toBe(2);
+    const before = mockTflite.calls;
+    mockTflite.mode = 'ok';
+    await pressButton(r, 'Retry');
+    expect(mockTflite.calls).toBeGreaterThan(before);
+    expect(textOf(r.toJSON())).not.toContain("didn't load");
     await unmount(r);
   });
 });
@@ -567,6 +714,70 @@ describe('FormCheck — calibration rail', () => {
       );
     expect(endBtn).toBeDefined();
 
+    await unmount(r);
+  });
+
+  it('Recalibrate is a HOLD — a stray tap only hints', async () => {
+    // A tap used to drop an armed session back into calibration: the counter
+    // freezes and nothing at the bottom of the screen, where the presenter is
+    // looking, changes. It reads as "the detector stopped working".
+    const r = await render(<FormCheckScreen />);
+    await pressButton(r, 'Start form check');
+
+    const pill = r.root.findAll((n) => n.props?.accessibilityLabel === 'Recalibrate')[0]!;
+    expect(typeof pill.props.onLongPress).toBe('function');
+
+    await act(async () => {
+      (pill.props.onPress as () => void)();
+    });
+    expect(textOf(r.toJSON())).toContain('Hold to recalibrate');
+    // Still calibrating from the SAME session — the tap reset nothing.
+    expect(textOf(r.toJSON())).toContain('PRACTICE MOTION 1 OF 2');
+
+    await unmount(r);
+  });
+
+  it('Restart begins a fresh session without leaving the live view', async () => {
+    // Ranked demo failure #7: no way to restart quickly after a stumble.
+    const r = await render(<FormCheckScreen />);
+    await pressButton(r, 'Start form check');
+    await pressButton(r, 'Skip');
+    expect(textOf(r.toJSON())).not.toContain('PRACTICE MOTION');
+
+    await pressButton(r, 'Restart');
+    // The rail re-reads the session on its own 4 Hz poll (it is not
+    // remounted), so let one tick land before asserting.
+    await act(async () => {
+      jest.advanceTimersByTime(400);
+    });
+    const text = textOf(r.toJSON());
+    // Back to a brand-new session's calibration, still live, no guide detour.
+    expect(text).toContain('PRACTICE MOTION 1 OF 2');
+    expect(text).not.toContain('Check your shooting motion');
+
+    await unmount(r);
+  });
+
+  it('no enumerated camera says so instead of blaming the room', async () => {
+    // The permission wall used to be gated on `device != null`, so a null
+    // device rendered a black scrim whose only content read "too slow. More
+    // light helps." with no action.
+    mockCameraState.device = null;
+    const r = await render(<FormCheckScreen />);
+    await pressButton(r, 'Start form check');
+
+    const text = textOf(r.toJSON());
+    expect(text).toContain('No camera available');
+    expect(text).not.toContain('More light helps');
+    await unmount(r);
+  });
+
+  it('a missing device does NOT hide the permission wall', async () => {
+    mockCameraState.hasPermission = false;
+    mockCameraState.device = null;
+    const r = await render(<FormCheckScreen />);
+    await pressButton(r, 'Start form check');
+    expect(textOf(r.toJSON())).toContain('Camera access needed');
     await unmount(r);
   });
 });
@@ -767,6 +978,139 @@ describe('FormCheckReport — calibration receipt (degraded labels)', () => {
     expect(textOf(r.toJSON())).toContain('standing span too unsteady');
     await unmount(r);
   });
+
+  it('a passing-but-angled stance is qualified, a square one is not', async () => {
+    // The side gate now passes from SIDE_PROFILE_MIN (≈40° of tolerance) so
+    // an ordinary room can be used — but the ANGLES do not survive the same
+    // tolerance, and the receipt has to say which side of that line it was on.
+    const reps = [rep(1)];
+    const angled = reportOf(reps, { calibration: calib({ sidenessAvg: 0.42 }) });
+    const r1 = await render(
+      <FormCheckReport reps={reps} report={angled} hand="right" savedId={1} />,
+    );
+    const t1 = textOf(r1.toJSON());
+    expect(t1).toContain('42% side-on');
+    expect(t1).toContain('2D angles read low');
+    await unmount(r1);
+
+    const square = reportOf(reps, { calibration: calib({ sidenessAvg: 0.85 }) });
+    const r2 = await render(
+      <FormCheckReport reps={reps} report={square} hand="right" savedId={1} />,
+    );
+    const t2 = textOf(r2.toJSON());
+    expect(t2).toContain('85% side-on');
+    expect(t2).not.toContain('2D angles read low');
+    await unmount(r2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Low confidence (v3) — the other half of the relaxed-gate bargain.
+//
+// The core relaxed its gates so a hoop-free demo in an unknown room can
+// happen, and reports on every rep WHY its numbers are worth less. A screen
+// that ignores those fields presents a relaxed capture as a clean one, which
+// is the one thing the honesty contract forbids.
+
+describe('FormCheckReport — low-confidence reporting', () => {
+  it('a clean session says nothing about confidence', async () => {
+    const reps = [rep(1, { setPointElbowDeg: 84 }, { lowConfidence: [] })];
+    const report = reportOf(reps, { lowConfidence: { reps: 0, reasons: [] } });
+    const r = await render(
+      <FormCheckReport reps={reps} report={report} hand="right" savedId={1} />,
+    );
+    expect(textOf(r.toJSON())).not.toContain('relaxed gate');
+    await unmount(r);
+  });
+
+  it('names how many reps were relaxed, and what each relaxation cost', async () => {
+    const reps = [
+      rep(1, { setPointElbowDeg: 84 }, { lowConfidence: ['lowPoseFps'] }),
+      rep(2, { setPointElbowDeg: 85 }, { lowConfidence: ['angledStance'] }),
+      rep(3, { setPointElbowDeg: 86 }),
+    ];
+    const report = reportOf(reps, {
+      lowConfidence: { reps: 2, reasons: ['lowPoseFps', 'angledStance'] },
+    });
+    const r = await render(
+      <FormCheckReport reps={reps} report={report} hand="right" savedId={1} />,
+    );
+    const text = textOf(r.toJSON());
+
+    expect(text).toContain('2 of 3 reps were caught under a relaxed gate');
+    expect(text).toContain('pose ran under 15 fps');
+    expect(text).toContain('angled to the camera');
+    // The reps are REAL — the line must not read as a disclaimer that they
+    // were invented.
+    expect(text).toContain('Really measured, just lower-confidence.');
+    await unmount(r);
+  });
+
+  it('per-rep reasons ride as chips and spell themselves out when expanded', async () => {
+    const reps = [
+      rep(1, { setPointElbowDeg: 84 }, { lowConfidence: ['gateDropout'] }),
+    ];
+    const report = reportOf(reps, {
+      lowConfidence: { reps: 1, reasons: ['gateDropout'] },
+    });
+    const r = await render(
+      <FormCheckReport reps={reps} report={report} hand="right" savedId={1} />,
+    );
+    await switchTo(r, 'Reps');
+    expect(textOf(r.toJSON())).toContain('landmarks dropped');
+
+    const row = r.root.findAll(
+      (n) => n.props?.accessibilityLabel === 'Rep 1 details' &&
+        typeof n.props?.onPress === 'function',
+    )[0]!;
+    await act(async () => {
+      (row.props.onPress as () => void)();
+    });
+    expect(textOf(r.toJSON())).toContain('landmarks dropped mid-motion');
+    await unmount(r);
+  });
+
+  it('lowConfidenceLine: null when clean, "All N" when the whole session was', () => {
+    const reps = [rep(1), rep(2)];
+    expect(lowConfidenceLine(reportOf(reps))).toBeNull();
+    expect(
+      lowConfidenceLine(reportOf(reps, { lowConfidence: { reps: 0, reasons: [] } })),
+    ).toBeNull();
+    const all = lowConfidenceLine(
+      reportOf(reps, { lowConfidence: { reps: 2, reasons: ['lowPoseFps'] } }),
+    );
+    expect(all).toContain('All 2 reps were caught under a relaxed gate');
+  });
+});
+
+describe('FormCheckReport — one-action restart', () => {
+  it('offers Check again, which runs the callback without leaving the report', async () => {
+    // Done pops the whole /formcheck route, which re-mounts the screen and
+    // re-pays the model load — dead air at the exact moment after a stumble.
+    const reps = [rep(1, { setPointElbowDeg: 84 })];
+    const onAgain = jest.fn();
+    const r = await render(
+      <FormCheckReport
+        reps={reps}
+        report={reportOf(reps)}
+        hand="right"
+        savedId={1}
+        onAgain={onAgain}
+      />,
+    );
+    await pressButton(r, 'Check again');
+    expect(onAgain).toHaveBeenCalledTimes(1);
+    await unmount(r);
+  });
+
+  it('a report with no restart callback still renders (Done only)', async () => {
+    const reps = [rep(1)];
+    const r = await render(
+      <FormCheckReport reps={reps} report={reportOf(reps)} hand="right" savedId={1} />,
+    );
+    expect(textOf(r.toJSON())).not.toContain('Check again');
+    await unmount(r);
+  });
 });
 
 describe('FormCheckReport — Compare tab and similarity', () => {
@@ -801,6 +1145,11 @@ describe('FormCheckReport — Compare tab and similarity', () => {
     await unmount(r);
   });
 
+  // RE-PINNED (v3 stage hardening): the report now OPENS on Compare whenever
+  // a rep captured a decodable motion, so the best-rep card — which lives on
+  // Overview — is no longer the mount-time tab. Every assertion is kept, with
+  // one explicit hop to Overview in front of them; the jump-into-Compare
+  // contract this test exists for is unchanged and still asserted.
   it('the best-rep card jumps into Compare', async () => {
     const seq = realSequence();
     const reps = [
@@ -812,10 +1161,38 @@ describe('FormCheckReport — Compare tab and similarity', () => {
       <FormCheckReport reps={reps} report={report} hand="right" savedId={1} />,
     );
 
+    await switchTo(r, 'Overview');
     expect(textOf(r.toJSON())).toContain('elbow 88° in band');
     await pressButton(r, 'View in Compare');
     expect(textOf(r.toJSON())).toContain('MOTION_STAGE');
     await unmount(r);
+  });
+
+  it('opens ON the theater when a rep decoded, on Overview when none did', async () => {
+    // A stage demo is two or three reps: Overview would greet the room with a
+    // nag headline and four em dashes while the showpiece sat one tap away.
+    const seq = realSequence();
+    const withMotion = [rep(1, { setPointElbowDeg: 88 }, { sequence: seq })];
+    const r1 = await render(
+      <FormCheckReport
+        reps={withMotion}
+        report={reportOf(withMotion)}
+        hand="right"
+        savedId={1}
+      />,
+    );
+    expect(textOf(r1.toJSON())).toContain('MOTION_STAGE');
+    await unmount(r1);
+
+    // Nothing decodable ⇒ the old default stands, no empty theater on mount.
+    const flat = [rep(1), rep(2)];
+    const r2 = await render(
+      <FormCheckReport reps={flat} report={reportOf(flat)} hand="right" savedId={1} />,
+    );
+    const text = textOf(r2.toJSON());
+    expect(text).not.toContain('MOTION_STAGE');
+    expect(text).toContain('CONSISTENCY');
+    await unmount(r2);
   });
 });
 
@@ -880,6 +1257,84 @@ describe('guidanceBanner', () => {
     // what determines the arm) — side guidance still speaks.
     const armDown = { ...readyAll, armOk: false, sideOk: false, sideness: 0.2, ready: false };
     expect(guidanceBanner(true, armDown, 'right', null, true)!.text).toContain('turn 90°');
+  });
+
+  it('a dead loader outranks everything and names the recovery', () => {
+    // The ladder used to exhaust itself with a bare catch: model stayed null,
+    // the rail said "Warming up the pose model…" forever, and rep counting
+    // was silently dead behind a live preview.
+    const b = guidanceBanner(false, readyAll, 'right', null, false, {
+      modelErr: 'no delegate',
+    });
+    expect(b).toEqual({ text: "The pose model didn't load — tap Retry.", pauses: true });
+    // Even with a loaded model and every gate green, the error still wins.
+    expect(
+      guidanceBanner(true, readyAll, 'right', null, false, { modelErr: 'boom' })!.text,
+    ).toContain('Retry');
+  });
+
+  it('"no frame yet" is its own state, never a lighting complaint', () => {
+    // medianFps returns 0 until two samples exist, so EVERY session used to
+    // open by telling the room the light was bad.
+    const noData = { ...readyAll, fps: 0, fpsOk: false, ready: false };
+    expect(guidanceBanner(true, noData, 'right', null, false)!).toEqual({
+      text: 'Starting the camera…',
+      pauses: true,
+    });
+    // Frames not arrived yet, even with a measured rate carried over.
+    expect(
+      guidanceBanner(true, readyAll, 'right', null, false, { warming: true })!.text,
+    ).toBe('Starting the camera…');
+    // A MEASURED sub-floor rate still reports the number.
+    expect(
+      guidanceBanner(true, { ...readyAll, fps: 12, fpsOk: false, ready: false }, 'right', null, false)!
+        .text,
+    ).toContain('12 fps');
+  });
+
+  it('the too-slow line names the flip button on the front camera', () => {
+    // "More light helps" is not an instruction a presenter can follow on
+    // stage. The back camera has a materially larger aperture and the flip
+    // pill is already on screen.
+    const slow = { ...readyAll, fps: 11, fpsOk: false, ready: false };
+    expect(
+      guidanceBanner(true, slow, 'right', null, false, { camPosition: 'front' })!.text,
+    ).toContain('Tap flip for the back camera');
+    expect(
+      guidanceBanner(true, slow, 'right', null, false, { camPosition: 'back' })!.text,
+    ).toContain('More light helps');
+  });
+
+  it('an fps override is stated as an advisory and never pauses', () => {
+    // MIN_POSE_FPS never moved: the override is carrying fpsOk, so the screen
+    // has to say the timing numbers are worth less.
+    const over = { ...readyAll, fps: 11, fpsOk: true, fpsOverridden: true };
+    const b = guidanceBanner(true, over, 'right', null, false)!;
+    expect(b.pauses).toBe(false);
+    expect(b.text).toContain('below the 15 fps floor');
+    expect(b.text).toContain('low-confidence');
+    // A hard gate still outranks it — that message is actionable.
+    expect(
+      guidanceBanner(true, { ...over, fullBodyOk: false, ready: false }, 'right', null, false)!.text,
+    ).toContain('Step back');
+  });
+
+  it('a measured-but-angled stance is qualified; an unmeasurable one is not', () => {
+    const angled = { ...readyAll, sideness: 0.45, sideOk: true, sideTrusted: false };
+    const b = guidanceBanner(true, angled, 'right', null, false)!;
+    expect(b.pauses).toBe(false);
+    expect(b.text).toContain('Angled to the camera');
+    // sideness null = the gauge could not vote. Occlusion is not evidence of
+    // facing the camera, so nothing is claimed either way.
+    expect(
+      guidanceBanner(
+        true,
+        { ...angled, sideness: null },
+        'right',
+        null,
+        false,
+      ),
+    ).toBeNull();
   });
 
   it('heavy tilt is an ADVISORY — it never pauses rep counting', () => {
@@ -970,5 +1425,35 @@ describe('formSessionRowOf (write path)', () => {
     expect(reps.length).toBe(MIN_SPREAD_REPS);
     const row = formSessionRowOf(reportOf(reps), reps, 1);
     expect(row.tempoSpreadMs).not.toBeNull();
+  });
+
+  // Saving must not launder a relaxed capture. The live report already says
+  // which reps were caught under a relaxed gate; if the write path drops it,
+  // the saved copy reads exactly like a clean check forever after.
+  it('the relaxed-gate receipt survives the write — per rep AND session-level', () => {
+    const reps = [
+      rep(1, { setPointElbowDeg: 84 }, { lowConfidence: ['lowPoseFps'] }),
+      rep(2, { setPointElbowDeg: 86 }, { lowConfidence: [] }),
+    ];
+    const report = reportOf(reps, {
+      lowConfidence: { reps: 1, reasons: ['lowPoseFps'] },
+    });
+    const summary = JSON.parse(formSessionRowOf(report, reps, 1).summaryJson) as {
+      reps: { lowConfidence: string[] }[];
+      lowConfidence: { reps: number; reasons: string[] };
+    };
+
+    expect(summary.reps[0]!.lowConfidence).toEqual(['lowPoseFps']);
+    expect(summary.reps[1]!.lowConfidence).toEqual([]);
+    expect(summary.lowConfidence).toEqual({ reps: 1, reasons: ['lowPoseFps'] });
+  });
+
+  it('a clean session persists an EMPTY receipt, never a missing one', () => {
+    const reps = [rep(1, {}, { lowConfidence: [] })];
+    const report = reportOf(reps, { lowConfidence: { reps: 0, reasons: [] } });
+    const summary = JSON.parse(formSessionRowOf(report, reps, 1).summaryJson) as {
+      lowConfidence: { reps: number; reasons: string[] };
+    };
+    expect(summary.lowConfidence).toEqual({ reps: 0, reasons: [] });
   });
 });
