@@ -1,6 +1,6 @@
-The MIT License (MIT)
+MIT License
 
-Copyright (c) 2015-present 650 Industries, Inc. (aka Expo)
+Copyright (c) 2026 Aries Wu (吳泓寰)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -19,3 +19,18 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+---
+
+This project bundles or depends on third-party work under its own terms:
+
+- Detector training data: Roboflow Universe datasets, CC BY 4.0.
+- Algorithm references: josephattalla/Basketball-Shot-Detection (MIT) and
+  Ed-Zh/Basketball-Analytics (MIT).
+- Bundled model weights in assets/models/ carry their own licences: the
+  default YOLOX-Nano detector and the MoveNet pose model are Apache-2.0,
+  while the non-default YOLO11 fallback detector is AGPL-3.0 and is not
+  covered by the MIT grant above.
+
+The authoritative list is src/core/legalCredits.ts, which also drives the
+in-app credits screen. See docs/MODELS.md for dataset detail.
