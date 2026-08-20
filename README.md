@@ -159,14 +159,14 @@ Branch state: `main` is the stable line. Later work, including a pose-only Form 
 
 ## Licences and credits
 
-Project code is MIT, see [LICENSE](LICENSE).
+Project code is MIT, see [LICENSE](LICENSE). It does not cover the bundled model weights, the training data or the fonts, which carry their own terms; those are set out in [NOTICE](NOTICE).
 
-Third-party terms are tracked by hand in [`src/core/legalCredits.ts`](src/core/legalCredits.ts), which is the single source for the in-app credits screen (`src/app/legal/licenses.tsx`). A build-time dependency scan was rejected for this on purpose, because the entries that matter here are model weights and datasets, which a package scan does not see.
+Third-party terms are also tracked by hand in [`src/core/legalCredits.ts`](src/core/legalCredits.ts), which is the single source for the in-app credits screen (`src/app/legal/licenses.tsx`). A build-time dependency scan was rejected for this on purpose, because the entries that matter here are model weights and datasets, which a package scan does not see.
 
 | Bundled model | Licence | Role |
 | --- | --- | --- |
-| YOLOX-Nano detector | Apache-2.0 | Default detector |
+| YOLOX detectors, Tiny small-ball finetune plus Nano fallbacks | Apache-2.0 | Default detector |
 | MoveNet SinglePose Lightning | Apache-2.0 | Optional 2D pose for form analysis |
-| YOLO11 detector | AGPL-3.0 | User-selectable fallback, not the default, flagged in `legalCredits.ts` for removal from any paid build |
+| YOLO11 detectors | AGPL-3.0 | User-selectable fallback, not the default, flagged in `legalCredits.ts` for removal from any paid build |
 
-Training images come from Roboflow Universe datasets under CC BY 4.0. Algorithm references are `josephattalla/Basketball-Shot-Detection` and `Ed-Zh/Basketball-Analytics`, both MIT. Fonts are Barlow Condensed and Inter under OFL-1.1. See [`docs/MODELS.md`](docs/MODELS.md) for the dataset detail.
+Training images come from Roboflow Universe datasets under CC BY 4.0. Algorithm references are `josephattalla/Basketball-Shot-Detection` and `Ed-Zh/Basketball-Analytics`, both MIT. Fonts are Barlow Condensed and Inter under OFL-1.1. [`docs/MODELS.md`](docs/MODELS.md) lists every shipped model file with its architecture, input size and licence, plus the dataset, training and export detail.
