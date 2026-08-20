@@ -9,9 +9,13 @@
  * v2 upgrade path: move this whole class into the worklet runtime and swap
  * the scheduleOnRN hop for direct SharedValue writes (docs/ARCHITECTURE.md §2).
  */
-import { DETECTION, FLIGHT, RIM, SHOT_FSM, scaleFrameGate } from '../core/config';
+import { BALL_SIZES_M, DETECTION, FLIGHT, RIM, SHOT_FSM, scaleFrameGate } from '../core/config';
+import type { FrameFunnel } from '../core/acquisitionFunnel';
+import { buildArcSnapshot } from '../core/arcSnapshot';
 import { BallTracker } from '../core/ballTracker';
 import { FlightArc } from '../core/flightArc';
+import { apexAboveRim, DribbleDetector } from '../core/dribbleGate';
+import { MultiBallGuard } from '../core/multiBallGuard';
 import { estimateShotValue } from '../core/court';
 import { FormAnalyzer, coachingTips } from '../core/formAnalysis';
 import { FormSequenceBuffer } from '../core/formSequence';
@@ -27,6 +31,14 @@ import {
   type FtCalibrationResult,
   type FtDistanceCalibration,
 } from '../core/ftCalibration';
+import {
+  classifyByFtSeed,
+  deriveFtSeed,
+  ftSeedBallSizeCapFrac,
+  metricValueConfidence,
+  type FtSeed,
+} from '../core/ftSeed';
+import { FIBA_COURT, type CourtSpec } from '../core/courtModel';
 import {
   ABS_MIN_FIT_SAMPLES,
   MIN_FIT_SAMPLES,
@@ -69,6 +81,13 @@ export interface FramePayload {
    * light profile untouched. Drives the tracker's dark-relaxed cold gate.
    */
   light?: number;
+  /**
+   * 8x8 mean-luma grid (0..1) sampled by the worklet over the CONTENT rect
+   * every ~2 s for the lens glare/haze advisory (src/core/lensCheck.ts).
+   * ENGINE-ONLY: useShotEngine's onPayload consumes and strips it BEFORE
+   * pipeline.step — the pipeline itself never reads it.
+   */
+  lensGrid?: readonly number[];
 }
 
 export interface PipelineEvents {
@@ -80,7 +99,32 @@ export interface PipelineEvents {
   onFrame?: (state: PipelineFrameState) => void;
   /** Fired exactly once per resolved shot. */
   onShot?: (shot: ResolvedShot) => void;
+  /**
+   * FT-seed arm feedback: fired on the resolve frame of each shot consumed by
+   * an armed armFtSeed() attempt — success exactly once (then disarmed), or a
+   * quiet per-attempt failure with the remaining attempt budget. Value/position
+   * labeling only; never affects outcome (see the resolve hook in step()).
+   */
+  onFtSeed?: (r: FtSeedFeedback) => void;
 }
+
+/**
+ * Outcome of one armed FT-seed attempt (see {@link ShotPipeline.armFtSeed}).
+ * ok:false carries the remaining attempt budget so the HUD chip can show
+ * "N shots left"; shotsLeft 0 means the arm just disarmed itself.
+ */
+export type FtSeedFeedback =
+  | { ok: true; anchoredAtM: number }
+  | {
+      ok: false;
+      reason:
+        | 'no-rim'
+        | 'no-origin'
+        | 'invalid-anchor'
+        | 'no-metric-estimate'
+        | 'estimate-out-of-range';
+      shotsLeft: number;
+    };
 
 export interface PipelineFrameState {
   t: number;
@@ -118,6 +162,19 @@ export interface PipelineFrameState {
    * physically-plausible curvature.
    */
   fullFlightPath: number[];
+  /**
+   * Per-frame acquisition-funnel diagnostics (src/core/acquisitionFunnel.ts).
+   * DISPLAY/DIAG ONLY — assembled from values the pipeline already computed
+   * and never read by any judging path (drawing != judging).
+   */
+  funnel: FrameFunnel;
+  /**
+   * Live view of BallTracker.getHistory() (oldest first, real + predicted
+   * samples). A LIVE readonly view, not a copy — consume it synchronously in
+   * onFrame (the engine flattens the IDLE breadcrumbs from it) or copy before
+   * the next step().
+   */
+  trackHistory: readonly BallSample[];
 }
 
 /** Why a captureFtAnchor() attempt did not produce a calibration. */
@@ -157,7 +214,41 @@ export class ShotPipeline {
   /** Live copy of config.FLIGHT.useFlightArc, toggled from Settings so the user
    *  can disable full-flight tracking without a rebuild (escape hatch). */
   private useFlight: boolean = FLIGHT.useFlightArc;
+  /**
+   * Dribble suppression gate — VISUAL ONLY (honesty: drawing != judging). A
+   * dribble bounce fits a parabola just fine, so the global FlightArc would
+   * happily paint a confident flight line / landing ghost / snapped ball over
+   * a non-shot. The detector watches tracked-ball vertical motion for the
+   * bounce signature; its verdict suppresses un-armed flight DRAWING below
+   * and nothing else. It never touches FsmFrameInput / fsm.step — the
+   * make/miss judgment path is byte-identical with the gate on or off.
+   */
+  private readonly dribble = new DribbleDetector();
   private readonly rimLock = new RimLock({ lockHoldSec: RIM.lockHoldSec });
+  /**
+   * Multi-ball warmup guard (suppression-only): while several confident balls
+   * fly at once, new arming is held via FsmFrameInput.armLockout. It can never
+   * create/upgrade a call or touch a live attempt (see multiBallGuard.ts).
+   */
+  private readonly multiBall = new MultiBallGuard();
+  private multiBallEnabled = true;
+  /**
+   * Active per-model cold ball gate (mirror of the tracker's own, set via
+   * setColdBallGate; null = default). The multi-ball count must use the SAME
+   * bar as track acquisition: nano-v2 deliberately raises its cold gate
+   * because it emits spurious balls in the 0.2..0.35 band that the tracker
+   * ignores — counting those phantoms would chronically latch the arm
+   * lockout and silently swallow real shots (see {@link multiBallCountGate}).
+   */
+  private coldBallGate: number | null = null;
+  /** Rim bump guard (Settings): fast rim re-settle + drift-stale arm hold. */
+  private rimGuard = true;
+  /**
+   * Last seen RimLock.lockGeneration. The geometry object is mutated IN PLACE,
+   * so a hard re-lock never changes its reference — this counter is the only
+   * honest "the rim moved" signal for the FSM's cached zones. -1 = unseen.
+   */
+  private lastLockGen = -1;
   private fsm: ShotFsm | null = null;
   private events: PipelineEvents;
   private lastRim: RimGeometry | null = null;
@@ -204,6 +295,12 @@ export class ShotPipeline {
   private courtRegistration: CourtRegistration | null = null;
   /** Reappearance corroborator flag (Settings, experimental). */
   private reappearance = false;
+  /** Rattle-out make guard flag (Settings). Applied when the FSM is created at
+   *  rim lock — i.e. per session, same lifecycle as depthVeto/reappearance. */
+  private rattleGuard = false;
+  /** Settle-window flag (Settings). Applied at rim lock, same lifecycle as the
+   *  rattle guard — defers the belowRim resolve so late bounce-outs are seen. */
+  private settleWindow = false;
   /** Camera pitch at/around rim lock from the IMU, degrees +up; null = no IMU. */
   private viewPitchDeg: number | null = null;
   /**
@@ -228,6 +325,18 @@ export class ShotPipeline {
    *  metric23 flag off — the user performed the calibration ritual precisely
    *  to sharpen 2/3 calls, so it must not be a silent no-op (see step()). */
   private ftCalibration: FtDistanceCalibration | null = null;
+  /**
+   * FT-seed court transform (src/core/ftSeed.ts): scale + yaw pinned by one
+   * user-asserted free throw. VALUE/POSITION ONLY — the cascade consults it
+   * after outcome/signals are final, and staleness (rim width drift > 15%)
+   * clears it quietly. Per-session like ftCalibration (never persisted).
+   */
+  private ftSeed: FtSeed | null = null;
+  /**
+   * Armed FT-seed capture: the next `shotsLeft` resolved shots each attempt a
+   * seed derivation from their own origin foot. Success or exhaustion disarms.
+   */
+  private ftSeedArm: { spec: CourtSpec; shotsLeft: number } | null = null;
   /** In-flight FT anchor capture, fed by step() frames until it resolves. */
   private ftCapture: {
     samples: { x: number; y: number }[];
@@ -257,6 +366,7 @@ export class ShotPipeline {
   /** Per-model cold ball-acquisition gate (the active detector sets its own —
    *  a noisier model needs a higher bar to start a track). null = default. */
   setColdBallGate(gate: number | null): void {
+    this.coldBallGate = gate;
     this.tracker.setColdGate(gate);
   }
 
@@ -269,6 +379,27 @@ export class ShotPipeline {
   /** Depth-ratio parallax veto (from Settings). Takes effect at rim lock. */
   setDepthVeto(enabled: boolean): void {
     this.depthVeto = enabled;
+  }
+
+  /** Multi-ball warmup guard (from Settings). Suppression-only — see step(). */
+  setMultiBallGuard(enabled: boolean): void {
+    this.multiBallEnabled = enabled;
+    if (!enabled) this.multiBall.reset();
+  }
+
+  /** Rim bump guard (from Settings): bump-settle boost + drift arm hold. */
+  setRimGuard(enabled: boolean): void {
+    this.rimGuard = enabled;
+    this.rimLock.setBumpSettle(enabled);
+  }
+
+  /**
+   * Persistence rescue (settings.trackerRescue): forwarded to the tracker's
+   * detection-side recall mechanism. Candidate recall ONLY — it never touches
+   * arming or make/miss (see BallTracker.setRescue / maybeRescue).
+   */
+  setTrackerRescue(enabled: boolean): void {
+    this.tracker.setRescue(enabled);
   }
 
   /** Metric 2/3 estimation (from Settings). */
@@ -292,6 +423,17 @@ export class ShotPipeline {
   /** Reappearance corroborator (from Settings). Takes effect at rim lock. */
   setReappearance(enabled: boolean): void {
     this.reappearance = enabled;
+  }
+
+  /** Rattle-out make guard (from Settings). Takes effect at rim lock. */
+  setRattleGuard(enabled: boolean): void {
+    this.rattleGuard = enabled;
+  }
+
+  /** Settle window before the belowRim resolve (from Settings). Takes effect
+   *  at rim lock. */
+  setSettleWindow(enabled: boolean): void {
+    this.settleWindow = enabled;
   }
 
   /**
@@ -345,6 +487,23 @@ export class ShotPipeline {
     });
   }
 
+  /**
+   * Arm the FT-seed derivation: the user declares "my next shot is a free
+   * throw", and each of the next `attempts` resolved shots tries to derive the
+   * full court transform (scale + yaw) from its own origin foot. Success (or
+   * running out of attempts) disarms; feedback rides PipelineEvents.onFtSeed.
+   * OUTCOME-INDEPENDENT by design: a missed free throw still anchors the court
+   * — the shooter stood at the line either way (see the resolve hook).
+   */
+  armFtSeed(spec: CourtSpec = FIBA_COURT, attempts = 3): void {
+    this.ftSeedArm = { spec, shotsLeft: attempts };
+  }
+
+  /** Cancel a pending FT-seed arm (leaves any derived seed untouched). */
+  cancelFtSeed(): void {
+    this.ftSeedArm = null;
+  }
+
   /** Manual rim override from the live tap-to-set-rim. */
   setManualRim(box: Box, frame: { width: number; height: number }): void {
     this.rimLock.setManual(box);
@@ -368,6 +527,11 @@ export class ShotPipeline {
     this.ftCapture?.resolve({ ok: false, reason: 'no-rim' });
     this.ftCapture = null;
     this.ftCalibration = null;
+    // The FT seed's transform is anchored to the OLD placement too — clear the
+    // seed, any pending arm, and the tracker's derived session ball-size cap.
+    this.ftSeed = null;
+    this.ftSeedArm = null;
+    this.tracker.setSessionBallSizeCap(null);
   }
 
   get rimGeometry(): RimGeometry | null {
@@ -392,6 +556,17 @@ export class ShotPipeline {
 
     const rim = this.rimLock.step(frame, frame.t) ?? this.rimLock.geometry;
     if (rim && rim !== this.lastRim) this.adoptRim(rim, dims);
+    const lockGen = this.rimLock.lockGeneration;
+    if (lockGen !== this.lastLockGen) {
+      this.lastLockGen = lockGen;
+      // Re-lock moved the (in-place mutated) geometry: recompute the FSM's
+      // cached zones — reference equality can never reveal a hard re-lock.
+      if (rim) this.fsm?.setRim(rim);
+      // The dribble gate's bounce state is rim-relative — a moved rim makes
+      // it stale. Resetting errs in the permissive direction: an inactive
+      // detector suppresses nothing, so a re-lock can never blank a real shot.
+      this.dribble.reset();
+    }
 
     if (this.rimLock.driftDetected && !this.wasDrifted) {
       this.wasDrifted = true;
@@ -403,11 +578,35 @@ export class ShotPipeline {
       this.ftCapture?.resolve({ ok: false, reason: 'no-rim' });
       this.ftCapture = null;
       this.ftCalibration = null;
+      // The FT seed's transform (scale + yaw) hangs off the OLD framing just
+      // as strongly — a pan that keeps rim distance constant slips past the
+      // width sentinel below yet rotates every court placement. Mirror
+      // reAim(): drop the seed, any pending arm, and the derived ball cap.
+      this.ftSeed = null;
+      this.ftSeedArm = null;
+      this.tracker.setSessionBallSizeCap(null);
       this.events.onRimDrift?.();
     } else if (!this.rimLock.driftDetected && this.wasDrifted) {
       // Re-locked after a camera bump — announce so the UI clears its banner.
       this.wasDrifted = false;
       if (this.lastRim) this.events.onRimLocked?.(this.lastRim);
+    }
+
+    // FT-seed staleness sentinel: the seed's transform hangs off the rim's
+    // on-screen scale at anchor time; a live rim width drifting > 15% from it
+    // means the camera moved (or a hard re-lock landed elsewhere), so the
+    // transform no longer holds. Clear quietly — value labeling just falls
+    // back to metric/heuristic, no event, no effect on outcome.
+    if (this.ftSeed != null && this.lastRim != null) {
+      const w = this.lastRim.box.width;
+      if (
+        Math.abs(w - this.ftSeed.anchorRimWidthPx) /
+          this.ftSeed.anchorRimWidthPx >
+        0.15
+      ) {
+        this.ftSeed = null;
+        this.tracker.setSessionBallSizeCap(null);
+      }
     }
 
     // Flight corridor (config.FLIGHT.useFlightArc): the global arc fitted
@@ -435,6 +634,9 @@ export class ShotPipeline {
       this.lastRim?.hoopRoi ?? null,
       corridor,
     );
+    // Funnel: the tracker's per-step gate telemetry, copied BEFORE anything
+    // else can step the tracker again. Recording only (acquisitionFunnel.ts).
+    const trackStats = this.tracker.lastStepStats();
     // Feed the accepted ball into the global arc. A discontinuity (first ball,
     // or the flight went dark past the freshness window) starts a fresh arc so
     // one shot's samples never contaminate the next shot's fit.
@@ -443,6 +645,15 @@ export class ShotPipeline {
         this.flightArc.reset(frame.t);
       }
       this.flightArc.push(ball);
+    }
+    // Dribble-gate feed (visual-only): every tracked sample, honestly flagged
+    // real vs Kalman-coasted, plus the current rim for scale. Consulted below
+    // solely to suppress un-armed flight DRAWING; the FSM path never reads it.
+    if (ball) {
+      this.dribble.update(
+        { t: ball.t, cy: ball.cy, vy: ball.vy, real: !ball.predicted },
+        this.lastRim,
+      );
     }
 
     // Form analysis (opt-in): feed each frame's pose to the analyzer so it can
@@ -502,6 +713,27 @@ export class ShotPipeline {
     let liveTrajectory: readonly BallSample[] = [];
     let resolved: ResolvedShot | null = null;
 
+    // Arm suppression (suppression-only, can never mint a call): multi-ball
+    // warmup scenes and a drift-stale rim both hold NEW arming. The guard is
+    // stepped EVERY frame (its clear timer only advances when stepped); the
+    // count uses the ACTIVE cold-acquisition gate (per-model, never below the
+    // default) so faint noise the tracker itself ignores can never trigger it.
+    const multiGate = multiBallCountGate(this.coldBallGate);
+    let ballCount = 0;
+    // Funnel: RAW ball-class detections this frame (pre-tracker, no score
+    // gate) — the "ball seen" top of the acquisition funnel.
+    let rawBall = 0;
+    for (const d of frame.detections) {
+      if (d.cls !== 'ball') continue;
+      rawBall++;
+      if (d.score >= multiGate) ballCount++;
+    }
+    const multiLock = this.multiBallEnabled && this.multiBall.step(ballCount, frame.t);
+    const armLockout = multiLock || (this.rimGuard && this.rimLock.driftDetected);
+
+    // Funnel: the FSM's arm verdict this frame; 'no-rim' until the FSM exists.
+    let armRefusal: FrameFunnel['armRefusal'] = 'no-rim';
+
     if (this.fsm && this.lastRim) {
       const person = this.pickShooterBox(frame, ball);
       const result = this.fsm.step({
@@ -515,14 +747,53 @@ export class ShotPipeline {
         ...(this.pendingReleaseT !== null
           ? { releaseEventT: this.pendingReleaseT }
           : {}),
+        ...(armLockout ? { armLockout: true } : {}),
       });
       phase = result.phase;
       liveTrajectory = result.liveTrajectory;
       resolved = result.resolved;
+      armRefusal = result.armRefusal;
     }
     // An event with no locked rim/FSM dies here: no rim means no shots, and
     // holding it could deliver a seconds-stale event at a later rim lock.
     this.pendingReleaseT = null;
+
+    // Confident, physically-plausible global arc (if any) — powers the drawn
+    // full-flight line, the landing-ghost fallback and the occlusion snap
+    // below, plus the dribble gate's apex test. Computed ONCE, after fsm.step,
+    // so it can never feed judgment. (Hoisted above the landing prediction so
+    // the gate is known before any visual output is produced.)
+    let arcFit: ArcFit | null = null;
+    if (this.useFlight && this.lastRim) {
+      const floor = scaleFrameGate(
+        MIN_FIT_SAMPLES,
+        this.tracker.estimatedStepDt(),
+        ABS_MIN_FIT_SAMPLES,
+      );
+      const gfit = this.flightArc.fit(floor);
+      if (
+        gfit &&
+        gfit.ya > 0 &&
+        gfit.tMax > gfit.tMin &&
+        gfit.r2y >= FLIGHT.corridorMinR2yLoose &&
+        plausibleArcCurvature(gfit.ya, this.lastRim.box.width, FLIGHT.maxArcYaRimWidths)
+      ) {
+        arcFit = gfit;
+      }
+    }
+
+    // Dribble visual gate (honesty: drawing != judging). While the detector
+    // sees a bounce pattern — or the fitted apex never even nears the rim
+    // plane — the un-armed flight visuals are suppressed: an honest blank
+    // beats a confident parabola over a dribble. Never fires during SHOT_LIVE
+    // (an armed real shot is not a dribble, so live drawing is untouched) and
+    // feeds nothing back into the FSM above.
+    const dribbleSuppress = suppressDribbleVisuals(
+      phase,
+      this.dribble.active,
+      arcFit,
+      this.lastRim,
+    );
 
     // Predicted landing: fit the live arc and extrapolate to the rim plane.
     // Cheap (O(n) over ≤48 samples, only while a shot is live) and it's what
@@ -570,8 +841,11 @@ export class ShotPipeline {
     // shaky arc shows nothing rather than a wrong marker. Off-path untouched:
     // the branch is skipped entirely when full-flight tracking is off or the
     // live fit already produced a prediction.
+    // (Dribble gate: redundant today — the gate never fires in SHOT_LIVE —
+    // but the guard keeps this ghost gated if its phase condition ever widens.)
     if (
       predictedLanding === null &&
+      !dribbleSuppress &&
       this.useFlight &&
       phase === 'SHOT_LIVE' &&
       this.lastRim
@@ -614,29 +888,10 @@ export class ShotPipeline {
     // it from the first observed sample. STRICTLY visual: it never arms a shot
     // or feeds make/miss (drawing != judging). Confidence + plausible-curvature
     // gated, so a rattle (huge ya) or a shaky fit draws nothing, not a bad line.
-    // Confident, physically-plausible global arc (if any) — powers BOTH the
-    // drawn full-flight line and the occlusion snap below. Computed once.
-    let arcFit: ArcFit | null = null;
-    if (this.useFlight && this.lastRim) {
-      const floor = scaleFrameGate(
-        MIN_FIT_SAMPLES,
-        this.tracker.estimatedStepDt(),
-        ABS_MIN_FIT_SAMPLES,
-      );
-      const gfit = this.flightArc.fit(floor);
-      if (
-        gfit &&
-        gfit.ya > 0 &&
-        gfit.tMax > gfit.tMin &&
-        gfit.r2y >= FLIGHT.corridorMinR2yLoose &&
-        plausibleArcCurvature(gfit.ya, this.lastRim.box.width, FLIGHT.maxArcYaRimWidths)
-      ) {
-        arcFit = gfit;
-      }
-    }
-
+    // Dribble-gated (arcFit itself is computed above the landing prediction):
+    // while dribbleSuppress holds, emit NO path at all.
     const fullFlightPath: number[] = [];
-    if (arcFit) {
+    if (arcFit && !dribbleSuppress) {
       const span = arcFit.tMax - arcFit.tMin;
       const K = 16;
       for (let i = 0; i <= K; i++) {
@@ -655,7 +910,10 @@ export class ShotPipeline {
     // HUD glide follows the real flight instead of flying off. The FSM already
     // ran above on the RAW ball, so make/miss is completely untouched by this.
     let displayBall = ball;
-    if (arcFit && ball && ball.predicted) {
+    // Dribble-gated: during a dribble the RAW tracked ball passes through —
+    // snapping a bouncing ball onto a bogus parabola is exactly the fabricated
+    // motion this gate exists to prevent.
+    if (arcFit && !dribbleSuppress && ball && ball.predicted) {
       const p = evalArc(arcFit, ball.t);
       if (Number.isFinite(p.x) && Number.isFinite(p.y)) {
         displayBall = {
@@ -667,6 +925,19 @@ export class ShotPipeline {
         };
       }
     }
+
+    // Assemble the per-frame acquisition funnel — built HERE (after fsm.step
+    // and the arc fit) so every field is the value the frame actually used.
+    // Written from existing values only; no judging code ever reads it.
+    const funnel: FrameFunnel = {
+      ...trackStats,
+      rawBall,
+      track: ball ? (ball.predicted ? 'coast' : 'real') : 'none',
+      armRefusal,
+      dribbleLatch: this.dribble.active,
+      arcR2y: arcFit ? arcFit.r2y : null,
+      arcSuppressed: dribbleSuppress,
+    };
 
     const state: PipelineFrameState = {
       t: frame.t,
@@ -682,6 +953,8 @@ export class ShotPipeline {
       predictedLanding,
       predictedPath,
       fullFlightPath,
+      funnel,
+      trackHistory: this.tracker.getHistory(),
     };
     this.events.onFrame?.(state);
     if (resolved) {
@@ -699,6 +972,69 @@ export class ShotPipeline {
           originY = this.lastPoseFootPx.y / frame.frameHeight;
           resolved.originX = originX;
           resolved.originY = originY;
+        }
+        // FT-SEED RESOLVE HOOK: while armed, THIS resolved shot's origin foot
+        // is the declared free-throw anchor — derive the full court transform
+        // from it. Deliberately BEFORE the metric compute below so a
+        // successful derivation classifies the FT shot itself through its own
+        // seed (a self-consistent receipt: it lands at ≈(0, ftLine), value 2,
+        // source 'ftSeed'). OUTCOME-INDEPENDENT: outcome/signals were sealed
+        // by the FSM above and are never read or written here — a missed free
+        // throw anchors the court exactly as well as a made one.
+        if (this.ftSeedArm != null) {
+          const arm = this.ftSeedArm;
+          if (originX == null || originY == null) {
+            arm.shotsLeft -= 1;
+            if (arm.shotsLeft <= 0) this.ftSeedArm = null;
+            this.events.onFtSeed?.({
+              ok: false,
+              reason: 'no-origin',
+              shotsLeft: arm.shotsLeft,
+            });
+          } else {
+            const anchor: FtAnchor = {
+              footPx: {
+                x: originX * frame.frameWidth,
+                y: originY * frame.frameHeight,
+              },
+              rim: this.lastRim,
+              // Same square side the per-shot metric estimator is fed.
+              frameSize: frame.frameWidth,
+              pitchDeg: this.viewPitchDeg,
+              rimHeightM: this.rimHeightM,
+            };
+            const r = deriveFtSeed(anchor, arm.spec);
+            if (r.ok) {
+              this.ftSeed = r.seed;
+              // Reuses the documented force-enable semantics: a derived FT
+              // calibration switches the metric path on for this session.
+              this.ftCalibration = r.calibration;
+              this.ftSeedArm = null;
+              // Detection-accuracy dividend: shrink-only session ball-size
+              // cap from the anchored scene scale (tracking layer only —
+              // removing oversized candidates can never fabricate a make).
+              this.tracker.setSessionBallSizeCap(
+                ftSeedBallSizeCapFrac(
+                  r.seed,
+                  this.lastRim,
+                  frame.frameWidth,
+                  BALL_SIZES_M[this.ballSize],
+                ),
+              );
+              this.events.onFtSeed?.({
+                ok: true,
+                anchoredAtM: r.seed.uncalibratedM,
+              });
+            } else {
+              arm.shotsLeft -= 1;
+              if (arm.shotsLeft <= 0) this.ftSeedArm = null;
+              this.events.onFtSeed?.({
+                ok: false,
+                reason: r.reason,
+                shotsLeft: arm.shotsLeft,
+              });
+            }
+          }
         }
         // METRIC estimator first: pinhole geometry off the rim's real size +
         // height gives the distance in METERS; the rim-widths heuristic stays
@@ -745,9 +1081,24 @@ export class ShotPipeline {
                 originY * frame.frameHeight,
               )
             : null;
-        resolved.shotValue = reg ? reg.value : metric ? metric.value : est.value;
+        // FT-SEED rung: below court registration (a real homography always
+        // outranks a single-anchor similarity transform), above plain metric.
+        // Null on any sanity bail — falls through to the metric label
+        // untouched (the seed only re-labels estimates that already exist).
+        const seedEst =
+          reg == null && this.ftSeed != null && metric != null
+            ? classifyByFtSeed(this.ftSeed, metric)
+            : null;
+        resolved.shotValue = reg
+          ? reg.value
+          : seedEst
+            ? seedEst.value
+            : metric
+              ? metric.value
+              : est.value;
         resolved.distanceRimWidths = est.distanceRimWidths;
         if (reg) resolved.distanceM = reg.distanceM;
+        else if (seedEst) resolved.distanceM = seedEst.distanceM;
         else if (metric) resolved.distanceM = metric.distanceM;
         // Record which estimator won + its confidence + the mapped court point,
         // so the detection receipt can SHOW ITS WORK (auditable, not a guess).
@@ -755,8 +1106,15 @@ export class ShotPipeline {
           resolved.valueSource = 'court';
           resolved.valueConfidence = reg.confidence;
           resolved.courtPos = { x: reg.courtX, y: reg.courtY };
+        } else if (seedEst) {
+          resolved.valueSource = 'ftSeed';
+          resolved.valueConfidence = seedEst.confidence;
+          resolved.courtPos = { x: seedEst.courtX, y: seedEst.courtY };
         } else if (metric) {
           resolved.valueSource = 'metric';
+          // Honest confidence for the plain metric call (capped below the
+          // ftSeed tier, which sits below court registration — evidence.ts).
+          resolved.valueConfidence = metricValueConfidence(metric.distanceM);
         } else if (est.confidence > 0) {
           resolved.valueSource = 'heuristic';
           resolved.valueConfidence = est.confidence;
@@ -769,6 +1127,19 @@ export class ShotPipeline {
         else if (this.courtRange === '3pt') resolved.shotValue = 3;
         if (this.courtRange !== 'auto') resolved.valueSource = 'manual';
       }
+      // Persisted flight-arc snapshot — VISUAL ONLY (replay thumbnails + 3D
+      // replay). Never re-judged: the FSM/recheck never read it (drawing !=
+      // judging).
+      if (arcFit && fullFlightPath.length >= 8 && this.lastRim) {
+        const snap = buildArcSnapshot(
+          arcFit,
+          fullFlightPath,
+          this.lastRim.box,
+          frame.frameWidth,
+          frame.frameHeight,
+        );
+        if (snap) resolved.flightArc = snap;
+      }
       // Finalize the pose-based form report (only if a pose was seen this shot).
       if (this.form && this.sawPoseThisShot) {
         try {
@@ -779,7 +1150,7 @@ export class ShotPipeline {
           const releasePose = this.form.releasePose;
           // Motion sequence for Form Studio — best-effort, additive; a null
           // build (too little captured) simply omits the field.
-          const sequence = this.formSeq?.finalize() ?? null;
+          const sequence = this.formSeq?.finalize(releasePose ? releasePose.t : null) ?? null;
           resolved.form = {
             metrics,
             tips: coachingTips(metrics),
@@ -803,6 +1174,10 @@ export class ShotPipeline {
     this.tracker.reset();
     this.flightArc.reset(0);
     this.rimLock.reset();
+    this.multiBall.reset();
+    this.dribble.reset();
+    // lockGeneration is monotonic across resets by design — re-arm the watch.
+    this.lastLockGen = -1;
     this.form = null;
     this.formSeq = null;
     this.releaseDet = null;
@@ -815,6 +1190,9 @@ export class ShotPipeline {
     this.ftCapture?.resolve({ ok: false, reason: 'reset' });
     this.ftCapture = null;
     this.ftCalibration = null;
+    this.ftSeed = null;
+    this.ftSeedArm = null;
+    this.tracker.setSessionBallSizeCap(null);
   }
 
   /**
@@ -895,12 +1273,17 @@ export class ShotPipeline {
   private adoptRim(rim: RimGeometry, frame: { width: number; height: number }): void {
     const first = this.lastRim == null;
     this.lastRim = rim;
+    // Rim (re-)adoption starts a fresh session context for the visual dribble
+    // gate — same per-session lifecycle as the FSM's rim-scaled zones below.
+    this.dribble.reset();
     if (this.fsm) {
       this.fsm.setRim(rim);
     } else {
       this.fsm = new ShotFsm(rim, frame, {
         useDepthRatioVeto: this.depthVeto,
         useReappearance: this.reappearance,
+        useRattleGuard: this.rattleGuard,
+        useSettleWindow: this.settleWindow,
       });
       this.fsm.setBallSize(this.ballSize);
     }
@@ -970,6 +1353,56 @@ function bestPerson(
     if (best == null || key < best.key) best = { key, box: d.box };
   }
   return best?.box ?? null;
+}
+
+/**
+ * Score bar for the multi-ball guard's per-frame ball count: the ACTIVE cold
+ * acquisition gate, floored at the default. When nano-v2 is the running
+ * detector its cold gate is raised to ballScoreMinNanoV2 precisely because it
+ * is "higher recall but noisier" — spurious balls in the 0.2..0.35 band that
+ * the tracker deliberately never acquires. Counting those phantoms at the
+ * fixed 0.2 gate made one recurring 0.22 blob + the real ball read as a
+ * multi-ball scene, chronically latching the arm lockout (real shots silently
+ * never counted). Never BELOW the default: a per-model gate can only make the
+ * guard stricter about what counts as a ball. Exported for tests.
+ */
+export function multiBallCountGate(coldGate: number | null): number {
+  return Math.max(DETECTION.ballScoreMin, coldGate ?? 0);
+}
+
+/**
+ * Apex margin (rim widths BELOW the rim plane, +y down) for the dribble
+ * gate's "could this arc even be a shot" test: an arc whose fitted apex never
+ * climbs within 2 rim widths of the rim plane cannot be a shot at THIS hoop,
+ * so drawing it as one would be a fabrication. The gate module is permissive
+ * by contract — no fit or no rim means the test passes and nothing is
+ * suppressed (never blank a real shot for lack of information).
+ */
+export const DRIBBLE_APEX_MARGIN_RIM_WIDTHS = 2;
+
+/**
+ * Pure seam for the dribble visual gate (exported for tests): should the
+ * UN-ARMED flight visuals — fullFlightPath, the global-arc landing-ghost
+ * fallback, the display-ball parabola snap — be suppressed this frame?
+ *
+ * Honesty rationale: a dribble bounce fits a parabola just fine, so without
+ * this gate the HUD paints confident flight lines over non-shots. DRAWING
+ * only: the result never flows into FsmFrameInput or fsm.step, and while the
+ * FSM reports SHOT_LIVE the gate never fires — an armed real shot is not a
+ * dribble, so live-shot visuals draw exactly as before.
+ */
+export function suppressDribbleVisuals(
+  phase: ShotPhase,
+  detectorActive: boolean,
+  // tMin/tMax ride along structurally (ArcFit carries them) so apexAboveRim's
+  // observed-window straddle guard sees the fit's real time span (W2).
+  fit: { ya: number; yb: number; yc: number; tMin?: number; tMax?: number } | null,
+  rim: RimGeometry | null,
+): boolean {
+  if (phase === 'SHOT_LIVE') return false;
+  return (
+    detectorActive || !apexAboveRim(fit, rim, DRIBBLE_APEX_MARGIN_RIM_WIDTHS)
+  );
 }
 
 function maxScore(frame: FrameDetections, cls: 'ball_in_basket'): number {

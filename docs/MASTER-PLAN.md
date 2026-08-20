@@ -3,7 +3,7 @@
 > **用途**:未來 AI session 與開發者的完整接手檔 + 從現在到「最完成體 v3.0」的一年執行路線。
 > 讀完你應該知道:現在在哪、終點長什麼樣、每一季做什麼、每個工作項的驗收標準、什麼不要重新辯論。
 > **執行規則**:照 §4 backlog 依 ID 順序/依賴執行;每完成一項在該行標 ✅+commit hash;方向性改動必須更新本檔。
-> 最後更新:2026-07-08(v2,commit 待補)。前版:cd52b30。
+> 最後更新:2026-07-10(v2.1,171-agent mega-upgrade 波次)。前版:2026-07-08 v2(cd52b30)。
 
 ---
 
@@ -13,14 +13,14 @@
 Repo:`AriesHongHuanWu/HoopAi`,本機 `C:\Users\aries\claude\claudeCode\hoop-ai`。
 
 **指令**:
-- 驗證:`npx tsc --noEmit && npx jest`(基準 629 tests,全綠才能 commit)
+- 驗證:`npx tsc --noEmit && npx jest`(基準 1976 tests,全綠才能 commit)
 - iOS IPA:`gh workflow run ios-ipa.yml`(~16 分 → `ios-ipa-latest` release);Android:push main 自動(~37 分 → `android-latest`)
 - 模型驗證:`python tools/validate_model.py --model X.tflite --video <真實影片> --fps 6 --size 416|640 --compare <現役asset>`
 - 側載:Sideloadly + USB;使用者自己輸 Apple ID(AI 絕不碰帳密)
 
 **鐵律(每條都是真實事故換來的)**:
 1. 不在使用者本機訓練(GPU 過熱)— 訓練上 Kaggle/Colab/Lightning;本機只做 CPU 轉檔
-2. 程式碼/註解全英文;commit 結尾 `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`
+2. 程式碼/註解全英文;commit 結尾加當前 Claude 模型的 Co-Authored-By trailer(如 `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`)
 3. 絕不代打帳密/金鑰;Kaggle kernel 純 ASCII;kaggle CLI 要 `PYTHONUTF8=1`
 4. ROI 二次偵測只能貢獻 `ball`,絕不注入 `ball_in_basket`(假進球)
 5. 佐證器(virtual crossing/reappearance)只升級 `geo null→true` 且需 net/cls 同意;絕不單獨定案、絕不翻已判定的球
@@ -44,7 +44,33 @@ Repo:`AriesHongHuanWu/HoopAi`,本機 `C:\Users\aries\claude\claudeCode\hoop-ai`�
 
 ---
 
-## §1 現況快照(2026-07-08,HEAD d6a1690+)
+## §1 現況快照(2026-07-10,mega-upgrade 波次後)
+
+**2026-07-10 Round-2 mega-upgrade(13 偵察/設計 + 29 實作/整合 + 57 審查/驗證/修復;1976 tests 全綠):**
+- **FT-seed 場地定位(旗艦)**:`src/core/ftSeed.ts` — 開場罰球錨定(已知 FT 線距離反解 scale+yaw 修正)→ 任意鏡頭擺位的每球場上位置 + corner-accurate 2/3;provenance 新增 `ftSeed`(FT-anchored)層(court > ftSeed > metric > heuristic);信心上限 0.75 誠實封頂;live 的 `FtSeedChip` 儀式化引導;seed 亦回饋 shrink-only 球尺寸上限給 tracker。判定路徑零影響(只動 shotValue/位置)。rim 漂移/re-aim 會同步清 seed。
+- **追蹤斷鏈修復**:`acquisitionFunnel.ts` 漏斗遙測(raw→cull→gate→tracked→drawn + 最後拒絕原因,進 DebugPanel/COPY DIAG)、flag-gated 持續性救援(高分未收養球連續 N 幀→放行冷門檻,recall-only)、FSM `armRefusal` 記錄口徑、DetectionBoxes 雙層框(raw vs tracked)、dribbleGate 陳舊 latch/apex 跨界加固。
+- **模式分類 IA**:Train 分頁改 QUICK START/GAMES/CHALLENGES/TOOLS 分區 + 使用紀錄驅動的推薦 hero;全部 arm-then-route/deep-link/ghost picker 契約保留。
+- **Setup 一鍵開始**:頂部 StartHero(上次設定摘要 chip)+ 摺疊選項段 + sticky 底欄;settingsStore v7。
+- **動畫系統**:`src/components/motion/`(stagger/CountUp/MotionStat/SuccessBurst/AnimatedProgressBar/Shimmer/PressScale)+ gated haptics util;home/coach/history/trends/records/summary(PB 彩帶)/jump/profile/reel 全鋪;全部尊重 reduced-motion。
+- **3D v2**:視角預設(SIDE/FRONT/TOP)平滑 tween、自動環繞、手腕軌跡緞帶、release 幀場景內角度標註、兩球對比(誠實「estimated reconstruction」)、Stage3DStill 分享圖、首開導覽。
+- **教學層**:live 聚光燈 CoachMarks、HintChip 情境提示、校正指南 Skia 動畫場景、`/how-it-works` 偵測原理誠實說明頁、summary 誠實文案修正(改判不會訓練模型)。
+- 審查波抓到 13 個確認 bug 全修/處置(最重:stale FT-seed 回饋會假告「已錨定」+ rim 漂移不清 seed → 都修掉)。
+
+**2026-07-12 進球判定過度靈敏修正(候選→雙向對抗→實作 workflow;1994 tests)**:使用者回報「球一穿過拋物線就判進、其實 rattle 出來卻算進」。根因=geo 只認「框頂平面 in-span 下穿」+ 球一過 belowY 即結算,配 net brush 就 fuse 成 make,從不確認乾淨出框;rimBounce 只防「彈回框頂以上」。兩個 flag-gated 槓桿(雙向對抗都存活):`rattleGuard`(rim-contact 球被「看到」彈/滾出→held unsure,保留 observed-deep-exit 逃生口不誤殺被網吞的空心球)+ `settleWindow`(球掉到 belowY 後等 ~0.13s 才結算,抓 late bounce-out)。皆 bread-ball-safe(只降 make→unsure,不造假 miss)。FSM constructor flag 預設 false(recheck/pinned truth table 逐位元不變),live 由 settingsStore 預設 ON(persist v9+migration)、各有 Settings 開關。**否決** Lever A/D:belowRim 在第一個 below 樣本就結算 + geoExitObserved 是 depth-blind(正面 carom 直落也滿足),故會殺真 make 又補不到洞。**硬限制**:純正面貼框直落 carom 在單鏡頭 2D 本質模糊,唯一防線是 depth-ratio veto(已預設 ON)。
+
+
+**2026-07-10 171-agent mega-upgrade(21 偵察/設計 + 45 實作/整合 + 101 審查/驗證/修復 + 4 收尾;1502 tests 全綠):**
+- **偵測**:多球熱身防護(suppression-only `multiBallGuard` + FSM `armLockout`,吃 per-model cold gate)、籃框撞歪 settle-boost 重鎖 + drift 期 arm 鎖(`rimGuard`)、推論延遲熱調速器(`thermalGovernor` L0-L3,model reload 會 reset)、鏡頭眩光/霧化自檢 advisory(`lensCheck`,HUD chip + DebugPanel lens/thermal 列)、追蹤走廊 capsule + 重力感知投影。淨 ROI 相位假爆發 bug(會鑄假 make)已在審查波抓到修掉(rect 移動時 diff 基線失效化)。
+- **軌跡 HUD**:`arcHudGeometry`(解析導數版 release/entry angle)、TrajectoryOverlay 分級弧色+頂點標記+錐形彗尾、ArcReadout 即時角度 chip、`MiniArcReplay` 每球迷你弧重播(ShotList SessionRecap)。純視覺,不 arm 不判定。
+- **Form Studio 3D**:`src/core/pose3d/`(lift/camera3d/angles3d,純 TS 有測試)2D→3D 人體測量學提升(誠實標示 estimated)、純 Skia 透視投影+拖曳軌道相機、`FormStage3D` + `/formstudio3d` 畫面(播放刮擦、release 凍結、關節角讀數、NBA ghost 對照);`replay3d` 設定可關。
+- **校正教學**:`calibrationGuide` 引擎 + `/calibration-guide` 互動教學(擺位教練/籃框鎖定清單/點場走查/FT wizard)、`CalibrationHealthCard`(setup+settings)、court-tap 品質分級(dialed/good/rough)+ 成功卡。
+- **教練完整性**:冷區 finding→drill、過去 4 週 coach 時間軸、form-readiness 指標、season strip、`drillProgression` 難度等級(deep-link 帶 level 起 drill)、coach 報告分享卡。audit backlog rank6/8/9 完成。
+- **透明化+流程**:`detectionHealth` HUD 面板、`ShotReceipt` 可展開三訊號收據(corrected 誠實敘事)、unsure 批次 triage、GoalChip/熱度階梯/FormCueToast、`sessionStory` 總結敘事、Run-it-back 快速重開(保留 drill level)。
+- **資料**:db v9(arc snapshot + form keyframes 持久化,lazy decode)、settingsStore v6(新開關+遷移)、backup 匯入 shot PK 碰撞修復(AUTOINCREMENT 重派)、`replayQueries` 讀取層(部分消費端尚未建——arc 縮圖牆待做)。
+- **品質**:`ironRules.invariants` + `purity.static` + `settingsMigration` 守衛套件、docs/QUALITY-GATES.md、docs/INTEGRATION-REVIEW.md、docs/SMOKE-CHECKLIST.md(使用者實機煙霧清單)。
+- **待實機驗證**:所有相機/HUD/3D 畫面(Windows 無法跑 RN)——照 docs/SMOKE-CHECKLIST.md 走一輪。
+
+### 前版快照(2026-07-08,HEAD d6a1690+)
 
 **偵測管線**:小球特化 YOLOX-Tiny(416/640)→ worklet 解析+letterbox 剔除 → Kalman(飛行 0.12/暗光冷啟 0.16)→ ShotFsm 三訊號融合(geo/net/cls)、4 arm 路徑(jump/layup/descend/release-pose)、佐證器×2、防護(pass-through、卡球、putback、雙計冷卻)、3A rim lock、ROI zoom、離線重判。
 
@@ -107,14 +133,14 @@ Repo:`AriesHongHuanWu/HoopAi`,本機 `C:\Users\aries\claude\claudeCode\hoop-ai`�
 | D12 | 橢圓框面測試 | rim 橢圓長短軸→視角→過框改橢圓內點測試(取代 1D span);高視角 case 準度 +5 分以上才收 | L | D08 |
 | D13 | 飛輪重訓 R1 | 難例 ≥2k → 併入訓練集重訓 Tiny → validate 過 → 換 asset;建立「重訓 SOP」文件 | L | 飛輪 ≥2k |
 | D14 | 時序第四訊號(研究) | tracklet 序列 → 微型 temporal 模型(TCN/tiny transformer)make/miss 二分類;離線 AUC >0.9 才考慮上 | XL | D07 |
-| D15 | 多球場景 | tracklet 關聯:同幀多球時依連續性分軌;熱身多球不誤 arm。驗收:多球測試影片 0 假 attempt | L | — |
+| D15 | 多球場景 | tracklet 關聯:同幀多球時依連續性分軌;熱身多球不誤 arm。驗收:多球測試影片 0 假 attempt | L | — | ◐ v1 guard 上線 2026-07-10(suppression-only armLockout,吃 per-model cold gate;tracklet 分軌+影片驗收待做) |
 | D16 | 多人歸屬 | 出手球員歸屬(release-pose + lastHolder);per-player session 統計。驗收:2v2 影片歸屬正確 >85% | XL | D15 |
 | D17 | EfficientDet 備援收尾 | 查 Lightning 訓練→下載→寫 parser→validate 對比;贏才換,輸則存檔當保險 | M | 訓練完成 |
 | D18 | 模型無關驗證 | 文件化「換底層模型 checklist」;用 D17 或任一新模型走完一輪證明架構可換芯 | S | D17 |
-| D19 | 鏡頭髒污/眩光偵測 | 開場自檢:模糊度/眩光 heuristic → 提示擦鏡頭。誤報率 <5% | M | — |
-| D20 | 自動 re-lock 強化 | 相機被踢後免手動:drift 期間持續嘗試以舊 rim 特徵重鎖,10 秒內自動恢復率 >80% | M | — |
+| D19 | 鏡頭髒污/眩光偵測 | 開場自檢:模糊度/眩光 heuristic → 提示擦鏡頭。誤報率 <5% | M | — | ◐ 上線 2026-07-10(lensCheck advisory chip+debug 列;誤報率待實機統計) |
+| D20 | 自動 re-lock 強化 | 相機被踢後免手動:drift 期間持續嘗試以舊 rim 特徵重鎖,10 秒內自動恢復率 >80% | M | — | ◐ v1 上線 2026-07-10(settle-boost 快速重心 + drift 期 arm 鎖;恢復率待實機量) |
 | D21 | 錄影害羞模式 | 只存統計不存影片時,仍保留 unsure 球 ±5 秒 ring buffer 供重判(隱私+準度兼得) | M | — |
-| D22 | 熱節流自適應 | ProcessInfo.thermalState(iOS)/Android 等效 → 分級降幀策略,1 小時 session 不崩;記錄降級事件遙測 | M | D01 |
+| D22 | 熱節流自適應 | ProcessInfo.thermalState(iOS)/Android 等效 → 分級降幀策略,1 小時 session 不崩;記錄降級事件遙測 | M | D01 | ◐ v1 上線 2026-07-10(推論延遲代理版 thermalGovernor L0-L3 分級降幀+ROI/pose shedding;ProcessInfo 原生訊號待接) |
 | D23 | 夜間紅外/極暗實驗 | 極暗場地實測:光 profile 'dark' 下的實際準度;必要時訓練集加暗光增強重訓 | M | D13 |
 | D24 | 準度頁 v2(自動化) | 每 release CI 跑 harness → 產出 per-condition 準度 JSON → app 內「Accuracy」頁+官網頁自動更新 | M | D08 |
 

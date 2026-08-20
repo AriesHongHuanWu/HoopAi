@@ -3,9 +3,11 @@
  *
  * Broadcast layout on frosted glass:
  *   • collapsed: one scoreline — scoreboard numeral for points, dot-separated
- *     made/FG% figures on a shared baseline, flame pill when the streak is hot;
+ *     made/FG% figures on a shared baseline, flame pill escalating through the
+ *     heat-tier ladder (HOT / ON FIRE / UNCONSCIOUS at 3 / 5 / 10 — see
+ *     hud/heatTier.ts, aligned with STREAKS.celebrateAt);
  *   • expanded: a lead POINTS panel (huge scoreboard numeral), an aligned
- *     Made | FG% grid, the current streak (goes hot ≥ 3), and a compact
+ *     Made | FG% grid, the current streak with its heat label, and a compact
  *     2PT / 3PT split line, the 3s inked in downtown gold.
  *
  * Expand/collapse cross-fades and re-flows via Reanimated layout transitions
@@ -25,7 +27,8 @@ import Animated, {
 
 import { color, motion, radius, space, type } from '../../constants/tokens';
 import { useSession } from '../../state/sessionStore';
-import { Row, StatNumber } from '../ui';
+import { Chip, Row, StatNumber } from '../ui';
+import { heatState } from './heatTier';
 import { HudChip } from './HudChip';
 
 function pct(makes: number, attempts: number): string {
@@ -60,11 +63,12 @@ export function StatStrip({
   const threePtMakes = useSession((s) => s.stats.threePtMakes);
   const threePtAttempts = useSession((s) => s.stats.threePtAttempts);
 
-  const hot = streak >= 3;
+  const heat = heatState(streak);
+  const hot = heat.tier >= 1;
   const a11y =
     `${points} points. ${makes} of ${attempts} made, ${Math.round(fgPct * 100)} percent. ` +
     `Twos ${twoPtMakes} of ${twoPtAttempts}. Threes ${threePtMakes} of ${threePtAttempts}. ` +
-    `Streak ${streak}.`;
+    `Streak ${streak}${heat.label != null ? ', ' + heat.label.toLowerCase() : ''}.`;
 
   // MINIMAL BY DEFAULT: the court is the star, not the scoreboard. One tap
   // toggles between a single glanceable line and the full broadcast cards.
@@ -101,8 +105,20 @@ export function StatStrip({
                   <Text style={styles.miniStatUnit}>%</Text>
                 </Text>
                 {hot && (
-                  <View style={styles.flamePill}>
-                    <Text style={styles.flameText}>{`🔥${streak}`}</Text>
+                  <View
+                    style={[
+                      styles.flamePill,
+                      heat.tier === 2 && styles.flamePillFire,
+                      heat.tier === 3 && styles.flamePillGold,
+                    ]}
+                  >
+                    <Text
+                      style={[
+                        styles.flameText,
+                        heat.tier === 2 && styles.flameTextFire,
+                        heat.tier === 3 && styles.flameTextGold,
+                      ]}
+                    >{`🔥${streak}`}</Text>
                   </View>
                 )}
                 <Ionicons
@@ -144,14 +160,19 @@ export function StatStrip({
                 </HudChip>
                 <HudChip
                   style={[styles.sideChip, compact && styles.sideChipCompact]}
-                  tone={hot ? 'accent' : 'default'}
+                  tone={heat.tier >= 3 ? 'downtown' : hot ? 'accent' : 'default'}
                 >
                   <StatNumber
                     value={hot ? `🔥 ${streak}` : `${streak}`}
                     label="Streak"
                     size="medium"
-                    tint={hot ? color.accent : undefined}
+                    tint={heat.tier >= 3 ? color.threePt : hot ? color.accent : undefined}
                   />
+                  {heat.label != null && (
+                    <View style={styles.heatLabelWrap}>
+                      <Chip label={heat.label} tone="accent" compact />
+                    </View>
+                  )}
                 </HudChip>
               </View>
             </Row>
@@ -226,6 +247,25 @@ const styles = StyleSheet.create({
     ...type.caption,
     color: color.accent,
     fontVariant: ['tabular-nums'],
+  },
+  /** Tier 2 (ON FIRE) — inverted, loud: solid accent pill, coal text. */
+  flamePillFire: {
+    backgroundColor: color.accent,
+  },
+  flameTextFire: {
+    color: color.bg,
+  },
+  /** Tier 3 (UNCONSCIOUS) — downtown gold, same ink as the 3PT identity. */
+  flamePillGold: {
+    backgroundColor: color.threePtTint,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: color.threePt,
+  },
+  flameTextGold: {
+    color: color.threePt,
+  },
+  heatLabelWrap: {
+    marginTop: space.xs,
   },
   chevron: {
     alignSelf: 'center',

@@ -106,6 +106,8 @@ export function valueSourceLabel(source: ShotValueSource): string {
   switch (source) {
     case 'court':
       return 'Court-registered';
+    case 'ftSeed':
+      return 'FT-anchored';
     case 'metric':
       return 'Measured';
     case 'heuristic':
@@ -120,6 +122,8 @@ export function valueSourcePhrase(source: ShotValueSource): string {
   switch (source) {
     case 'court':
       return 'mapped to your calibrated court — corner-accurate';
+    case 'ftSeed':
+      return 'placed from your free-throw anchor — scale and direction from one shot';
     case 'metric':
       return 'real-distance estimate from rim geometry';
     case 'heuristic':
@@ -150,4 +154,90 @@ export function correctionRevert(
   shot: Pick<ResolvedShot, 'outcome' | 'corrected'>,
 ): { outcome: ShotOutcome; corrected: boolean } {
   return { outcome: shot.outcome, corrected: shot.corrected === true };
+}
+
+// ---------------------------------------------------------------------------
+// Receipt detail — plain-English channel + verdict explanations
+// ---------------------------------------------------------------------------
+
+/**
+ * One plain-English line per fusion channel for the expanded receipt detail.
+ * Mirrors the glyph chips exactly: yes / no / no data, never a guess.
+ */
+export function channelExplanation(
+  key: 'geo' | 'net' | 'cls',
+  value: boolean | null,
+): string {
+  switch (key) {
+    case 'geo':
+      return value === true
+        ? 'Path — the tracked flight crossed down through the hoop'
+        : value === false
+          ? 'Path — the tracked flight never went through the hoop'
+          : 'Path — the crossing was blocked from view';
+    case 'net':
+      return value === true
+        ? 'Net — the net moved right when the ball arrived'
+        : value === false
+          ? 'Net — the net stayed still'
+          : 'Net — no net in view on this hoop';
+    case 'cls':
+      return value === true
+        ? 'Seen — the AI saw the ball inside the hoop'
+        : value === false
+          ? 'Seen — the AI never saw the ball inside the hoop'
+          : 'Seen — no clear look inside the hoop';
+  }
+}
+
+/**
+ * One-sentence verdict narrative derived STRICTLY from the persisted signals.
+ * It explains the call that was already made — it never re-judges.
+ * Invariant (copy-layer mirror of the bread-ball rule): the word MAKE must
+ * never appear in a miss or unsure narrative.
+ *
+ * `corrected`: pass the shot's corrected flag. A corrected outcome is the
+ * USER'S call — corrections rewrite `outcome` but never `signalsJson`, so the
+ * persisted signals still describe the ORIGINAL machine call. Rendering a
+ * machine-verdict sentence ("Called MAKE — the strongest signals pointed
+ * in.") over three channels that all said NO would fabricate machine-make
+ * attribution; a corrected shot instead gets an honest correction sentence
+ * and the signals below keep describing the original call.
+ */
+export function verdictNarrative(
+  outcome: ShotOutcome,
+  signals: ShotSignals,
+  rimBounce: boolean,
+  corrected?: boolean,
+): string {
+  if (corrected === true) {
+    const noun =
+      outcome === 'make' ? 'MAKE' : outcome === 'miss' ? 'MISS' : 'UNSURE';
+    return `You corrected this to ${noun} — the signals below show the original call, not your correction.`;
+  }
+  let base: string;
+  if (outcome === 'make') {
+    if (signals.geo === true && signals.net === true) {
+      base = 'Called MAKE — the ball’s path and the net agree.';
+    } else if (signals.geo === true && signals.net === null) {
+      base = 'Called MAKE — clean path through the hoop (no net in view).';
+    } else if (signals.net === true && signals.cls === true) {
+      base = 'Called MAKE — the net moved and the ball was seen inside.';
+    } else {
+      base = 'Called MAKE — the strongest signals pointed in.';
+    }
+  } else if (outcome === 'miss') {
+    if (signals.illusion != null) {
+      base = 'Called MISS — the ball only LOOKED like it went in from this angle.';
+    } else if (signals.geo === false) {
+      base = 'Called MISS — the path never went through the hoop.';
+    } else {
+      base = 'Called MISS — no signal showed the ball going in.';
+    }
+  } else {
+    base =
+      'Called UNSURE — the signals disagreed, so no guess was made. You can correct it below; your corrections are always labeled.';
+  }
+  if (rimBounce && outcome !== 'unsure') base += ' It rattled the rim on the way.';
+  return base;
 }

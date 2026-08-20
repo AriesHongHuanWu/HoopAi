@@ -8,6 +8,9 @@ import { createJSONStorage, persist } from 'zustand/middleware';
 import type { SoundPack } from '../camera/soundPacks';
 import { DEVICE_TUNING, type DeviceTier } from '../core/deviceProfile';
 import type { ShootingHand } from '../core/types';
+// Type-only: courtCalibrationStore imports useSettings at runtime, so this
+// import MUST stay `import type` to keep the runtime dependency one-way.
+import type { CourtCalSummary } from './courtCalibrationStore';
 
 /** Which clips survive when a recorded session ends. */
 export type KeepMode = 'makes' | 'decided' | 'all' | 'none';
@@ -131,7 +134,7 @@ export const CLIP_POST_ROLL_MIN = 1;
 export const CLIP_POST_ROLL_MAX = 5;
 
 /** Screens with an in-app coach-marks walkthrough. */
-export type TutorialScreen = 'home' | 'live' | 'summary';
+export type TutorialScreen = 'home' | 'live' | 'liveHud' | 'summary' | 'formstudio3d';
 
 /** Has the walkthrough for each screen been seen (and dismissed) once? */
 export type TutorialSeen = Record<TutorialScreen, boolean>;
@@ -139,7 +142,23 @@ export type TutorialSeen = Record<TutorialScreen, boolean>;
 const TUTORIAL_SEEN_DEFAULT: TutorialSeen = {
   home: false,
   live: false,
+  liveHud: false,
   summary: false,
+  formstudio3d: false,
+};
+
+/**
+ * One-shot contextual hint chips (components/hud/HintChip.tsx). Keys are
+ * persistence contracts — stable forever, never renamed.
+ */
+export type HintKey = 'unsureLive' | 'unsureSummary';
+
+/** Has each one-shot contextual hint been dismissed/acted on once? */
+export type HintSeen = Record<HintKey, boolean>;
+
+const HINT_SEEN_DEFAULT: HintSeen = {
+  unsureLive: false,
+  unsureSummary: false,
 };
 
 export interface SettingsState {
@@ -248,6 +267,30 @@ export interface SettingsState {
    */
   reappearance: boolean;
   /**
+   * Rattle-out make guard: stricter make confirmation. When the ball crosses
+   * the rim line in-span and the net twitches — but the ball is then SEEN
+   * bouncing/caroming back OUT instead of dropping cleanly through the hoop —
+   * the shot is held as 'unsure' instead of being counted as a make. Recovers
+   * accuracy on rim rattles and front-lip caroms that a net brush would
+   * otherwise miscount. Bread-ball-safe: it can only downgrade a make to
+   * unsure, never invent a miss, and it never touches a clean swish or a
+   * swish the net swallows. DEFAULT ON (safe error direction); this toggle is
+   * the escape hatch if it ever holds a real make on your setup. Takes effect
+   * at the next rim lock.
+   */
+  rattleGuard: boolean;
+  /**
+   * Settle window before a make is scored. When ON, the tracker waits a few
+   * frames (~0.13s) after the ball drops below the rim before deciding, so a
+   * LATE rim bounce-out — the ball dips in then pops back up over the rim and
+   * out — is caught and held as 'unsure' instead of being counted. Pairs with
+   * the rattle-out guard. Bread-ball-safe: it can only downgrade a make to
+   * unsure, never invent a miss, and a clean or net-swallowed swish (which
+   * never climbs back above the rim) is untouched. DEFAULT ON; this toggle is
+   * the escape hatch. Takes effect at the next rim lock.
+   */
+  settleWindow: boolean;
+  /**
    * Full-flight parabola tracking (src/core/flightArc.ts). A persistent arc
    * fitted over the whole shot gives the tracker a standing score-floor
    * relaxation along the predicted path, so a faint mid-arc ball keeps being
@@ -283,6 +326,10 @@ export interface SettingsState {
   deviceTuned: boolean;
   /** Last session orientation — powers the Home quick-start (skip setup). */
   lastOrient: 'portrait' | 'landscape';
+  /** Last-used Timed Challenge duration (seconds) — seeds setup's pre-flight chips. */
+  lastDurationSec: number;
+  /** Last-used Spot Shooting makes-per-spot target — seeds setup's pre-flight chips. */
+  lastMakesPerSpot: number;
   /**
    * Run the pose model for shooting-form analysis + coaching. Default off — it
    * runs a second model per frame, best on recent phones. See formAnalysis.ts.
@@ -296,6 +343,66 @@ export interface SettingsState {
    * the Settings stepper.
    */
   dailyGoalMakes: number;
+  /**
+   * Receipt of the last successful court-landmark calibration. Written
+   * imperatively by courtCalibrationStore.commit() on every successful
+   * registration; read by CalibrationHealthCard. Registrations themselves are
+   * per-camera-pose and never persisted — only this receipt survives.
+   */
+  lastCourtCalSummary: CourtCalSummary | null;
+  /**
+   * Receipt of the last successful FT-line calibration, written by live.tsx's
+   * FtCalibrationChip success branch. Null until an FT calibration succeeds.
+   */
+  lastFtCalSummary: { ts: number } | null;
+  /** One-shot flag: the calibration guide screen has been opened once. */
+  calGuideSeen: boolean;
+  /**
+   * One-shot flag: the first-ball receipt tour (FirstBallRitual) has run.
+   * Same pattern as tutorialSeen — consumed/written only by FirstBallRitual.
+   */
+  receiptTourSeen: boolean;
+  /** One-shot contextual hint flags — consumed by HintChip; reset by resetTutorial. */
+  hintSeen: HintSeen;
+  /** One-shot: the /how-it-works explainer has been opened at least once. */
+  detectionExplainerSeen: boolean;
+  /**
+   * 3D replay viewer master switch. Pure-Skia projection is visual-only but
+   * costs GPU on entry phones — this is the escape hatch.
+   *
+   * Consumers: src/app/formstudio.tsx hides its VIEW IN 3D entry button when
+   * false, and src/app/formstudio3d.tsx (also reachable by deep link) gates
+   * itself — it shows a "turned off in Settings" empty state instead of
+   * fetching/lifting/rendering the 3D theater. Toggled by the Settings › Video
+   * row (src/app/settings.tsx).
+   */
+  replay3d: boolean;
+  /**
+   * Suppress NEW shot arming while several confident balls are in flight
+   * (warmups). Suppression-only — can never create a call.
+   */
+  multiBallGuard: boolean;
+  /**
+   * Fast rim re-settle after camera bumps + hold new arming while the rim
+   * lock is drift-stale.
+   */
+  rimGuard: boolean;
+  /**
+   * Persistence rescue: adopt a ball the detector keeps seeing in the
+   * raised-gate band but the tracker never starts on. DETECTION-side recall
+   * only — never touches arming or make/miss.
+   */
+  trackerRescue: boolean;
+  /**
+   * Inference-time-based thermal governor: sheds ROI/pose and caps frame
+   * rate when the chip is hot.
+   */
+  adaptiveThermal: boolean;
+  /**
+   * Pre-session advisory chip when lens glare or haze is detected. Never
+   * gates anything.
+   */
+  lensCheck: boolean;
 
   set: <K extends keyof SettingsState>(key: K, value: SettingsState[K]) => void;
   /**
@@ -321,9 +428,11 @@ export interface SettingsState {
   setDeviceTier: (override: 'auto' | DeviceTier) => void;
   /** Mark one screen's walkthrough as seen (called on finish/skip). */
   markTutorialSeen: (screen: TutorialScreen) => void;
+  /** Mark one contextual hint as seen (called by HintChip on dismiss/action). */
+  markHintSeen: (key: HintKey) => void;
   /**
-   * Clear all tutorial-seen flags so every walkthrough re-triggers.
-   * onboardingDone is left untouched — only the in-app coach marks reset.
+   * Clear the coach marks, contextual hints and the first-ball receipt tour
+   * so every walkthrough re-triggers. onboardingDone is left untouched.
    * Exposed for Settings > "Restart tutorial".
    */
   resetTutorial: () => void;
@@ -361,15 +470,31 @@ export const useSettings = create<SettingsState>()(
       nanoV2: false,
       courtRange: 'auto',
       reappearance: true,
+      rattleGuard: true,
+      settleWindow: true,
       useFlightArc: true,
       motionAssist: false,
       deviceTierOverride: 'auto',
       detectedTier: null,
       deviceTuned: false,
       lastOrient: 'portrait',
+      lastDurationSec: 60,
+      lastMakesPerSpot: 5,
       formAnalysis: false,
       tutorialSeen: TUTORIAL_SEEN_DEFAULT,
       dailyGoalMakes: 0,
+      lastCourtCalSummary: null,
+      lastFtCalSummary: null,
+      calGuideSeen: false,
+      receiptTourSeen: false,
+      hintSeen: { ...HINT_SEEN_DEFAULT },
+      detectionExplainerSeen: false,
+      replay3d: true,
+      multiBallGuard: true,
+      rimGuard: true,
+      trackerRescue: true,
+      adaptiveThermal: true,
+      lensCheck: true,
       set: (key, value) => set({ [key]: value } as Pick<SettingsState, typeof key>),
       // Picking a tracking preset is an explicit knob choice, so hand the tier
       // control back to 'auto' — otherwise the "Your device" row would keep
@@ -408,7 +533,13 @@ export const useSettings = create<SettingsState>()(
         }),
       markTutorialSeen: (screen) =>
         set((s) => ({ tutorialSeen: { ...s.tutorialSeen, [screen]: true } })),
-      resetTutorial: () => set({ tutorialSeen: { ...TUTORIAL_SEEN_DEFAULT } }),
+      markHintSeen: (key) => set((s) => ({ hintSeen: { ...s.hintSeen, [key]: true } })),
+      resetTutorial: () =>
+        set({
+          tutorialSeen: { ...TUTORIAL_SEEN_DEFAULT },
+          hintSeen: { ...HINT_SEEN_DEFAULT },
+          receiptTourSeen: false,
+        }),
     }),
     {
       name: 'hoopai-settings',
@@ -420,7 +551,7 @@ export const useSettings = create<SettingsState>()(
       // "from version N" to branch on instead of relying on zustand's default
       // shallow-merge rehydration, which silently keeps stale/renamed keys
       // around forever.
-      version: 5,
+      version: 9,
       migrate: (persisted, version) => {
         const s = persisted as SettingsState;
         // v2: YOLOX (Apache-2.0, GPU-correct) becomes the default detector. Move
@@ -455,6 +586,49 @@ export const useSettings = create<SettingsState>()(
         // make). Turn it on for existing installs too — it's a strict detection
         // improvement, and the Settings toggle lets anyone opt out.
         if (version < 5 && s.useFlightArc == null) s.useFlightArc = true;
+        // v6 (mega-upgrade — bumped exactly ONCE for every sibling feature):
+        // 3D replay viewer added, default ON (visual-only; the persisted
+        // arc/skeleton data exists either way). The other keys landing at v6
+        // (calibration receipts, one-shot tour flags, detection guards) are
+        // plain additive keys whose creator defaults merge cleanly on
+        // rehydrate, so replay3d is the only backfill this version needs.
+        if (version < 6 && s.replay3d == null) s.replay3d = true;
+        // v7 (round-2 mega-upgrade — bumped exactly ONCE for every sibling
+        // feature landing together):
+        // - tutorials/form3d: 'liveHud' + 'formstudio3d' walkthroughs added.
+        //   tutorialSeen is a NESTED record — zustand's shallow rehydrate
+        //   keeps the old persisted object wholesale, so the new keys must be
+        //   backfilled explicitly (unlike top-level additive keys).
+        //   Re-spreading the defaults UNDER the persisted flags preserves
+        //   every seen=true while filling the new screens with false.
+        // - tutorials: contextual-hint ledger + explainer one-shot, backfilled
+        //   so rehydrated stores carry every key (shallow-merge would
+        //   otherwise leave the nested hintSeen undefined forever).
+        // - tracking-gap: trackerRescue defaults ON (detection-side recall
+        //   only; provably inert unless a per-model cold gate raised the
+        //   acquisition floor — it can never touch make/miss judging).
+        // - setup-flow: the pre-flight screen remembers per-user defaults.
+        //   Additive keys — backfill creator defaults so seeded chips never
+        //   read undefined.
+        if (version < 7) {
+          s.tutorialSeen = { ...TUTORIAL_SEEN_DEFAULT, ...(s.tutorialSeen ?? {}) };
+          s.hintSeen = { ...HINT_SEEN_DEFAULT };
+          s.detectionExplainerSeen = false;
+          if (s.trackerRescue == null) s.trackerRescue = true;
+          if (s.lastDurationSec == null) s.lastDurationSec = 60;
+          if (s.lastMakesPerSpot == null) s.lastMakesPerSpot = 5;
+        }
+        // v8: rattle-out make guard added, default ON (bread-ball-safe — it can
+        // only downgrade a make to 'unsure', never fabricate a miss, and never
+        // touches a clean/occluded swish). Turn it on for existing installs too;
+        // the Settings toggle lets anyone opt out.
+        if (version < 8 && s.rattleGuard == null) s.rattleGuard = true;
+        // v9: settle window before scoring a make added, default ON (bread-ball-
+        // safe — make -> 'unsure' only, never a fabricated miss; a clean or net-
+        // swallowed swish never climbs back above the rim so it is untouched).
+        // Enable it for existing installs too; the Settings toggle lets anyone
+        // opt out.
+        if (version < 9 && s.settleWindow == null) s.settleWindow = true;
         return s;
       },
     },

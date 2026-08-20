@@ -5,8 +5,11 @@
  * than hudGlass so the teaching card clearly owns the moment) and shows one
  * card at a time with Next/Skip actions, animated progress dots, and a
  * reduced-motion-aware fade. When a step provides a targetRect, the card is
- * positioned near it and a soft highlight ring is cut into the scrim around
- * that rect; otherwise the card is centered.
+ * positioned near it — below by default, or above via `placement: 'above'`
+ * for bottom-anchored targets — and a soft highlight ring is cut into the
+ * scrim around that rect; otherwise the card is centered. Position math lives
+ * in coachMarkLayout.ts (pure, unit-tested). With `tapToAdvance`, a tap
+ * anywhere on the scrim advances; the buttons stay the accessible path.
  *
  * Skia is not required — plain Views are enough for the highlight ring, kept
  * simple so this mounts cheaply over camera/session screens.
@@ -46,6 +49,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { color, motion, radius, space, touch, type } from '../../constants/tokens';
 import { useSettings, type TutorialScreen } from '../../state/settingsStore';
 import { Row } from '../ui';
+import { cardPosFor, HIGHLIGHT_PAD } from './coachMarkLayout';
 
 /** RN 0.86 dropped StyleSheet.absoluteFillObject — local equivalent. */
 const absoluteFill = {
@@ -61,10 +65,16 @@ export interface CoachStep {
   text: string;
   /** Screen-space rect to highlight; omit to center the card. */
   targetRect?: LayoutRectangle;
+  /**
+   * Where the card sits relative to targetRect. 'below' (default) matches the
+   * original behavior; use 'above' for bottom-anchored targets (e.g. the live
+   * action bar) so the card doesn't cover them. Ignored when targetRect is
+   * omitted (card centers).
+   */
+  placement?: 'below' | 'above';
 }
 
 const CARD_MAX_WIDTH = 360;
-const HIGHLIGHT_PAD = 10;
 
 /** Darker than hudGlass: while teaching, the app behind should clearly recede. */
 const SCRIM_COLOR = 'rgba(10, 9, 9, 0.82)';
@@ -98,12 +108,19 @@ export function CoachMarks({
   steps,
   onFinish,
   onSkip,
+  tapToAdvance = false,
 }: {
   steps: CoachStep[];
   /** Called after the last step's "Got it" is pressed. */
   onFinish: () => void;
   /** Called when the user dismisses early via Skip. Defaults to onFinish. */
   onSkip?: () => void;
+  /**
+   * When true, a tap anywhere on the scrim advances to the next step (and
+   * finishes on the last one). The card's Skip/Next buttons keep priority and
+   * remain the screen-reader path.
+   */
+  tapToAdvance?: boolean;
 }) {
   const insets = useSafeAreaInsets();
   const [index, setIndex] = useState(0);
@@ -121,6 +138,14 @@ export function CoachMarks({
     setIndex((i) => i + 1);
   };
 
+  const cardPos = cardPosFor(
+    step.targetRect,
+    step.placement ?? 'below',
+    Dimensions.get('window').height,
+    insets.top,
+    insets.bottom,
+  );
+
   return (
     <Animated.View
       entering={FadeIn.duration(motion.standard).reduceMotion(ReduceMotion.System)}
@@ -128,22 +153,26 @@ export function CoachMarks({
       style={[styles.scrim, { paddingTop: insets.top, paddingBottom: insets.bottom }]}
       accessibilityViewIsModal
     >
+      {tapToAdvance && (
+        // Full-scrim underlay: rendered BEFORE the card wrapper so the card's
+        // own Skip/Next Pressables win hit-testing; those buttons remain the
+        // screen-reader path.
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Next tip — tap anywhere to continue"
+          onPress={next}
+          style={absoluteFill}
+        />
+      )}
+
       {step.targetRect != null && <Highlight rect={step.targetRect} />}
 
       <View
         style={[
           styles.cardWrap,
-          step.targetRect == null
+          cardPos == null
             ? styles.cardWrapCentered
-            : {
-                position: 'absolute',
-                left: space.lg,
-                right: space.lg,
-                top: Math.min(
-                  Math.max(step.targetRect.y + step.targetRect.height + HIGHLIGHT_PAD + space.lg, insets.top + space.lg),
-                  Dimensions.get('window').height - 260,
-                ),
-              },
+            : { position: 'absolute', left: space.lg, right: space.lg, ...cardPos },
         ]}
       >
         <Animated.View

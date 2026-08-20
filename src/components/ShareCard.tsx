@@ -891,6 +891,54 @@ export async function shareWeekCard(week: Parameters<typeof weekCardData>[0]): P
 }
 
 /**
+ * "Coach report" card data — Coach's Corner's weekly read as a story card.
+ * WSS is the hero; the second chip row carries either the top FIX finding
+ * (miss-toned) or the next-week FOCUS (accent-toned). Lives here because
+ * shareCardImage is module-private.
+ */
+export function coachCardData(r: {
+  label: string;
+  wss: number;
+  fgPct: number | null;
+  makes: number;
+  attempts: number;
+  sessions: number;
+  topFinding: string | null;
+  focus: string;
+}): ShareCardData {
+  const clip = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
+  const pct = r.fgPct != null ? Math.round(r.fgPct * 100) : 0;
+  const chips: ChipSpec[][] = [
+    [
+      { text: `${pct}% FG (${r.makes}/${r.attempts})`, bg: color.makeTint, fg: color.make },
+      {
+        text: `${r.sessions} ${r.sessions === 1 ? 'SESSION' : 'SESSIONS'}`,
+        bg: color.surfaceRaised,
+        fg: color.textDim,
+      },
+    ],
+    r.topFinding != null
+      ? [{ text: clip('FIX: ' + r.topFinding.toUpperCase(), 34), bg: color.missTint, fg: color.miss }]
+      : [{ text: clip('FOCUS: ' + r.focus.toUpperCase(), 34), bg: color.accentTint, fg: color.accent }],
+  ];
+  return {
+    eyebrow: 'COACH REPORT',
+    title: r.label,
+    dateLabel: "COACH'S CORNER",
+    hero: String(r.wss),
+    heroLabel: 'WEEK SHOOTING SCORE',
+    pips: [],
+    chips,
+  };
+}
+
+/** Share the coach-report story card. Never throws. */
+export async function shareCoachCard(r: Parameters<typeof coachCardData>[0]): Promise<boolean> {
+  const fallback = `🏀 Coach's read on my week: WSS ${r.wss}, ${r.makes}/${r.attempts} makes. Next: ${r.focus} — Hoopilot.`;
+  return shareCardImage(coachCardData(r), fallback);
+}
+
+/**
  * One-call session share: build the card from stats/shots and share it.
  * Never throws; resolves false when even the text fallback failed.
  */

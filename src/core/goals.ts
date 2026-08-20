@@ -18,6 +18,8 @@ export interface GoalSummaryRow {
   /** Epoch ms. */
   startedAt: number;
   makes?: number | null;
+  /** Session row id — lets {@link goalBaselineMakes} exclude the in-progress session. */
+  id?: number;
 }
 
 /**
@@ -49,6 +51,31 @@ export function todayMakes(
     }
   }
   return total;
+}
+
+/**
+ * {@link todayMakes} minus the in-progress session's already-persisted rows.
+ *
+ * WHY the exclusion is load-bearing: the live GoalChip shows
+ * `baseline + live store makes`. The in-progress session persists each shot as
+ * it resolves, so its DB summary row already contains those makes. GoalChip
+ * mounts under `rimLocked`, which flips false→true again on a re-aim — on that
+ * remount a fresh DB fetch would count the current session's makes twice (once
+ * in the baseline, once in live `stats.makes`) unless its row is excluded here.
+ *
+ * `excludeSessionId == null` (session not persisted, or caller doesn't care)
+ * degrades to plain {@link todayMakes}. Rows without an `id` are never
+ * excluded. Pure, deterministic, no I/O — time comes from `nowMs` only.
+ */
+export function goalBaselineMakes(
+  summaries: readonly GoalSummaryRow[],
+  nowMs: number,
+  excludeSessionId?: number,
+): number {
+  const rows = excludeSessionId == null
+    ? summaries
+    : summaries.filter((r) => r.id !== excludeSessionId);
+  return todayMakes(rows, nowMs);
 }
 
 /**

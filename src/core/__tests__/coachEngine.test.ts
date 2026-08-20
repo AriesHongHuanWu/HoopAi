@@ -396,3 +396,114 @@ describe('ruleThreePtFlat', () => {
     expect(findingById(runCoach([session(1, T0, shots)]), 'threePtFlat')).toBeUndefined();
   });
 });
+
+describe('ruleColdZone', () => {
+  // Cold cell: shotValue 3 + a right-side origin → right/far. Warm filler:
+  // shotValue 2 + center origin → center/mid.
+  function coldWindow(opts: {
+    coldMakes: number;
+    coldMisses: number;
+    warmMakes: number;
+    warmMisses: number;
+    coldOriginX?: number;
+  }): CoachSession {
+    const shots: ResolvedShot[] = [];
+    const cx = opts.coldOriginX ?? 0.85;
+    for (let i = 0; i < opts.coldMakes; i++) shots.push(shot({ outcome: 'make', value: 3, originX: cx }));
+    for (let i = 0; i < opts.coldMisses; i++) shots.push(shot({ outcome: 'miss', value: 3, originX: cx }));
+    for (let i = 0; i < opts.warmMakes; i++) shots.push(shot({ outcome: 'make', value: 2, originX: 0.5 }));
+    for (let i = 0; i < opts.warmMisses; i++) shots.push(shot({ outcome: 'miss', value: 2, originX: 0.5 }));
+    return session(1, T0, shots);
+  }
+
+  test('fires on a cold right corner three and prescribes corners3', () => {
+    // Right/far 2/8 = 25%; center/mid 12/20 = 60%; window 14/28 = 50%. Gap 25.
+    const f = findingById(
+      runCoach([coldWindow({ coldMakes: 2, coldMisses: 6, warmMakes: 12, warmMisses: 8 })]),
+      'coldZone',
+    );
+    expect(f).toBeDefined();
+    expect(f!.severity).toBe(2);
+    expect(f!.drillId).toBe('corners3');
+    expect(f!.title).toContain('right corner three');
+    expect(f!.evidence).toContain('2/8');
+    expect(f!.evidence).toContain('25%');
+  });
+
+  test('a cold top-of-key three prescribes catchShoot10', () => {
+    const f = findingById(
+      runCoach([coldWindow({ coldMakes: 2, coldMisses: 6, warmMakes: 12, warmMisses: 8, coldOriginX: 0.5 })]),
+      'coldZone',
+    );
+    expect(f).toBeDefined();
+    expect(f!.drillId).toBe('catchShoot10');
+    expect(f!.title).toContain('top-of-key three');
+  });
+
+  test('silent when the cold cell has fewer attempts than the gate', () => {
+    // Right/far has only 4 attempts → below coldZoneMinCellAttempts (5); the
+    // only rankable cell (center/mid, 60%) sits ABOVE the window FG%.
+    const f = findingById(
+      runCoach([coldWindow({ coldMakes: 1, coldMisses: 3, warmMakes: 12, warmMisses: 8 })]),
+      'coldZone',
+    );
+    expect(f).toBeUndefined();
+  });
+
+  test('silent when the gap is under the threshold', () => {
+    // Right/far 4/8 = 50%; center/mid 13/20 = 65%; window 17/28 ≈ 61%. Gap ~11.
+    const f = findingById(
+      runCoach([coldWindow({ coldMakes: 4, coldMisses: 4, warmMakes: 13, warmMisses: 7 })]),
+      'coldZone',
+    );
+    expect(f).toBeUndefined();
+  });
+
+  test('shots lacking both distance and shotValue never place', () => {
+    // originX only — no band → every shot lands in `unplaced`, no worst cell.
+    const shots: ResolvedShot[] = [];
+    for (let i = 0; i < 6; i++) shots.push(shot({ outcome: 'make', originX: 0.85 }));
+    for (let i = 0; i < 6; i++) shots.push(shot({ outcome: 'miss', originX: 0.85 }));
+    expect(findingById(runCoach([session(1, T0, shots)]), 'coldZone')).toBeUndefined();
+  });
+});
+
+describe('ruleFormRegression', () => {
+  // n decided shots whose only pose metric is the set-point elbow angle.
+  function poseSession(id: number, at: number, n: number, elbow: number): CoachSession {
+    const shots: ResolvedShot[] = [];
+    for (let i = 0; i < n; i++) {
+      shots.push(
+        shot({ outcome: i % 2 === 0 ? 'make' : 'miss', metrics: { setPointElbowDeg: elbow } }),
+      );
+    }
+    return session(id, at, shots);
+  }
+
+  test('fires when the recent half drifts out of the elbow band', () => {
+    // Older half mean 84° (inside 75–90, dev 0); recent 98° (dev 8 > deadband 6).
+    const older = poseSession(1, T0, 6, 84);
+    const recent = poseSession(2, T0 + DAY, 6, 98);
+    const f = findingById(runCoach([older, recent]), 'formRegression');
+    expect(f).toBeDefined();
+    expect(f!.severity).toBe(2);
+    expect(f!.trend).toBe('worsening');
+    expect(f!.title).toContain('set-point elbow');
+    // Evidence names both means with units.
+    expect(f!.evidence).toContain('84°');
+    expect(f!.evidence).toContain('98°');
+  });
+
+  test('silent below the min samples per half', () => {
+    const older = poseSession(1, T0, 5, 84);
+    const recent = poseSession(2, T0 + DAY, 5, 98);
+    expect(findingById(runCoach([older, recent]), 'formRegression')).toBeUndefined();
+  });
+
+  test('silent when both halves sit equally out of band', () => {
+    // dev 8° in both halves → deviation delta 0, no regression.
+    const older = poseSession(1, T0, 6, 98);
+    const recent = poseSession(2, T0 + DAY, 6, 98);
+    expect(findingById(runCoach([older, recent]), 'formRegression')).toBeUndefined();
+  });
+});

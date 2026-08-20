@@ -15,6 +15,7 @@
 import { create } from 'zustand';
 
 import { initDrillMode, type DrillId } from '../core/drills';
+import { initDrillModeAtLevel, type DrillLevel } from '../core/drillProgression';
 import {
   initMode,
   shiftModeClock,
@@ -35,9 +36,10 @@ export interface ModeStoreState {
    * Start a fresh structured drill (src/core/drills.ts). A drill runs AS the
    * `spotShooting` mode with its progression on `config.drill`, so it flows
    * through the same banner/complete/history surfaces. Replaces any running
-   * mode.
+   * mode. `level` (default 1) scales the drill's make goals via the coach's
+   * drill progression; omitting it keeps the original catalog behavior.
    */
-  selectDrill: (id: DrillId) => void;
+  selectDrill: (id: DrillId, level?: DrillLevel) => void;
   /**
    * Fold a resolved shot into the active mode. No-op when no mode is active or
    * the game is already done. `nowSec` should be the shot's resolve time
@@ -70,8 +72,8 @@ export const useMode = create<ModeStoreState>((set, get) => ({
     set({ activeMode: initMode(id, opts) });
   },
 
-  selectDrill: (id) => {
-    set({ activeMode: initDrillMode(id) });
+  selectDrill: (id, level) => {
+    set({ activeMode: level != null && level > 1 ? initDrillModeAtLevel(id, level) : initDrillMode(id) });
   },
 
   applyShot: (shot, nowSec) => {

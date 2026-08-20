@@ -30,7 +30,7 @@ import { FadeInDown, useReducedMotion } from 'react-native-reanimated';
 
 import { BackPill } from '@/components/ShotList';
 import { FormMotionStage, type StagePhase } from '@/components/charts/FormMotionStage';
-import { Card, Chip, EmptyState, Row, Screen } from '@/components/ui';
+import { Card, Chip, EmptyState, PillButton, Row, Screen } from '@/components/ui';
 import { color, font, radius, space, type } from '@/constants/tokens';
 import { sessionShots, shotFromRow } from '@/data/db';
 import { decodeSequence, type DecodedFrame } from '@/core/formSequence';
@@ -78,6 +78,7 @@ export default function FormStudioScreen() {
   const { sid } = useLocalSearchParams<{ sid?: string }>();
   const { width } = useWindowDimensions();
   const hand = useSettings((s) => s.shootingHand);
+  const replay3d = useSettings((s) => s.replay3d);
   const reducedMotion = useReducedMotion();
 
   // Live-session shots (used when no sid param).
@@ -363,6 +364,23 @@ export default function FormStudioScreen() {
                   size-normalized so only the FORM differs. Depth is illustrated with limb
                   layering and shadow — this is a 2D motion comparison, not a 3D capture.
                 </Text>
+                {/* shot.id is the SESSION-LOCAL shotIndex — formstudio3d resolves it
+                    against the same session (sid param or the live session). Hidden
+                    when 3D replay is off (Settings › Video) — matching this screen's
+                    conditional-render style; formstudio3d gates deep links itself. */}
+                {replay3d && (
+                  <PillButton
+                    label="VIEW IN 3D"
+                    variant="ghost"
+                    icon="cube-outline"
+                    onPress={() =>
+                      router.push({
+                        pathname: '/formstudio3d',
+                        params: { ...(sid ? { sid } : {}), shot: String(selected.shot.id) },
+                      })
+                    }
+                  />
+                )}
               </Card>
             )}
 

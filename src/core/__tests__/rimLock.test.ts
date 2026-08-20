@@ -413,6 +413,127 @@ describe('RimLock oversized-box admission gate', () => {
   });
 });
 
+describe('RimLock bump-settle boost', () => {
+  const diag = Math.hypot(rimBox.width, rimBox.height); // ≈ 44.72
+  // 0.3·diag ≈ 13.4 px bump: INSIDE the accept zone (maxDriftDiagFactor 0.5 ·
+  // diag ≈ 22.4 px), so every observation is ACCEPTED and drift never fires —
+  // only the damping speed is in play.
+  const bumped: Box = { ...rimBox, x: rimBox.x + 0.3 * diag };
+  const bumpedCx = bumped.x + bumped.width / 2;
+
+  test('settle boost converges after a small bump', () => {
+    const lock = new RimLock();
+    feed(lock, rimBox, 5); // lock at cx=120
+    let g = lock.geometry;
+    for (let i = 0; i < 6; i++) {
+      g = lock.step(frame((5 + i) / FPS, [rimDet(bumped)]), (5 + i) / FPS);
+    }
+    // Re-centered within 0.05·diag (≈ 2.2 px) by observation 6. Plain
+    // lockAlpha would still be ≈ 9.9 px off here (see the control below).
+    expect(Math.abs(g!.cx - bumpedCx)).toBeLessThan(0.05 * diag);
+    expect(lock.driftDetected).toBe(false);
+  });
+
+  test('control: setBumpSettle(false) keeps the slow lockAlpha convergence', () => {
+    const lock = new RimLock();
+    lock.setBumpSettle(false);
+    feed(lock, rimBox, 5);
+    let g = lock.geometry;
+    for (let i = 0; i < 6; i++) {
+      g = lock.step(frame((5 + i) / FPS, [rimDet(bumped)]), (5 + i) / FPS);
+    }
+    // 13.4 · 0.95^6 ≈ 9.9 px — still well off after 6 accepted frames.
+    expect(Math.abs(g!.cx - bumpedCx)).toBeGreaterThan(0.15 * diag);
+  });
+
+  test('boost disengages after convergence: back to the slow alpha', () => {
+    const lock = new RimLock();
+    feed(lock, rimBox, 5);
+    // Converge on the bumped position and let the offset EMA decay below the
+    // exit threshold (hysteresis) so the boost is disengaged again.
+    for (let i = 0; i < 20; i++) {
+      lock.step(frame((5 + i) / FPS, [rimDet(bumped)]), (5 + i) / FPS);
+    }
+    const cxBefore = lock.geometry!.cx;
+    // A small one-frame jitter must now move the lock by ≈ lockAlpha·dx
+    // (~0.05·dx), not SETTLE_ALPHA·dx (0.35·dx).
+    const jitter: Box = { ...bumped, x: bumped.x + 4 };
+    const g = lock.step(frame(25 / FPS, [rimDet(jitter)]), 25 / FPS);
+    const dx = jitter.x + jitter.width / 2 - cxBefore;
+    const moved = Math.abs(g!.cx - cxBefore);
+    expect(moved).toBeLessThan(0.1 * Math.abs(dx)); // slow again
+    expect(moved).toBeGreaterThan(0.02 * Math.abs(dx)); // ...but not frozen
+  });
+
+  test('symmetric jitter never engages the boost (EMA cancels)', () => {
+    const lock = new RimLock();
+    feed(lock, rimBox, 5);
+    // Same ±4 px alternation as the damping suite: the offset EMA oscillates
+    // near zero, so damping must stay at lockAlpha throughout.
+    let prevCx = lock.geometry!.cx;
+    let maxStep = 0;
+    for (let i = 0; i < 30; i++) {
+      const jittered: Box = { ...rimBox, x: rimBox.x + (i % 2 === 0 ? 4 : -4) };
+      const g = lock.step(frame((5 + i) / FPS, [rimDet(jittered)]), (5 + i) / FPS);
+      maxStep = Math.max(maxStep, Math.abs(g!.cx - prevCx));
+      prevCx = g!.cx;
+    }
+    // A boosted frame would step ≈ 0.35 · 8 = 2.8 px; lockAlpha steps ≈ 0.4 px.
+    expect(maxStep).toBeLessThan(RIM.lockAlpha * 8 * 1.5);
+  });
+});
+
+describe('RimLock lockGeneration', () => {
+  // Moderate displacement (same recipe as the drift suite): past the reject
+  // threshold, under the large-jump threshold → slow 5-reject drift path.
+  const movedBox: Box = { x: 160, y: 50, width: 40, height: 20 };
+
+  test('0 before lock, 1 after first lock, stable across EMA accepts', () => {
+    const lock = new RimLock();
+    expect(lock.lockGeneration).toBe(0);
+    feed(lock, rimBox, 5);
+    expect(lock.lockGeneration).toBe(1);
+    // 20 ordinary accepted EMA frames never bump the generation.
+    feed(lock, rimBox, 20, 5);
+    expect(lock.lockGeneration).toBe(1);
+  });
+
+  test('increments once on a drift + re-lock sequence', () => {
+    const lock = new RimLock();
+    feed(lock, rimBox, 5);
+    expect(lock.lockGeneration).toBe(1);
+    // 5 slow rejects flag drift, then a consistent cluster at the new spot
+    // re-locks there — the generation must move so in-place-mutation
+    // consumers (fsm.setRim, worklet ROI sync) can see the re-lock.
+    let g = null;
+    for (let i = 0; i < 9; i++) {
+      g = lock.step(frame((5 + i) / FPS, [rimDet(movedBox)]), (5 + i) / FPS);
+    }
+    expect(g!.cx).toBe(180); // re-locked at the new spot...
+    expect(lock.driftDetected).toBe(false);
+    expect(lock.lockGeneration).toBe(2); // ...and the generation moved once
+  });
+
+  test('increments on setManual', () => {
+    const lock = new RimLock();
+    feed(lock, rimBox, 5);
+    expect(lock.lockGeneration).toBe(1);
+    lock.setManual({ x: 200, y: 100, width: 50, height: 25 });
+    expect(lock.lockGeneration).toBe(2);
+  });
+
+  test('survives reset (monotonic), then increments on the next lock', () => {
+    const lock = new RimLock();
+    feed(lock, rimBox, 5);
+    lock.reset();
+    // Monotonic across resets so a consumer comparing a cached generation can
+    // never miss a re-lock that follows a session reset.
+    expect(lock.lockGeneration).toBe(1);
+    feed(lock, rimBox, 3, 40);
+    expect(lock.lockGeneration).toBe(2);
+  });
+});
+
 describe('RimLock — pre-lock hold countdown', () => {
   const step = (lock: RimLock, box: Box, t: number) =>
     lock.step(frame(t, [rimDet(box)]), t);

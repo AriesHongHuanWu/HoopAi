@@ -74,7 +74,7 @@ jest.mock(
   { virtual: true },
 );
 
-import { BallTracker } from '../ballTracker';
+import { BallTracker, distToSegment } from '../ballTracker';
 import { DETECTION, RELEASE, TRACKER } from '../config';
 import type { Box, Detection, FrameDetections } from '../types';
 
@@ -232,6 +232,96 @@ describe('BallTracker', () => {
     expect(
       tracker.step(frameAt(0, [ballDet(200, 200, { score })]), null, corridor),
     ).toBeNull();
+  });
+
+  describe('corridor capsule (segment between successive corridor points)', () => {
+    // In the tracking band (>= 0.12) but under cold acquisition (0.2): the
+    // faint fast-flight band the capsule exists to keep alive at low fps.
+    const faintScore =
+      (DETECTION.ballScoreMinTracking + DETECTION.ballScoreMin) / 2; // 0.16
+    const corridorA = { p: { x: 100, y: 300 }, tubeR: 40 };
+    const corridorB = { p: { x: 300, y: 300 }, tubeR: 40 };
+
+    test('distToSegment: interior projection, endpoint clamp, degenerate segment', () => {
+      expect(distToSegment(200, 310, 100, 300, 300, 300)).toBeCloseTo(10);
+      // Beyond endpoint A: clamps to the endpoint, not the infinite line.
+      expect(distToSegment(50, 300, 100, 300, 300, 300)).toBeCloseTo(50);
+      // Degenerate (zero-length) segment = plain point distance.
+      expect(distToSegment(0, 0, 3, 4, 3, 4)).toBeCloseTo(5);
+    });
+
+    test('capsule accepts between corridor points', () => {
+      const tracker = new BallTracker({});
+      // Prime last frame's corridor point A, then step frame B 1/8 s later
+      // (within the 0.35 s capsule gap). The candidate at (200,310) sits 10 px
+      // off segment A-B but ~100 px from EITHER point — the per-frame point
+      // test alone would reject it (100 > tubeR 40).
+      tracker.step(frameAt(0, []), null, corridorA);
+      const out = tracker.step(
+        frameAt(1 / 8, [ballDet(200, 310, { score: faintScore })]),
+        null,
+        corridorB,
+      );
+      expect(out).not.toBeNull();
+      expect(out!.predicted).toBe(false);
+      expect(out!.cx).toBeCloseTo(200);
+      expect(out!.cy).toBeCloseTo(310);
+    });
+
+    test('capsule inert when stale (corridor points too far apart in time)', () => {
+      const tracker = new BallTracker({});
+      // Same geometry but 0.5 s between corridor frames (> 0.35 s gap): the
+      // capsule must NOT bridge — back to the point test, which rejects.
+      tracker.step(frameAt(0, []), null, corridorA);
+      expect(
+        tracker.step(
+          frameAt(0.5, [ballDet(200, 310, { score: faintScore })]),
+          null,
+          corridorB,
+        ),
+      ).toBeNull();
+    });
+
+    test('capsule inert without a current corridor (cold gate applies)', () => {
+      const tracker = new BallTracker({});
+      // A last corridor point alone opens nothing: with corridor=null this
+      // frame the faint candidate faces the full cold-acquisition gate.
+      tracker.step(frameAt(0, []), null, corridorA);
+      expect(
+        tracker.step(
+          frameAt(1 / 8, [ballDet(200, 310, { score: faintScore })]),
+          null,
+          null,
+        ),
+      ).toBeNull();
+    });
+  });
+
+  test('gravity-aware projection: the gravity-corrected candidate wins the weighting', () => {
+    const g = 900;
+    const tracker = new BallTracker({ gravityPxPerSec2: g });
+    // Two accepts giving vy ≈ +400 px/s (descending, +y down) at t1.
+    const y1 = 100 + 400 * DT;
+    tracker.step(frameAt(0, [ballDet(300, 100)]), null);
+    tracker.step(frameAt(DT, [ballDet(300, y1)]), null);
+
+    // After a 0.15 s detection gap (still inside jumpWindowSec so the track is
+    // fresh), offer the constant-velocity position vs the gravity-corrected
+    // one (+0.5·g·0.15² ≈ +10 px lower) at EQUAL scores: the inverse-distance
+    // weighting must pick the physically correct (gravity) position.
+    const gap = 0.15;
+    const cvY = y1 + 400 * gap;
+    const gravY = cvY + 0.5 * g * gap * gap;
+    const out = tracker.step(
+      frameAt(DT + gap, [
+        ballDet(300, cvY, { score: 0.5 }),
+        ballDet(300, gravY, { score: 0.5 }),
+      ]),
+      null,
+    );
+    expect(out).not.toBeNull();
+    expect(out!.predicted).toBe(false);
+    expect(out!.cy).toBeCloseTo(gravY, 3);
   });
 
   test('tracks a clean projectile arc (y down: rising ball has vy < 0)', () => {
@@ -687,5 +777,139 @@ describe('BallTracker', () => {
     for (let i = 1; i < history.length; i++) {
       expect(history[i].t).toBeGreaterThan(history[i - 1].t);
     }
+  });
+
+  describe('session ball size cap (setSessionBallSizeCap, shrink-only)', () => {
+    // 0.15 of the 640 frame: comfortably under the config cap (0.22) but over
+    // a 0.10 session cap. Round box, high score — only size gates it.
+    const box015 = ballDet(320, 320, { score: 0.9, w: 96, h: 96 });
+
+    test('a 0.15-fraction box is accepted by default but rejected after a 0.10 cap', () => {
+      const dflt = new BallTracker({});
+      const ok = dflt.step(frameAt(0, [box015]), null);
+      expect(ok).not.toBeNull();
+      expect(ok!.predicted).toBe(false);
+
+      const capped = new BallTracker({});
+      capped.setSessionBallSizeCap(0.1);
+      expect(capped.step(frameAt(0, [box015]), null)).toBeNull();
+      expect(capped.getHistory()).toHaveLength(0);
+      const stats = capped.lastStepStats();
+      expect(stats.rejSize).toBe(1);
+      expect(stats.lastReject).toBe('size');
+    });
+
+    test('a loosening cap (0.5) clamps to the config default — behavior identical', () => {
+      const capped = new BallTracker({});
+      capped.setSessionBallSizeCap(0.5);
+      // Under the config cap: still accepted.
+      expect(capped.step(frameAt(0, [box015]), null)).not.toBeNull();
+      // Over the config cap (0.23 > 0.22): still rejected — the session cap
+      // can never LOOSEN the gate.
+      const over = ballDet(320, 320, {
+        score: 0.9,
+        w: 640 * (DETECTION.ballMaxSizeFraction + 0.01),
+        h: 640 * (DETECTION.ballMaxSizeFraction + 0.01),
+      });
+      const fresh = new BallTracker({});
+      fresh.setSessionBallSizeCap(0.5);
+      expect(fresh.step(frameAt(0, [over]), null)).toBeNull();
+    });
+
+    test('null restores the config default', () => {
+      const tracker = new BallTracker({});
+      tracker.setSessionBallSizeCap(0.1);
+      expect(tracker.step(frameAt(0, [box015]), null)).toBeNull();
+      tracker.setSessionBallSizeCap(null);
+      expect(tracker.step(frameAt(DT, [box015]), null)).not.toBeNull();
+    });
+
+    test('non-finite or non-positive input is treated as null (default cap)', () => {
+      for (const junk of [Number.NaN, Number.POSITIVE_INFINITY, 0, -1]) {
+        const tracker = new BallTracker({});
+        tracker.setSessionBallSizeCap(junk);
+        expect(tracker.step(frameAt(0, [box015]), null)).not.toBeNull();
+      }
+    });
+
+    test('score floors, aspect gate, and jump gate are unchanged by the cap', () => {
+      // Score floor: a low-score small ball still fails cold acquisition.
+      const scoreT = new BallTracker({});
+      scoreT.setSessionBallSizeCap(0.1);
+      expect(
+        scoreT.step(
+          frameAt(0, [ballDet(200, 200, { score: DETECTION.ballScoreMin - 0.05 })]),
+          null,
+        ),
+      ).toBeNull();
+      expect(scoreT.lastStepStats().lastReject).toBe('score');
+
+      // Aspect gate: a slow tall-skinny box still falls back to prediction.
+      const aspectT = new BallTracker({});
+      aspectT.setSessionBallSizeCap(0.1);
+      for (let i = 0; i < 3; i++) {
+        aspectT.step(frameAt(i * DT, [ballDet(200 + i, 200)]), null);
+      }
+      const tall = ballDet(203, 200, { w: 20, h: 60, score: 0.9 });
+      const aspectOut = aspectT.step(frameAt(3 * DT, [tall]), null);
+      expect(aspectOut).not.toBeNull();
+      expect(aspectOut!.predicted).toBe(true);
+      expect(aspectT.lastStepStats().lastReject).toBe('aspect');
+
+      // Jump gate: a teleporting box is still rejected inside the window.
+      const jumpT = new BallTracker({});
+      jumpT.setSessionBallSizeCap(0.1);
+      warmUp(jumpT, 3, 100, 100);
+      const jumpOut = jumpT.step(
+        frameAt(3 * DT, [ballDet(400, 400, { score: 0.95 })]),
+        null,
+      );
+      expect(jumpOut).not.toBeNull();
+      expect(jumpOut!.predicted).toBe(true);
+      expect(jumpT.lastStepStats().lastReject).toBe('jump');
+
+      // Dark-profile floor still applies with a cap set.
+      const darkT = new BallTracker({});
+      darkT.setSessionBallSizeCap(0.1);
+      darkT.setLightProfile('dark');
+      expect(
+        darkT.step(
+          frameAt(0, [ballDet(200, 200, { score: DETECTION.ballScoreMinDark + 0.01 })]),
+          null,
+        ),
+      ).not.toBeNull();
+    });
+  });
+
+  describe('acquisition telemetry on the existing fixtures (regression + stats)', () => {
+    test('a clean cold accept reports accepted/cold with zero rejects', () => {
+      const tracker = new BallTracker({});
+      const out = tracker.step(frameAt(0, [ballDet(100, 100)]), null);
+      expect(out).not.toBeNull();
+      const stats = tracker.lastStepStats();
+      expect(stats).toEqual({
+        ballDets: 1,
+        floor: DETECTION.ballScoreMin,
+        gate: 'cold',
+        rejScore: 0,
+        rejSize: 0,
+        rejAspect: 0,
+        rejJump: 0,
+        lastReject: null,
+        accepted: true,
+        rescued: false,
+      });
+    });
+
+    test('an empty frame reports an inert stats object (floor still active)', () => {
+      const tracker = new BallTracker({});
+      tracker.step(frameAt(0, []), null);
+      const stats = tracker.lastStepStats();
+      expect(stats.ballDets).toBe(0);
+      expect(stats.accepted).toBe(false);
+      expect(stats.gate).toBe('none');
+      expect(stats.lastReject).toBeNull();
+      expect(stats.floor).toBeCloseTo(DETECTION.ballScoreMin);
+    });
   });
 });

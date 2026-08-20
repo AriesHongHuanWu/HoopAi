@@ -22,7 +22,6 @@ import {
 } from 'react-native';
 import Animated, {
   Easing,
-  FadeInDown,
   useDerivedValue,
   useReducedMotion,
   useSharedValue,
@@ -31,6 +30,7 @@ import Animated, {
 } from 'react-native-reanimated';
 
 import { BootIntro, bootIntroDelayMs } from '@/components/BootIntro';
+import { useCardStagger } from '@/components/motion';
 import { Sparkline } from '@/components/charts/Sparkline';
 import { CoachMarks, useCoachMarks, type CoachStep } from '@/components/coach/CoachMarks';
 import { GoalRing } from '@/components/GoalRing';
@@ -155,7 +155,10 @@ export default function HomeScreen() {
   // Captured once per mount: on a cold start the cards wait for the boot
   // intro's cover to lift, on every later mount they rise immediately.
   const [introDelay] = useState(() => bootIntroDelayMs(reducedMotion));
-  const enter = (i: number) => FadeInDown.duration(420).delay(introDelay + i * 70);
+  // Canonical stagger hook: adds the reduced-motion gate the old hand-rolled
+  // helper was missing (returns undefined per index under reduced motion).
+  // introDelay stays reactive — the hook re-memoizes when baseDelayMs changes.
+  const enter = useCardStagger({ baseDelayMs: introDelay, stepMs: 70, durationMs: 420 });
 
   // undefined = loading, null = no sessions yet.
   const [lastSession, setLastSession] = useState<SessionSummaryRow | null | undefined>(undefined);

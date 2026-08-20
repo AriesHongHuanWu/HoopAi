@@ -1,0 +1,12 @@
+{
+  "arch": "yolox_nano",
+  "classes": ["ball", "rim", "ball_in_basket", "person"],
+  "num_classes": 4,
+  "input": "416/640 NHWC RGB 0..1 (*255 folded), folded decode -> [1,N,9]",
+  "trained_on": "Lightning.ai L4; 35 Roboflow datasets + user basketball.coco.zip (1232) + AI-cleaned 721-frame set (585 good), local sources oversampled 4x",
+  "recipe": "nano @416 single-scale, finetune from COCO yolox_nano.pth, ~13/25 epochs (credits exhausted, best-ckpt promoted)",
+  "val_metrics": {"AP50_all": 0.856, "ball_AP": 0.570, "rim_AP": 0.693, "ball_in_basket_AP": 0.690, "person_AP": 0.545},
+  "vs_old_offline_721frames_BIASED": {"ball_detRate@0.3": "65%->85%", "ball_meanConf": "0.42->0.69", "ceiling_phantoms": "68->99"},
+  "note": "Offline numbers are on training frames (optimistic). Real validation = on-device on NEW footage. Cold gate kept at DETECTION.ballScoreMin=0.2 for the first device test.",
+  "onnx_vs_tflite_maxerr": {"416": 0.0025, "640": 0.0071}
+}

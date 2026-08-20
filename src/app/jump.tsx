@@ -27,11 +27,10 @@
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import { useKeepAwake } from 'expo-keep-awake';
-import * as Haptics from 'expo-haptics';
 import { NitroModules } from 'react-native-nitro-modules';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Linking, Platform, Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
-import Animated, { FadeIn, FadeInDown, useReducedMotion } from 'react-native-reanimated';
+import Animated, { FadeIn } from 'react-native-reanimated';
 import { useSharedValue } from 'react-native-reanimated';
 import { scheduleOnRN } from 'react-native-worklets';
 import {
@@ -47,8 +46,10 @@ import {
 } from 'react-native-fast-tflite';
 
 import { Sparkline } from '@/components/charts/Sparkline';
+import { CountUp, SuccessBurst, useCardStagger } from '@/components/motion';
 import { Card, Chip, PillButton, Row, Screen } from '@/components/ui';
 import { color, font, radius, space, type } from '@/constants/tokens';
+import { haptic } from '@/utils/haptics';
 import {
   PLYO_PROGRAMS,
   estimateJump,
@@ -228,42 +229,12 @@ function useJumpPose(active: boolean, sink: (s: JumpSample) => void) {
 }
 
 // ---------------------------------------------------------------------------
-// Count-up number (result reveal).
-// ---------------------------------------------------------------------------
-
-function useCountUp(target: number, durationMs: number, run: boolean): number {
-  const [v, setV] = useState(0);
-  const reduced = useReducedMotion();
-  useEffect(() => {
-    if (!run) return;
-    if (reduced || durationMs <= 0) {
-      setV(target);
-      return;
-    }
-    let raf = 0;
-    const start = Date.now();
-    const tick = () => {
-      const p = Math.min(1, (Date.now() - start) / durationMs);
-      // easeOutCubic
-      const eased = 1 - Math.pow(1 - p, 3);
-      setV(target * eased);
-      if (p < 1) raf = requestAnimationFrame(tick);
-      else setV(target);
-    };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, [target, durationMs, run, reduced]);
-  return v;
-}
-
-// ---------------------------------------------------------------------------
 // Screen
 // ---------------------------------------------------------------------------
 
 export default function JumpLabScreen() {
   useKeepAwake();
   const { width } = useWindowDimensions();
-  const reduced = useReducedMotion();
 
   const [phase, setPhase] = useState<MeasurePhase>('idle');
   const [estimate, setEstimate] = useState<JumpEstimate | null>(null);
@@ -290,15 +261,15 @@ export default function JumpLabScreen() {
     void loadHistory();
   }, [loadHistory]);
 
-  const cardEnter = (i: number) =>
-    reduced ? undefined : FadeInDown.delay(i * 70).duration(360);
+  // Canonical card stagger (self-gates under reduced motion → undefined).
+  const cardEnter = useCardStagger({ stepMs: 70 });
 
   // ── Capture lifecycle ──────────────────────────────────────────────────
   const startCapture = useCallback(() => {
     samplesRef.current = [];
     setEstimate(null);
     setPhase('capturing');
-    void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    haptic.impactMedium();
     captureTimer.current = setTimeout(() => {
       setPhase('scoring');
     }, CAPTURE_MS);
@@ -315,9 +286,7 @@ export default function JumpLabScreen() {
     setEstimate(est);
     setPhase('result');
     if (est.method !== 'none') {
-      void Haptics.notificationAsync(
-        Haptics.NotificationFeedbackType.Success,
-      );
+      haptic.success();
       // Persist + refresh history / PB.
       void (async () => {
         const wasPb = est.heightCm > pb;
@@ -624,8 +593,11 @@ function CaptureProgress({ framesSv }: { framesSv: ReturnType<typeof useSharedVa
 // ---------------------------------------------------------------------------
 
 function JumpResult({ estimate, isNewPb }: { estimate: JumpEstimate; isNewPb: boolean }) {
-  const counted = useCountUp(estimate.heightCm, 900, true);
-  const inches = counted / 2.54;
+  // The number rolls on the UI thread (fx/CountUp) — no per-frame re-render.
+  // Re-roll per measurement is guaranteed by mounting: the parent clears
+  // `estimate` on every new capture, so this block remounts for each result;
+  // `trigger` re-rolls too when consecutive results differ.
+  const inches = estimate.heightCm / 2.54;
   const conf = estimate.confidence;
   const confLabel = conf >= 0.75 ? 'High' : conf >= 0.5 ? 'Medium' : 'Low';
   const confTone: React.ComponentProps<typeof Chip>['tone'] =
@@ -640,9 +612,23 @@ function JumpResult({ estimate, isNewPb }: { estimate: JumpEstimate; isNewPb: bo
         </Row>
       )}
       <Row gap={space.sm} style={styles.resultHeroRow}>
-        <Text style={styles.resultHero}>{counted.toFixed(1)}</Text>
+        <CountUp
+          to={estimate.heightCm}
+          durationMs={900}
+          decimals={1}
+          trigger={estimate.heightCm}
+          style={[styles.resultHero, styles.countUpFix]}
+        />
         <Text style={styles.resultUnit}>cm</Text>
-        <Text style={styles.resultInches}>({inches.toFixed(1)}")</Text>
+        <CountUp
+          to={inches}
+          durationMs={900}
+          decimals={1}
+          prefix="("
+          suffix={'")'}
+          trigger={estimate.heightCm}
+          style={[styles.resultInches, styles.countUpFix]}
+        />
       </Row>
       <Row gap={space.sm} style={styles.resultChips}>
         <Chip label={confLabel + ' confidence'} tone={confTone} />
@@ -673,6 +659,12 @@ function JumpResult({ estimate, isNewPb }: { estimate: JumpEstimate; isNewPb: bo
         </View>
       </View>
       {estimate.note.length > 0 && <Text style={styles.resultNote}>{estimate.note}</Text>}
+      {isNewPb && (
+        // One-shot PB celebration over the result block only (inside the hero
+        // card — NEVER the camera overlay). Renders null under reduced motion;
+        // the NEW PERSONAL BEST row above is the static carrier of the meaning.
+        <SuccessBurst trigger={estimate.heightCm} pieces={16} />
+      )}
     </Animated.View>
   );
 }
@@ -917,6 +909,11 @@ const styles = StyleSheet.create({
   resultInches: {
     ...type.body,
     color: color.textFaint,
+  },
+  // CountUp renders through a TextInput; strip Android's extra font padding so
+  // its baseline matches the sibling Texts in the baseline-aligned row.
+  countUpFix: {
+    includeFontPadding: false,
   },
   resultChips: {
     marginTop: space.md,

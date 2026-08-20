@@ -7,6 +7,13 @@
  * Visual-only: everything renders from the SessionStats already loaded by
  * the summary screen — no queries, no store writes. All motion is one-shot
  * and fully disabled under system reduced-motion.
+ *
+ * Count-ups: PTS and FG% roll in via MotionStat (fx/CountUp inside the
+ * StatNumber layout). PRESENTATION ONLY — the numbers are the same
+ * unsure-excluded stats as before, landing on identical final values (and
+ * appearing instantly at those values under reduced motion). The MAKES
+ * column stays a static StatNumber: "12/20" is a compound string a count-up
+ * cannot roll honestly, so we don't fake it.
  */
 import { Ionicons } from '@expo/vector-icons';
 import React, { useEffect, useState } from 'react';
@@ -29,6 +36,7 @@ import Animated, {
   withTiming,
 } from 'react-native-reanimated';
 
+import { MotionStat } from '@/components/motion';
 import { StatNumber } from '@/components/ui';
 import { color, font, motion, radius, space, type } from '@/constants/tokens';
 import type { SessionStats } from '@/core/types';
@@ -166,6 +174,7 @@ export function SummaryHero({
     <View style={style}>
       <View style={styles.strip} accessible accessibilityLabel={a11yLabel}>
         <Animated.View entering={enter(90)} style={styles.col}>
+          {/* Compound "12/20" can't roll honestly — stays static. */}
           <StatNumber
             value={`${stats.makes}/${stats.attempts}`}
             label="makes"
@@ -174,11 +183,25 @@ export function SummaryHero({
         </Animated.View>
         <View style={styles.divider} />
         <Animated.View entering={enter(0)} style={styles.col}>
-          <StatNumber value={fgValue} label="field goals" size="large" />
+          {stats.attempts > 0 ? (
+            <MotionStat
+              value={Math.round(stats.fgPct * 100)}
+              suffix="%"
+              label="field goals"
+              size="large"
+            />
+          ) : (
+            <StatNumber value={fgValue} label="field goals" size="large" />
+          )}
         </Animated.View>
         <View style={styles.divider} />
         <Animated.View entering={enter(160)} style={styles.col}>
-          <StatNumber value={String(stats.points)} label="pts" size="medium" />
+          <MotionStat
+            value={stats.points}
+            label="pts"
+            size="medium"
+            trigger={stats.points}
+          />
         </Animated.View>
       </View>
       {(perfect || heater) && (

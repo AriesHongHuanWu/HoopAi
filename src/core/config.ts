@@ -206,6 +206,25 @@ export const TRACKER = {
    */
   maxSpeedDiametersPerSec: 40,
   /**
+   * Persistence rescue for the raised-cold-gate band (BallTracker's rescue
+   * path, flag-gated by settings.trackerRescue via setRescue). A ball det
+   * scoring in [DETECTION.ballScoreMin, activeColdFloor) may still START a
+   * track when it passes every NON-score gate and reappears coherently:
+   * at least `rescueFrames` sightings within `rescueWindowSec`, each moving
+   * at most `rescueMaxStepDiameters` ball diameters from the previous one,
+   * with net first→last travel of at least `rescueMinTravelDiameters`
+   * diameters (kills static phantoms — lights/rafters/background hoops hold
+   * still, a real ball travels). The band is EMPTY unless a per-model cold
+   * gate raised the floor above ballScoreMin (nano-v2's 0.35 today), so the
+   * feature is provably inert on default models — it bridges the
+   * "debug overlay draws the ball at 0.2 but the tracker demands 0.35"
+   * dead zone without loosening any model's chosen floor outright.
+   */
+  rescueFrames: 3,
+  rescueWindowSec: 0.25,
+  rescueMaxStepDiameters: 3,
+  rescueMinTravelDiameters: 0.75,
+  /**
    * Reject clearly non-round boxes (width * 1.4 < height) — likely a body
    * part or netting — unless the sample is flagged as a motion-blur streak.
    */
@@ -502,6 +521,47 @@ export const SHOT_FSM = {
   useDepthRatioVeto: false,
   useReappearance: false,
   useViewBandRouting: false,
+  /**
+   * Rattle-out make guard. Constructor default FALSE — the conservative
+   * baseline the pinned truth-table tests and the offline recheck replay run
+   * against, so their make/miss calls stay byte-identical. The LIVE app
+   * defaults it ON via settingsStore (the user wants stricter makes), threaded
+   * through adoptRim into the FSM opts exactly like depthVeto/reappearance.
+   *
+   * When ON, a geo+net make with an OBSERVED rim-plane crossing is demoted to
+   * 'unsure' if the ball was SEEN exiting deep below the rim but NOT via a
+   * clean in-span drop through the hoop (geoExitObserved) — the rim-rattle /
+   * front-lip carom-OUT signature that a net brush would otherwise mint as a
+   * phantom make. Bread-ball-safe: it can only turn a make into 'unsure' (never
+   * a fabricated miss), it never touches occluded makes (no observed crossing,
+   * or the ball vanished into the net before a deep sample), and a corroborated
+   * ball_in_basket (cls) is exempt.
+   */
+  useRattleGuard: false,
+  /**
+   * Settle window before the belowRim resolve. Constructor default FALSE — the
+   * pinned truth-table tests and the offline recheck replay run against this
+   * baseline (they pass no opts), so their make/miss calls and timing stay
+   * byte-identical. The LIVE app defaults it ON via settingsStore, threaded
+   * through adoptRim into the FSM opts exactly like useRattleGuard.
+   *
+   * When ON, the FSM does NOT resolve the instant the ball first drops past
+   * belowY; it keeps the shot live for `settleWindowSec`, so a LATE rim
+   * bounce-out (ball dips below the rim, then pops back up over it and out) is
+   * observed rather than frozen on the first below-rim sample. The rattle-out
+   * guard / geoExitObserved then judge the fuller trajectory, and a re-ascent
+   * above the rim plane demotes the would-be make. Bread-ball-safe: make ->
+   * 'unsure' only (never a fabricated miss); a clean or net-swallowed swish
+   * never re-ascends above the plane, so it is untouched.
+   */
+  useSettleWindow: false,
+  /**
+   * Settle window length (seconds) the belowRim resolve is deferred when
+   * useSettleWindow is ON. ~0.13s ≈ 4 frames at NOMINAL_FPS(30); this is the
+   * HARD cap on the extra make latency. A time gate (inputs-only), so the
+   * 30fps boundary is byte-identical via GATE_EPS_SEC — no frame counting.
+   */
+  settleWindowSec: 0.13,
 } as const;
 
 /**

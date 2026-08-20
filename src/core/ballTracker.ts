@@ -18,6 +18,10 @@
  * camera frame timestamps carried in `FrameDetections.t` (seconds).
  * Coordinates are analysis-frame pixels, +y down (ball rising ⇒ vy < 0).
  */
+import type {
+  GateUsed,
+  TrackerStepStats,
+} from './acquisitionFunnel';
 import { DETECTION, GATE_EPS_SEC, RELEASE, TRACKER } from './config';
 import { boxCenter, boxContains, distance } from './geometry';
 import { BallKalman } from './kalman';
@@ -53,6 +57,21 @@ const BLUR_STREAK_MIN_DIAMETERS_PER_FRAME = 2;
 const NOMINAL_FRAME_DT = 1 / 30;
 
 /**
+ * Rescue sighting ring-buffer capacity. Adoption needs TRACKER.rescueFrames
+ * (3) coherent sightings; one extra slot lets the window slide without the
+ * buffer thrashing at exactly the threshold.
+ */
+const RESCUE_BUF_CAP = 4;
+
+/**
+ * Max wall-clock gap (seconds) between successive corridor points for the
+ * capsule test to bridge them. Older last-points fall back to the plain
+ * point-in-tube test — a segment across a long detection gap would sweep
+ * far more court than the corridor prior justifies.
+ */
+const CORRIDOR_CAPSULE_MAX_GAP_SEC = 0.35;
+
+/**
  * EMA weight of the newest inter-step interval when tracking the mean sample
  * cadence. Low (0.1) so a single long gap (occlusion, a dropped frame) barely
  * moves the estimate — the estimate must reflect the DEVICE'S steady fps, not
@@ -82,6 +101,24 @@ interface Candidate {
   det: Detection;
   cx: number;
   cy: number;
+}
+
+/** Distance from point (px,py) to segment (ax,ay)-(bx,by). Degenerate segment = point distance. */
+export function distToSegment(
+  px: number,
+  py: number,
+  ax: number,
+  ay: number,
+  bx: number,
+  by: number,
+): number {
+  const dx = bx - ax;
+  const dy = by - ay;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq <= 0) return Math.hypot(px - ax, py - ay);
+  const u = ((px - ax) * dx + (py - ay) * dy) / lenSq;
+  const uc = u < 0 ? 0 : u > 1 ? 1 : u;
+  return Math.hypot(px - (ax + uc * dx), py - (ay + uc * dy));
 }
 
 /**
@@ -145,6 +182,20 @@ export class BallTracker {
   private releaseSeed: { x: number; y: number; t: number } | null = null;
 
   /**
+   * Previous frame's flight-corridor point (+ tube radius, camera seconds),
+   * for the capsule test in pickCandidate. Like releaseSeed this is an
+   * EXTERNAL prior independent of the track, so it survives resetTrack() and
+   * is cleared only by reset(). lastCorridorT = -Infinity means "none yet".
+   */
+  private lastCorridorX = 0;
+
+  private lastCorridorY = 0;
+
+  private lastCorridorTubeR = 0;
+
+  private lastCorridorT = Number.NEGATIVE_INFINITY;
+
+  /**
    * Scene-light profile from the pipeline (see setLightProfile). An
    * ENVIRONMENTAL setting, not track state: it survives resetTrack()/reset()
    * on purpose — the gym doesn't get brighter because the track died.
@@ -152,6 +203,44 @@ export class BallTracker {
   private lightProfile: LightProfile = 'bright';
   /** Per-model cold-gate override (see setColdGate); null = DETECTION default. */
   private coldGate: number | null = null;
+
+  /**
+   * Per-session ball-size cap override (see setSessionBallSizeCap); null =
+   * DETECTION.ballMaxSizeFraction. Matches coldGate's lifecycle exactly:
+   * survives resetTrack() AND reset() — the pipeline explicitly nulls it on
+   * reAim/reset/stale-drift.
+   */
+  private sessionMaxSizeFrac: number | null = null;
+
+  /** Persistence-rescue master switch (settings.trackerRescue, see setRescue). */
+  private rescueEnabled = true;
+
+  /**
+   * Coherent-sighting ring buffer for the persistence rescue (see
+   * maybeRescue): recent ball dets in the [ballScoreMin, activeColdFloor)
+   * band that passed every NON-score gate. Cleared on any acceptance and on
+   * resetTrack()/reset() — an adopted or dead track invalidates the chain.
+   */
+  private readonly rescueBuf: { x: number; y: number; r: number; t: number }[] =
+    [];
+
+  /**
+   * Per-step gate telemetry (see acquisitionFunnel.ts). ONE object mutated
+   * in place every step (allocation-light on the JS thread); read a copy via
+   * lastStepStats(). Recording only — never feeds any gate decision.
+   */
+  private readonly stats: TrackerStepStats = {
+    ballDets: 0,
+    floor: DETECTION.ballScoreMin,
+    gate: 'none',
+    rejScore: 0,
+    rejSize: 0,
+    rejAspect: 0,
+    rejJump: 0,
+    lastReject: null,
+    accepted: false,
+    rescued: false,
+  };
 
   /**
    * @param opts Optional tracker configuration; see {@link BallTrackerOptions}.
@@ -197,6 +286,7 @@ export class BallTracker {
   ): TrackedBall | null {
     const t = frame.t;
     this.frameIndex++;
+    this.resetStats();
     // Track the device cadence from consecutive step timestamps (forward gaps
     // only — a non-monotonic or repeated timestamp is ignored rather than
     // poisoning the EMA). Every frame counts, occluded ones included: fps, not
@@ -209,6 +299,15 @@ export class BallTracker {
     this.pruneStale(t);
 
     const candidate = this.pickCandidate(frame, hoopRoi, corridor ?? null);
+    // Record this frame's corridor point only AFTER pickCandidate has used
+    // it — the capsule spans the PREVIOUS and CURRENT points, so recording
+    // first would collapse the segment to a point.
+    if (corridor != null) {
+      this.lastCorridorX = corridor.p.x;
+      this.lastCorridorY = corridor.p.y;
+      this.lastCorridorTubeR = corridor.tubeR;
+      this.lastCorridorT = t;
+    }
     if (candidate !== null) {
       return this.accept(candidate, t);
     }
@@ -324,12 +423,43 @@ export class BallTracker {
     this.coldGate = gate;
   }
 
+  /** Per-session max ball-box size cap (fraction of frame side), derived from a
+   *  successful FT-seed anchor (src/core/ftSeed.ts). SHRINK-ONLY: clamped to the
+   *  config default so it can never loosen the gate; null restores the default.
+   *  Tracking-layer only — removing candidates can never fabricate a make. */
+  setSessionBallSizeCap(frac: number | null): void {
+    this.sessionMaxSizeFrac =
+      frac != null && Number.isFinite(frac) && frac > 0
+        ? Math.min(frac, DETECTION.ballMaxSizeFraction)
+        : null;
+  }
+
+  /**
+   * Master switch for the persistence rescue (see maybeRescue), forwarded
+   * from settings.trackerRescue by the pipeline. Default true; the setting is
+   * the escape hatch mirroring useFlightArc. Toggling never touches any other
+   * gate — with rescue off the tracker is byte-identical to the legacy path.
+   */
+  setRescue(enabled: boolean): void {
+    this.rescueEnabled = enabled;
+  }
+
+  /**
+   * Copy of the LAST step's gate telemetry (see acquisitionFunnel.ts). One
+   * small object per call, allocated on the JS thread — acceptable; callers
+   * that poll faster than the pipeline should compare with funnelChanged.
+   */
+  lastStepStats(): TrackerStepStats {
+    return { ...this.stats };
+  }
+
   /** Clears all tracker state, including the sample history. */
   reset(): void {
     this.resetTrack();
     this.history.length = 0;
     this.frameIndex = 0;
     this.releaseSeed = null;
+    this.lastCorridorT = Number.NEGATIVE_INFINITY;
     // Cadence estimate survives a track drop (resetTrack) — the device fps
     // doesn't change when a track dies — but a full reset() is a new session,
     // so re-seed it to the nominal interval.
@@ -350,12 +480,39 @@ export class BallTracker {
     this.lastAcceptT = null;
     this.lastAccept = null;
     this.lastSampleT = null;
+    // A dead track invalidates the rescue sighting chain too (reset() also
+    // lands here). coldGate + sessionMaxSizeFrac survive BOTH on purpose —
+    // they are per-model/per-session environment, not track state.
+    this.rescueBuf.length = 0;
+  }
+
+  /** Zeroes the per-step telemetry at the top of step() (in place, no alloc). */
+  private resetStats(): void {
+    const s = this.stats;
+    s.ballDets = 0;
+    // Overwritten with the ACTIVE floor in pickCandidate; pre-seeded with the
+    // default so an early-out step still reports something sane.
+    s.floor =
+      this.lightProfile === 'dark'
+        ? DETECTION.ballScoreMinDark
+        : (this.coldGate ?? DETECTION.ballScoreMin);
+    s.gate = 'none';
+    s.rejScore = 0;
+    s.rejSize = 0;
+    s.rejAspect = 0;
+    s.rejJump = 0;
+    s.lastReject = null;
+    s.accepted = false;
+    s.rescued = false;
   }
 
   /**
    * Extrapolates the current Kalman state to time `t` WITHOUT mutating the
-   * filter (constant-velocity read-only projection, used for candidate
-   * weighting and the blur-streak gate).
+   * filter (read-only projection, used for candidate weighting and the
+   * blur-streak gate). Physics-correct coast: the Kalman already knows
+   * gravity; the cheap projection should too, so candidate weighting and the
+   * blur-streak axis stay honest during descent. DETECTION-side only — the
+   * FSM judges the same raw ball.
    */
   private projectStateTo(t: number): KalmanEstimate | null {
     if (!this.kalman.initialized) return null;
@@ -365,7 +522,13 @@ export class BallTracker {
       this.lastSampleT !== null && t > this.lastSampleT
         ? t - this.lastSampleT
         : 0;
-    return { x: s.x + s.vx * dt, y: s.y + s.vy * dt, vx: s.vx, vy: s.vy };
+    const g = this.gravityPxPerSec2;
+    return {
+      x: s.x + s.vx * dt,
+      y: s.y + s.vy * dt + 0.5 * g * dt * dt,
+      vx: s.vx,
+      vy: s.vy + g * dt,
+    };
   }
 
   /** Inter-frame interval used to convert px/s speeds to px/frame. */
@@ -390,8 +553,25 @@ export class BallTracker {
     const pred = this.projectStateTo(t);
     const dt = this.frameDt(t);
 
+    // Cold-acquisition floor: relaxed to ballScoreMinDark in genuinely DARK
+    // scenes only (see setLightProfile) — a real low-light ball scores under
+    // the 0.2 open-court gate, so no track ever started. Invariant across the
+    // detections of one frame, so hoisted out of the loop.
+    const coldFloor =
+      this.lightProfile === 'dark'
+        ? DETECTION.ballScoreMinDark
+        : (this.coldGate ?? DETECTION.ballScoreMin);
+    this.stats.floor = coldFloor;
+    // Session size cap (shrink-only, see setSessionBallSizeCap), hoisted out
+    // of the hot loop.
+    const sizeCapFrac = this.sessionMaxSizeFrac ?? DETECTION.ballMaxSizeFraction;
+
     let best: Candidate | null = null;
     let bestWeight = Number.NEGATIVE_INFINITY;
+    let bestGate: GateUsed = 'none';
+    // First rescue adoption this frame (see maybeRescue) — applied only if NO
+    // candidate survives the normal path, so it can never displace one.
+    let rescueAdopt: Candidate | null = null;
 
     // Fresh track ⇒ flight-continuation mode: the jump gate is still armed
     // (a candidate must land near the prediction), so the score floor drops
@@ -424,6 +604,7 @@ export class BallTracker {
 
     for (const det of frame.detections) {
       if (det.cls !== 'ball') continue;
+      this.stats.ballDets++;
 
       const center = boxCenter(det.box);
       const inHoopRoi = hoopRoi !== null && boxContains(hoopRoi, center);
@@ -435,35 +616,77 @@ export class BallTracker {
       // no live track — the corridor is the locality that trackFresh's jump gate
       // provides, so a faint mid-arc ball keeps the flight alive across the WHOLE
       // frame. This is the standing relaxation the arc lacked away from the rim.
+      // Capsule between successive corridor points closes the low-fps gap where
+      // a fast ball lands between two per-frame tube tests; still a score-floor
+      // relaxation only — never feeds judgment.
       const inCorridor =
         corridor !== null &&
-        Math.hypot(center.x - corridor.p.x, center.y - corridor.p.y) <= corridor.tubeR;
-      // Cold-acquisition floor: relaxed to ballScoreMinDark in genuinely
-      // DARK scenes only (see setLightProfile) — a real low-light ball
-      // scores under the 0.2 open-court gate, so no track ever started.
-      const coldFloor =
-        this.lightProfile === 'dark'
-          ? DETECTION.ballScoreMinDark
-          : (this.coldGate ?? DETECTION.ballScoreMin);
+        (t - this.lastCorridorT <= CORRIDOR_CAPSULE_MAX_GAP_SEC
+          ? distToSegment(
+              center.x,
+              center.y,
+              this.lastCorridorX,
+              this.lastCorridorY,
+              corridor.p.x,
+              corridor.p.y,
+            ) <= Math.max(corridor.tubeR, this.lastCorridorTubeR)
+          : Math.hypot(center.x - corridor.p.x, center.y - corridor.p.y) <=
+            corridor.tubeR);
+      // Locality prior for the cold aspect gate: an EXTERNAL "the ball must
+      // be here" signal (flight corridor or released wrist) that substitutes
+      // for the Kalman-velocity locality a live track would provide.
+      const hasLocalityPrior = inCorridor || nearWrist;
       const scoreGate = inHoopRoi
         ? DETECTION.ballScoreMinHoopRoi
         : trackFresh || nearWrist || inCorridor
           ? DETECTION.ballScoreMinTracking
           : coldFloor;
-      if (det.score < scoreGate) continue;
+      if (det.score < scoreGate) {
+        this.stats.rejScore++;
+        this.stats.lastReject = 'score';
+        // Persistence rescue: a det in the raised-cold-gate band may still
+        // accumulate toward adoption (never displaces a normal acceptance).
+        if (rescueAdopt === null) {
+          rescueAdopt = this.maybeRescue(
+            det,
+            center.x,
+            center.y,
+            frame,
+            pred,
+            dt,
+            trackFresh,
+            coldFloor,
+            sizeCapFrac,
+            hasLocalityPrior,
+          );
+        }
+        continue;
+      }
 
       // Reject an implausibly LARGE ball box (a near-frame-size false positive
       // that the round-aspect gate lets through and that paints a giant circle
       // over the whole screen). A real basketball never fills half the frame.
+      // sizeCapFrac is the config default unless a session FT-seed anchor
+      // SHRANK it (see setSessionBallSizeCap — never looser than the default).
       if (
-        det.box.width > frame.frameWidth * DETECTION.ballMaxSizeFraction ||
-        det.box.height > frame.frameHeight * DETECTION.ballMaxSizeFraction
+        det.box.width > frame.frameWidth * sizeCapFrac ||
+        det.box.height > frame.frameHeight * sizeCapFrac
       ) {
+        this.stats.rejSize++;
+        this.stats.lastReject = 'size';
         continue;
       }
 
-      if (!this.passesAspectGate(det.box, pred, dt)) continue;
-      if (!this.passesJumpGate(center.x, center.y, t)) continue;
+      if (!this.passesAspectGate(det.box, pred, dt, hasLocalityPrior)) {
+        this.stats.rejAspect++;
+        this.stats.lastReject = 'aspect';
+        continue;
+      }
+      if (!this.passesJumpGate(center.x, center.y, t)) {
+        this.stats.rejJump++;
+        this.stats.lastReject = 'jump';
+        continue;
+      }
 
       // Score weighted by inverse distance to the Kalman prediction.
       const weight =
@@ -473,9 +696,119 @@ export class BallTracker {
       if (weight > bestWeight) {
         bestWeight = weight;
         best = { det, cx: center.x, cy: center.y };
+        bestGate = inHoopRoi
+          ? 'hoopRoi'
+          : trackFresh || nearWrist || inCorridor
+            ? 'tracking'
+            : 'cold';
       }
     }
+
+    if (best === null && rescueAdopt !== null) {
+      // No candidate survived the normal path but the rescue chain matured:
+      // adopt the banded det. One-sided by construction — it only ever ADDS a
+      // tracked ball where today there was none, and the FSM judge path sees
+      // the same vetted TrackedBall stream either way.
+      best = rescueAdopt;
+      bestGate = 'cold';
+      this.stats.rescued = true;
+    }
+    if (best !== null) {
+      // Any acceptance restarts phantom accumulation — the chain either got
+      // adopted or is superseded by a real track.
+      this.rescueBuf.length = 0;
+    }
+    this.stats.accepted = best !== null;
+    this.stats.gate = bestGate;
     return best;
+  }
+
+  /**
+   * Persistence rescue (recall-up, judgment-untouched — flag-gated by
+   * settings.trackerRescue via setRescue).
+   *
+   * WHY: DetectionBoxes draws balls at DETECTION.ballScoreMin (0.2) while a
+   * per-model cold gate (setColdGate — nano-v2's 0.35) may demand far more to
+   * START a track, so a real ball in the 0.2..0.35 band is visibly "seen"
+   * yet never tracked. A single banded det is exactly the phantom the raised
+   * gate exists to reject — but a det that passes every NON-score gate and
+   * reappears COHERENTLY (rescueFrames sightings within rescueWindowSec,
+   * stepping ≤ rescueMaxStepDiameters diameters) with real net travel
+   * (≥ rescueMinTravelDiameters diameters, killing static lights/rafters/
+   * background hoops) is behaving like a ball, not like noise. The band is
+   * [ballScoreMin, activeColdFloor): EMPTY unless a per-model gate raised the
+   * floor, so default models are provably unaffected.
+   *
+   * Returns the adopted candidate when the chain matures, else null after
+   * (possibly) extending the chain. One sighting per frame: same-timestamp
+   * duplicates are ignored.
+   */
+  private maybeRescue(
+    det: Detection,
+    cx: number,
+    cy: number,
+    frame: FrameDetections,
+    pred: KalmanEstimate | null,
+    dt: number,
+    trackFresh: boolean,
+    coldFloor: number,
+    sizeCapFrac: number,
+    hasLocalityPrior: boolean,
+  ): Candidate | null {
+    if (!this.rescueEnabled || trackFresh) return null;
+    // The rescue band. Note dark scenes LOWER the floor below ballScoreMin,
+    // which makes the band empty there too — dark already has its own relief.
+    if (det.score < DETECTION.ballScoreMin || det.score >= coldFloor) {
+      return null;
+    }
+    // Every non-score gate must still pass — the rescue bridges the score
+    // band ONLY; size/aspect/jump keep their full authority.
+    if (
+      det.box.width > frame.frameWidth * sizeCapFrac ||
+      det.box.height > frame.frameHeight * sizeCapFrac
+    ) {
+      return null;
+    }
+    if (!this.passesAspectGate(det.box, pred, dt, hasLocalityPrior)) {
+      return null;
+    }
+    if (!this.passesJumpGate(cx, cy, frame.t)) return null;
+
+    const t = frame.t;
+    const r = (det.box.width + det.box.height) / 4;
+    // Drop sightings that fell out of the coherence window.
+    while (
+      this.rescueBuf.length > 0 &&
+      this.rescueBuf[0].t < t - TRACKER.rescueWindowSec
+    ) {
+      this.rescueBuf.shift();
+    }
+    const tail =
+      this.rescueBuf.length > 0
+        ? this.rescueBuf[this.rescueBuf.length - 1]
+        : null;
+    if (tail !== null) {
+      // One sighting per frame keeps "N coherent times" meaning N frames.
+      if (t <= tail.t) return null;
+      if (
+        Math.hypot(cx - tail.x, cy - tail.y) >
+        TRACKER.rescueMaxStepDiameters * (2 * r)
+      ) {
+        // Incoherent with the accumulating chain — start over from here.
+        this.rescueBuf.length = 0;
+      }
+    }
+    this.rescueBuf.push({ x: cx, y: cy, r, t });
+    if (this.rescueBuf.length > RESCUE_BUF_CAP) this.rescueBuf.shift();
+
+    if (this.rescueBuf.length >= TRACKER.rescueFrames) {
+      const first = this.rescueBuf[0];
+      const travel = Math.hypot(cx - first.x, cy - first.y);
+      if (travel >= TRACKER.rescueMinTravelDiameters * (2 * r)) {
+        return { det, cx, cy };
+      }
+    }
+    return null;
   }
 
   /**
@@ -489,18 +822,29 @@ export class BallTracker {
    * (`height * aspectWidthFactor < width`, likely a horizontal limb/arm or a
    * fast crosscourt-pass motion-blur smear) — each checked against the
    * blur-streak exception for velocity along its own elongation axis.
+   *
+   * COLD elongated boxes (no Kalman prediction) used to be rejected
+   * unconditionally — which silently killed the very first detection of a
+   * fast, motion-blurred ball, so the flight was never picked up at all.
+   * `hasLocalityPrior` (candidate inside the flight corridor or the wrist-
+   * seed radius) is an EXTERNAL "the ball must be here" prior that
+   * substitutes for the missing velocity: with it a cold streak is accepted;
+   * without it (the default) legacy behavior is byte-identical. Bounded by
+   * construction — never a blanket relaxation.
    */
   private passesAspectGate(
     box: Box,
     pred: KalmanEstimate | null,
     dtSec: number,
+    hasLocalityPrior = false,
   ): boolean {
     const tallSkinny = box.width * TRACKER.aspectWidthFactor < box.height;
     const wideShort = box.height * TRACKER.aspectWidthFactor < box.width;
     if (!tallSkinny && !wideShort) return true;
 
-    // Elongated box. Blur-streak exception requires a known fast velocity.
-    if (pred === null) return false;
+    // Elongated box. Blur-streak exception requires a known fast velocity —
+    // or, cold, an external locality prior standing in for it.
+    if (pred === null) return hasLocalityPrior;
     const diameter =
       2 * (this.smoothedR ?? Math.min(box.width, box.height) / 2);
     if (diameter <= 0) return false;

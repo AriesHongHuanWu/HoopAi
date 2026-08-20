@@ -7,11 +7,13 @@
  * histogram.
  */
 import { Ionicons } from '@expo/vector-icons';
-import * as Haptics from 'expo-haptics';
 import { router, useLocalSearchParams } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import Animated from 'react-native-reanimated';
 
+import { useCardStagger } from '@/components/motion';
+import { haptic } from '@/utils/haptics';
 import { shareSessionCard } from '@/components/ShareCard';
 import { FramePickerModal } from '@/components/FramePickerModal';
 import { sessionMomentSec } from '@/core/shareFrame';
@@ -85,7 +87,7 @@ function TagField({
       accessibilityLabel={tag.length > 0 ? `Tag: ${tag}. Edit tag` : 'Add a tag'}
       accessibilityHint="Opens a text field to edit this session's tag"
       onPress={() => {
-        void Haptics.selectionAsync();
+        haptic.selection();
         setDraft(tag);
         setEditing(true);
       }}
@@ -187,6 +189,9 @@ function ModeBreakdownCard({ modeId, resultJson }: { modeId: string; resultJson:
 }
 
 export default function SessionDetailScreen() {
+  // Canonical card cascade over the detail's top-level blocks, in visual
+  // order (undefined under reduced motion — everything renders static).
+  const enter = useCardStagger();
   const { id } = useLocalSearchParams<{ id: string }>();
   const parsed = typeof id === 'string' ? Number(id) : Number.NaN;
   const sessionId = Number.isInteger(parsed) ? parsed : null;
@@ -324,75 +329,97 @@ export default function SessionDetailScreen() {
         />
       ) : (
         <View>
-          <Text style={styles.title}>
-            {formatSessionDate(session.startedAt)}
-          </Text>
-          {meta != null && (
-            <Row gap={space.xs} style={styles.metaRow}>
-              <Ionicons
-                name="time-outline"
-                size={12}
-                color={color.textFaint}
-                importantForAccessibility="no"
-              />
-              <Text style={styles.meta}>{meta}</Text>
-            </Row>
-          )}
-          <View style={{ marginTop: space.sm }}>
-            <TagField tag={tag} onChange={onTagChange} />
-          </View>
-          {shareFailed && (
-            <View style={{ marginTop: space.md }}>
-              <Chip label="Couldn't share — try again" tone="unsure" />
+          {/* Block 0 — header: date title, meta line, tag pill. */}
+          <Animated.View entering={enter(0)}>
+            <Text style={styles.title}>
+              {formatSessionDate(session.startedAt)}
+            </Text>
+            {meta != null && (
+              <Row gap={space.xs} style={styles.metaRow}>
+                <Ionicons
+                  name="time-outline"
+                  size={12}
+                  color={color.textFaint}
+                  importantForAccessibility="no"
+                />
+                <Text style={styles.meta}>{meta}</Text>
+              </Row>
+            )}
+            <View style={{ marginTop: space.sm }}>
+              <TagField tag={tag} onChange={onTagChange} />
             </View>
-          )}
-          <PillButton
-            label="Shot Lab — deep analysis"
-            icon="flask"
-            onPress={() =>
-              router.push({ pathname: '/shotlab', params: { sid: String(session.id) } })
-            }
-            disabled={record.shots.length === 0}
-            style={{ marginTop: space.lg }}
-          />
-          <PillButton
-            variant="ghost"
-            label={sharing ? 'Preparing…' : 'Share card'}
-            icon="share-social"
-            onPress={onShareCard}
-            disabled={sharing || record.shots.length === 0}
-            style={{ marginTop: space.md }}
-          />
-          {record.shots.length === 0 && (
-            <View style={{ marginTop: space.md, alignItems: 'flex-start' }}>
-              <Chip label="No shots logged — nothing to analyze or share" />
-            </View>
-          )}
-          {session.videoPath != null && (
-            <Row gap={space.md} style={{ marginTop: space.lg }}>
-              <PillButton
-                label="Watch replay"
-                icon="play"
-                onPress={() => router.push(`/video/${session.id}`)}
-                style={{ flex: 1 }}
-              />
-              <ReelEntryButton sessionId={session.id} variant="ghost" style={{ flex: 1 }} />
-            </Row>
-          )}
-          {session.videoPath != null && recStartSec != null && (
-            <RecheckPanel
-              sessionId={session.id}
-              unsureCount={unsureCount}
-              onVerdict={onRecheckVerdict}
+          </Animated.View>
+          {/* Block 1 — actions: share status, Shot Lab, share, replay. */}
+          <Animated.View entering={enter(1)}>
+            {shareFailed && (
+              <View style={{ marginTop: space.md }}>
+                <Chip label="Couldn't share — try again" tone="unsure" />
+              </View>
+            )}
+            <PillButton
+              label="Shot Lab — deep analysis"
+              icon="flask"
+              onPress={() =>
+                router.push({ pathname: '/shotlab', params: { sid: String(session.id) } })
+              }
+              disabled={record.shots.length === 0}
+              style={{ marginTop: space.lg }}
+            />
+            <PillButton
+              variant="ghost"
+              label={sharing ? 'Preparing…' : 'Share card'}
+              icon="share-social"
+              onPress={onShareCard}
+              disabled={sharing || record.shots.length === 0}
               style={{ marginTop: space.md }}
             />
+            {record.shots.length === 0 && (
+              <View style={{ marginTop: space.md, alignItems: 'flex-start' }}>
+                <Chip label="No shots logged — nothing to analyze or share" />
+              </View>
+            )}
+            {session.videoPath != null && (
+              <Row gap={space.md} style={{ marginTop: space.lg }}>
+                <PillButton
+                  label="Watch replay"
+                  icon="play"
+                  onPress={() => router.push(`/video/${session.id}`)}
+                  style={{ flex: 1 }}
+                />
+                <ReelEntryButton sessionId={session.id} variant="ghost" style={{ flex: 1 }} />
+              </Row>
+            )}
+          </Animated.View>
+          {/* Block 2 — offline re-check panel. */}
+          {session.videoPath != null && recStartSec != null && (
+            <Animated.View entering={enter(2)}>
+              <RecheckPanel
+                sessionId={session.id}
+                unsureCount={unsureCount}
+                onVerdict={onRecheckVerdict}
+                unsureShotIndexes={record.shots
+                  .filter((s) => s.outcome === 'unsure' && s.corrected !== true)
+                  .map((s) => s.id)}
+                onManualCorrect={(shotIndex, outcome) => {
+                  const s = record.shots.find((x) => x.id === shotIndex);
+                  // No corrected=false here: a hand triage is a user edit and
+                  // gets the Edited badge (record.correct defaults corrected).
+                  if (s) record.correct(s, outcome);
+                }}
+                style={{ marginTop: space.md }}
+              />
+            </Animated.View>
           )}
+          {/* Block 3 — game-mode breakdown. */}
           {session.modeId != null && (
-            <View style={{ marginTop: space.lg }}>
+            <Animated.View entering={enter(3)} style={{ marginTop: space.lg }}>
               <ModeBreakdownCard modeId={session.modeId} resultJson={session.modeResultJson} />
-            </View>
+            </Animated.View>
           )}
-          <View style={styles.recapSection}>
+          {/* Block 4 — hero stats + shot list (shared recap). The shot list's
+              own rows stay static: it can be long and lives in a shared
+              component; only the section enters as one unit. */}
+          <Animated.View entering={enter(4)} style={styles.recapSection}>
             <SessionRecap
               shots={record.shots}
               stats={record.stats}
@@ -401,10 +428,11 @@ export default function SessionDetailScreen() {
               videoPath={session.videoPath}
               keepMode={session.keepMode}
             />
-          </View>
+          </Animated.View>
+          {/* Blocks 5–6 — deeper analysis cards. */}
           <View style={styles.analysisSection}>
             {prev != null && (
-              <Card>
+              <Card entering={enter(5)}>
                 <Eyebrow>Vs previous session</Eyebrow>
                 <Text style={styles.compareMeta}>
                   Compared with {formatSessionDate(prev.startedAt)}
@@ -412,7 +440,7 @@ export default function SessionDetailScreen() {
                 <CompareBars current={record.stats} previous={prev.stats} />
               </Card>
             )}
-            <Card>
+            <Card entering={enter(6)}>
               <Eyebrow>Entry angles</Eyebrow>
               <AngleHistogram angles={entryAngles} />
             </Card>

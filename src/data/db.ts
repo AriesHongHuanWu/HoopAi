@@ -23,7 +23,8 @@ import {
   type LifetimeTotals,
 } from '../core/achievements';
 import { historyRetentionLimit } from '../core/premium';
-import type { FormReport, GameModeId, ResolvedShot, SessionStats, ShotOutcome, ShotSignals, ShotValueSource } from '../core/types';
+import { decodeArcSnapshot } from '../core/arcSnapshot';
+import type { FormReport, GameModeId, PersistedFlightArc, ResolvedShot, SessionStats, ShotOutcome, ShotSignals, ShotValueSource } from '../core/types';
 import { recomputeStats } from '../core/stats';
 
 export interface SessionRow {
@@ -268,6 +269,15 @@ async function migrate(db: SQLite.SQLiteDatabase): Promise<void> {
       PRAGMA user_version = 8;
     `);
   }
+  if (version < 9) {
+    // v9: persisted flight-arc snapshot (PersistedFlightArc JSON, ~0.7 KB max)
+    // for replay thumbnails + the 3D replay theater. VISUAL-ONLY by contract —
+    // recheck/judging never read it. NULL when no confident arc (or pre-v9).
+    await db.execAsync(`
+      ALTER TABLE shots ADD COLUMN arcJson TEXT;
+      PRAGMA user_version = 9;
+    `);
+  }
 }
 
 /** Run a DB operation; on ANY failure log + return the fallback (never throw). */
@@ -480,8 +490,8 @@ export async function insertShot(sessionId: number, shot: ResolvedShot): Promise
          sessionId, shotIndex, tStart, tResolved, outcome, corrected, rimBounce,
          entryAngleDeg, releaseAngleDeg, xCross, originX, originY,
          signalsJson, trajectoryJson, shotValue, formJson,
-         valueSource, valueConfidence, courtX, courtY
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         valueSource, valueConfidence, courtX, courtY, arcJson
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       sessionId,
       shot.id,
       shot.tStart,
@@ -502,6 +512,7 @@ export async function insertShot(sessionId: number, shot: ResolvedShot): Promise
       shot.valueConfidence ?? null,
       shot.courtPos?.x ?? null,
       shot.courtPos?.y ?? null,
+      shot.flightArc ? JSON.stringify(shot.flightArc) : null,
     );
     return res.lastInsertRowId;
   });
@@ -617,6 +628,8 @@ export interface ShotRow {
   valueConfidence?: number | null;
   courtX?: number | null;
   courtY?: number | null;
+  /** v9: serialized PersistedFlightArc; null pre-v9 or when no confident arc. */
+  arcJson?: string | null;
 }
 
 export async function sessionShots(sessionId: number): Promise<ShotRow[]> {
@@ -656,7 +669,7 @@ const FALLBACK_SIGNALS: ShotSignals = { geo: null, net: null, cls: null };
 
 /** Rebuild a ResolvedShot from its persisted row (for replay/recompute). */
 export function shotFromRow(row: ShotRow): ResolvedShot {
-  return {
+  const shot: ResolvedShot = {
     id: row.shotIndex,
     tStart: row.tStart,
     tResolved: row.tResolved,
@@ -683,6 +696,31 @@ export function shotFromRow(row: ShotRow): ResolvedShot {
       ? { courtPos: { x: row.courtX, y: row.courtY } }
       : {}),
   };
+  // v9: flight-arc snapshot (visual-only replay data). Decoded LAZILY on
+  // first `flightArc` access: the history/trends/shotlab hot paths map every
+  // row through here but never render the arc, so they must not pay a
+  // per-shot JSON.parse for it. The decode result is cached, so repeated
+  // reads cost one parse total. Corrupt rows decode to nothing on access
+  // (decodeArcSnapshot rejects, never repairs — the getter then yields
+  // undefined, matching the pre-v9/no-arc shape); NULL/empty arcJson never
+  // defines the property at all.
+  const arcJson = row.arcJson;
+  if (arcJson) {
+    let decoded = false;
+    let arc: PersistedFlightArc | null = null;
+    Object.defineProperty(shot, 'flightArc', {
+      enumerable: true,
+      configurable: true,
+      get(): PersistedFlightArc | undefined {
+        if (!decoded) {
+          decoded = true;
+          arc = decodeArcSnapshot(arcJson);
+        }
+        return arc ?? undefined;
+      },
+    });
+  }
+  return shot;
 }
 
 export async function sessionStatsFromDb(sessionId: number): Promise<SessionStats> {
@@ -692,12 +730,19 @@ export async function sessionStatsFromDb(sessionId: number): Promise<SessionStat
 
 /**
  * Insert an imported backup's rows (src/data/backup.ts mergeBackup output).
- * Sessions/shots/jumps are inserted with their ORIGINAL ids preserved (the
- * merge plan already excluded any id that collides locally), all inside one
- * transaction so a partial failure rolls back. Returns the counts actually
- * written; never throws (a failure logs + returns zeros, leaving the db
- * untouched). Achievements-seen / challenge-ledger merges are applied by the
- * caller against their persisted zustand stores, not here.
+ * Sessions and jumps are inserted with their ORIGINAL ids preserved (the
+ * merge plan already excluded any id that collides locally). Shots are the
+ * exception: their PRIMARY KEY is NOT deduped by mergeBackup — a backup from
+ * another install can carry shot ids that collide with local rows even when
+ * every session id is distinct — so the id column is deliberately OMITTED
+ * and AUTOINCREMENT assigns fresh ids. That is safe because nothing
+ * references shots.id (shots hang off sessions via sessionId, which IS
+ * preserved); a shot's identity within its session is (sessionId, shotIndex).
+ * Everything runs inside one transaction so a partial failure rolls back.
+ * Returns the counts actually written; never throws (a failure logs +
+ * returns zeros, leaving the db untouched). Achievements-seen /
+ * challenge-ledger merges are applied by the caller against their persisted
+ * zustand stores, not here.
  */
 export async function importBackup(plan: {
   sessions: SessionRow[];
@@ -725,14 +770,16 @@ export async function importBackup(plan: {
         );
       }
       for (const sh of plan.shots) {
+        // No explicit id: AUTOINCREMENT assigns a fresh PRIMARY KEY (see the
+        // function doc — backup shot ids can collide with local rows).
         await db.runAsync(
           `INSERT INTO shots (
-             id, sessionId, shotIndex, tStart, tResolved, outcome, corrected,
+             sessionId, shotIndex, tStart, tResolved, outcome, corrected,
              rimBounce, entryAngleDeg, releaseAngleDeg, xCross, originX, originY,
              signalsJson, trajectoryJson, clipPath, shotValue, formJson,
-             rechecked, outcomeCorrected
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          sh.id,
+             rechecked, outcomeCorrected, valueSource, valueConfidence,
+             courtX, courtY, arcJson
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           sh.sessionId,
           sh.shotIndex,
           sh.tStart,
@@ -752,6 +799,14 @@ export async function importBackup(plan: {
           sh.formJson ?? null,
           sh.rechecked ?? 0,
           sh.outcomeCorrected ?? 0,
+          // v8/v9 columns — restoring them here fixes the pre-existing v8
+          // backup round-trip data loss (provenance was exported but dropped
+          // on import).
+          sh.valueSource ?? null,
+          sh.valueConfidence ?? null,
+          sh.courtX ?? null,
+          sh.courtY ?? null,
+          sh.arcJson ?? null,
         );
       }
       for (const j of plan.jumps) {

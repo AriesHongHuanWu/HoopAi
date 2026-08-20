@@ -192,4 +192,65 @@ describe('estimateShotValueMetric', () => {
       expect(est!.value).toBe(2);
     });
   });
+
+  // lateralM — the FT-seed geometry hook (src/core/ftSeed.ts). Additive only:
+  // it must recover the ground-truth rim-relative lateral and leave every
+  // pre-existing field exactly as before.
+  describe('lateralM (FT-seed geometry hook)', () => {
+    test('recovers the ground-truth lateral offset', () => {
+      const est = estimateShotValueMetric(
+        scene({ camH: 1.0, zRim: 9, zFeet: 5, xFeet: 5 }),
+      );
+      expect(est).not.toBeNull();
+      expect(est!.lateralM).toBeCloseTo(5, 6);
+    });
+
+    test('is RIM-relative with an image-right positive sign', () => {
+      // Rim 1 m right of the axis, shooter 2 m left → lateral = −2 − 1 = −3.
+      const est = estimateShotValueMetric(
+        scene({ camH: 1.0, zRim: 9, zFeet: 5, xRim: 1, xFeet: -2 }),
+      );
+      expect(est).not.toBeNull();
+      expect(est!.lateralM).toBeCloseTo(-3, 6);
+    });
+
+    test('distance identity: uncalibrated distanceM = hypot(zFeet − zRim, lateralM)', () => {
+      const est = estimateShotValueMetric(
+        scene({ camH: 0.6, zRim: 10, zFeet: 3, xFeet: 2 }),
+      );
+      expect(est).not.toBeNull();
+      expect(est!.distanceM).toBeCloseTo(
+        Math.hypot(est!.zFeetM - est!.zRimM, est!.lateralM),
+        10,
+      );
+    });
+
+    test('all pre-existing fields are unchanged in the flagship scene', () => {
+      // Byte-identical outputs vs. the pre-lateralM estimator: the exact
+      // assertions of the flagship 7m→3PT test must still hold, plus the new
+      // field carries the (zero) ground truth without perturbing anything.
+      const est = estimateShotValueMetric(scene({ camH: 0.6, zRim: 10, zFeet: 3 }));
+      expect(est).not.toBeNull();
+      expect(est!.value).toBe(3);
+      expect(est!.distanceM).toBeCloseTo(7.0, 1);
+      expect(est!.zRimM).toBeCloseTo(10, 3);
+      expect(est!.zFeetM).toBeCloseTo(3, 3);
+      expect(est!.camHeightM).toBeCloseTo(0.6, 2);
+      expect(est!.lateralM).toBeCloseTo(0, 6);
+    });
+
+    test('calibration never touches lateralM (raw geometry, like zRim/zFeet)', () => {
+      const base = scene({ camH: 0.6, zRim: 10, zFeet: 3.6, xFeet: 1 });
+      const uncal = estimateShotValueMetric(base);
+      const cal = estimateShotValueMetric({
+        ...base,
+        calibration: { correctionFactor: 1.1 },
+      });
+      expect(uncal).not.toBeNull();
+      expect(cal).not.toBeNull();
+      expect(cal!.lateralM).toBe(uncal!.lateralM);
+      expect(cal!.zRimM).toBe(uncal!.zRimM);
+      expect(cal!.zFeetM).toBe(uncal!.zFeetM);
+    });
+  });
 });

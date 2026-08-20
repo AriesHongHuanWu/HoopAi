@@ -4,6 +4,15 @@
  * row, the full SessionRecap under a "Box score" eyebrow, and a grouped
  * action stack (analysis / share / primary Done).
  *
+ * Motion: top-level sections enter with the canonical card stagger
+ * (useCardStagger — returns undefined under system reduced-motion, so Views
+ * render statically), and a new personal best fires a one-shot Confetti
+ * burst overlaid on the whole screen. The burst is presentation only: it is
+ * keyed on sessionId (once per mount per session), pointerEvents-none, and
+ * renders nothing under reduced motion — PersonalBestBanner remains the
+ * always-on carrier of the record. UndoSnackbar, modals and CoachMarks are
+ * deliberately NOT staggered.
+ *
  * Data source: the live session store when a session just ended
  * (phase === 'ended'); otherwise falls back to the database via the ?id=
  * search param so the screen also works after a reload / deep link.
@@ -12,6 +21,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { router, useLocalSearchParams } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { StyleSheet, Text, View, type LayoutRectangle } from 'react-native';
+import Animated from 'react-native-reanimated';
 
 import { ReelEntryButton } from '@/components/ReelEntryButton';
 import { shareSessionCard, sessionCardData, type CardFormat } from '@/components/ShareCard';
@@ -29,6 +39,8 @@ import {
 import { CoachMarks, useCoachMarks, type CoachStep } from '@/components/coach/CoachMarks';
 import { CourtHeatmap } from '@/components/charts/CourtHeatmap';
 import { CourtPlacementMap } from '@/components/charts/CourtPlacementMap';
+import { HintChip } from '@/components/hud/HintChip';
+import { Confetti, useCardStagger } from '@/components/motion';
 import { PersonalBestBanner } from '@/components/PersonalBestBanner';
 import { RecheckPanel } from '@/components/RecheckPanel';
 import { buildHeatmap } from '@/core/heatmap';
@@ -37,10 +49,14 @@ import { SummaryHero, isPerfectSession } from '@/components/SummaryHero';
 import { Card, Chip, Eyebrow, PillButton, Row, Screen } from '@/components/ui';
 import { color, radius, space, type } from '@/constants/tokens';
 import { detectNewBests, type CareerBests } from '@/core/achievements';
+import { levelOfGoals } from '@/core/drillProgression';
+import type { ModeState } from '@/core/gameModes';
+import { todayMakes } from '@/core/goals';
 import { detectMilestones, type Milestone } from '@/core/milestones';
 import type { ResolvedShot, ShotOutcome, ShotValue } from '@/core/types';
-import { careerBests, lifetimeTotals } from '@/data/db';
+import { careerBests, getSession, lifetimeTotals, listSessions } from '@/data/db';
 import { saveSessionVideo } from '@/data/videoLibrary';
+import { useMode } from '@/state/modeStore';
 import { useSession } from '@/state/sessionStore';
 import { useSettings } from '@/state/settingsStore';
 
@@ -58,6 +74,17 @@ export default function SessionSummaryScreen() {
   const resetToIdle = useSession((s) => s.resetToIdle);
   const keepSetting = useSettings((s) => s.keepMode);
   const saveToPhotos = useSettings((s) => s.saveToPhotos);
+  const dailyGoal = useSettings((s) => s.dailyGoalMakes);
+  // One-shot "how detection works" nudge flag (settingsStore v7).
+  // how-it-works.tsx flips it on mount, so the nudge disappears after a
+  // single visit — no local state.
+  const explainerSeen = useSettings((s) => s.detectionExplainerSeen);
+
+  // Canonical section entrance stagger (undefined under reduced motion).
+  const enter = useCardStagger();
+  // Personal-best confetti mounts once per screen mount, then unmounts on
+  // completion. Corrections that re-derive newBests can never re-fire it.
+  const [confettiOn, setConfettiOn] = useState(true);
 
   const storeMode = phase === 'ended';
   const paramId =
@@ -133,6 +160,44 @@ export default function SessionSummaryScreen() {
       .catch(() => {});
   }, [storeMode, stats.makes]);
 
+  // RUN IT BACK — recover the finished game's final ModeState so the restart
+  // can re-arm the same mode/drill. DB mode parses the already-loaded row;
+  // storeMode does a one-shot fetch of the just-persisted row (endSession
+  // awaits finish() before navigating here, so it exists). Any parse failure
+  // stays null, which honestly degrades the restart to free play.
+  const [prevMode, setPrevMode] = useState<ModeState | null>(null);
+  useEffect(() => {
+    const json = record.session?.modeResultJson;
+    if (json == null) return;
+    try {
+      setPrevMode(JSON.parse(json) as ModeState);
+    } catch {}
+  }, [record.session]);
+  const modeFetched = useRef(false);
+  useEffect(() => {
+    if (!storeMode || liveSessionId == null || modeFetched.current) return;
+    modeFetched.current = true;
+    void getSession(liveSessionId).then((row) => {
+      try {
+        if (row?.modeResultJson) setPrevMode(JSON.parse(row.modeResultJson) as ModeState);
+      } catch {}
+    });
+  }, [storeMode, liveSessionId]);
+
+  // DAILY GOAL — closes the loop the live GoalChip opens. One-shot fetch,
+  // just-ended sessions only. The session is already persisted (endSession
+  // awaits finish() before navigating here), so today's total honestly
+  // includes tonight — plain todayMakes, no exclusion needed.
+  const [goalMade, setGoalMade] = useState<number | null>(null);
+  const goalFetched = useRef(false);
+  useEffect(() => {
+    if (!storeMode || dailyGoal <= 0 || goalFetched.current) return;
+    goalFetched.current = true;
+    void listSessions(100)
+      .then((rows) => setGoalMade(todayMakes(rows, Date.now())))
+      .catch(() => {});
+  }, [storeMode, dailyGoal]);
+
   const newBests = useMemo(() => {
     if (!storeMode || pbBaseline == null) return [];
     const bests = detectNewBests(stats, pbBaseline);
@@ -189,6 +254,39 @@ export default function SessionSummaryScreen() {
     resetToIdle();
     router.replace('/');
   };
+
+  // Restart with the same setup — mirrors home quickStart ((tabs)/index.tsx)
+  // and live.tsx replayMode: reset session state, re-arm the same mode/drill,
+  // then jump to live with the persisted orientation (recordVideo/keepMode
+  // flow from persisted settings automatically — that IS "same setup").
+  const runItBack = useCallback(() => {
+    const mode = prevMode;
+    resetToIdle();
+    const m = useMode.getState();
+    const drill = mode?.config?.drill;
+    if (drill != null) {
+      // A structured drill rides inside spotShooting — re-init via its own
+      // builder so variable spots/goals rebuild, at the SAME level the run was
+      // played at (recovered from the persisted goals — "same setup" includes
+      // the level). getDrill throws on a stale/unknown persisted DrillId
+      // (levelOfGoals reads the catalog too), so fall back to free play.
+      try {
+        m.selectDrill(drill.id, levelOfGoals(drill.id, drill.goals));
+      } catch {
+        m.reset();
+      }
+    } else if (mode != null && mode.config?.ghost == null) {
+      m.selectMode(mode.modeId, mode.config ?? undefined);
+    } else {
+      // Free play — or a Ghost race, whose persisted timeline was stripped at
+      // endSession; an empty timeline can't be honestly re-raced, so fall back.
+      m.reset();
+    }
+    useSession.getState().beginSetup();
+    // replace (not push): a back-gesture from pre-lock live must never pop
+    // onto this now-reset summary.
+    router.replace(`/session/live?orient=${useSettings.getState().lastOrient}`);
+  }, [prevMode, resetToIdle]);
 
   // Share-card generation: disabled while the snapshot renders; failure shows
   // a quiet chip (shareSessionCard itself never throws).
@@ -273,7 +371,10 @@ export default function SessionSummaryScreen() {
   const summarySteps: CoachStep[] = [
     {
       title: 'Fix a make, miss or 2/3',
-      text: "Swipe a shot right to mark a make, left for a miss — or tap to correct it, including 2-point vs. 3-point. Every correction you make trains sharper detection for next time.",
+      // HONESTY: corrections rewrite the outcome only — signalsJson is never
+      // touched and nothing retrains (see core/evidence.ts). Never claim
+      // corrections improve detection.
+      text: 'Swipe a shot right to mark a make, left for a miss — or tap to correct it, including 2-point vs. 3-point. Corrections are yours: always labeled EDITED, never used to re-judge anything.',
     },
     {
       title: 'Watch the replay',
@@ -320,9 +421,32 @@ export default function SessionSummaryScreen() {
               />
             </View>
           )}
-          <SummaryHero stats={stats} style={styles.hero} />
+          <Animated.View entering={enter(0)}>
+            <SummaryHero stats={stats} style={styles.hero} />
+          </Animated.View>
+          {/* Block 1 — goal line + milestone share one stagger slot. The PB
+              banner below stays unwrapped: it carries its own hero-synced
+              entrance (and is the reduced-motion carrier for the confetti). */}
+          {storeMode && dailyGoal > 0 && goalMade != null && (
+            <Animated.View
+              entering={enter(1)}
+              style={styles.goalLineWrap}
+              accessibilityLabel={`Daily goal: ${goalMade} of ${dailyGoal} makes today`}
+            >
+              {goalMade >= dailyGoal ? (
+                <Chip
+                  label={`Daily goal hit — ${goalMade}/${dailyGoal} makes today`}
+                  tone="make"
+                />
+              ) : (
+                <Text style={styles.goalLine}>
+                  {`Daily goal · ${goalMade}/${dailyGoal} — ${dailyGoal - goalMade} to go`}
+                </Text>
+              )}
+            </Animated.View>
+          )}
           {milestones.length > 0 && (
-            <View style={styles.milestoneBanner}>
+            <Animated.View entering={enter(1)} style={styles.milestoneBanner}>
               <View style={styles.milestoneIcon}>
                 <Ionicons
                   name={milestones[0]!.icon as React.ComponentProps<typeof Ionicons>['name']}
@@ -341,13 +465,13 @@ export default function SessionSummaryScreen() {
                   </Text>
                 )}
               </View>
-            </View>
+            </Animated.View>
           )}
           {newBests.length > 0 && (
             <PersonalBestBanner bests={newBests} style={styles.pbBanner} />
           )}
           {videoPath != null && sessionId != null && (
-            <View style={styles.mediaSection}>
+            <Animated.View entering={enter(2)} style={styles.mediaSection}>
               <Eyebrow>Watch it back</Eyebrow>
               <View ref={replayRef} onLayout={() => {
                 replayRef.current?.measureInWindow((x, y, w, h) =>
@@ -364,48 +488,88 @@ export default function SessionSummaryScreen() {
                   <ReelEntryButton sessionId={sessionId} variant="ghost" style={{ flex: 1 }} />
                 </Row>
               </View>
+              {/* One-time honesty hint above the re-check region: UNSURE never
+                  flips on its own, and corrections train nothing. HintChip
+                  persists its own seen-flag and renders null afterwards. */}
+              {unsureCount > 0 && (
+                <HintChip
+                  hintKey="unsureSummary"
+                  text="UNSURE stays unsure until you say otherwise — honest receipts only. Swipe to correct; it's labeled, and it trains nothing."
+                  actionLabel="How calls are made"
+                  onAction={() => router.push('/how-it-works')}
+                  style={{ marginTop: space.md }}
+                />
+              )}
               {recordingStartSec != null && (
                 <RecheckPanel
                   sessionId={sessionId}
                   unsureCount={unsureCount}
                   onVerdict={onRecheckVerdict}
+                  unsureShotIndexes={shots
+                    .filter((s) => s.outcome === 'unsure' && s.corrected !== true)
+                    .map((s) => s.id)}
+                  onManualCorrect={(shotIndex, outcome) => {
+                    const s = shots.find((x) => x.id === shotIndex);
+                    // No third arg: corrected defaults to true — a hand edit
+                    // earns the Edited badge, unlike machine re-reads above.
+                    if (s) applyCorrection(s, outcome);
+                  }}
                   style={{ marginTop: space.md }}
                 />
               )}
-            </View>
+            </Animated.View>
           )}
           {heatmap.totalAttempts >= 4 && (
-            <View style={styles.heatSection}>
+            <Animated.View entering={enter(3)} style={styles.heatSection}>
               <Eyebrow>Shot map</Eyebrow>
               <View style={styles.heatCard}>
                 <CourtHeatmap heatmap={heatmap} />
               </View>
-            </View>
+            </Animated.View>
           )}
           {courtPlaced >= 3 && (
-            <View style={styles.heatSection}>
+            <Animated.View entering={enter(4)} style={styles.heatSection}>
               <Eyebrow>Court map · calibrated</Eyebrow>
               <View style={styles.heatCard}>
                 <CourtPlacementMap shots={shots} spec={FIBA_COURT} />
               </View>
-            </View>
+            </Animated.View>
           )}
-          <Eyebrow>Box score</Eyebrow>
-          <SessionRecap
-            shots={shots}
-            stats={stats}
-            onCorrect={onCorrect}
-            onCorrectValue={onCorrectValue}
-            videoPath={videoPath}
-            keepMode={keepMode}
-          />
+          <Animated.View entering={enter(5)}>
+            <Eyebrow>Box score</Eyebrow>
+            <SessionRecap
+              shots={shots}
+              stats={stats}
+              onCorrect={onCorrect}
+              onCorrectValue={onCorrectValue}
+              videoPath={videoPath}
+              keepMode={keepMode}
+            />
+          </Animated.View>
           {shareFailed && (
             <View style={{ marginTop: space.lg }}>
               <Chip label="Couldn't share — try again" tone="unsure" />
             </View>
           )}
-          <View style={styles.actionsSection}>
+          <Animated.View entering={enter(6)} style={styles.actionsSection}>
             <Eyebrow>Next up</Eyebrow>
+            {/* First-summary explainer nudge — how-it-works.tsx flips the
+                persisted flag on mount, so this row retires itself after one
+                visit (from anywhere); the Settings entry remains. */}
+            {!explainerSeen && (
+              <>
+                <Text style={styles.explainerCaption}>
+                  First session? See exactly how makes, misses and UNSURE get decided.
+                </Text>
+                <PillButton
+                  variant="ghost"
+                  label="How every call is made"
+                  icon="receipt-outline"
+                  onPress={() => router.push('/how-it-works')}
+                  style={styles.explainerButton}
+                />
+              </>
+            )}
             <PillButton
               variant="ghost"
               label="Shot Lab — deep analysis"
@@ -431,12 +595,19 @@ export default function SessionSummaryScreen() {
               />
             </Row>
             <PillButton
+              variant="ghost"
+              label="Run it back"
+              icon="refresh"
+              onPress={runItBack}
+              style={{ marginTop: space.md }}
+            />
+            <PillButton
               label="Done"
               icon="checkmark"
               onPress={onDone}
               style={{ marginTop: space.md }}
             />
-          </View>
+          </Animated.View>
         </>
       )}
     </Screen>
@@ -475,6 +646,20 @@ export default function SessionSummaryScreen() {
         }}
       />
     )}
+    {/* Personal-best confetti — LAST child so it z-sits above everything.
+        One burst per screen mount per session (trigger keyed on sessionId;
+        confettiOn never resets, so re-renders/corrections can't replay it).
+        pointerEvents-none inside Confetti keeps every button tappable during
+        the burst; under reduced motion Confetti renders null and the
+        PersonalBestBanner above carries the record on its own. */}
+    {newBests.length > 0 && confettiOn && (
+      <Confetti
+        trigger={sessionId ?? 0}
+        seed={(sessionId ?? 1) as number}
+        style={styles.confetti}
+        onDone={() => setConfettiOn(false)}
+      />
+    )}
     </View>
   );
 }
@@ -501,6 +686,15 @@ const styles = StyleSheet.create({
   pbBanner: {
     marginTop: -space.md,
     marginBottom: space.xl,
+  },
+  /** Daily-goal result line: same tuck-up rhythm as pbBanner under the hero. */
+  goalLineWrap: {
+    marginTop: -space.md,
+    marginBottom: space.xl,
+  },
+  goalLine: {
+    ...type.caption,
+    color: color.textDim,
   },
   // Career-milestone banner: a gold "moment" tucked under the hero, above PBs.
   milestoneBanner: {
@@ -559,6 +753,23 @@ const styles = StyleSheet.create({
   },
   actionsSection: {
     marginTop: space.xl,
+  },
+  /** First-summary explainer nudge: one-line caption over its ghost CTA. */
+  explainerCaption: {
+    ...type.micro,
+    color: color.textDim,
+    marginBottom: space.sm,
+  },
+  explainerButton: {
+    marginBottom: space.md,
+  },
+  /** Full-screen confetti overlay (RN 0.86 has no absoluteFillObject). */
+  confetti: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
   },
   heading: {
     ...type.heading,

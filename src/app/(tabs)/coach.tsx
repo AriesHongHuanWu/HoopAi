@@ -2,8 +2,10 @@
  * Coach's Corner — the multi-session coaching room.
  *
  * A weekly-report hero card (broadcast box-score idiom, like SummaryHero) with
- * a Mon–Sun week selector, then the ranked coach findings for that week:
- * severity-toned cards carrying the user's OWN evidence numbers and a
+ * a Mon–Sun week selector, then the insight cards in narrative order — arc
+ * profile, four-week timeline, season strip, NBA twin, weekly plan (+ Form
+ * Studio 3D promo), form readiness — then the ranked coach findings for that
+ * week: severity-toned cards carrying the user's OWN evidence numbers and a
  * prescription chip. "Share my week" pushes the report through the existing
  * ShareCard story pipeline.
  *
@@ -16,11 +18,16 @@ import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import React, { useEffect, useMemo, useState } from 'react';
 import { Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
-import Animated, { FadeInDown, useReducedMotion } from 'react-native-reanimated';
+import Animated from 'react-native-reanimated';
 
-import { shareWeekCard } from '@/components/ShareCard';
+import { useCardStagger, useStaggerAt } from '@/components/motion';
+import { shareCoachCard, shareWeekCard } from '@/components/ShareCard';
+import { ArcProfileCard } from '@/components/coach/ArcProfileCard';
+import { CoachTimelineCard } from '@/components/coach/CoachTimelineCard';
+import { FormReadinessCard } from '@/components/coach/FormReadinessCard';
+import { SeasonStrip } from '@/components/coach/SeasonStrip';
 import { Card, Chip, EmptyState, PillButton, Row, Screen, StatNumber } from '@/components/ui';
-import { color, font, radius, space, type } from '@/constants/tokens';
+import { color, font, motion, radius, space, type } from '@/constants/tokens';
 import {
   runCoach,
   weeklyPlan,
@@ -31,7 +38,16 @@ import {
   type Trend,
   type WeeklyAssignment,
 } from '@/core/coachEngine';
+import { arcProfile, coachTimeline, formReadiness, seasonComparison } from '@/core/coachInsights';
 import { getDrill } from '@/core/drills';
+import {
+  drillPrescription,
+  drillResultFromModeState,
+  levelForDrill,
+  LEVEL_LABEL,
+  type DrillLevel,
+  type DrillResult,
+} from '@/core/drillProgression';
 import {
   buildWeeklyReport,
   weekStart,
@@ -93,10 +109,12 @@ function trendVisual(trend: Trend): { icon: React.ComponentProps<typeof Ionicons
 // Finding card
 // ---------------------------------------------------------------------------
 
-function FindingCard({ finding, index, reducedMotion }: { finding: CoachFinding; index: number; reducedMotion: boolean }) {
+function FindingCard({ finding, index }: { finding: CoachFinding; index: number }) {
   const meta = SEVERITY_META[finding.severity];
   const trend = trendVisual(finding.trend);
-  const entering = reducedMotion ? undefined : FadeInDown.delay(index * 70).duration(360);
+  // Canonical stagger (reduced-motion gated inside the hook).
+  const enter = useCardStagger({ stepMs: 70 });
+  const entering = enter(index);
   return (
     <Animated.View
       entering={entering}
@@ -135,10 +153,10 @@ function FindingCard({ finding, index, reducedMotion }: { finding: CoachFinding;
 
 const ZONE_NAME: Record<ChartZone, string> = { left: 'Left', center: 'Middle', right: 'Right' };
 
-function WeeklyHero({ report, reducedMotion }: { report: WeeklyReport; reducedMotion: boolean }) {
+function WeeklyHero({ report }: { report: WeeklyReport }) {
   const fg = report.fgPct != null ? `${Math.round(report.fgPct * 100)}%` : '—';
-  const enter = (delayMs: number) =>
-    reducedMotion ? undefined : FadeInDown.duration(260).delay(delayMs);
+  // Absolute-delay stagger (reduced-motion gated inside the hook).
+  const enterAt = useStaggerAt({ durationMs: motion.standard });
 
   const delta = report.fgDeltaPtsVsPrior;
   const deltaText =
@@ -159,7 +177,7 @@ function WeeklyHero({ report, reducedMotion }: { report: WeeklyReport; reducedMo
         }`;
 
   return (
-    <Card entering={enter(0)}>
+    <Card entering={enterAt(0)}>
       <SectionEyebrow icon="calendar-outline">{`Week of ${report.label}`}</SectionEyebrow>
 
       {/* WSS badge + headline */}
@@ -292,7 +310,7 @@ function WeekSelector({
 type LoadState =
   | { status: 'loading' }
   | { status: 'error' }
-  | { status: 'ready'; sessions: CoachSession[] };
+  | { status: 'ready'; sessions: CoachSession[]; drillResults: DrillResult[] };
 
 function useCoachSessions(): { state: LoadState; reload: () => void } {
   const [state, setState] = useState<LoadState>({ status: 'loading' });
@@ -303,6 +321,18 @@ function useCoachSessions(): { state: LoadState; reload: () => void } {
     void (async () => {
       try {
         const rows = await listSessions(SCAN_LIMIT);
+        // Drill history for the level ladder — parsed off the SAME rows (no
+        // extra DB queries). Drills persist as finished spotShooting states.
+        const drillResults = rows
+          .filter((r) => r.modeId === 'spotShooting' && r.modeResultJson)
+          .map((r) => {
+            try {
+              return drillResultFromModeState(JSON.parse(r.modeResultJson!), r.startedAt);
+            } catch {
+              return null;
+            }
+          })
+          .filter((x): x is DrillResult => x != null);
         const withShots = rows.filter((r) => r.attempts > 0);
         const sessions = await Promise.all(
           withShots.map(async (r): Promise<CoachSession> => {
@@ -317,7 +347,7 @@ function useCoachSessions(): { state: LoadState; reload: () => void } {
             };
           }),
         );
-        if (alive) setState({ status: 'ready', sessions });
+        if (alive) setState({ status: 'ready', sessions, drillResults });
       } catch {
         if (alive) setState({ status: 'error' });
       }
@@ -410,9 +440,12 @@ function NbaTwinCard({
  */
 function WeeklyPlanCard({
   plan,
+  levels,
   entering,
 }: {
   plan: readonly WeeklyAssignment[];
+  /** Per-drill progression: current level + the coach's level prescription. */
+  levels: Partial<Record<string, { level: DrillLevel; prescription: string }>>;
   entering?: React.ComponentProps<typeof Animated.View>['entering'];
 }) {
   return (
@@ -424,6 +457,7 @@ function WeeklyPlanCard({
       <View style={styles.planList}>
         {plan.map((item, i) => {
           const drill = getDrill(item.drillId);
+          const lv = levels[item.drillId];
           return (
             <View key={item.finding.id} style={styles.planItem}>
               <View style={styles.planNum}>
@@ -432,10 +466,27 @@ function WeeklyPlanCard({
               <View style={styles.planBody}>
                 <Text style={styles.assignTitle}>{item.finding.title}</Text>
                 <Text style={styles.body}>{item.finding.prescription}</Text>
+                {lv != null && (
+                  <>
+                    <Row gap={space.sm} style={styles.planLevelRow}>
+                      <Chip
+                        label={`LEVEL ${lv.level} · ${LEVEL_LABEL[lv.level].toUpperCase()}`}
+                        tone={lv.level > 1 ? 'accent' : 'default'}
+                        compact
+                      />
+                    </Row>
+                    <Text style={styles.planLevelRx}>{lv.prescription}</Text>
+                  </>
+                )}
                 <Pressable
                   accessibilityRole="button"
-                  accessibilityLabel={`Practice ${drill.title} in Train`}
-                  onPress={() => router.push('/modes')}
+                  accessibilityLabel={`Practice ${drill.title} at level ${lv?.level ?? 1} in Train`}
+                  onPress={() =>
+                    router.push({
+                      pathname: '/modes',
+                      params: { drill: item.drillId, level: String(lv?.level ?? 1) },
+                    })
+                  }
                   style={({ pressed }) => [styles.planDrill, pressed && { opacity: 0.6 }]}
                 >
                   <Ionicons name="basketball" size={14} color={color.accent} />
@@ -451,11 +502,11 @@ function WeeklyPlanCard({
 }
 
 export default function CoachScreen() {
-  const reducedMotion = useReducedMotion();
   const { state: load, reload } = useCoachSessions();
   const [weekIndex, setWeekIndex] = useState(0);
 
   const sessions = load.status === 'ready' ? load.sessions : [];
+  const drillResults = load.status === 'ready' ? load.drillResults : [];
   const weeks = useMemo(() => weeksOf(sessions), [sessions]);
   const activeWeek = weeks[Math.min(weekIndex, Math.max(0, weeks.length - 1))];
 
@@ -502,7 +553,51 @@ export default function CoachScreen() {
     [findings],
   );
 
-  const cardEnter = (i: number) => (reducedMotion ? undefined : FadeInDown.delay(i * 70).duration(380));
+  // Four-week timeline ending at the selected week (oldest-first, empty weeks
+  // included so the bars read as a calendar, not a highlight reel).
+  const timeline = useMemo(
+    () => (activeWeek ? coachTimeline(sessions, activeWeek.startMs, 4) : []),
+    [sessions, activeWeek],
+  );
+
+  // Last 28 days vs the 28 before — the season-scale trend strip.
+  const season = useMemo(
+    () => (activeWeek ? seasonComparison(sessions, activeWeek.startMs) : null),
+    [sessions, activeWeek],
+  );
+
+  // Arc profile — the release-arc signature over the last ~15 sessions
+  // (sessions come newest-first from listSessions). Deliberately NOT
+  // week-scoped: the arc read is a habit, and it should hold steady while the
+  // user flips between weeks. arcProfile is pure (band 43–52°).
+  const arc = useMemo(
+    () => arcProfile(sessions.slice(0, 15).flatMap((s) => s.shots)),
+    [sessions],
+  );
+
+  // Timeline emptiness — with 3+ of the 4 weeks blank, the bars need one
+  // gentle line of context so a new user reads "calendar", not "broken chart".
+  const timelineMostlyEmpty = useMemo(
+    () => timeline.filter((w) => w.sessions === 0).length >= 3,
+    [timeline],
+  );
+
+  // Pose/form data coverage across the whole scan window (not week-scoped).
+  const readiness = useMemo(() => formReadiness(sessions.flatMap((s) => s.shots)), [sessions]);
+
+  // Drill progression per planned drill: current level + the level prescription.
+  const planLevels = useMemo(() => {
+    const m: Partial<Record<string, { level: DrillLevel; prescription: string }>> = {};
+    for (const item of plan) {
+      const rs = drillResults.filter((r) => r.drillId === item.drillId);
+      const level = levelForDrill(rs);
+      m[item.drillId] = { level, prescription: drillPrescription(item.drillId, level, rs) };
+    }
+    return m;
+  }, [plan, drillResults]);
+
+  // Canonical stagger for the insight-card ladder (reduced-motion gated inside).
+  const cardEnter = useCardStagger({ stepMs: 70, durationMs: 380 });
 
   return (
     <Screen scroll>
@@ -538,19 +633,80 @@ export default function CoachScreen() {
               onPick={setWeekIndex}
             />
 
-            <WeeklyHero report={report} reducedMotion={reducedMotion} />
+            <WeeklyHero report={report} />
+
+            {/* Arc profile — the release-arc signature over recent sessions.
+                The card owns its own n<5 "charging" state, so it mounts from
+                the very first measured shot. */}
+            {arc.n >= 1 && <ArcProfileCard profile={arc} entering={cardEnter(1)} />}
+
+            {/* Four-week timeline — tap a bar to jump the week selector */}
+            {timeline.some((w) => w.sessions > 0) && (
+              <View style={styles.timelineBlock}>
+                <CoachTimelineCard
+                  weeks={timeline}
+                  activeStartMs={activeWeek!.startMs}
+                  onPickWeek={(ms) => {
+                    const i = weeks.findIndex((w) => w.startMs === ms);
+                    if (i >= 0) setWeekIndex(i);
+                  }}
+                  entering={cardEnter(2)}
+                />
+                {timelineMostlyEmpty && (
+                  <Text style={styles.timelineHint}>
+                    Your timeline fills in as the weeks stack up.
+                  </Text>
+                )}
+              </View>
+            )}
+
+            {/* Season strip — shown whenever EITHER 28-day window has data */}
+            {season != null && (season.recent.attempts > 0 || season.prior.attempts > 0) && (
+              <SeasonStrip comparison={season} entering={cardEnter(3)} />
+            )}
 
             {/* NBA twin — who you shoot like this week + what to steal */}
-            {twin != null && <NbaTwinCard match={twin} entering={cardEnter(1)} />}
+            {twin != null && <NbaTwinCard match={twin} entering={cardEnter(4)} />}
 
             {/* This week's plan — the top fixes + drills to groove them */}
-            {plan.length > 0 && <WeeklyPlanCard plan={plan} entering={cardEnter(2)} />}
+            {plan.length > 0 && (
+              <WeeklyPlanCard plan={plan} levels={planLevels} entering={cardEnter(5)} />
+            )}
+
+            {/* Form Studio 3D promo — the upgrade's flagship, one tap away */}
+            <Card entering={cardEnter(6)}>
+              <Row gap={space.sm} style={styles.promoHead}>
+                <Ionicons name="cube-outline" size={18} color={color.accent} />
+                <Text style={styles.promoTitle} numberOfLines={1}>
+                  See your shooting form in 3D
+                </Text>
+                <Chip label="NEW" tone="accent" compact />
+              </Row>
+              <Text style={styles.body}>
+                Your tracked shots, rebuilt as a 3D skeleton you can orbit from any angle.
+              </Text>
+              <PillButton
+                label="Open Form Studio"
+                icon="cube-outline"
+                variant="ghost"
+                onPress={() => router.push('/formstudio')}
+                style={styles.promoBtn}
+              />
+            </Card>
+
+            {/* Form-data readiness — how much of the coach's form read is fed */}
+            <FormReadinessCard
+              readiness={readiness}
+              onOpenSettings={() => router.push('/settings')}
+              onOpenFormStudio={() => router.push('/formstudio')}
+              entering={cardEnter(7)}
+            />
 
             {/* Findings */}
             <View>
               <SectionEyebrow icon="clipboard-outline">The read on your week</SectionEyebrow>
               {findings.length === 0 ? (
-                <Card entering={cardEnter(1)}>
+                <Card entering={cardEnter(8)}>
                   <Text style={styles.body}>
                     {report.attempts < 8
                       ? 'A few more shots this week and the coach will have enough to break things down.'
@@ -560,14 +716,35 @@ export default function CoachScreen() {
               ) : (
                 <View style={styles.findingList}>
                   {findings.map((f, i) => (
-                    <FindingCard key={f.id} finding={f} index={i} reducedMotion={reducedMotion} />
+                    <FindingCard key={f.id} finding={f} index={i} />
                   ))}
                 </View>
               )}
             </View>
 
+            {/* Share the whole coach read as a story card */}
+            {report.sessions > 0 && (
+              <PillButton
+                label="Share coach report"
+                icon="share-outline"
+                variant="ghost"
+                onPress={() => {
+                  void shareCoachCard({
+                    label: report.label,
+                    wss: report.wss,
+                    fgPct: report.fgPct,
+                    makes: report.makes,
+                    attempts: report.attempts,
+                    sessions: report.sessions,
+                    topFinding: findings[0]?.title ?? null,
+                    focus: report.nextWeekFocus,
+                  });
+                }}
+              />
+            )}
+
             {/* Deeper dive hook */}
-            <Card entering={cardEnter(2)}>
+            <Card entering={cardEnter(9)}>
               <SectionEyebrow icon="flask-outline">Go deeper</SectionEyebrow>
               <Text style={styles.body}>
                 Coach's Corner reads across your whole week. For a single session — make-vs-miss
@@ -659,6 +836,15 @@ const styles = StyleSheet.create({
     flex: 1,
     minWidth: 0,
   },
+  planLevelRow: {
+    marginTop: space.sm,
+    alignItems: 'center',
+  },
+  planLevelRx: {
+    ...type.caption,
+    color: color.textDim,
+    marginTop: 4,
+  },
   planDrill: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -707,6 +893,31 @@ const styles = StyleSheet.create({
     ...type.caption,
     color: color.textFaint,
     letterSpacing: 1,
+  },
+
+  // Timeline block (card + optional sparse-history hint hugging it)
+  timelineBlock: {
+    gap: space.xs,
+  },
+  timelineHint: {
+    ...type.caption,
+    color: color.textFaint,
+    paddingHorizontal: space.xs,
+  },
+
+  // Form Studio 3D promo
+  promoHead: {
+    alignItems: 'center',
+  },
+  promoTitle: {
+    ...type.heading,
+    color: color.text,
+    flex: 1,
+    minWidth: 0,
+  },
+  promoBtn: {
+    marginTop: space.md,
+    alignSelf: 'flex-start',
   },
 
   // Week selector

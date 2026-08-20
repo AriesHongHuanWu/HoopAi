@@ -6,9 +6,7 @@
  */
 import { Ionicons } from '@expo/vector-icons';
 import { createAudioPlayer, type AudioPlayer } from 'expo-audio';
-import { FadeInDown, useReducedMotion } from 'react-native-reanimated';
 import Constants from 'expo-constants';
-import * as Haptics from 'expo-haptics';
 import { router } from 'expo-router';
 import { useEffect, useRef, useState, type ComponentProps } from 'react';
 import { Linking, Modal, Pressable, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
@@ -20,6 +18,7 @@ import {
   type SoundPack,
 } from '@/camera/soundPacks';
 import { BackPill } from '@/components/ShotList';
+import { CalibrationHealthCard } from '@/components/CalibrationHealthCard';
 import { Card, Eyebrow, Row, Screen } from '@/components/ui';
 import { color, radius, space, touch, type } from '@/constants/tokens';
 import type { ShootingHand } from '@/core/types';
@@ -29,9 +28,8 @@ import {
   exportHardExamples,
 } from '@/data/hardExamples';
 import { runBackupExport, runBackupImport } from '@/data/backupRunner';
-
-/** Staggered card entrance (i = card index top-to-bottom). */
-const cardEnter = (i: number) => FadeInDown.delay(i * 70).duration(380);
+import { useCardStagger } from '@/components/motion';
+import { haptic } from '@/utils/haptics';
 import {
   CLIP_POST_ROLL_MAX,
   CLIP_POST_ROLL_MIN,
@@ -173,9 +171,9 @@ const PRESET_OPTIONS: {
   },
 ];
 
-/** Fires selection haptics when the user has them enabled. */
+/** Selection tick — the haptic util gates on the user's Haptics setting. */
 function tick() {
-  if (useSettings.getState().hapticsEnabled) void Haptics.selectionAsync();
+  haptic.selection();
 }
 
 /** Human copy for the measured device tier, from the last on-device benchmark. */
@@ -540,10 +538,18 @@ export default function SettingsScreen() {
   const roiZoom = useSettings((s) => s.roiZoom);
   const depthVeto = useSettings((s) => s.depthVeto);
   const reappearance = useSettings((s) => s.reappearance);
+  const rattleGuard = useSettings((s) => s.rattleGuard);
+  const settleWindow = useSettings((s) => s.settleWindow);
   const motionAssist = useSettings((s) => s.motionAssist);
   const metric23 = useSettings((s) => s.metric23);
   const nanoV2 = useSettings((s) => s.nanoV2);
   const useFlightArc = useSettings((s) => s.useFlightArc);
+  const replay3d = useSettings((s) => s.replay3d);
+  const multiBallGuard = useSettings((s) => s.multiBallGuard);
+  const rimGuard = useSettings((s) => s.rimGuard);
+  const trackerRescue = useSettings((s) => s.trackerRescue);
+  const adaptiveThermal = useSettings((s) => s.adaptiveThermal);
+  const lensCheck = useSettings((s) => s.lensCheck);
   const formAnalysis = useSettings((s) => s.formAnalysis);
   const dailyGoalMakes = useSettings((s) => s.dailyGoalMakes);
   const set = useSettings((s) => s.set);
@@ -555,9 +561,9 @@ export default function SettingsScreen() {
   const resolvedTier = resolvedTuning(deviceTierOverride, lastBenchmark?.ms ?? null).tier;
   const deviceName = Device.modelName ?? Device.deviceName ?? 'your phone';
 
-  // Respect the system Reduce Motion setting: cards appear in place.
-  const reducedMotion = useReducedMotion();
-  const enter = (i: number) => (reducedMotion ? undefined : cardEnter(i));
+  // Staggered card entrance (i = card index top-to-bottom). The hook returns
+  // undefined under Reduce Motion, so cards appear in place.
+  const enter = useCardStagger({ stepMs: 70, durationMs: 380 });
 
   // Derived tracking preset (never persisted — always reflects the live knobs).
   const activePreset = presetFromKnobs({
@@ -616,9 +622,7 @@ export default function SettingsScreen() {
   }, []);
 
   const restartTutorial = () => {
-    if (useSettings.getState().hapticsEnabled) {
-      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    }
+    haptic.success();
     resetTutorial();
     setTutorialNotice(true);
     if (tutorialNoticeTimer.current != null) clearTimeout(tutorialNoticeTimer.current);
@@ -672,9 +676,7 @@ export default function SettingsScreen() {
     setImportOpen(false);
     setImportDraft('');
     if (result.ok) {
-      if (useSettings.getState().hapticsEnabled) {
-        void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      }
+      haptic.success();
       showBackupNotice(`Imported ${result.imported}, skipped ${result.skipped}.`);
     } else {
       showBackupNotice(IMPORT_ERRORS[result.error] ?? 'Import failed.');
@@ -742,9 +744,10 @@ export default function SettingsScreen() {
             description="Gentle taps for buttons and milestones."
             value={hapticsEnabled}
             onValueChange={(v) => {
-              // Confirm with a tap only when turning haptics ON.
-              if (v) void Haptics.selectionAsync();
+              // Write first, then tick: the util gates on the store, so the
+              // confirmation tap fires only when haptics were just turned ON.
               set('hapticsEnabled', v);
+              haptic.selection();
             }}
           />
           <View style={styles.divider} />
@@ -1048,6 +1051,26 @@ export default function SettingsScreen() {
           />
           <View style={styles.divider} />
           <ToggleRow
+            label="Rattle-out guard (stricter makes)"
+            description="When the ball crosses the rim line and the net twitches, but you then SEE it bounce or carom back out instead of dropping through, hold the shot as 'unsure' rather than counting a make. Cleans up rim rattles and front-rim caroms a net brush would miscount. Bread-ball-safe: it can only downgrade a make to unsure, never invent a miss, and never touches a clean swish or one the net swallows. ON by default. Takes effect at the next rim lock."
+            value={rattleGuard}
+            onValueChange={(v) => {
+              tick();
+              set('rattleGuard', v);
+            }}
+          />
+          <View style={styles.divider} />
+          <ToggleRow
+            label="Settle window (late bounce-out)"
+            description="Wait a few frames (~0.13s) after the ball drops below the rim before scoring a make, so a LATE rim bounce-out — the ball dips in then pops back up over the rim and out — is caught and held as 'unsure' instead of counted. Pairs with the rattle-out guard. Bread-ball-safe: it can only downgrade a make to unsure, never invent a miss, and a clean swish or one the net swallows is untouched. ON by default. Takes effect at the next rim lock."
+            value={settleWindow}
+            onValueChange={(v) => {
+              tick();
+              set('settleWindow', v);
+            }}
+          />
+          <View style={styles.divider} />
+          <ToggleRow
             label="Rim zoom"
             experimental
             description="When the ball is missed near the basket, re-run the detector on a magnified crop of the rim to recover it at the make/miss moment. Self-limiting — only fires during a shot, only when needed, and only on phones fast enough. Turn on Debug mode to see it working (the 'roi zoom' row)."
@@ -1066,6 +1089,59 @@ export default function SettingsScreen() {
             onValueChange={(v) => {
               tick();
               set('motionAssist', v);
+            }}
+          />
+          <View style={styles.divider} />
+          {/* Detection guards — suppression/advisory-only safety nets. None of
+              them can ever create a make call; each toggle is an escape hatch. */}
+          <Eyebrow>Detection guards</Eyebrow>
+          <ToggleRow
+            label="Multi-ball guard"
+            description="Pause new shot detection while several balls are in the air. Prevents false calls during warmups."
+            value={multiBallGuard}
+            onValueChange={(v) => {
+              tick();
+              set('multiBallGuard', v);
+            }}
+          />
+          <View style={styles.divider} />
+          <ToggleRow
+            label="Rim bump guard"
+            description="Re-settle the rim quickly after camera bumps and hold judgment while the rim is uncertain."
+            value={rimGuard}
+            onValueChange={(v) => {
+              tick();
+              set('rimGuard', v);
+            }}
+          />
+          <View style={styles.divider} />
+          <ToggleRow
+            label="Track rescue"
+            description="Recovers a ball the detector keeps seeing but the tracker won’t start on (raised-gate models only). Detection-side only — never changes make/miss judging."
+            value={trackerRescue}
+            onValueChange={(v) => {
+              tick();
+              set('trackerRescue', v);
+            }}
+          />
+          <View style={styles.divider} />
+          <ToggleRow
+            label="Thermal auto-throttle"
+            description="Ease off detection when the phone runs hot, instead of stuttering."
+            value={adaptiveThermal}
+            onValueChange={(v) => {
+              tick();
+              set('adaptiveThermal', v);
+            }}
+          />
+          <View style={styles.divider} />
+          <ToggleRow
+            label="Lens check"
+            description="Warn before a session if glare or a smudged lens may hurt tracking."
+            value={lensCheck}
+            onValueChange={(v) => {
+              tick();
+              set('lensCheck', v);
             }}
           />
           <View style={styles.divider} />
@@ -1178,6 +1254,18 @@ export default function SettingsScreen() {
               />
             </View>
           ))}
+          <View style={styles.divider} />
+          {/* Replay rendering — independent of recording: the 3D theater draws
+              from persisted arc/skeleton data, so it works without clips. */}
+          <ToggleRow
+            label="3D replay"
+            description="Render shot replays as a 3D scene. Turn off if replay feels slow on this phone."
+            value={replay3d}
+            onValueChange={(v) => {
+              tick();
+              set('replay3d', v);
+            }}
+          />
           {debugMode && (
           <>
           <View style={styles.divider} />
@@ -1331,8 +1419,19 @@ export default function SettingsScreen() {
           </Row>
         </Card>
 
-        {/* Data */}
+        {/* Calibration */}
         <Card entering={enter(6)}>
+          <SectionHeader icon="locate">Calibration</SectionHeader>
+          {/* `bare` — the health card renders content-only inside this Card. */}
+          <CalibrationHealthCard
+            variant="settings"
+            bare
+            onOpenGuide={() => router.push('/calibration-guide')}
+          />
+        </Card>
+
+        {/* Data */}
+        <Card entering={enter(7)}>
           <SectionHeader icon="cloud-download">Data</SectionHeader>
           <ActionRow
             label={backupBusy ? 'Exporting…' : 'Export all data'}
@@ -1355,11 +1454,17 @@ export default function SettingsScreen() {
         </Card>
 
         {/* Help */}
-        <Card entering={enter(7)}>
+        <Card entering={enter(8)}>
           <SectionHeader icon="help-buoy">Help</SectionHeader>
           <ActionRow
+            label="How detection works"
+            description="The three signals, receipts and confidence tiers behind every call."
+            onPress={() => router.push('/how-it-works')}
+          />
+          <View style={styles.divider} />
+          <ActionRow
             label="Restart tutorial"
-            description="Replay the coach marks on Home, Live and Summary."
+            description="Replay the coach marks and first-time hints."
             onPress={restartTutorial}
           />
           {tutorialNotice && (
@@ -1374,7 +1479,7 @@ export default function SettingsScreen() {
         </Card>
 
         {/* About */}
-        <Card entering={enter(8)}>
+        <Card entering={enter(9)}>
           <SectionHeader icon="information-circle">About</SectionHeader>
           <Row style={styles.settingRow} gap={space.lg}>
             <Text style={styles.settingLabel}>Version</Text>

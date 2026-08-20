@@ -363,6 +363,166 @@ describe('shotFromRow', () => {
   });
 });
 
+describe('flight-arc persistence (v9)', () => {
+  // A minimal snapshot that passes decodeArcSnapshot's validation: ya > 0,
+  // tMax > tMin, >= 8 flat path entries, positive rim box + frame dims.
+  const arc = {
+    v: 1 as const,
+    fit: { ya: 400, yb: -300, yc: 120, xm: 50, xq: 10, r2y: 0.95, tMin: 1, tMax: 2 },
+    path: [10, 100, 20, 60, 30, 40, 40, 60],
+    rimBox: { x: 30, y: 35, width: 40, height: 20 },
+    frameW: 640,
+    frameH: 640,
+  };
+  const shot = {
+    id: 1,
+    tStart: 0,
+    tResolved: 1,
+    outcome: 'make' as const,
+    signals: { geo: true, net: null, cls: null },
+    rimBounce: false,
+    xCross: null,
+    entryAngleDeg: null,
+    releaseAngleDeg: null,
+    releasePoint: null,
+    originX: null,
+    originY: null,
+    trajectory: [],
+  };
+
+  it('insertShot binds 21 params with the arc JSON in slot 21', async () => {
+    const fake = fakeDatabase();
+    sqlite.openDatabaseAsync.mockResolvedValue(fake);
+
+    await db.insertShot(7, { ...shot, flightArc: arc });
+
+    const call = fake.runAsync.mock.calls.find(
+      (c: unknown[]) => typeof c[0] === 'string' && c[0].includes('INSERT INTO shots'),
+    ) as unknown[];
+    // sql + 21 bound params (arcJson is the 21st column).
+    expect(call).toHaveLength(22);
+    expect(call[0]).toContain('arcJson');
+    const bound = call[call.length - 1];
+    expect(typeof bound).toBe('string');
+    expect(JSON.parse(bound as string)).toEqual(arc);
+  });
+
+  it('insertShot binds null in the arcJson slot when the shot has no arc', async () => {
+    const fake = fakeDatabase();
+    sqlite.openDatabaseAsync.mockResolvedValue(fake);
+
+    await db.insertShot(7, shot);
+
+    const call = fake.runAsync.mock.calls.find(
+      (c: unknown[]) => typeof c[0] === 'string' && c[0].includes('INSERT INTO shots'),
+    ) as unknown[];
+    expect(call).toHaveLength(22);
+    expect(call[call.length - 1]).toBeNull();
+  });
+
+  const baseRow = {
+    id: 10,
+    sessionId: 1,
+    shotIndex: 2,
+    tStart: 1,
+    tResolved: 2,
+    outcome: 'make' as const,
+    corrected: 0,
+    rimBounce: 0,
+    entryAngleDeg: null,
+    releaseAngleDeg: null,
+    xCross: null,
+    originX: null,
+    originY: null,
+    signalsJson: '{}',
+    trajectoryJson: '[]',
+    clipPath: null,
+  };
+
+  it('shotFromRow revives flightArc from a valid arcJson row', () => {
+    const revived = db.shotFromRow({ ...baseRow, arcJson: JSON.stringify(arc) });
+    expect(revived.flightArc).toEqual(arc);
+  });
+
+  it('shotFromRow omits flightArc for null and corrupt arcJson (reject, never repair)', () => {
+    expect(db.shotFromRow({ ...baseRow, arcJson: null }).flightArc).toBeUndefined();
+    expect(db.shotFromRow(baseRow).flightArc).toBeUndefined();
+    expect(db.shotFromRow({ ...baseRow, arcJson: '{' }).flightArc).toBeUndefined();
+  });
+
+  it('decodes arcJson LAZILY: no parse on the row read path, one cached parse on first flightArc access', () => {
+    // History/trends/shotlab map every persisted row through shotFromRow but
+    // never render the arc — the row read path must not pay a per-shot
+    // JSON.parse for arcJson. The decode runs on first .flightArc access and
+    // is cached for repeat reads.
+    const arcJson = JSON.stringify(arc);
+    const parseSpy = jest.spyOn(JSON, 'parse');
+    const arcParses = () =>
+      parseSpy.mock.calls.filter(([raw]) => raw === arcJson).length;
+    try {
+      const shot = db.shotFromRow({ ...baseRow, arcJson });
+      expect(arcParses()).toBe(0); // building the shot did NOT parse the arc
+      expect(shot.flightArc).toEqual(arc); // first access decodes...
+      expect(arcParses()).toBe(1);
+      expect(shot.flightArc).toEqual(arc); // ...and repeat reads hit the cache
+      expect(arcParses()).toBe(1);
+    } finally {
+      parseSpy.mockRestore();
+    }
+  });
+
+  it('keeps flightArc enumerable so spreads/serialization still carry the decoded arc', () => {
+    // ShotList's value-override path spreads the shot ({ ...shot, ... }) —
+    // the lazy property must behave like the old eager field there.
+    const spread = { ...db.shotFromRow({ ...baseRow, arcJson: JSON.stringify(arc) }) };
+    expect(spread.flightArc).toEqual(arc);
+  });
+
+  it('importBackup restores arcJson AND the v8 provenance columns (regression pin)', async () => {
+    const fake = fakeDatabase();
+    sqlite.openDatabaseAsync.mockResolvedValue(fake);
+
+    await db.importBackup({
+      sessions: [],
+      shots: [{ ...baseRow, arcJson: JSON.stringify(arc), valueSource: 'court', courtX: 1, courtY: 2 }],
+      jumps: [],
+    });
+
+    const call = fake.runAsync.mock.calls.find(
+      (c: unknown[]) => typeof c[0] === 'string' && c[0].includes('INSERT INTO shots'),
+    ) as unknown[];
+    const sql = call[0] as string;
+    // Pins the v8 backup round-trip fix (provenance was exported but dropped
+    // on import) plus the new v9 arc column.
+    expect(sql).toContain('arcJson');
+    expect(sql).toContain('valueSource');
+    expect(sql).toContain('courtX');
+    // 24 columns (no explicit id — AUTOINCREMENT assigns fresh shot PKs so a
+    // foreign backup's ids can never collide) → sql + 24 bound params.
+    expect(sql).not.toMatch(/INSERT INTO shots \(\s*id\b/);
+    expect(call).toHaveLength(25);
+  });
+
+  it('runs the v9 migration from a v8 database', async () => {
+    const fake = fakeDatabase();
+    fake.getFirstAsync.mockImplementation(async (sql: string) => {
+      if (sql.includes('user_version')) return { user_version: 8 };
+      return null;
+    });
+    sqlite.openDatabaseAsync.mockResolvedValue(fake);
+
+    await db.getDb();
+
+    const ranV9 = fake.execAsync.mock.calls.some(
+      (c: unknown[]) =>
+        typeof c[0] === 'string' &&
+        c[0].includes('ALTER TABLE shots ADD COLUMN arcJson TEXT') &&
+        c[0].includes('PRAGMA user_version = 9'),
+    );
+    expect(ranV9).toBe(true);
+  });
+});
+
 describe('resetDatabase', () => {
   it('closes, deletes and re-opens; never throws even when steps fail', async () => {
     const first = fakeDatabase();
@@ -494,7 +654,7 @@ describe('importBackup (P19)', () => {
   const shot = { id: 100, sessionId: 10, shotIndex: 0, tStart: 0, tResolved: 1, outcome: 'make' as const, corrected: 0, rimBounce: 0, entryAngleDeg: null, releaseAngleDeg: null, xCross: null, originX: null, originY: null, signalsJson: '{}', trajectoryJson: '[]', clipPath: null };
   const jump = { id: 7, ts: 5, heightCm: 55, method: 'hang-time', confidence: 0.9 };
 
-  it('inserts sessions, shots and jumps with their ids in one transaction', async () => {
+  it('inserts sessions/jumps with their ids and shots WITHOUT ids, in one transaction', async () => {
     const fake = fakeDatabase();
     sqlite.openDatabaseAsync.mockResolvedValue(fake);
 
@@ -502,18 +662,72 @@ describe('importBackup (P19)', () => {
 
     expect(counts).toEqual({ sessions: 1, shots: 1, jumps: 1 });
     expect(fake.withTransactionAsync).toHaveBeenCalledTimes(1);
-    // Session insert preserves the original id.
+    // Session insert preserves the original id (shots reference it via
+    // sessionId, so it MUST survive verbatim).
     const sessionInsert = fake.runAsync.mock.calls.find(
       (c: unknown[]) => typeof c[0] === 'string' && c[0].includes('INSERT INTO sessions'),
     );
     expect(sessionInsert?.[1]).toBe(10); // first bound param is id
-    // Shot + jump inserts fired too.
-    expect(
-      fake.runAsync.mock.calls.some((c: unknown[]) => typeof c[0] === 'string' && c[0].includes('INSERT INTO shots')),
-    ).toBe(true);
-    expect(
-      fake.runAsync.mock.calls.some((c: unknown[]) => typeof c[0] === 'string' && c[0].includes('INSERT INTO jumps')),
-    ).toBe(true);
+    // Shot insert deliberately OMITS the id column (AUTOINCREMENT assigns a
+    // fresh PRIMARY KEY): mergeBackup only dedupes session/jump ids, so a
+    // foreign backup's shot ids may collide with local rows. First bound
+    // param is therefore the (preserved) sessionId, not the backup shot id.
+    const shotInsert = fake.runAsync.mock.calls.find(
+      (c: unknown[]) => typeof c[0] === 'string' && c[0].includes('INSERT INTO shots'),
+    );
+    expect(shotInsert?.[0]).not.toMatch(/INSERT INTO shots \(\s*id\b/);
+    expect(shotInsert?.[1]).toBe(10); // sessionId, not shot.id (100)
+    // Jump insert keeps its id (deduped upstream, no children reference it).
+    const jumpInsert = fake.runAsync.mock.calls.find(
+      (c: unknown[]) => typeof c[0] === 'string' && c[0].includes('INSERT INTO jumps'),
+    );
+    expect(jumpInsert?.[1]).toBe(7); // first bound param is id
+  });
+
+  it('imports shots whose backup ids collide with existing local rows (fresh ids, no rollback)', async () => {
+    // Regression: a backup from ANOTHER install can carry shots whose
+    // PRIMARY KEY ids already exist locally even though every session id is
+    // distinct. The old insert bound sh.id explicitly, so SQLite raised
+    // SQLITE_CONSTRAINT inside the transaction and the WHOLE import rolled
+    // back as 'write-failed'. Simulate the real PK: reject any shots INSERT
+    // that explicitly binds an already-taken id; auto-assign otherwise.
+    const fake = fakeDatabase();
+    const takenShotIds = new Set([100, 101]); // local rows already own these
+    let nextAutoId = 500;
+    fake.runAsync.mockImplementation(async (sql: string, ...params: unknown[]) => {
+      if (sql.includes('INSERT INTO shots')) {
+        if (/INSERT INTO shots \(\s*id\b/.test(sql)) {
+          const id = params[0] as number;
+          if (takenShotIds.has(id)) {
+            throw new Error('SQLITE_CONSTRAINT: UNIQUE constraint failed: shots.id');
+          }
+          takenShotIds.add(id);
+          return { lastInsertRowId: id, changes: 1 };
+        }
+        const id = nextAutoId++;
+        takenShotIds.add(id);
+        return { lastInsertRowId: id, changes: 1 };
+      }
+      return { lastInsertRowId: 1, changes: 1 };
+    });
+    sqlite.openDatabaseAsync.mockResolvedValue(fake);
+
+    const counts = await db.importBackup({
+      sessions: [session],
+      // Both shot ids collide with local rows; both must still land.
+      shots: [
+        { ...shot, id: 100, shotIndex: 0 },
+        { ...shot, id: 101, shotIndex: 1 },
+      ],
+      jumps: [],
+    });
+
+    // Import succeeds — all shots present, nothing rolled back to zeros.
+    expect(counts).toEqual({ sessions: 1, shots: 2, jumps: 0 });
+    const shotInserts = fake.runAsync.mock.calls.filter(
+      (c: unknown[]) => typeof c[0] === 'string' && c[0].includes('INSERT INTO shots'),
+    );
+    expect(shotInserts).toHaveLength(2);
   });
 
   it('returns all-zero counts on a write failure without throwing', async () => {

@@ -239,6 +239,18 @@ describe('mergeBackup', () => {
     expect(plan.shots.map((s) => s.sessionId)).toEqual([9]);
   });
 
+  it('keeps shots whose PRIMARY KEY ids collide locally — only the parent session id decides', () => {
+    // Shot ids are deliberately NOT deduped here: nothing references
+    // shots.id, and importBackup (src/data/db.ts) omits the id column on
+    // insert so AUTOINCREMENT assigns fresh PKs. Dropping a shot because its
+    // id happened to collide would silently lose data from another install.
+    const incoming = data({ sessions: [session(3)], shots: [shot(3, 0, { id: 100 })] });
+    // sessionIds: [1] — session 3 is new, but shot id 100 exists locally.
+    const plan = mergeBackup(incoming, { sessionIds: [1], jumpIds: [] }, EMPTY_ACH, EMPTY_CH);
+    expect(plan.shots).toHaveLength(1);
+    expect(plan.shots[0]!.id).toBe(100); // carried verbatim; db assigns the real PK
+  });
+
   it('dedupes jumps by id against existing and within the set', () => {
     const incoming = data({ jumps: [jump(1), jump(2), jump(2), jump(3)] });
     const plan = mergeBackup(incoming, { sessionIds: [], jumpIds: [1] }, EMPTY_ACH, EMPTY_CH);
