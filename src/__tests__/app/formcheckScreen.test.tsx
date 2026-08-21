@@ -24,7 +24,12 @@
  *  5. Pure copy/write-path helpers (repCallout, verdictHeadline,
  *     guidanceBanner, lowConfidenceLine, armChipLabel, formSessionRowOf) —
  *     including the summaryJson-carries-no-sequences contract.
- *  6. V3 STAGE HARDENING — the loader warms the interpreter up before
+ *  6. V4 BUFFER ORIENTATION — the check opens on the BACK camera; the rail
+ *     carries a VIEW chip that says UNVERIFIED (never a silent "upright")
+ *     until the detector commits, DURING calibration as well as past it,
+ *     takes a one-tap human override that latches as MANUAL, and drops that
+ *     latch when the session restarts or the camera changes.
+ *  7. V3 STAGE HARDENING — the loader warms the interpreter up before
  *     publishing it and reports a dead ladder with a Retry instead of an
  *     eternal "warming up"; permission is asked at MOUNT; a null device says
  *     so rather than blaming the room; "Starting the camera…" is its own
@@ -36,7 +41,16 @@
  * frame output is stubbed inert, so the session never receives a sample and
  * the "Ready — shoot when you like." rail state (readiness.ready true) has no
  * render path here — its trigger is pinned instead as guidanceBanner
- * returning null, which is exactly the condition the rail branches on.
+ * returning null, which is exactly the condition the rail branches on. For
+ * the same reason the ORIENTATION detector never receives a frame here, so
+ * its two auto verdicts are pinned through the exported copy helpers (and, at
+ * the source, by src/__tests__/core/poseOrientation.test.ts); what the screen
+ * itself is pinned on is the zero-frame state — UNVERIFIED — and the manual
+ * override, which needs no frames at all. The same limit puts the sink's
+ * SESSION REBUILD out of reach here: it fires on the frame where the
+ * correction switches on or off, and no frame ever arrives under jest, so
+ * its rail copy ("restarted after the view flipped") is verifiable only on a
+ * device. Nothing below claims otherwise.
  *
  * Mock set follows src/__tests__/app/sessionFormReport.test.tsx.
  */
@@ -201,12 +215,22 @@ const mockCameraState = {
   hasPermission: false,
   canRequestPermission: true,
   requestPermission: jest.fn(async () => false),
-  device: { id: 'mock-front' } as { id: string } | null,
+  device: { id: 'mock-cam' } as { id: string } | null,
+  /**
+   * Which sensor the screen last asked for. The default is load-bearing: the
+   * capture protocol puts the phone at the shooter's side 2–4 m away, where
+   * the front preview cannot be read — and defaulting to BACK also keeps the
+   * whole front-camera path out of a demo.
+   */
+  position: null as 'front' | 'back' | null,
 };
 jest.mock('react-native-vision-camera', () => ({
   __esModule: true,
   Camera: () => null,
-  useCameraDevice: () => mockCameraState.device,
+  useCameraDevice: (position: 'front' | 'back') => {
+    mockCameraState.position = position;
+    return mockCameraState.device;
+  },
   useCameraPermission: () => ({
     hasPermission: mockCameraState.hasPermission,
     canRequestPermission: mockCameraState.canRequestPermission,
@@ -273,6 +297,8 @@ import FormCheckScreen, {
   formSessionRowOf,
   guidanceBanner,
   lowConfidenceLine,
+  orientationChipHint,
+  orientationChipLabel,
   repCallout,
   verdictHeadline,
 } from '@/app/formcheck';
@@ -332,6 +358,18 @@ async function pressButton(r: ReactTestRenderer, label: string): Promise<void> {
           typeof m.props?.children === 'string' && m.props.children === label,
       ).length > 0,
     );
+  expect(target).toBeDefined();
+  await act(async () => {
+    (target!.props.onPress as () => void)();
+  });
+}
+
+/** Press the first control carrying `label` as its accessibility label. */
+async function pressA11y(r: ReactTestRenderer, label: string): Promise<void> {
+  const target = r.root.findAll(
+    (n) =>
+      typeof n.props?.onPress === 'function' && n.props?.accessibilityLabel === label,
+  )[0];
   expect(target).toBeDefined();
   await act(async () => {
     (target!.props.onPress as () => void)();
@@ -488,7 +526,8 @@ beforeEach(() => {
   mockCameraState.hasPermission = false;
   mockCameraState.canRequestPermission = true;
   mockCameraState.requestPermission.mockClear();
-  mockCameraState.device = { id: 'mock-front' };
+  mockCameraState.device = { id: 'mock-cam' };
+  mockCameraState.position = null;
   mockProfileState.heightCm = null;
   mockTflite.mode = 'pending';
   mockTflite.calls = 0;
@@ -778,6 +817,166 @@ describe('FormCheck — calibration rail', () => {
     const r = await render(<FormCheckScreen />);
     await pressButton(r, 'Start form check');
     expect(textOf(r.toJSON())).toContain('Camera access needed');
+    await unmount(r);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// V4 — the camera default and the buffer-orientation chip
+
+describe('FormCheck — camera default', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  it('opens on the BACK sensor, not the front one', async () => {
+    // The protocol props the phone at the shooter's SIDE, 2–4 m away: the
+    // front preview was never readable from there, and the back sensor is
+    // the better one. It also keeps the entire front-camera path — mirroring
+    // included — out of a demo.
+    const r = await render(<FormCheckScreen />);
+    expect(mockCameraState.position).toBe('back');
+    await unmount(r);
+  });
+
+  it('the guide asks for the CAMERA to point at you, not the screen', async () => {
+    const r = await render(<FormCheckScreen />);
+    const text = textOf(r.toJSON());
+    expect(text).toContain('camera pointing at you');
+    expect(text).not.toContain('screen facing you');
+    await unmount(r);
+  });
+
+  it('keeps the one-tap flip to the front camera', async () => {
+    mockCameraState.hasPermission = true;
+    const r = await render(<FormCheckScreen />);
+    await pressButton(r, 'Start form check');
+    expect(mockCameraState.position).toBe('back');
+
+    await pressA11y(r, 'Switch to the front camera');
+    expect(mockCameraState.position).toBe('front');
+    await unmount(r);
+  });
+});
+
+describe('FormCheck — buffer orientation chip', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+    mockCameraState.hasPermission = true;
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  /** Live, past calibration, on the chip row — where the VIEW chip lives. */
+  async function armedRail(): Promise<ReactTestRenderer> {
+    const r = await render(<FormCheckScreen />);
+    await pressButton(r, 'Start form check');
+    await pressButton(r, 'Skip');
+    return r;
+  }
+
+  it('says UNVERIFIED until the detector commits — never a silent "upright"', async () => {
+    // No frames reach the detector under jest, which IS the honest zero-frame
+    // state: nothing was verified, so nothing is corrected and the chip says
+    // exactly that. A green "upright" here would be a claim about a check
+    // that never ran.
+    const r = await armedRail();
+    const text = textOf(r.toJSON());
+    expect(text).toContain('VIEW UNVERIFIED');
+    expect(text).not.toContain('VIEW UPRIGHT');
+    expect(text).not.toContain('FLIP FIXED');
+
+    const chip = r.root.findAll(
+      (n) =>
+        typeof n.props?.onPress === 'function' &&
+        typeof n.props?.accessibilityLabel === 'string' &&
+        n.props.accessibilityLabel.startsWith('Camera orientation unverified'),
+    )[0];
+    expect(chip).toBeDefined();
+    expect(String(chip!.props.accessibilityLabel)).toContain('left uncorrected');
+
+    await unmount(r);
+  });
+
+  it('carries the VIEW chip DURING calibration, not only past it', async () => {
+    // Collecting is the exact window the verdict is designed to settle in.
+    // The chip row used to render only in the armed branch, so through that
+    // whole phase the verdict was invisible and the override untappable —
+    // the honesty contract, unreachable precisely where it is relied on.
+    // (armedRail() presses Skip first, which is why it could not see this.)
+    const r = await render(<FormCheckScreen />);
+    await pressButton(r, 'Start form check');
+    let text = textOf(r.toJSON());
+    expect(text).toContain('PRACTICE MOTION 1 OF 2');
+    expect(text).toContain('VIEW UNVERIFIED');
+
+    // And it takes the override right there, without leaving calibration.
+    await pressButton(r, 'VIEW UNVERIFIED');
+    text = textOf(r.toJSON());
+    expect(text).toContain('FLIP FIXED · MANUAL');
+    expect(text).toContain('PRACTICE MOTION 1 OF 2');
+    await unmount(r);
+  });
+
+  it('one tap latches the human call, and taps back the other way', async () => {
+    // The stage recovery: a skeleton on its head must be fixable in one tap,
+    // and a wrong tap undone in one more. Manual wins and latches over the
+    // detector — src/core/poseOrientation.ts pins that half.
+    const r = await armedRail();
+    await pressButton(r, 'VIEW UNVERIFIED');
+    expect(textOf(r.toJSON())).toContain('FLIP FIXED · MANUAL');
+
+    await pressButton(r, 'FLIP FIXED · MANUAL');
+    expect(textOf(r.toJSON())).toContain('VIEW UPRIGHT · MANUAL');
+    await unmount(r);
+  });
+
+  it('Restart drops the latch back to unverified', async () => {
+    const r = await armedRail();
+    await pressButton(r, 'VIEW UNVERIFIED');
+    expect(textOf(r.toJSON())).toContain('FLIP FIXED · MANUAL');
+
+    await pressButton(r, 'Restart');
+    // The rail re-reads the detector on its own 4 Hz poll (it is not
+    // remounted), so let one tick land before asserting.
+    await act(async () => {
+      jest.advanceTimersByTime(400);
+    });
+    await pressButton(r, 'Skip');
+    const text = textOf(r.toJSON());
+    expect(text).toContain('VIEW UNVERIFIED');
+    expect(text).not.toContain('MANUAL');
+    await unmount(r);
+  });
+
+  it('a camera change drops the latch — a new sensor is a new orientation', async () => {
+    const r = await armedRail();
+    await pressButton(r, 'VIEW UNVERIFIED');
+    expect(textOf(r.toJSON())).toContain('FLIP FIXED · MANUAL');
+
+    await pressA11y(r, 'Switch to the front camera');
+    await act(async () => {
+      jest.advanceTimersByTime(400);
+    });
+    const text = textOf(r.toJSON());
+    expect(text).toContain('VIEW UNVERIFIED');
+    expect(text).not.toContain('MANUAL');
+    await unmount(r);
+  });
+
+  it('the chip sits in the readiness row, beside the other gauges', async () => {
+    // Consistency, not a new surface: it renders in the SAME chip row as FPS
+    // / BODY / ARM / SIDE, so nothing about the rail moved.
+    const r = await armedRail();
+    const text = textOf(r.toJSON());
+    expect(text).toContain('BODY');
+    expect(text).toContain('SIDE');
+    expect(text).toContain('ASSUMED RIGHT');
+    expect(text).toContain('VIEW UNVERIFIED');
     await unmount(r);
   });
 });
@@ -1364,6 +1563,35 @@ describe('armChipLabel', () => {
     expect(armChipLabel('right', 'settings')).toBe('ASSUMED RIGHT');
     expect(armChipLabel('left', 'auto')).toBe('AUTO LEFT');
     expect(armChipLabel('left', 'manual')).toBe('LEFT ARM');
+  });
+});
+
+describe('orientationChipLabel / orientationChipHint', () => {
+  it('an uncommitted verdict reads UNVERIFIED and promises nothing', () => {
+    // The honesty contract: 'unknown' means NOT VERIFIED, never "probably
+    // fine". The keypoints go through untouched in that state and the chip
+    // has to say so.
+    expect(orientationChipLabel('unknown', null)).toBe('VIEW UNVERIFIED');
+    const hint = orientationChipHint('unknown', null);
+    expect(hint).toContain('unverified');
+    expect(hint).toContain('left uncorrected');
+  });
+
+  it('states the committed verdict and marks the human ones MANUAL', () => {
+    expect(orientationChipLabel('upright', 'auto')).toBe('VIEW UPRIGHT');
+    expect(orientationChipLabel('flipped', 'auto')).toBe('FLIP FIXED');
+    expect(orientationChipLabel('upright', 'manual')).toBe('VIEW UPRIGHT · MANUAL');
+    expect(orientationChipLabel('flipped', 'manual')).toBe('FLIP FIXED · MANUAL');
+  });
+
+  it('a fired correction names itself, and says whose call it was', () => {
+    // A correction nobody can see is a correction nobody can overrule.
+    const auto = orientationChipHint('flipped', 'auto');
+    expect(auto).toContain('upside down');
+    expect(auto).toContain('corrected');
+    expect(auto).toContain('auto-detected');
+    expect(orientationChipHint('upright', 'manual')).toContain('your pick');
+    expect(orientationChipHint('upright', 'auto')).toContain('used as captured');
   });
 });
 

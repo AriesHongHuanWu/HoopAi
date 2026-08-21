@@ -1,5 +1,5 @@
 /**
- * Form Check — hoop-free shooting-form reps from the front camera.
+ * Form Check — hoop-free shooting-form reps from the back camera.
  *
  * Point the phone at YOURSELF (no hoop, no ball tracking): the screen counts
  * shooting-motion reps with the existing pose-only ReleaseDetector and grades
@@ -61,6 +61,28 @@
  *    size that reads from three metres;
  *  - every relaxed gate the core now reports ({@link FormCheckRep.lowConfidence})
  *    is rendered. A relaxed capture is never presented as a clean one.
+ *
+ * ── V4 — buffer orientation ──────────────────────────────────────────────────
+ * On a real device the skeleton drew HEAD-DOWN, FEET-UP. That is not a
+ * drawing offset: a 180°-rotated buffer feeds MoveNet an upside-down person,
+ * so release height (a signed ankle−wrist difference), the dip's wrist-y
+ * extremum, knee flexion and the tilt estimate are all computed on flipped
+ * coordinates. The correction therefore happens ONCE at the PARSE BOUNDARY —
+ * in the JS-side sink, before the session or the overlay sees the frame (see
+ * src/core/poseOrientation.ts) — so the picture and the numbers can never
+ * disagree. Doing it in {@link mapKeypoint} instead would fix the picture and
+ * leave the analysis upside down, which is the worst outcome available.
+ * The verdict rides in the readiness rail as a chip — in the CALIBRATION
+ * stepper as well as the armed chip row, because collecting is the phase the
+ * verdict is meant to settle in — and is overridable in one tap; while it is
+ * unverified the chip SAYS so and the data stays untouched.
+ * Committing is a coordinate-space change, so the session is REBUILT on that
+ * edge: baselines locked in the old space would otherwise be compared against
+ * the new one, and a rep scored upside down would ride into the report. The
+ * stepper says why it restarted.
+ * The default camera is now the BACK one: the capture protocol puts the phone
+ * at the shooter's side 2–4 m away, where the screen cannot be read anyway,
+ * and the back sensor is the better one.
  */
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
@@ -142,6 +164,13 @@ import { decodeSequence, type DecodedFrame } from '@/core/formSequence';
 import { PLAYER_ARCHETYPES, type PlayerArchetype } from '@/core/nbaBenchmarks';
 import { referenceSequence } from '@/core/nbaReferenceForms';
 import { formSimilarity, type FormSimilarity } from '@/core/formSimilarity';
+import {
+  PoseOrientationDetector,
+  correctPoseFrame,
+  type OrientationSource,
+  type PoseOrientation,
+  type PoseOrientationState,
+} from '@/core/poseOrientation';
 import { posturePlan, type PostureCue } from '@/core/postureFix';
 import type { PoseKeypointName, ShootingHand } from '@/core/types';
 import { insertFormSession, type FormSessionFullRow } from '@/data/db';
@@ -159,6 +188,15 @@ const POSE_ASSET = require('../../assets/models/movenet-pose.tflite');
 
 /** MoveNet input side (square) — the analysis space every keypoint lives in. */
 const POSE_INPUT = 192;
+
+/**
+ * The square {@link correctPoseFrame} inverts a flipped buffer around. It is
+ * the ANALYSIS square (POSE_INPUT), never `frame.width/height`: parseMoveNet
+ * de-normalizes into the 192-square cover-crop, so handing the correction the
+ * camera's sensor dims would translate the whole skeleton off the crop.
+ * Module-level so the per-frame sink allocates nothing.
+ */
+const POSE_SQUARE = { width: POSE_INPUT, height: POSE_INPUT } as const;
 
 /** Skeleton overlay poll interval, ms (~12 Hz — CaptureProgress precedent). */
 const OVERLAY_POLL_MS = 80;
@@ -516,6 +554,41 @@ export function armChipLabel(hand: ShootingHand, source: HandSource): string {
 }
 
 /**
+ * VIEW chip label — the buffer-orientation verdict, in four states.
+ *
+ * 'unknown' reads UNVERIFIED and never "upright": the detector abstained, the
+ * keypoints are deliberately left uncorrected, and a green chip there would
+ * be the screen claiming a check it never completed. A fired correction says
+ * FLIP FIXED — a correction the user cannot see is a correction they cannot
+ * overrule. A human's pick is marked MANUAL (armChipLabel's idiom: the
+ * automatic call carries no badge, the human's does).
+ */
+export function orientationChipLabel(
+  verdict: PoseOrientation,
+  source: OrientationSource | null,
+): string {
+  if (verdict === 'unknown') return 'VIEW UNVERIFIED';
+  const word = verdict === 'flipped' ? 'FLIP FIXED' : 'VIEW UPRIGHT';
+  return source === 'manual' ? `${word} · MANUAL` : word;
+}
+
+/** Spoken form of {@link orientationChipLabel}, plus what the tap does. */
+export function orientationChipHint(
+  verdict: PoseOrientation,
+  source: OrientationSource | null,
+): string {
+  if (verdict === 'unknown') {
+    return 'Camera orientation unverified — the pose is left uncorrected. Tap if the skeleton is upside down.';
+  }
+  const what =
+    verdict === 'flipped'
+      ? 'Camera reads upside down, so the pose is corrected'
+      : 'Camera reads upright, so the pose is used as captured';
+  const who = source === 'manual' ? 'your pick' : 'auto-detected';
+  return `${what} (${who}). Tap to flip it.`;
+}
+
+/**
  * The ONE guidance banner, chosen by priority: model error → model warmup →
  * camera warmup → fps → full body → arm → side-profile → low-confidence
  * advisories → all clear. Hard gates pause rep counting (the caller appends
@@ -760,7 +833,13 @@ export default function FormCheckScreen() {
   const heightCm = useProfile((s) => s.heightCm);
 
   const [phase, setPhase] = useState<CheckPhase>('guide');
-  const [camPosition, setCamPosition] = useState<'front' | 'back'>('front');
+  /**
+   * BACK by default. The capture protocol props the phone at the shooter's
+   * side 2–4 m away, screen turned away — the front preview was never
+   * readable from there, and the back sensor is the better one. The flip pill
+   * stays, so a front capture is still one tap away.
+   */
+  const [camPosition, setCamPosition] = useState<'front' | 'back'>('back');
   // Screen-local watched arm — seeded from Settings, never written back.
   // Kept in sync BOTH ways: a manual flip pushes into the session, and the
   // session's auto-handedness commit (at calibration lock) syncs back here.
@@ -782,12 +861,84 @@ export default function FormCheckScreen() {
    * report and stamp it "Saved on this phone" against a row that is not it.
    */
   const saveTokenRef = useRef(0);
+  /**
+   * Buffer-orientation verdict for THIS camera session. Held in a ref, not
+   * state: it is fed on the JS-side sink at frame rate (the worklet hands
+   * every sample over with scheduleOnRN), and the rail polls its snapshot at
+   * 4 Hz like everything else on this screen.
+   */
+  const orientRef = useRef<PoseOrientationDetector>(new PoseOrientationDetector());
+  /** True while the sink is actively correcting frames. See the rebuild. */
+  const correctingRef = useRef(false);
+  /**
+   * Height for a session the SINK has to rebuild. A ref because the sink is
+   * deliberately dependency-free — a re-render must never re-arm the camera
+   * loop — so it cannot close over the profile value.
+   */
+  const heightRef = useRef<number | null>(heightCm ?? null);
+  useEffect(() => {
+    heightRef.current = heightCm ?? null;
+  }, [heightCm]);
+  /** A space change threw this session away — the stepper says so. */
+  const [viewReset, setViewReset] = useState(false);
+
+  /**
+   * The verdict committing is a COORDINATE-SPACE CHANGE, not just a picture
+   * fix: from that frame on the session is fed numbers in a different space
+   * from everything before it. Nothing the old session holds survives it —
+   * the locked set-point wrist y and the standing baseline would be compared
+   * across spaces (a ~28 px phantom difference on a 144 px body, enough to
+   * flag `shallowDip` on every rep of the session), the 2 s rolling window
+   * would straddle both, and any rep already scored was scored upside down.
+   * So the session is REBUILT rather than patched: in the flipped case
+   * everything it held was garbage anyway, and discarding it is the only
+   * move that cannot leave a mixed-space number on the report.
+   *
+   * The human's ARM pick is the one thing carried over: it is a statement
+   * about the shooter, not about the buffer.
+   */
+  const rebuildForSpaceChange = useCallback(() => {
+    const old = sessionRef.current;
+    if (old == null) return;
+    const manualHand = old.calibration.handSource === 'manual';
+    const next = new FormCheckSession({
+      hand: handRef.current,
+      frameHeight: POSE_INPUT,
+      heightCm: heightRef.current,
+    });
+    if (manualHand) next.setHand(handRef.current, 'manual');
+    sessionRef.current = next;
+    setRepCount(0);
+    setLastRep(null);
+    setViewReset(true);
+  }, []);
 
   const sink = useCallback((s: FormPoseSample) => {
-    latestRef.current = s;
+    // THE PARSE BOUNDARY. A 180°-rotated buffer hands MoveNet an upside-down
+    // person, and then EVERY number downstream is computed on flipped
+    // coordinates — release height is a signed ankle−wrist difference, the
+    // dip walks the wrist y hunting an extremum, knee flexion and tilt read
+    // the ankle→hip→shoulder line. Correcting once here, before the session
+    // and before latestRef, is what keeps the drawing and the metrics from
+    // ever disagreeing. It must NOT move into mapKeypoint: that fixes the
+    // picture and leaves the analysis running upside down.
+    const verdict = orientRef.current.push(s.pose);
+    const fixed = correctPoseFrame(s.pose, verdict, POSE_SQUARE);
+    // Same reference back = nothing to correct (upright, or not yet
+    // verified) — keep the original sample rather than reallocating it.
+    const correcting = fixed !== s.pose;
+    const sample = correcting ? { ...s, pose: fixed } : s;
+    latestRef.current = sample;
+    // The flag CHANGING is the space change — in either direction, and from
+    // an auto commit or a manual override alike. Rebuild before this frame
+    // is pushed, so the new session's first frame is its first frame.
+    if (correcting !== correctingRef.current) {
+      correctingRef.current = correcting;
+      rebuildForSpaceChange();
+    }
     const session = sessionRef.current;
     if (session == null) return;
-    const rep = session.push(s.pose);
+    const rep = session.push(sample.pose);
     // Auto-handedness may flip the watched arm at calibration lock — mirror
     // it into screen state WITHOUT calling setHand back into the session
     // (that would read as a manual pick and disable the vote).
@@ -806,10 +957,22 @@ export default function FormCheckScreen() {
       setRepCount(session.reps.length);
       setLastRep(rep);
     }
-  }, []);
+    // rebuildForSpaceChange is itself dependency-free, so the sink identity
+    // is still stable for the life of the screen and the camera loop is
+    // never re-armed by a re-render.
+  }, [rebuildForSpaceChange]);
 
   const live = phase === 'live';
   const pose = useFormPose(live, camPosition, sink);
+
+  /**
+   * A camera change can change the buffer's orientation, so the latched
+   * verdict must never survive one — including a MANUAL one, which was made
+   * about the other sensor. Runs on mount too, where it is a no-op.
+   */
+  useEffect(() => {
+    orientRef.current.reset();
+  }, [camPosition]);
 
   /**
    * Start (or restart) a live session IN PLACE. The screen never unmounts, so
@@ -825,6 +988,14 @@ export default function FormCheckScreen() {
       heightCm: heightCm ?? null,
     });
     latestRef.current = null;
+    // A fresh session re-decides the orientation from scratch: the previous
+    // run's latch (auto or manual) says nothing about how this one is framed.
+    orientRef.current.reset();
+    // The reset detector emits uncorrected frames again, so the sink's space
+    // flag has to start there too — otherwise the first frame of the new
+    // session would read as a space change and rebuild it immediately.
+    correctingRef.current = false;
+    setViewReset(false);
     saveTokenRef.current++;
     setRepCount(0);
     setLastRep(null);
@@ -882,6 +1053,22 @@ export default function FormCheckScreen() {
 
   const recalibrate = useCallback(() => {
     sessionRef.current?.recalibrate();
+    // This trip through collecting was ASKED for, so the stepper must stop
+    // blaming the view fix for it.
+    setViewReset(false);
+    haptic.selection();
+  }, []);
+
+  /**
+   * The human override, one tap: the presenter's call wins and LATCHES over
+   * the detector's (`override` marks it manual, and a latched verdict stops
+   * every later vote). From 'unknown' it asserts FLIPPED — the only reason
+   * anyone reaches for this control is a skeleton standing on its head that
+   * the detector has not committed on yet.
+   */
+  const flipOrientation = useCallback(() => {
+    const det = orientRef.current;
+    det.override(det.verdict === 'flipped' ? 'upright' : 'flipped');
     haptic.selection();
   }, []);
 
@@ -939,6 +1126,9 @@ export default function FormCheckScreen() {
           onRecalibrate={recalibrate}
           latestRef={latestRef}
           sessionRef={sessionRef}
+          orientRef={orientRef}
+          onFlipOrientation={flipOrientation}
+          viewReset={viewReset}
           repCount={repCount}
           lastRep={lastRep}
           onEnd={endSession}
@@ -983,7 +1173,9 @@ export default function FormCheckScreen() {
           <PlacementDiagram />
           <PlacementRule
             n={1}
-            text="Prop the phone at your SIDE, on your shooting-arm side, screen facing you."
+            // Camera, not screen: the check now opens on the BACK sensor, so
+            // the screen faces away and cannot be read from 2–4 m anyway.
+            text="Prop the phone at your SIDE, on your shooting-arm side, camera pointing at you."
           />
           <PlacementRule
             n={2}
@@ -1095,6 +1287,9 @@ function LiveOverlay({
   onRecalibrate,
   latestRef,
   sessionRef,
+  orientRef,
+  onFlipOrientation,
+  viewReset,
   repCount,
   lastRep,
   onEnd,
@@ -1110,6 +1305,10 @@ function LiveOverlay({
   onRecalibrate: () => void;
   latestRef: React.MutableRefObject<FormPoseSample | null>;
   sessionRef: React.MutableRefObject<FormCheckSession | null>;
+  orientRef: React.MutableRefObject<PoseOrientationDetector>;
+  onFlipOrientation: () => void;
+  /** This session was rebuilt because the pose coordinate space changed. */
+  viewReset: boolean;
   repCount: number;
   lastRep: FormCheckRep | null;
   onEnd: () => void;
@@ -1208,6 +1407,9 @@ function LiveOverlay({
           framesSv={pose.framesSv}
           camPosition={camPosition}
           onFlipHand={onFlipHand}
+          orientRef={orientRef}
+          onFlipOrientation={onFlipOrientation}
+          viewReset={viewReset}
         />
         {/* Zone C: the big rep numeral, the last-rep phase line, actions. */}
         <View
@@ -1325,6 +1527,9 @@ function LiveRail({
   framesSv,
   camPosition,
   onFlipHand,
+  orientRef,
+  onFlipOrientation,
+  viewReset,
 }: {
   sessionRef: React.MutableRefObject<FormCheckSession | null>;
   modelLoaded: boolean;
@@ -1334,21 +1539,36 @@ function LiveRail({
   framesSv: { value: number };
   camPosition: 'front' | 'back';
   onFlipHand: () => void;
+  orientRef: React.MutableRefObject<PoseOrientationDetector>;
+  onFlipOrientation: () => void;
+  /** This session was rebuilt because the pose coordinate space changed. */
+  viewReset: boolean;
 }) {
   const { width: winW } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const [snap, setSnap] = useState<RailSnap | null>(() => railSnapOf(sessionRef.current));
   const [warming, setWarming] = useState(true);
+  const [orient, setOrient] = useState<PoseOrientationState>(() =>
+    orientRef.current.state(),
+  );
   useEffect(() => {
     const id = setInterval(() => {
       setSnap(railSnapOf(sessionRef.current));
       // A SharedValue read on the JS thread is legal in a callback, never in
       // a render body — this is the file's existing poll pattern.
       setWarming((framesSv?.value ?? 0) < WARMUP_FRAMES);
+      // Same 4 Hz poll: the detector runs at frame rate on the sink and the
+      // rail never re-renders per frame.
+      setOrient(orientRef.current.state());
     }, READINESS_POLL_MS);
     return () => clearInterval(id);
-  }, [sessionRef, framesSv]);
+  }, [sessionRef, framesSv, orientRef]);
   const refresh = useCallback(() => setSnap(railSnapOf(sessionRef.current)), [sessionRef]);
+  /** The override must land on the chip NOW, not on the next 250 ms tick. */
+  const flipOrientation = useCallback(() => {
+    onFlipOrientation();
+    setOrient(orientRef.current.state());
+  }, [onFlipOrientation, orientRef]);
   const stripStyle = [styles.readyStrip, { paddingTop: insets.top + space.md }];
 
   // The armed moment: fires once on the collecting → done edge (a completed
@@ -1409,7 +1629,13 @@ function LiveRail({
         : null;
 
   const chipRow = (
-    <ChipRow readiness={readiness} calib={calib} onFlipHand={onFlipHand} />
+    <ChipRow
+      readiness={readiness}
+      calib={calib}
+      onFlipHand={onFlipHand}
+      orient={orient}
+      onFlipOrientation={flipOrientation}
+    />
   );
 
   if (collecting && calib != null) {
@@ -1424,9 +1650,19 @@ function LiveRail({
               <Text style={styles.stepTitle}>
                 {`PRACTICE MOTION ${step} OF ${SHADOW_REPS_TARGET}`}
               </Text>
-              <Text style={styles.stepSub}>Not scored — calibrating.</Text>
+              <Text style={styles.stepSub}>
+                {viewReset
+                  ? 'Not scored — restarted after the view flipped.'
+                  : 'Not scored — calibrating.'}
+              </Text>
             </View>
           </Row>
+          {/* The chips ride HERE too, not only past calibration. Collecting is
+              the exact window the orientation verdict is designed to settle
+              in, and a chip that is invisible then is a verdict nobody can
+              check and an override nobody can reach — which is the whole
+              honesty contract, unreachable in the phase that needs it. */}
+          {chipRow}
           {banner != null && (
             <Text style={styles.stepGate}>
               {banner.text} Practice motions are paused.
@@ -1539,17 +1775,21 @@ function LiveRail({
 }
 
 /**
- * The four readiness chips. Extracted so the armed celebration can render
- * them underneath itself instead of replacing them.
+ * The readiness chips. Extracted so the armed celebration can render them
+ * underneath itself instead of replacing them.
  */
 function ChipRow({
   readiness,
   calib,
   onFlipHand,
+  orient,
+  onFlipOrientation,
 }: {
   readiness: FormCheckReadiness | null;
   calib: CalibrationState | null;
   onFlipHand: () => void;
+  orient: PoseOrientationState;
+  onFlipOrientation: () => void;
 }) {
   const fps = readiness?.fps ?? 0;
   const fpsOk = readiness?.fpsOk ?? false;
@@ -1586,6 +1826,21 @@ function ChipRow({
         ok={sideOk}
         trusted={readiness?.sideTrusted !== false}
       />
+      {/* A correction that fires must be VISIBLE — one nobody can see is one
+          nobody can overrule. Only a verified-upright buffer earns green:
+          UNVERIFIED means the pose is going through untouched and the screen
+          says so rather than implying it checked. Tap = the human's call. */}
+      <Pressable
+        onPress={onFlipOrientation}
+        accessibilityRole="button"
+        accessibilityLabel={orientationChipHint(orient.verdict, orient.source)}
+      >
+        <Chip
+          label={orientationChipLabel(orient.verdict, orient.source)}
+          tone={orient.verdict === 'upright' ? 'make' : 'unsure'}
+          compact
+        />
+      </Pressable>
     </Row>
   );
 }
