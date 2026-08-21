@@ -173,6 +173,8 @@ One action each. Phrased so it looks intentional.
 | 12 | **End session** is grey | It is disabled at zero reps. Tap **Restart**, never **Cancel** | "Fresh take." |
 | 13 | Total loss | **Cancel** → **Start form check** | The model stays warm; this costs about a second. |
 | 14 | Report is thin (< 3 reps) | Tap **Check again** on the report, do four | "Let me give it enough reps to talk about consistency." |
+| 15 | `No camera frames — the pose loop stalled.` *(banner, every chip amber)* | Tap **Restart**. If it returns, **Cancel** → **Start form check** | "It noticed its own camera stopped feeding it — it would rather say nothing than grade a frozen picture." |
+| 16 | A metric reads **not measured** on the report | Nothing. Do another rep with a clear gather (ball at the waist, then up) | "It refused that one. It only reports the numbers it actually read a frame for — that is the whole product." |
 
 ---
 
@@ -258,3 +260,63 @@ Two more, harmless as long as you follow §6:
   magnitude. Do not demo those screens on a phone with long uptime.
 - A **one-line log of the accepted delegate rung** in the Form Check loader would make M2 directly
   readable in Xcode/Console instead of inferred. Not yet added.
+
+---
+
+## 9 · CHANGED ON 2026-08-21 — RE-REHEARSE BEFORE YOU TRUST A SCREENSHOT
+
+Commit `82cc02c` changed **what Form Check will say about the same motion**. Anything you
+screenshotted or memorised before this build is out of date. Read this section once, then do §0 again.
+
+### Your old rehearsal numbers are gone, on purpose
+
+Three cues used to fire on essentially *every* rep because they were read at the wrong frame or
+judged against the wrong band. They are fixed, so the report now says different things:
+
+- **"Lower your set point" no longer appears on every rep.** The dip used to be a global argmax over
+  the whole pre-release window with nothing checking that the frame was a real gather, so on a
+  ball-free motion it locked onto the arm hanging at your side and read ~165° against a 75–90° band.
+- **Follow-through no longer reads 0 ms.** It was judged at 155° while the detector fires at 130°,
+  so the hold could never be satisfied and it became the loudest callout.
+- **Compare scores moved.** Three of eight rules could not measure the shooter at all and are gone
+  (the score is now out of **6** rules, and the screen says so). A clean side-on rep that used to
+  open near 25/100 now scores like a person, not like an artifact. **Re-take every Compare
+  screenshot.**
+
+### A metric can now say "not measured" — this is the demo, not a bug
+
+When the dip frame is not a plausible gather, set point, knee flexion and release time are refused
+*together*, with the reason. Do not apologise for it. It is the same rule as the ball: **the app
+does not report what it did not see.** Playbook row 16 has the line.
+
+### If you are left-handed, do this before you go on
+
+The shooting hand used to be captured once at first render while the settings store was still
+rehydrating with a `right` default — a left-handed presenter had the whole session measured on the
+non-shooting arm, silently and plausibly. It now re-syncs on the guide screen and never mid-session.
+
+1. **Settings → shooting hand → Left**, before you open Form Check.
+2. On the guide, confirm the **ARM** chip reads what you expect.
+3. If it is wrong, flip it on the chip. A manual flip is now pinned and will not be walked back.
+
+### New banner you have not seen in rehearsal
+
+`No camera frames — the pose loop stalled.` — the frame counter stopped advancing for ~750 ms. Every
+readiness chip drops to amber and **Count anyway is suppressed**, because an override over a dead
+loop is a promise the screen cannot keep. Playbook row 15.
+
+> **Force it once in rehearsal** so it is not the first time you see it: start a session, background
+> the app mid-capture, come back. Expect the banner within about a second, and expect every chip
+> amber rather than a stale green.
+
+### Still unverified on hardware
+
+These are code-level fixes verified by 2,751 offline tests. **Nothing below has been seen on a
+phone yet** — do §0 twice on the demo device before you believe any of it:
+
+- [ ] The gather gate refuses the rest-start rep and *accepts* a real one (do both deliberately).
+- [ ] Follow-through prints a real millisecond number, not 0 and not a refusal, on a held finish.
+- [ ] The stall banner appears within ~1 s of a forced stall, and clears on **Restart**.
+- [ ] With a left-hand setting, the ARM chip and the report both track the left arm.
+- [ ] Compare opens on a believable score, and the "N of 6 rules measured" line matches what it drew.
+- [ ] Room fps chip ≥ 22 after three back-to-back runs (thermal).
