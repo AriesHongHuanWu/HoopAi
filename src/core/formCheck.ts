@@ -125,6 +125,7 @@
 import { FORM } from './config';
 import { coachingTips, OneEuroFilter } from './formAnalysis';
 import {
+  bodyFrameOf,
   buildSequence,
   SEQ_WINDOW_SEC,
   type RawSeqFrame,
@@ -943,6 +944,18 @@ function sideProfileOfRaw(raw: RawSeqFrame): number | null {
   const ls = pts.get('left_shoulder');
   const rs = pts.get('right_shoulder');
   if (!ls || !rs) return null;
+  // ABSTAIN on a frame that does not read as a standing body.
+  //
+  // THE BUG THIS CLOSES (the "theater draws a straight line" bug): sideness is
+  // 1 − shoulderSeparation/bodyHeight, so a COLLAPSED pose — every keypoint on
+  // one column, which is what a mis-detected or upside-down capture looks like
+  // — separates by zero and scores 1.0: a PERFECT side profile. The gate whose
+  // entire job is refusing bad viewpoints was maximally satisfied by the worst
+  // capture there is, which is how eleven reps of a straight line got scored.
+  // A frame that cannot be read as a body now votes nothing instead of voting
+  // "ideal". Same predicate the sequence packer refuses on, so the gauge and
+  // the capture can never disagree about what a body is.
+  if (bodyFrameOf(pts) == null) return null;
   const h = bodyHeightOf(pts);
   if (h == null) return null;
   let sepSum = Math.abs(ls.x - rs.x) / h;
@@ -2372,7 +2385,24 @@ export class FormCheckSession {
     // side-profile vote (null = abstain).
     const vis = frameVisibility(pose, this.handSide);
     const side = raw != null ? sideProfileOfRaw(raw) : null;
-    this.readySamples.push({ t, fullBody: vis.fullBody, arm: vis.arm, sideness: side });
+    // BODY means a body, not "the keypoints exist".
+    //
+    // frameVisibility counts landmarks — head OR shoulder, a hip, a foot —
+    // which a collapsed or upside-down MoveNet output satisfies completely.
+    // Paired with a side gauge that ABSTAINS on such a frame (and an abstain
+    // passes the side gate by design, so it cannot be the one that catches
+    // this), every readiness light would go green over a capture that is not a
+    // person, and reps would be scored from it — which is exactly what
+    // happened for eleven reps of the owner's session. The extra clause asks
+    // the same question the sequence packer asks: do these landmarks describe
+    // a standing body? frameVisibility's own contract is untouched.
+    const bodyReadable = raw != null && bodyFrameOf(raw.pts) != null;
+    this.readySamples.push({
+      t,
+      fullBody: vis.fullBody && bodyReadable,
+      arm: vis.arm,
+      sideness: side,
+    });
     const rCut = t - READINESS_WINDOW_SEC;
     while (this.readySamples.length > 0 && this.readySamples[0]!.t < rCut) {
       this.readySamples.shift();
@@ -2881,10 +2911,21 @@ export class FormCheckSession {
     }
 
     const poseFps = medianFps(window.map((f) => f.t));
+    // ONE SPACE FOR THE WHOLE REP. computeRepMetricsDetailed and
+    // computePhaseTiming both de-rotate the window by −tiltDeg when the camera
+    // roll is confidently measured; the sequence used to be packed from the
+    // RAW window, so the theater drew the shooter in a different coordinate
+    // space from the numbers printed under them, and the sequence carried a
+    // roll the metrics had already removed. Same frames, same space, or the
+    // picture and the numbers are describing two different shooters.
+    const seqWindow =
+      tiltDeg != null && Number.isFinite(tiltDeg) && tiltDeg !== 0
+        ? rotateFrames(window, -tiltDeg, this.frameHeight)
+        : window;
     const rep: FormCheckRep = {
       index: this.repsList.length + 1,
       releaseT,
-      sequence: buildSequence(window, this.handSide, releaseT),
+      sequence: buildSequence(seqWindow, this.handSide, releaseT),
       metrics,
       phases: computePhaseTiming(window, {
         hand: this.handSide,

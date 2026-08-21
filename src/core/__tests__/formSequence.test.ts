@@ -312,18 +312,29 @@ describe('releaseFrame marker', () => {
 
   test('regression: two-arg buildSequence output is byte-identical to pre-marker shape', () => {
     const M = SEQ_MISSING;
-    // Expected packed row for anchoredFrame: center (300,400), height 200.
+    // Expected packed row for anchoredFrame: center (300,400), height 200.25.
     // SEQ_KEYPOINT_ORDER: nose, eyes/ears (missing), shoulders/elbows/wrists
     // (missing), hips, knees (missing), ankles.
+    //
+    // RE-PINNED (the "theater draws a straight line" bug). The nose/ankle y
+    // values moved −4000 → −3995 and 4000 → 3995, i.e. by 0.06% of a body
+    // height. The old numbers came from dividing by the AXIS-ALIGNED
+    // |ankle.y − nose.y| = 200 px; the scale is now the roll-invariant
+    // head→foot distance, and this fixture's head (300,300) and lowest foot
+    // (290,500) are hypot(10,200) = 200.25 px apart. That difference is the
+    // whole point: the axis-aligned span shrinks as the capture rolls, which
+    // magnified rolled captures ~1.4× at 45° and ~10× at 90° until they
+    // saturated the int16 grid. The pin is NOT a threshold — it is the exact
+    // packing, and it moved because the scale it divides by is now correct.
     const row = [
-      0, -4000, // nose
+      0, -3995, // nose
       M, M, M, M, M, M, M, M, // eyes + ears
       M, M, M, M, // shoulders
       M, M, M, M, // elbows
       M, M, M, M, // wrists
       -400, 0, 400, 0, // hips
       M, M, M, M, // knees
-      -400, 4000, 400, 4000, // ankles
+      -400, 3995, 400, 3995, // ankles
     ];
     const raw = anchoredStream(4);
     const seq = buildSequence(raw, 'right');

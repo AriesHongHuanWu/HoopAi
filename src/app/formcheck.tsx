@@ -199,7 +199,11 @@ import {
   type SpreadStat,
 } from '@/core/formCheck';
 import { liftRep, type FormCheck3D } from '@/core/formCheck3d';
-import { decodeSequence, type DecodedFrame } from '@/core/formSequence';
+import {
+  decodeSequence,
+  isReconstructibleMotion,
+  type DecodedFrame,
+} from '@/core/formSequence';
 import { PLAYER_ARCHETYPES, type PlayerArchetype } from '@/core/nbaBenchmarks';
 import { referenceSequence } from '@/core/nbaReferenceForms';
 import { formSimilarity, type FormSimilarity } from '@/core/formSimilarity';
@@ -3088,17 +3092,40 @@ export function FormCheckReport({
   const { width } = useWindowDimensions();
   const reducedMotion = useReducedMotion();
 
-  // Theater: reps whose sequence decodes. Computed BEFORE `seg` so the report
-  // can open on the segment that actually has something in it.
-  const theaterReps = useMemo(
+  // Theater: reps whose sequence decodes into a body the stage can honestly
+  // draw. Computed BEFORE `seg` so the report can open on the segment that
+  // actually has something in it.
+  //
+  // The filter used to be `seq.length >= 2` — "we have rows" — which is how the
+  // stage came to draw a single vertical line with the head at the bottom, and
+  // how the cue engine came to coach a human being from it. isReconstructible-
+  // Motion is the same predicate buildSequence now applies to what it ships,
+  // repeated HERE because reports rehydrated from this phone were written
+  // before that gate existed and still carry degenerate sequences. A rep that
+  // fails it is left out; the Compare tab says so rather than drawing a body
+  // that was never seen.
+  const decodedReps = useMemo(
     () =>
-      reps
-        .map((rep) => ({
-          rep,
-          seq: rep.sequence != null ? decodeSequence(rep.sequence) : [],
-        }))
-        .filter((r) => r.seq.length >= 2),
+      reps.map((rep) => {
+        const seq = rep.sequence != null ? decodeSequence(rep.sequence) : [];
+        return { rep, seq, drawable: isReconstructibleMotion(seq) };
+      }),
     [reps],
+  );
+  const theaterReps = useMemo(
+    () => decodedReps.filter((r) => r.drawable),
+    [decodedReps],
+  );
+
+  /**
+   * Reps that DID record pose rows and were still refused by the gate above.
+   * Counted so the Compare tab can say which of the two silences it is in —
+   * "nothing was captured" and "what was captured is not a body" are different
+   * facts, and the second one is the one the shooter can act on.
+   */
+  const refusedMotions = useMemo(
+    () => decodedReps.filter((r) => r.rep.sequence != null && !r.drawable).length,
+    [decodedReps],
   );
 
   // A short stage demo is two or three reps, which lands Overview on a nag
@@ -3570,7 +3597,9 @@ export function FormCheckReport({
             ) : (
               <Card>
                 <Text style={styles.body}>
-                  No rep captured a full motion window — nothing to compare yet.
+                  {refusedMotions > 0
+                    ? `${refusedMotions === 1 ? 'One rep' : `${refusedMotions} reps`} recorded a motion window, but the pose in it could not be reconstructed as a standing body — the camera was rolled too far, or the keypoints collapsed. Nothing is drawn from it: a figure here would be invented, not measured. Stand side-on with the phone upright and the whole body in frame, then check again.`
+                    : 'No rep captured a full motion window — nothing to compare yet.'}
                 </Text>
               </Card>
             )}

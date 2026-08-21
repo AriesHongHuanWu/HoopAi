@@ -36,7 +36,11 @@ import { FormMotionStage, type StagePhase } from '@/components/charts/FormMotion
 import { Card, Chip, EmptyState, PillButton, Row, Screen } from '@/components/ui';
 import { color, font, radius, space, type } from '@/constants/tokens';
 import { sessionShots, shotFromRow } from '@/data/db';
-import { decodeSequence, type DecodedFrame } from '@/core/formSequence';
+import {
+  decodeSequence,
+  isReconstructibleMotion,
+  type DecodedFrame,
+} from '@/core/formSequence';
 import { PLAYER_ARCHETYPES, type PlayerArchetype } from '@/core/nbaBenchmarks';
 import { referenceSequence } from '@/core/nbaReferenceForms';
 import { posturePlan, type PostureCue } from '@/core/postureFix';
@@ -106,14 +110,18 @@ export default function FormStudioScreen() {
   const shots = historyId != null ? (historyShots ?? []) : liveShots;
   const loading = historyId != null && historyShots == null;
 
-  // Shots that actually captured a motion sequence.
+  // Shots that actually captured a motion sequence — and whose sequence reads
+  // back as a body. The test used to be `decoded.length >= 2`, which is how the
+  // stage came to draw straight lines out of degenerate captures (see
+  // isReconstructibleMotion in src/core/formSequence.ts). Repeated here because
+  // rows persisted before that gate existed still hold degenerate sequences.
   const studioShots = useMemo<StudioShot[]>(() => {
     const out: StudioShot[] = [];
     for (const shot of shots) {
       const seq = shot.form?.sequence;
       if (!seq) continue;
       const decoded = decodeSequence(seq);
-      if (decoded.length < 2) continue;
+      if (!isReconstructibleMotion(decoded)) continue;
       out.push({
         shot,
         seq: decoded,

@@ -351,8 +351,19 @@ import {
   type FormCheckSession,
   type FormCheckSessionReport,
 } from '@/core/formCheck';
-import { buildSequence, type RawSeqFrame } from '@/core/formSequence';
-import type { FormMetrics, PoseFrame, PoseKeypointName } from '@/core/types';
+import {
+  SEQ_KEYPOINT_ORDER,
+  SEQ_MISSING,
+  SEQ_SCALE,
+  buildSequence,
+  type RawSeqFrame,
+} from '@/core/formSequence';
+import type {
+  FormMetrics,
+  FormSequence,
+  PoseFrame,
+  PoseKeypointName,
+} from '@/core/types';
 import { useSettings } from '@/state/settingsStore';
 
 // ---------------------------------------------------------------------------
@@ -1503,6 +1514,54 @@ describe('FormCheckReport — Compare tab and similarity', () => {
 
     expect(text).not.toContain('MOTION_STAGE');
     expect(text).toContain('nothing to compare');
+    await unmount(r);
+  });
+
+  it('REFUSES to draw a degenerate persisted sequence — the straight-line bug', async () => {
+    // The exact shape a 20 s recording from the owner's phone shows in this
+    // theater: every joint on ONE x, and the nose BELOW the hip origin. It was
+    // drawn as a vertical line with the head circle at the bottom, captioned
+    // "ELBOW 180°", scored 14–35 for style match, and cued with "raise your set
+    // point" on every rep. buildSequence can no longer produce this, but rows
+    // already saved on the phone still hold it — so the report layer has to
+    // refuse it too, and SAY it refused rather than draw a body.
+    const collapsed: FormSequence = (() => {
+      const frames = 8;
+      const data: number[] = [];
+      // nose, …, hips, …, ankles — the y ladder of the shipped figure, x ≡ 0.
+      const yOf: Partial<Record<PoseKeypointName, number>> = {
+        nose: 0.6,
+        left_shoulder: 0.2,
+        right_shoulder: 0.2,
+        left_hip: 0,
+        right_hip: 0,
+        left_knee: -0.15,
+        right_knee: -0.15,
+        left_ankle: -0.35,
+        right_ankle: -0.35,
+      };
+      for (let f = 0; f < frames; f++) {
+        for (const name of SEQ_KEYPOINT_ORDER) {
+          const y = yOf[name];
+          if (y == null) data.push(SEQ_MISSING, SEQ_MISSING);
+          else data.push(0, Math.round(y * SEQ_SCALE));
+        }
+      }
+      return { v: 1, hand: 'right', frames, durationSec: 0.8, data };
+    })();
+
+    const reps = [rep(1, { setPointElbowDeg: 0 }, { sequence: collapsed })];
+    const r = await render(
+      <FormCheckReport reps={reps} report={reportOf(reps)} hand="right" savedId={1} />,
+    );
+    await switchTo(r, 'Compare');
+    const text = textOf(r.toJSON());
+
+    // No stage, no style match, no cue list — nothing computed off a line.
+    expect(text).not.toContain('MOTION_STAGE');
+    expect(text).not.toContain('STYLE MATCH');
+    // And it names WHICH silence this is, so the shooter can act on it.
+    expect(text).toContain('could not be reconstructed as a standing body');
     await unmount(r);
   });
 
