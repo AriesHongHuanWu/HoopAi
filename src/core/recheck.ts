@@ -27,9 +27,13 @@
  * allowed to confirm what the live call could not decide — it is never allowed
  * to be more confident than the live pass on less evidence. Three rules enforce
  * that, and each one is a suppression:
- *   1. The replay FSM is constructed with the SAME guards the live app enables
- *      (depth veto / reappearance / rattle guard / settle window). Running them
- *      OFF made the offline FSM strictly more permissive than the live one.
+ *   1. The replay FSM is constructed with the demote-or-corroborate guards the
+ *      live app enables (reappearance / rattle guard / settle window). Running
+ *      them OFF made the offline FSM strictly more permissive than the live
+ *      one. The fourth live guard — the depth-ratio veto — is deliberately NOT
+ *      replayed, because it needs a camera placement the session never
+ *      persisted; see the construction site for why guessing it was worse than
+ *      going without.
  *   2. A netless make resting on 2D geometry ALONE is refused
  *      ({@link offlineMakeCorroborated}) — at 6 fps a "crossing pair" spans
  *      167 ms, which is not a look at the ball going through the hoop.
@@ -44,6 +48,7 @@
  */
 import { DETECTION } from './config';
 import { BallTracker } from './ballTracker';
+import type { BallSizeSetting } from './depthRatioGate';
 import { computeRimGeometry } from './rimLock';
 import { ShotFsm } from './shotFsm';
 import type { Box, Detection, ShotOutcome, ShotSignals } from './types';
@@ -96,6 +101,18 @@ export interface RecheckDeps {
   frameSize: number;
   /** Engine-clock second the recording started (SessionRow.recordingStartSec). */
   recordingStartSec: number;
+  /**
+   * The user's ball-size setting (settingsStore.ballSize), threaded so the
+   * replay measures depth with the SAME ruler as the live pass
+   * (shotPipeline.adoptRim -> fsm.setBallSize). The ball's real diameter is
+   * the only metric scale the depth math has, and config.ts puts the cost of a
+   * mis-set size at ~10% on the ratio — about half the far-range signal — so a
+   * player on a size 5 or 6 ball was silently judged as if they shot a 7.
+   * Omit ONLY where the setting is genuinely unreachable: the FSM then keeps
+   * its size-7 constructor default and the reappearance depth check inherits
+   * that assumption.
+   */
+  ballSize?: BallSizeSetting;
   /** Cooperative cancellation — checked between frames. */
   isCancelled?: () => boolean;
   fps?: number;
@@ -329,26 +346,51 @@ export async function recheckShot(
 
   // --- Phase 3: replay through a fresh tracker + FSM in timestamp order.
   const tracker = new BallTracker({});
-  // Every guard the LIVE app enables via settingsStore -> adoptRim
+  // The guards the LIVE app enables via settingsStore -> adoptRim
   // (shotPipeline.adoptRim). config.ts ships them constructor-default FALSE as
   // the unit-test baseline, so passing no opts here ran the offline pass with
-  // depth veto, reappearance, rattle guard and settle window ALL OFF — a
-  // strictly MORE permissive FSM than the live one, on strictly less evidence.
-  // All four are demote-or-corroborate by construction (config.ts documents
-  // each: the depth veto is make->miss only, reappearance upgrades only with
-  // net/cls agreement, the rattle guard only demotes to unsure, the settle
-  // window only buys observation time) — none of them can mint a make — so
-  // turning them on can only make the offline pass stricter.
+  // reappearance, rattle guard and settle window ALL OFF — a strictly MORE
+  // permissive FSM than the live one, on strictly less evidence. All three are
+  // demote-or-corroborate by construction (config.ts documents each:
+  // reappearance upgrades only with net/cls agreement, the rattle guard only
+  // demotes to unsure, the settle window only buys observation time) — none of
+  // them can mint a make — so turning them on can only make the replay
+  // stricter.
+  //
+  // THE DEPTH VETO IS THE ONE LIVE GUARD WE CANNOT REPLAY, and it is off here
+  // on purpose. depthRatioGate fires only in the two placements where the
+  // crossing geometry holds (GATE_BANDS: side_wing / behind_shooter) and stays
+  // SILENT in the rest; live, the band comes from the locked rim's aspect plus
+  // IMU pitch (classifyViewBand -> setViewBand). None of that is persisted, so
+  // offline the placement is simply unknown — and leaving the flag on left the
+  // FSM on its 'side_wing' default, ARMING the veto for every re-checked
+  // session, under-hoop and overhead sessions included. A fired veto sets
+  // geo=false and fuse() returns 'miss' on its first line, so an unsure shot
+  // landed in the user's history as a decided MISS on an assumed tripod
+  // position. An unknown placement must not be assumed to be the one placement
+  // where the gate is valid, so the replay makes NO depth claim instead of a
+  // guessed one; the shot falls back to the ordinary fusion, where a netless
+  // geo-only make is still refused below. Naming a non-gate band would silence
+  // the gate just as well, but it would stamp a placement we never observed
+  // onto the shot's geoDepth receipt — reporting what we did not see, the one
+  // thing this module exists to prevent. The unread 'side_wing' default is
+  // inert while this flag is false: viewBand has exactly one consumer, the veto.
   const fsm = new ShotFsm(
     rim,
     { width: deps.frameSize, height: deps.frameSize },
     {
-      useDepthRatioVeto: true,
+      useDepthRatioVeto: false,
       useReappearance: true,
       useRattleGuard: true,
       useSettleWindow: true,
     },
   );
+  // Ball size is the OTHER half of the same problem: it is the metric ruler
+  // for the reappearance guard's per-sample depth check (which we do replay),
+  // so an unthreaded size 7 applied that error to every size 5/6 player. This
+  // is knowable — it is a user setting — so thread it. Left undefined, the FSM
+  // keeps its documented size-7 default.
+  if (deps.ballSize !== undefined) fsm.setBallSize(deps.ballSize);
   let matched: { outcome: ShotOutcome; signals: ShotSignals; dt: number } | null = null;
   for (const f of frames) {
     const ball = tracker.step(

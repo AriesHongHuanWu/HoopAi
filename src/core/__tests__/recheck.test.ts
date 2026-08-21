@@ -1,4 +1,5 @@
 import { SHOT_FSM } from '../config';
+import { depthRatioGate } from '../depthRatioGate';
 import {
   RECHECK,
   medianRimBox,
@@ -13,12 +14,14 @@ import {
 import type { Box, DetClass, Detection, ShotSignals } from '../types';
 
 /**
- * Constructor opts of every replay ShotFsm recheckShot builds. The spy
- * SUBCLASSES the real FSM (requireActual), so every other test in this file
- * still runs the genuine state machine — this only records the opts, which is
- * the one thing no fixture can observe from the outside.
+ * Constructor opts of every replay ShotFsm recheckShot builds, plus every
+ * ball size pushed into one. The spy SUBCLASSES the real FSM (requireActual),
+ * so every other test in this file still runs the genuine state machine — this
+ * only records what crosses the boundary, which is the one thing no fixture
+ * can observe from the outside.
  */
 const mockFsmOpts: Record<string, unknown>[] = [];
+const mockFsmBallSizes: unknown[] = [];
 
 jest.mock('../shotFsm', () => {
   const actual = jest.requireActual('../shotFsm');
@@ -26,6 +29,10 @@ jest.mock('../shotFsm', () => {
     constructor(rim: never, frame: never, opts: Record<string, unknown> = {}) {
       super(rim, frame, opts);
       mockFsmOpts.push(opts);
+    }
+    setBallSize(size: unknown): void {
+      mockFsmBallSizes.push(size);
+      super.setBallSize(size);
     }
   }
   return { ...actual, ShotFsm: SpyShotFsm };
@@ -83,6 +90,23 @@ function swishFrame(videoTimeSec: number): Detection[] {
 function corroboratedSwishFrame(videoTimeSec: number): Detection[] {
   const dets = swishFrame(videoTimeSec);
   if (videoTimeSec >= 2.2 && videoTimeSec <= 2.9) dets.push(clsDet());
+  return dets;
+}
+
+/**
+ * The same swish, but the ball RENDERS BIG (40px across, not 24px) — the
+ * presentation of a ball flying well IN FRONT of the hoop. That is exactly the
+ * reading the depth-ratio veto exists to catch, and it is veto-bait ONLY if
+ * the camera placement is one the gate is valid in. The offline pass cannot
+ * know the placement, so it must not act on this. Still no net and no
+ * ball_in_basket, so the honest offline answer is "no verdict".
+ */
+function frontHeavySwishFrame(videoTimeSec: number): Detection[] {
+  const dets: Detection[] = [rimDet()];
+  const y = 165 + 200 * (videoTimeSec - 1.9) ** 2;
+  if (videoTimeSec >= 0.4 && videoTimeSec <= 2.72 && y <= 600) {
+    dets.push(det('ball', 0.7, boxAround(320, y, 40)));
+  }
   return dets;
 }
 
@@ -286,6 +310,7 @@ describe('sampleCameraTimes', () => {
 describe('recheckShot', () => {
   beforeEach(() => {
     mockFsmOpts.length = 0;
+    mockFsmBallSizes.length = 0;
   });
 
   // RE-PINNED (was: "upgrades an unsure shot to MAKE from a re-tracked swish
@@ -327,21 +352,76 @@ describe('recheckShot', () => {
     expect(result.signals!.geo).toBe(false);
   });
 
-  it('replays with the same guard flags the LIVE pipeline enables', async () => {
+  // THE POINT OF THIS BLOCK. An earlier version of this test asserted the four
+  // guard flags and stopped there, which is how a wrong verdict shipped: the
+  // flags were right and the FSM was still judging on values nobody had given
+  // it. Every test below pins what the replay DOES.
+
+  it('never convicts an unsure shot as a MISS on an assumed camera placement', async () => {
+    // The fixture really is veto-bait: under the 'side_wing' the FSM defaults
+    // to, these exact pixels fire the depth gate. (If this assertion ever goes
+    // stale the behavioural one underneath becomes vacuous, so it is pinned
+    // here rather than assumed.)
+    expect(
+      depthRatioGate({
+        ballDiaPxAvg: 40,
+        nRealSamples: 5,
+        rimWidthPx: RIM_BOX.width,
+        rimLockContaminated: false,
+        ballSize: 7,
+        viewBand: 'side_wing',
+        crossingReal: true,
+        rimBounce: false,
+        clsStrongContext: false,
+      }).decision,
+    ).toBe('veto_front');
+    // The session never persisted its camera placement, so the replay has no
+    // way to know whether the gate is valid here. A fired veto would flip geo
+    // true->false and fuse() returns 'miss' on that first line — writing a
+    // decided MISS into the user's history off an assumed tripod position.
+    const { deps } = depsFor(frontHeavySwishFrame);
+    const result = await recheckShot(UNSURE_SHOT, deps);
+    expect(result.verdict).not.toBe('miss');
+    // And it does not swing the other way either: with no net and no
+    // ball_in_basket the geometry-only make is still refused, so the shot
+    // simply keeps the unsure the live pass gave it.
+    expect(result.verdict).toBeNull();
+    expect(result.reason).toBe('uncorroborated-make');
+  });
+
+  it('replays the demote-or-corroborate guards, minus the unknowable one', async () => {
     // config.ts ships these constructor-default FALSE as the unit-test
-    // baseline; shotPipeline.adoptRim turns all four on from settingsStore.
+    // baseline; shotPipeline.adoptRim turns them on from settingsStore.
     // Passing no opts here ran the offline pass on a MORE permissive FSM than
-    // the live one — more confidence from less evidence. All four are
-    // demote-or-corroborate only, so this can only make the replay stricter.
+    // the live one — more confidence from less evidence. The three below are
+    // demote-or-corroborate only, so enabling them can only make the replay
+    // stricter. The depth veto is OFF because it is the one guard that needs a
+    // camera placement the session did not persist; see recheck.ts for why an
+    // assumed band is worse than no depth claim at all.
     const { deps } = depsFor(corroboratedSwishFrame);
     await recheckShot(UNSURE_SHOT, deps);
     expect(mockFsmOpts).toHaveLength(1);
     expect(mockFsmOpts[0]).toEqual({
-      useDepthRatioVeto: true,
+      useDepthRatioVeto: false,
       useReappearance: true,
       useRattleGuard: true,
       useSettleWindow: true,
     });
+  });
+
+  it("hands the FSM the user's real ball size, not the size-7 default", async () => {
+    // Ball diameter is the metric ruler for the reappearance guard's depth
+    // check, which the replay DOES run. Assumed 7 applied a ~10% ratio error
+    // to every size 5/6 player, offline, regardless of their setting.
+    const { deps } = depsFor(corroboratedSwishFrame, { ballSize: 5 });
+    await recheckShot(UNSURE_SHOT, deps);
+    expect(mockFsmBallSizes).toEqual([5]);
+  });
+
+  it('leaves the FSM on its documented default when no ball size is given', async () => {
+    const { deps } = depsFor(corroboratedSwishFrame);
+    await recheckShot(UNSURE_SHOT, deps);
+    expect(mockFsmBallSizes).toEqual([]);
   });
 
   it('feeds the injected detector VIDEO time (camera − recordingStartSec)', async () => {

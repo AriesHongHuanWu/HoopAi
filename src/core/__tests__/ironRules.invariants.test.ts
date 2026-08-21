@@ -12,10 +12,15 @@ import { ABS_MIN_FIT_SAMPLES, MIN_FIT_SAMPLES } from '../trajectory';
 import { CLASS_ORDER } from '../../ml/yoloParser';
 
 describe('iron-rule invariants — FSM baseline', () => {
-  // recheck.ts constructs its replay FSM with NO opts, inheriting these
-  // constructor defaults. They must stay false so the offline recheck and the
-  // pinned fuse truth table run against the conservative baseline; the LIVE
-  // app opts in per-instance via settingsStore -> adoptRim.
+  // These are the conservative constructor baseline the pinned fuse truth
+  // table and the unit suites run against. They must stay false; the LIVE app
+  // opts in per-instance via settingsStore -> adoptRim.
+  //
+  // The offline recheck now passes opts EXPLICITLY rather than inheriting
+  // these (recheck.ts RECHECK_FSM_OPTS), so this test no longer describes it.
+  // Which guards the replay may run is pinned in recheck.test.ts instead --
+  // by behaviour, not by flags, because a flags-only assertion is exactly what
+  // let the replay convict shots on an assumed camera placement.
   test('FSM constructor-default flags stay false (recheck + unit baseline)', () => {
     expect(SHOT_FSM.useDepthRatioVeto).toBe(false);
     expect(SHOT_FSM.useReappearance).toBe(false);

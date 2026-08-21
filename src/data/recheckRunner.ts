@@ -31,6 +31,7 @@ import {
 } from '../camera/detectImage';
 import { recheckShots, type RecheckShotResult } from '../core/recheck';
 import type { Detection } from '../core/types';
+import { useSettings } from '../state/settingsStore';
 import {
   getSession,
   markShotRechecked,
@@ -193,9 +194,15 @@ async function runSessionRecheck(
   const byShotId = new Map<number, ShotRow>(eligible.map((r) => [r.id, r]));
   const corrections: RecheckCorrection[] = [];
 
+  // The replay judges depth against the ball's REAL diameter, so it needs the
+  // same setting the live camera threads through pipeline.setBallSize (see
+  // useShotEngine). Read non-reactively, exactly like detectImage reads the
+  // engine choice — a run is a one-shot job, not a subscriber.
+  const ballSize = useSettings.getState().ballSize;
+
   const summary = await recheckShots(
     eligible.map((r) => ({ shotId: r.id, tResolved: r.tResolved, outcome: r.outcome })),
-    { detectFrame, frameSize: S, recordingStartSec, isCancelled },
+    { detectFrame, frameSize: S, recordingStartSec, isCancelled, ballSize },
     {
       onProgress,
       onResult: async (result: RecheckShotResult) => {
