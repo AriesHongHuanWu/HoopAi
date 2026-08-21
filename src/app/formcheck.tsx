@@ -150,6 +150,7 @@ import {
   useCameraDevice,
   useCameraPermission,
   useFrameOutput,
+  type InterruptionReason,
 } from 'react-native-vision-camera';
 import { useResizer } from 'react-native-vision-camera-resizer';
 import {
@@ -161,6 +162,7 @@ import { Canvas, Circle, Line, Path, Skia, vec } from '@shopify/react-native-ski
 
 import { useAppStateGuard } from '@/camera/useAppStateGuard';
 
+import FormCheck3DPanel from '@/components/charts/FormCheck3DPanel';
 import { FormMotionStage, type StagePhase } from '@/components/charts/FormMotionStage';
 import { PhaseBars } from '@/components/charts/PhaseBars';
 import { ArcReveal, arcMotif } from '@/components/motion';
@@ -170,6 +172,10 @@ import { SESSION_FORM_REFERENCE_CAPTION } from '@/components/SessionFormReport';
 import { BackPill } from '@/components/ShotList';
 import { Card, Chip, PillButton, Row, Screen } from '@/components/ui';
 import { color, font, iconSize, layout, radius, space, type } from '@/constants/tokens';
+import {
+  cameraSessionBanner,
+  type CameraSessionStatus,
+} from '@/core/cameraSession';
 import { FORM } from '@/core/config';
 import {
   ELBOW_SPREAD_FLAG_DEG,
@@ -192,6 +198,7 @@ import {
   type RepPhaseTiming,
   type SpreadStat,
 } from '@/core/formCheck';
+import { liftRep, type FormCheck3D } from '@/core/formCheck3d';
 import { decodeSequence, type DecodedFrame } from '@/core/formSequence';
 import { PLAYER_ARCHETYPES, type PlayerArchetype } from '@/core/nbaBenchmarks';
 import { referenceSequence } from '@/core/nbaReferenceForms';
@@ -338,6 +345,16 @@ const absoluteFill = {
 // Minimal pose loop — streams full PoseFrames to a JS-side sink.
 // ---------------------------------------------------------------------------
 
+/**
+ * What the `<Camera>` has actually told this screen about its session, plus
+ * the wall clock this attempt started on. {@link cameraSessionBanner} turns
+ * it into copy; nothing here decides anything.
+ */
+interface CameraSessionState extends Omit<CameraSessionStatus, 'elapsedMs'> {
+  /** When this capture session began coming up — the deadline's zero. */
+  since: number;
+}
+
 /** One streamed sample: the parsed pose + the sensor dims (overlay mapping). */
 interface FormPoseSample {
   pose: ReturnType<typeof parseMoveNet>;
@@ -448,6 +465,60 @@ function useFormPose(
     onForeground: () => setForeground(true),
   });
 
+  /**
+   * THE CAMERA SESSION'S OWN CHANNEL. VisionCamera reports a session that
+   * failed, was interrupted, or never came up through callbacks this screen
+   * passed to NOTHING — so `useCamera`'s default handler took them, which is
+   * a `console.error` nobody on a phone can see. A camera another app is
+   * holding then looks EXACTLY like one that is warming up, forever.
+   *
+   * The shape is {@link CameraSessionStatus} verbatim (minus the clock, which
+   * the rail's poll owns), so the pure {@link cameraSessionBanner} decides
+   * what any of it MEANS and this hook only records what was observed.
+   */
+  const [camSession, setCamSession] = useState<CameraSessionState>(() => ({
+    errorMessage: null,
+    interruption: null,
+    configured: false,
+    started: false,
+    since: Date.now(),
+  }));
+  // A new sensor, or a return from the background, is a NEW session: the old
+  // one's error and its "started" are both stale, keeping either would let
+  // one interruption accuse a session that has since recovered, and the
+  // deadline has to start again with it (the reacquire is not a failure).
+  useEffect(() => {
+    setCamSession({
+      errorMessage: null,
+      interruption: null,
+      configured: false,
+      started: false,
+      since: Date.now(),
+    });
+  }, [position, foreground]);
+  const onCameraConfigured = useCallback(() => {
+    setCamSession((s) => (s.configured ? s : { ...s, configured: true }));
+  }, []);
+  const onCameraStarted = useCallback(() => {
+    // A session that is running is not a session that errored — clearing the
+    // message here is what stops a recovered camera wearing an old fault.
+    setCamSession((s) => ({ ...s, started: true, errorMessage: null }));
+  }, []);
+  const onCameraStopped = useCallback(() => {
+    setCamSession((s) => (s.started ? { ...s, started: false } : s));
+  }, []);
+  const onCameraError = useCallback((err: Error) => {
+    // Raw text to the console only. On-screen copy says what to DO.
+    console.warn('[formcheck] camera session error', err);
+    setCamSession((s) => ({ ...s, errorMessage: String(err?.message ?? err) }));
+  }, []);
+  const onCameraInterruptionStarted = useCallback((reason: InterruptionReason) => {
+    setCamSession((s) => ({ ...s, interruption: reason }));
+  }, []);
+  const onCameraInterruptionEnded = useCallback(() => {
+    setCamSession((s) => (s.interruption == null ? s : { ...s, interruption: null }));
+  }, []);
+
   // Load MoveNet once (fast delegate → CPU fallback), mirroring useShotEngine's
   // pose loader. Boxed into a SharedValue so the frame worklet reads it fresh.
   // Runs at screen mount (deps carry no `active`), so the warm-up above is
@@ -499,7 +570,18 @@ function useFormPose(
     };
   }, [boxedPoseSv, cpuOnly, loadNonce]);
 
-  const retryModel = useCallback(() => setLoadNonce((n) => n + 1), []);
+  /**
+   * Re-run the loader ladder. The frame counters go with it — the same "both
+   * counters or neither" rule the background guard and {@link usePoseCpu}
+   * follow. Without this the "isn't running" banner outlived the Retry that
+   * was offered to clear it: the failure count from the dead interpreter
+   * stayed on screen until the NEW one produced its first successful frame.
+   */
+  const retryModel = useCallback(() => {
+    framesSv.value = 0;
+    failedSv.value = 0;
+    setLoadNonce((n) => n + 1);
+  }, [failedSv, framesSv]);
 
   /**
    * Reload WITHOUT the accelerated rung, and zero the frame counters so the
@@ -607,6 +689,15 @@ function useFormPose(
     foreground,
     framesSv,
     failedSv,
+    /** What the capture session has reported — read by the rail's poll. */
+    camSession,
+    /** Handed straight to `<Camera>`; see the session-channel note above. */
+    onCameraConfigured,
+    onCameraStarted,
+    onCameraStopped,
+    onCameraError,
+    onCameraInterruptionStarted,
+    onCameraInterruptionEnded,
   };
 }
 
@@ -832,18 +923,39 @@ export function nobodyInFrame(
  *                   around — the two failures it answers.
  *  - `countAnyway`  the measured rate is under the floor but above what the
  *                   core will accept an override for.
+ *  - `countSideAnyway` the shooter is measurably squarer to the camera than
+ *                   the side floor, in a room that will not let them stand
+ *                   anywhere else. Counts the reps and refuses the angles.
  *
  * Every one of these is a RECOVERY, not a relaxation of a measurement: none
- * of them makes the screen claim a number it did not read. `countAnyway` is
- * the single one that relaxes a gate, and it is the pre-existing one whose
- * reps already ride into the report marked low-confidence.
+ * of them makes the screen claim a number it did not read. The two
+ * `count…Anyway` kinds relax a gate, and both ride into the report marked
+ * low-confidence ('lowPoseFps' / 'angledStance') — the side one additionally
+ * refuses every 2D joint angle the yaw would distort, in the core.
+ *
+ * THE ORDER BELOW IS {@link guidanceBanner}'S ORDER, BRANCH FOR BRANCH. That
+ * is the entire reason this decision lives in its own function: the two used
+ * to diverge (`nobodyInFrame` sat above the fps gate here and below it
+ * there), so a back camera pointed at a wall on a phone running 12 fps read
+ * "Pose is at 12 fps — too slow" over a **Flip camera** button — and the fps
+ * override silently vanished at exactly the moment it was needed. If a
+ * branch is added to one function, add it to the other in the same place.
  */
-export type BannerActionKind = 'retryModel' | 'poseCpu' | 'flipCamera' | 'countAnyway';
+export type BannerActionKind =
+  | 'retryModel'
+  | 'poseCpu'
+  | 'flipCamera'
+  | 'countAnyway'
+  | 'countSideAnyway';
 
 export function bannerActionKind(
   r: FormCheckReadiness | null,
   opts: {
     modelErr?: string | null;
+    /** The camera session REPORTED a fault — see {@link cameraSessionBanner}. */
+    cameraFault?: string | null;
+    /** The pose model is not published yet (warm-up copy owns the rail). */
+    modelLoaded?: boolean;
     /** See {@link inferenceFailing}. */
     inferenceFailing?: boolean;
     /** The accelerated rung is already dropped — there is nothing to switch
@@ -856,27 +968,47 @@ export function bannerActionKind(
     /** Frames STARTED and then stopped — see {@link frameStall}. */
     stalled?: boolean;
     camPosition?: 'front' | 'back';
+    /** Calibration is collecting practice motions — the banner skips the arm
+     *  branch there (calibration is what determines the arm), so this one
+     *  must too or the side escape is unreachable in exactly the phase the
+     *  presenter is stuck in. */
+    collecting?: boolean;
   } = {},
 ): BannerActionKind | null {
   if (opts.modelErr != null) return 'retryModel';
+  // A reported camera fault names an EXTERNAL fix ("close the other app",
+  // "let it cool"): no button on this screen performs it, and a Flip camera
+  // pill under that sentence would be a control that cannot clear it.
+  if (opts.cameraFault != null) return null;
+  if (opts.modelLoaded === false) return null;
   if (opts.inferenceFailing === true) {
     return opts.poseCpuOnly === true ? 'retryModel' : 'poseCpu';
   }
+  if (r == null) return null;
   // Nothing has arrived yet: past the budget the flip is the one control that
   // rebuilds the capture session, and before it there is nothing to offer but
-  // patience.
-  if (opts.warming === true) return opts.noFirstFrame === true ? 'flipCamera' : null;
+  // patience. `r.fps <= 0` mirrors the banner's own warm-up test.
+  if (opts.warming === true || r.fps <= 0) {
+    return opts.noFirstFrame === true ? 'flipCamera' : null;
+  }
   // A stalled loop is not a rate to override — see the banner's own note.
   if (opts.stalled === true) return null;
-  if (r == null) return null;
-  if (nobodyInFrame(r, opts.camPosition)) return 'flipCamera';
   // The core refuses an override below FPS_OVERRIDE_MIN (no velocity sample
   // survives), so offering one there would be a promise the screen can't keep.
-  if (!r.fpsOk && r.fps >= FPS_OVERRIDE_MIN) return 'countAnyway';
+  // Either way this branch OWNS the state: the banner is talking about the
+  // rate, so nothing below may answer it with a different button.
+  if (!r.fpsOk) return r.fps >= FPS_OVERRIDE_MIN ? 'countAnyway' : null;
+  if (nobodyInFrame(r, opts.camPosition)) return 'flipCamera';
+  if (!r.fullBodyOk) return null;
+  // The arm gate has its own control (the chip), not a banner pill.
+  if (opts.collecting !== true && !r.armOk) return null;
+  // The side gate is the one gate the shooter cannot always comply with —
+  // the room decides where they may stand. See FormCheckSession.overrideSideFloor.
+  if (!r.sideOk) return 'countSideAnyway';
   return null;
 }
 
-/** The six live gauges the readiness chips draw, after the no-reading rule. */
+/** The live gauges the readiness chips draw, after the no-reading rule. */
 export interface ChipGauges {
   fps: number;
   fpsOk: boolean;
@@ -884,6 +1016,8 @@ export interface ChipGauges {
   fullBodyOk: boolean;
   armOk: boolean;
   sideOk: boolean;
+  /** The side gate is only passing because the presenter overrode it. */
+  sideOverridden: boolean;
 }
 
 /**
@@ -920,14 +1054,17 @@ export function chipGauges(
     // Side-profile defaults OPEN (true) when unknown, so it must not turn
     // green just because nothing contradicted it while blind.
     sideOk: !noReading && (readiness?.sideOk ?? true),
+    // An overridden gate is not a passing one — the fps chip's precedent.
+    sideOverridden: !noReading && readiness?.sideOverridden === true,
   };
 }
 
 /**
- * The ONE guidance banner, chosen by priority: model error → model warmup →
- * every-frame-failing → camera warmup (and, past its budget, no-first-frame)
- * → frame stall → fps → nobody-in-frame → full body → arm → side-profile →
- * low-confidence advisories → all clear. Hard gates pause rep counting (the caller appends
+ * The ONE guidance banner, chosen by priority: model error → camera fault →
+ * model warmup → every-frame-failing → camera warmup (and, past its budget,
+ * no-first-frame) → frame stall → fps → nobody-in-frame → full body → arm →
+ * side-profile → low-confidence advisories → all clear.
+ * {@link bannerActionKind} walks this exact list — keep them in step. Hard gates pause rep counting (the caller appends
  * the paused line); the advisories never pause — the capture is degraded,
  * not refused, and the honest move is to say so and keep counting.
  * While `collecting`, the arm branch is skipped (calibration is what
@@ -946,6 +1083,14 @@ export function guidanceBanner(
   opts: {
     /** Both loader rungs failed (or the watchdog fired) — Retry is offered. */
     modelErr?: string | null;
+    /**
+     * The camera session REPORTED a fault (an `onError`, or an interruption
+     * that stops THIS screen's capture) — {@link cameraSessionBanner} already
+     * turned it into the one line that names the fix. Ahead of the model
+     * warm-up because it outlives it: a camera another app is holding does
+     * not start when the loader finishes.
+     */
+    cameraFault?: string | null;
     /** Frames are arriving and EVERY one is throwing — {@link inferenceFailing}. */
     inferenceFailing?: boolean;
     /** The accelerated rung is already dropped — there is no CPU left to
@@ -965,6 +1110,7 @@ export function guidanceBanner(
   if (opts.modelErr != null) {
     return { text: "The pose model didn't load — tap Retry.", pauses: true };
   }
+  if (opts.cameraFault != null) return { text: opts.cameraFault, pauses: true };
   if (!modelLoaded) return { text: 'Warming up the pose model…', pauses: true };
   // A model that loaded and then throws on every single frame outranks the
   // warm-up copy, because it IS what the warm-up copy was hiding: the counter
@@ -1037,6 +1183,16 @@ export function guidanceBanner(
   if (r.fpsOverridden === true) {
     return {
       text: `Counting below the ${MIN_POSE_FPS} fps floor — timing numbers are low-confidence.`,
+      pauses: false,
+    };
+  }
+  // The side twin, and it must NOT borrow the "read low" wording below: under
+  // the override the core does not report a small angle, it REFUSES the angle
+  // (a 'stanceNotSideOn' refusal on elbow, knee and follow-through). Saying
+  // they read low would describe a measurement nobody took.
+  if (r.sideOverridden === true) {
+    return {
+      text: 'Counting square to the camera — elbow and knee angles are not read.',
       pauses: false,
     };
   }
@@ -1803,6 +1959,16 @@ function LiveOverlay({
         enableLowLightBoost={false}
         resizeMode="contain"
         orientationSource="interface"
+        // THE SESSION'S OWN CHANNEL. Left unpassed, every one of these fell
+        // to the library default (a console.error) and a camera that never
+        // came up was indistinguishable from one still warming up. See
+        // useFormPose's session-channel note and src/core/cameraSession.ts.
+        onConfigured={pose.onCameraConfigured}
+        onStarted={pose.onCameraStarted}
+        onStopped={pose.onCameraStopped}
+        onError={pose.onCameraError}
+        onInterruptionStarted={pose.onCameraInterruptionStarted}
+        onInterruptionEnded={pose.onCameraInterruptionEnded}
       />
       {/* Zone B: presentation-only skeleton — a front preview is mirrored, so
           the overlay x-flips to match. Never feeds metrics. Nothing else may
@@ -1823,6 +1989,7 @@ function LiveOverlay({
           poseCpuOnly={pose.poseCpuOnly}
           framesSv={pose.framesSv}
           failedSv={pose.failedSv}
+          camSession={pose.camSession}
           camPosition={camPosition}
           onFlipCamera={onFlipCamera}
           onFlipHand={onFlipHand}
@@ -1947,6 +2114,7 @@ function LiveRail({
   poseCpuOnly,
   framesSv,
   failedSv,
+  camSession,
   camPosition,
   onFlipCamera,
   onFlipHand,
@@ -1966,6 +2134,8 @@ function LiveRail({
   framesSv: { value: number };
   /** Failed-frame counter, same contract — see {@link inferenceFailing}. */
   failedSv: { value: number };
+  /** What the capture session has reported — see {@link cameraSessionBanner}. */
+  camSession: CameraSessionState;
   camPosition: 'front' | 'back';
   onFlipCamera: () => void;
   onFlipHand: () => void;
@@ -1999,6 +2169,19 @@ function LiveRail({
   useEffect(() => {
     modelReadyRef.current = modelLoaded;
   }, [modelLoaded]);
+  /**
+   * The camera session's own report, as of the last poll. A ref, not a dep of
+   * the interval: re-creating the 4 Hz poll every time a callback fires would
+   * restart the stall clock with it.
+   */
+  const camSessionRef = useRef(camSession);
+  useEffect(() => {
+    camSessionRef.current = camSession;
+  }, [camSession]);
+  /** A fault that the session REPORTED, already worded — never an inference. */
+  const [camFault, setCamFault] = useState<string | null>(null);
+  /** The last INFERRED fault written to the console (once per fault, not 4×/s). */
+  const camWarnedRef = useRef<string | null>(null);
   useEffect(() => {
     const id = setInterval(() => {
       setSnap(railSnapOf(sessionRef.current));
@@ -2014,20 +2197,20 @@ function LiveRail({
       // Frames arriving, none surviving. Nothing to time — the counters say
       // it outright.
       setFailing(inferenceFailing(frames, failed));
-      // The warm-up budget. The clock is HELD at `now` while there is no
-      // model to run or a frame has already landed, so it only accumulates
-      // over the window where a published model and a live camera should be
-      // producing frames and are not.
-      if (warmClockRef.current === 0 || frames > 0 || !modelReadyRef.current) {
-        warmClockRef.current = now;
-      }
-      setNoFrames(noFirstFrame(frames > 0, now - warmClockRef.current));
-      if (frames < lastFramesRef.current) {
-        // The counter went BACKWARDS — the loop was reset (the foreground
-        // guard zeroes it on every background/restore). That is a restart,
-        // not a stall, and `warming` already says so.
+      // THE COUNTER WENT BACKWARDS — the loop was reset (the foreground guard
+      // zeroes it on every background/restore; so do Retry and Switch to CPU).
+      // That is a RESTART, and every clock measuring "how long has nothing
+      // arrived" restarts with it. The stall clock always did; the warm-up
+      // clock did not, so an app-switch longer than the 12 s budget came back
+      // accusing the camera — "No camera frames yet — tap Flip camera" over a
+      // perfectly healthy ~1 s reacquire, offering the one button that breaks
+      // the propped protocol. Ordered ABOVE the budget read below so the
+      // accusation cannot land on the very tick that detects the restart.
+      const restarted = frames < lastFramesRef.current;
+      if (restarted) {
         lastFramesRef.current = frames;
         lastFramesAtRef.current = now;
+        warmClockRef.current = now;
         setStalled(false);
       } else {
         const delta = frames - lastFramesRef.current;
@@ -2038,6 +2221,38 @@ function LiveRail({
           lastFramesRef.current = frames;
           lastFramesAtRef.current = now;
         }
+      }
+      // The warm-up budget. The clock is HELD at `now` while there is no
+      // model to run or a frame has already landed, so it only accumulates
+      // over the window where a published model and a live camera should be
+      // producing frames and are not.
+      if (warmClockRef.current === 0 || frames > 0 || !modelReadyRef.current) {
+        warmClockRef.current = now;
+      }
+      setNoFrames(noFirstFrame(frames > 0, now - warmClockRef.current));
+      // THE CAMERA SESSION'S OWN REPORT. Two kinds, and the difference is
+      // what stops this from fighting the budget above:
+      //  - TOLD (an onError, or an interruption that stops this capture):
+      //    information no watchdog can guess, whose fix is outside this app.
+      //    It goes on the rail and outranks the warm-up copy.
+      //  - INFERRED (a deadline passed in silence): says only that nothing
+      //    arrived — which noFirstFrame above already says, later, with a
+      //    control attached. Two deadlines for one silence would show two
+      //    different instructions, so this one takes the console instead: it
+      //    is what separates "the camera never came up" from "the camera is
+      //    running and the frame path is dead", which the counters cannot.
+      const cam = cameraSessionBanner({
+        ...camSessionRef.current,
+        elapsedMs: now - camSessionRef.current.since,
+      });
+      setCamFault(cam != null && cam.told ? cam.text : null);
+      if (cam != null && !cam.told) {
+        if (camWarnedRef.current !== cam.fault) {
+          camWarnedRef.current = cam.fault;
+          console.warn(`[formcheck] camera session ${cam.fault}`);
+        }
+      } else {
+        camWarnedRef.current = null;
       }
       // Same 4 Hz poll: the detector runs at frame rate on the sink and the
       // rail never re-renders per frame.
@@ -2074,14 +2289,20 @@ function LiveRail({
   const collecting = calibPhase === 'collecting';
   const railW = Math.max(0, winW - space.lg * 2 - space.md * 2);
 
+  // ONE object into BOTH decisions — that is what makes the words and the
+  // button structurally incapable of disagreeing (they walk the same list;
+  // see bannerActionKind's header).
   const bannerOpts = {
     modelErr,
+    cameraFault: camFault,
+    modelLoaded,
     inferenceFailing: failing,
     poseCpuOnly,
     warming,
     noFirstFrame: noFrames,
     stalled,
     camPosition,
+    collecting,
   };
   const banner = guidanceBanner(
     modelLoaded,
@@ -2108,11 +2329,21 @@ function LiveRail({
   const actionKind = bannerActionKind(readiness, bannerOpts);
   const bannerAction: { label: string; onPress: () => void } | null =
     actionKind === 'retryModel'
-      ? { label: 'Retry', onPress: onRetryModel }
+      ? {
+          label: 'Retry',
+          onPress: () => {
+            // A reload is a fresh start for the frame budget too: the loader
+            // has its own watchdog and its own copy, and charging its seconds
+            // to the camera's 12 s is what the budget's doc forbids.
+            warmClockRef.current = Date.now();
+            onRetryModel();
+          },
+        }
       : actionKind === 'poseCpu'
         ? {
             label: 'Switch to CPU',
             onPress: () => {
+              warmClockRef.current = Date.now();
               onPoseCpu();
               haptic.impactMedium();
             },
@@ -2134,7 +2365,31 @@ function LiveRail({
                   refresh();
                 },
               }
-            : null;
+            : actionKind === 'countSideAnyway'
+              ? {
+                  /**
+                   * THE SIDE ESCAPE. Same label as the fps twin because it is
+                   * the same bargain: the room will not let the shooter stand
+                   * side-on, so the gate opens and the price is stated
+                   * everywhere — SIDE · OVERRIDE on the chip, an advisory on
+                   * the rail, 'angledStance' on every rep, and the elbow,
+                   * knee and follow-through angles REFUSED in the core rather
+                   * than reported foreshortened.
+                   *
+                   * It has to reach CALIBRATION, which is where the dead end
+                   * actually is: the shadow collector reads the same
+                   * readiness.sideOk, so without this the stepper freezes on
+                   * "practice motion 1 of 2" and "Start scoring" is never
+                   * offered. The pill renders in the stepper for that reason.
+                   */
+                  label: 'Count anyway',
+                  onPress: () => {
+                    sessionRef.current?.overrideSideFloor();
+                    haptic.impactMedium();
+                    refresh();
+                  },
+                }
+              : null;
 
   const chipRow = (
     <ChipRow
@@ -2311,10 +2566,8 @@ function ChipRow({
   // The no-reading rule lives in {@link chipGauges} so it can be pinned. The
   // VIEW chip is deliberately NOT in it — that one reports a latched verdict
   // about the buffer, not a live gauge.
-  const { fps, fpsOk, overridden, fullBodyOk, armOk, sideOk } = chipGauges(readiness, {
-    stalled,
-    warming,
-  });
+  const { fps, fpsOk, overridden, fullBodyOk, armOk, sideOk, sideOverridden } =
+    chipGauges(readiness, { stalled, warming });
   const chipHand = calib?.hand ?? 'right';
   const chipSource = calib?.handSource ?? 'settings';
 
@@ -2343,6 +2596,7 @@ function ChipRow({
         sideness={stalled ? null : (readiness?.sideness ?? null)}
         ok={sideOk}
         trusted={!stalled && readiness?.sideTrusted !== false}
+        overridden={sideOverridden}
       />
       {/* A correction that fires must be VISIBLE — one nobody can see is one
           nobody can overrule. Only a verified-upright buffer earns green:
@@ -2452,24 +2706,29 @@ function ArmedReveal({ width }: { width: number }) {
  * Tiny 0–1 side-profile arc meter chip. Null = the gauge honestly can't vote
  * (occlusion) — the chip shows a dash and the gate PASSES.
  *
- * Three states, not two: the gate now passes from SIDE_PROFILE_MIN (≈40° of
+ * Four states, not two: the gate passes from SIDE_PROFILE_MIN (≈40° of
  * tolerance, so an ordinary room can be used) but 2D joint angles are only
  * trustworthy from SIDE_PROFILE_TRUSTED. A passing-but-angled stance stays
  * amber — green would be the screen claiming a squareness it measured itself
- * to not have.
+ * to not have — and an OVERRIDDEN stance says the word outright.
  */
 function SideChip({
   sideness,
   ok,
   trusted = true,
+  overridden = false,
 }: {
   sideness: number | null;
   ok: boolean;
   trusted?: boolean;
+  /** The gate is passing because the presenter overrode it, not because the
+   *  stance cleared the floor. The FPS chip's precedent: an overridden gauge
+   *  stays amber and SAYS so, however green the gate now reads. */
+  overridden?: boolean;
 }) {
   const w = 18;
   const h = 11;
-  const clean = ok && trusted;
+  const clean = ok && trusted && !overridden;
   const track = useMemo(() => {
     const p = Skia.Path.Make();
     p.addArc(Skia.XYWHRect(2, 2, w - 4, (h - 3) * 2), 180, 180);
@@ -2484,12 +2743,18 @@ function SideChip({
       accessible
       accessibilityLabel={
         sideness != null
-          ? `Side-on ${Math.round(sideness * 100)} percent${clean ? '' : ', angles read low'}`
+          ? `Side-on ${Math.round(sideness * 100)} percent${
+              overridden
+                ? ', counting anyway, angles not read'
+                : clean
+                  ? ''
+                  : ', angles read low'
+            }`
           : 'Side-on not measurable'
       }
     >
       <Text style={[styles.sideChipLabel, { color: clean ? color.make : color.unsure }]}>
-        SIDE
+        {overridden ? 'SIDE · OVERRIDE' : 'SIDE'}
       </Text>
       {sideness != null ? (
         <Canvas style={{ width: w, height: h }}>
@@ -2643,7 +2908,7 @@ function phaseForPos(pos: number): StagePhase {
   return 'FOLLOW';
 }
 
-type ReportSeg = 'overview' | 'reps' | 'compare';
+type ReportSeg = 'overview' | 'reps' | 'compare' | 'depth';
 
 /** Report chip word per hand source — honest at a glance. */
 const SOURCE_WORD: Record<HandSource, string> = {
@@ -2931,6 +3196,19 @@ export function FormCheckReport({
     [theaterReps],
   );
 
+  // The selected rep lifted into 3D. Declared ABOVE `segments` because the tab
+  // badge reads it — a helper referenced before its declaration is the TDZ trap
+  // this file has been bitten by before.
+  //
+  // Depth is an ESTIMATE (bone-length priors), never a measurement, and
+  // liftRep returns null rather than a half-skeleton when the rep is too thin
+  // or the depth scale cannot be trusted. A null here means the 3D tab is
+  // ATTENTIVELY empty, not broken.
+  const lifted3d = useMemo(
+    () => (selected != null ? liftRep(selected.rep) : null),
+    [selected],
+  );
+
   const segments: SegmentedTabItem<ReportSeg>[] = [
     { value: 'overview', label: 'Overview' },
     {
@@ -2944,6 +3222,12 @@ export function FormCheckReport({
       label: 'Compare',
       badge: theaterReps.length > 0 ? ('dot' as const) : undefined,
       badgeLabel: theaterReps.length > 0 ? 'motion captured' : undefined,
+    },
+    {
+      value: 'depth',
+      label: '3D',
+      badge: lifted3d != null ? ('dot' as const) : undefined,
+      badgeLabel: lifted3d != null ? 'depth estimated' : undefined,
     },
   ];
 
@@ -3287,6 +3571,22 @@ export function FormCheckReport({
               <Card>
                 <Text style={styles.body}>
                   No rep captured a full motion window — nothing to compare yet.
+                </Text>
+              </Card>
+            )}
+          </View>
+        )}
+
+        {seg === 'depth' && (
+          <View style={styles.segmentBody}>
+            {lifted3d != null ? (
+              <FormCheck3DPanel result={lifted3d} width={contentW} />
+            ) : (
+              <Card>
+                <Text style={styles.body}>
+                  {selected == null
+                    ? 'No rep captured a full motion window, so there is nothing to lift into 3D yet.'
+                    : 'This rep could not be lifted into 3D — too few frames, or the depth scale could not be trusted. It is left out rather than shown flat.'}
                 </Text>
               </Card>
             )}

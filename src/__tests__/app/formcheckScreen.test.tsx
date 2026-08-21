@@ -121,6 +121,15 @@ jest.mock('@shopify/react-native-skia', () => {
   const stub = () => null;
   return {
     __esModule: true,
+    // matchFont/Group/Text are needed because the report now reaches
+    // FormCheck3DPanel -> FormStage3D, which calls matchFont at MODULE SCOPE.
+    // A missing entry there is not a render failure, it is the whole suite
+    // failing to load.
+    matchFont: () => ({}),
+    Group: stub,
+    Text: stub,
+    Rect: stub,
+    RoundedRect: stub,
     Canvas: stub,
     Circle: stub,
     Line: stub,
@@ -325,6 +334,7 @@ import FormCheckScreen, {
   orientationChipLabel,
   repCallout,
   verdictHeadline,
+  type BannerActionKind,
 } from '@/app/formcheck';
 import {
   ELBOW_SPREAD_FLAG_DEG,
@@ -332,15 +342,17 @@ import {
   KNEE_SPREAD_FLAG_DEG,
   MIN_SPREAD_REPS,
   RELEASE_HEIGHT_SPREAD_FLAG,
+  SIDE_PROFILE_MIN,
   TEMPO_SPREAD_FLAG_MS,
   sessionSpreads,
   type CalibrationState,
   type FormCheckReadiness,
   type FormCheckRep,
+  type FormCheckSession,
   type FormCheckSessionReport,
 } from '@/core/formCheck';
 import { buildSequence, type RawSeqFrame } from '@/core/formSequence';
-import type { FormMetrics, PoseKeypointName } from '@/core/types';
+import type { FormMetrics, PoseFrame, PoseKeypointName } from '@/core/types';
 import { useSettings } from '@/state/settingsStore';
 
 // ---------------------------------------------------------------------------
@@ -537,6 +549,80 @@ function rawAt(t: number, i: number, dipFrames: number): RawSeqFrame {
   m.set('right_elbow', { x: arm.elbow[0], y: arm.elbow[1] });
   m.set('right_wrist', { x: arm.wrist[0], y: arm.wrist[1] });
   return { t, pts: m };
+}
+
+/**
+ * The same scripted shooter as a PoseFrame, scored above FORM.keypointScoreMin
+ * — what the SINK would hand the session if a camera existed under jest.
+ */
+function poseAt(t: number, i: number, dipFrames: number): PoseFrame {
+  const keypoints: PoseFrame['keypoints'] = {};
+  for (const [name, p] of Object.entries(STATIC) as [PoseKeypointName, [number, number]][]) {
+    keypoints[name] = { x: p[0], y: p[1], score: 0.9 };
+  }
+  const arm = armAt(i, dipFrames);
+  keypoints.right_elbow = { x: arm.elbow[0], y: arm.elbow[1], score: 0.9 };
+  keypoints.right_wrist = { x: arm.wrist[0], y: arm.wrist[1], score: 0.9 };
+  return { t, keypoints };
+}
+
+/**
+ * The same shooter turned SQUARE to the camera — the stance a room with a
+ * wall where the side-on line should be forces. The side gauge measures it at
+ * ~0.2, well under SIDE_PROFILE_MIN, so it is a MEASURED refusal and not an
+ * abstain. (Same shoulder/hip offsets the core suite uses.)
+ */
+function faceOnPoseAt(t: number, i: number, dipFrames: number): PoseFrame {
+  const pose = poseAt(t, i, dipFrames);
+  pose.keypoints.left_shoulder = { x: 68, y: 45, score: 0.9 };
+  pose.keypoints.left_hip = { x: 73, y: 95, score: 0.9 };
+  return pose;
+}
+
+/**
+ * The live rail's own props — the seam every screen-level test below drives.
+ * LiveRail is the only node carrying BOTH the session ref and the frame
+ * counter, which is exactly the pair a reachability test needs: the session
+ * the SCREEN built, and the counter the worklet would be writing.
+ */
+function railProps(r: ReactTestRenderer): {
+  sessionRef: { current: FormCheckSession | null };
+  framesSv: { value: number };
+} {
+  const rail = r.root.findAll(
+    (n) => n.props?.sessionRef != null && n.props?.framesSv != null,
+  )[0];
+  expect(rail).toBeDefined();
+  return rail!.props as {
+    sessionRef: { current: FormCheckSession | null };
+    framesSv: { value: number };
+  };
+}
+
+/** The session the screen is actually feeding — never a fresh one. */
+function liveSession(r: ReactTestRenderer): FormCheckSession {
+  const s = railProps(r).sessionRef.current;
+  expect(s).not.toBeNull();
+  return s!;
+}
+
+/** The `<Camera>` element's props (the mock renders null but keeps them). */
+function cameraProps(r: ReactTestRenderer): Record<string, unknown> {
+  const cam = r.root.findAll((n) => n.props?.onInterruptionStarted != null)[0];
+  expect(cam).toBeDefined();
+  return cam!.props as Record<string, unknown>;
+}
+
+/**
+ * One 4 Hz rail tick with frames still arriving. The counter has to keep
+ * MOVING or frameStall arms at 750 ms and every gauge goes honestly blank —
+ * which would hide the very states these tests are about.
+ */
+async function railTick(r: ReactTestRenderer, ms = 300): Promise<void> {
+  railProps(r).framesSv.value += 30;
+  await act(async () => {
+    jest.advanceTimersByTime(ms);
+  });
 }
 
 /** A genuinely decodable FormSequence for the theater/similarity tests. */
@@ -1973,6 +2059,7 @@ describe('chipGauges — a gauge may only read green while it is reading', () =>
       fullBodyOk: true,
       armOk: true,
       sideOk: true,
+      sideOverridden: false,
     });
   });
 
@@ -1985,6 +2072,7 @@ describe('chipGauges — a gauge may only read green while it is reading', () =>
       fullBodyOk: false,
       armOk: false,
       sideOk: false,
+      sideOverridden: false,
     });
   });
 
@@ -2002,6 +2090,7 @@ describe('chipGauges — a gauge may only read green while it is reading', () =>
       fullBodyOk: false,
       armOk: false,
       sideOk: false,
+      sideOverridden: false,
     });
   });
 
@@ -2030,6 +2119,7 @@ describe('chipGauges — a gauge may only read green while it is reading', () =>
       fullBodyOk: false,
       armOk: false,
       sideOk: true,
+      sideOverridden: false,
     });
   });
 });

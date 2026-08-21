@@ -32,6 +32,11 @@ yarn-error.*
 
 # local env files
 .env*.local
+# Firebase config lives in .env (see .env.example + docs/FIREBASE-SETUP.md).
+# It is not a secret by design, but nothing real belongs in a tracked file.
+.env
+.env.*
+!.env.example
 
 # typescript
 *.tsbuildinfo

@@ -48,6 +48,15 @@ import {
   evidenceTone,
 } from '@/core/evidence';
 import {
+  formatDisplayHeight,
+  fromDisplayHeight,
+  HEIGHT_UNIT_OPTIONS,
+  heightScale,
+  heightUnitSuffix,
+  spokenDisplayHeight,
+  toDisplayHeight,
+} from '@/core/heightUnits';
+import {
   DEFAULT_HEIGHT_CM,
   DEFAULT_WEIGHT_KG,
   EXPERIENCE_BLURB,
@@ -70,14 +79,6 @@ import { haptic } from '@/utils/haptics';
 import type { ShootingHand } from '@/core/types';
 
 const DEFAULT_BIRTH_YEAR = 2005;
-
-/** cm → a "5'11"" style label for the height readout. */
-function cmToFtIn(cm: number): string {
-  const totalIn = Math.round(cm / 2.54);
-  const ft = Math.floor(totalIn / 12);
-  const inch = totalIn % 12;
-  return `${ft}'${inch}"`;
-}
 
 interface StepChrome {
   /** Small accent eyebrow above the title. */
@@ -149,6 +150,7 @@ export default function OnboardingScreen() {
   // Existing settings keys the wizard is allowed to write at runtime.
   const shootingHand = useSettings((s) => s.shootingHand);
   const ballSize = useSettings((s) => s.ballSize);
+  const heightUnit = useSettings((s) => s.heightUnit);
   const setSetting = useSettings((s) => s.set);
 
   // Local drafts for the slider steps so dragging feels instant even before
@@ -161,6 +163,10 @@ export default function OnboardingScreen() {
   const [step, setStep] = useState(0);
 
   const maxYear = maxBirthYear();
+  const heightBounds = useMemo(
+    () => heightScale(heightUnit, MIN_HEIGHT_CM, MAX_HEIGHT_CM),
+    [heightUnit],
+  );
 
   const finish = useCallback(() => {
     // Wizard complete — through the settings-gated gateway, never
@@ -219,21 +225,37 @@ export default function OnboardingScreen() {
         ),
         isDataStep: true,
       },
-      // 2 — Height
+      // 2 — Height. The slider works in whatever unit is on screen; the draft
+      // it writes back is always canonical centimetres (see heightUnits.ts).
       {
         eyebrow: 'Step 2 · Measurements',
         title: 'How tall are you?',
         body: 'Calibrates release height and jump — never shared.',
         content: (
-          <NumberSlider
-            label="Height"
-            value={heightDraft}
-            min={MIN_HEIGHT_CM}
-            max={MAX_HEIGHT_CM}
-            unit="cm"
-            formatValue={(v) => `${v}`}
-            onChange={setHeightDraft}
-          />
+          <View style={styles.dualStack}>
+            <ChipSelect
+              label="Height unit"
+              options={[...HEIGHT_UNIT_OPTIONS]}
+              value={heightUnit}
+              onChange={(v) => {
+                tick();
+                setSetting('heightUnit', v);
+              }}
+            />
+            <NumberSlider
+              label="Height"
+              value={toDisplayHeight(heightDraft, heightUnit)}
+              min={heightBounds.min}
+              max={heightBounds.max}
+              step={heightBounds.step}
+              unit={heightUnitSuffix(heightUnit) ?? undefined}
+              formatValue={(v) => formatDisplayHeight(v, heightUnit)}
+              spokenValue={(v) => spokenDisplayHeight(v, heightUnit)}
+              onChange={(v) =>
+                setHeightDraft(fromDisplayHeight(v, heightUnit, MIN_HEIGHT_CM, MAX_HEIGHT_CM))
+              }
+            />
+          </View>
         ),
         isDataStep: true,
       },
@@ -487,7 +509,9 @@ export default function OnboardingScreen() {
     ];
   }, [
     ballSize,
+    heightBounds,
     heightDraft,
+    heightUnit,
     maxYear,
     nickDraft,
     profile.experience,

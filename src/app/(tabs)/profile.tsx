@@ -44,6 +44,16 @@ import {
   type BadgeTier,
   type LifetimeTotals,
 } from '@/core/achievements';
+import {
+  formatDisplayHeight,
+  formatHeight,
+  fromDisplayHeight,
+  HEIGHT_UNIT_OPTIONS,
+  heightScale,
+  heightUnitSuffix,
+  spokenDisplayHeight,
+  toDisplayHeight,
+} from '@/core/heightUnits';
 import type { ShootingHand } from '@/core/types';
 import { lifetimeTotals } from '@/data/db';
 import { useAchievementsSeen } from '@/state/achievementsSeenStore';
@@ -347,7 +357,9 @@ export default function ProfileScreen() {
   const setP = p.set;
   const shootingHand = useSettings((s) => s.shootingHand);
   const ballSize = useSettings((s) => s.ballSize);
+  const heightUnit = useSettings((s) => s.heightUnit);
   const setSetting = useSettings((s) => s.set);
+  const heightBounds = heightScale(heightUnit, MIN_HEIGHT_CM, MAX_HEIGHT_CM);
 
   const [editor, setEditor] = useState<EditorKey | null>(null);
   const [whyOpen, setWhyOpen] = useState(false);
@@ -427,10 +439,14 @@ export default function ProfileScreen() {
               <StatNumber size="medium" value="—" label="Age" />
             )}
             <View style={styles.statDivider} />
-            {p.heightCm != null ? (
+            {p.heightCm == null ? (
+              <StatNumber size="medium" value="—" label="Height" />
+            ) : heightUnit === 'cm' ? (
               <MotionStat size="medium" value={p.heightCm} label="cm" />
             ) : (
-              <StatNumber size="medium" value="—" label="Height" />
+              // 5'11" is a compound string, not a numeral a count-up can roll
+              // honestly — same rule the MAKES column follows on the summary.
+              <StatNumber size="medium" value={formatHeight(p.heightCm, 'ftin')} label="Height" />
             )}
             <View style={styles.statDivider} />
             {p.weightKg != null ? (
@@ -474,7 +490,7 @@ export default function ProfileScreen() {
           <Text style={styles.sectionEyebrow}>IDENTITY</Text>
           <FieldRow icon="person-outline" label="Nickname" filled={p.nickname.trim().length > 0} value={p.nickname.trim()} onPress={() => open('nickname')} />
           <View style={styles.divider} />
-          <FieldRow icon="resize-outline" label="Height" filled={p.heightCm != null} value={`${p.heightCm} cm`} onPress={() => open('height')} />
+          <FieldRow icon="resize-outline" label="Height" filled={p.heightCm != null} value={formatHeight(p.heightCm, heightUnit)} onPress={() => open('height')} />
           <View style={styles.divider} />
           <FieldRow icon="barbell-outline" label="Weight" filled={p.weightKg != null} value={`${p.weightKg} kg`} onPress={() => open('weight')} />
           <View style={styles.divider} />
@@ -579,7 +595,22 @@ export default function ProfileScreen() {
 
       {editor === 'height' && (
         <EditorSheet title="Height" onClose={() => setEditor(null)} onClear={p.heightCm != null ? () => { setP('heightCm', null); setEditor(null); } : undefined}>
-          <NumberSlider label="Height" value={p.heightCm ?? DEFAULT_HEIGHT_CM} min={MIN_HEIGHT_CM} max={MAX_HEIGHT_CM} unit="cm" formatValue={(v) => `${v}`} onChange={(v) => setP('heightCm', v)} />
+          {/* The slider works in the unit on screen; what lands in the store is
+              always canonical centimetres (src/core/heightUnits.ts). */}
+          <View style={styles.editorStack}>
+            <ChipSelect label="Height unit" options={[...HEIGHT_UNIT_OPTIONS]} value={heightUnit} onChange={(v) => setSetting('heightUnit', v)} />
+            <NumberSlider
+              label="Height"
+              value={toDisplayHeight(p.heightCm ?? DEFAULT_HEIGHT_CM, heightUnit)}
+              min={heightBounds.min}
+              max={heightBounds.max}
+              step={heightBounds.step}
+              unit={heightUnitSuffix(heightUnit) ?? undefined}
+              formatValue={(v) => formatDisplayHeight(v, heightUnit)}
+              spokenValue={(v) => spokenDisplayHeight(v, heightUnit)}
+              onChange={(v) => setP('heightCm', fromDisplayHeight(v, heightUnit, MIN_HEIGHT_CM, MAX_HEIGHT_CM))}
+            />
+          </View>
         </EditorSheet>
       )}
 
@@ -862,6 +893,11 @@ const styles = StyleSheet.create({
   inlineGroup: {
     gap: space.md,
     paddingVertical: space.xs,
+  },
+  // Unit chips above a big slider readout — the slider's own internal rhythm
+  // is space.xl, so the stack matches it rather than crowding the numeral.
+  editorStack: {
+    gap: space.xl,
   },
   inlineLabel: {
     ...type.bodyMedium,

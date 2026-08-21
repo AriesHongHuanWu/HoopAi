@@ -17,10 +17,21 @@
  * reads that as "2D bone longer than the prior", clamps dz to 0, and the limbs
  * come out FLAT — the torso still gets real depth (that comes from the yaw,
  * not from a bone solve), the limbs do not. Origin, units and axis convention
- * all line up; only the scale does not. This adapter MEASURES that mismatch
- * ({@link DepthScaleCheck}) and lets it veto 3D claims. It does not silently
- * rescale anything — a lift fix belongs in lift.ts/formSequence.ts, not in a
- * conversion invented here.
+ * all line up; only the scale does not.
+ *
+ * FIXED WHERE IT BELONGS (in the lift, not here): lift.ts now takes a
+ * `unitScale` — normalized units per standing body height — and multiplies
+ * every prior by it, so the priors are read in the units the frames actually
+ * arrived in. This adapter MEASURES that scale off the rep's own bones
+ * ({@link measureUnitScale}: the upper envelope of measured/prior 2D length,
+ * which is the smallest scale consistent with "a projection is never longer
+ * than the bone") and hands it to {@link liftSequence}. Nothing is rescaled
+ * behind the reader's back: the scale that was applied rides on
+ * `lifted.unitScale`, and {@link DepthScaleCheck} still measures how far the
+ * bones run over the priors AS THE LIFT READ THEM — so a rep whose scale
+ * could not be recovered still collapses to `depthCollapsed` and still vetoes
+ * the 3D claim. formSequence's normalization is NOT touched: exact-score pins
+ * in formSimilarity and postureFix depend on it.
  *
  * HONESTY CONTRACT (inherited, enforced in the data):
  * - x/y are MEASURED, z is an ESTIMATE — see {@link DEPTH_DISCLAIMER}.
@@ -39,7 +50,12 @@ import { decodeSequence } from './formSequence';
 import type { DecodedFrame } from './formSequence';
 import { angleAtDeg } from './geometry';
 import { jointAngleDeg, releaseFrameIndex } from './pose3d/angles3d';
-import { BONE_PRIORS, liftSequence } from './pose3d/lift';
+import {
+  BONE_PRIORS,
+  MIN_RESOLVABLE_DZ_RATIO,
+  liftSequence,
+  measureUnitScale,
+} from './pose3d/lift';
 import type { Frame3D, Joint3D, LiftedSequence } from './pose3d/lift';
 import type { FormSequence, PoseKeypointName, ShootingHand } from './types';
 
@@ -74,6 +90,14 @@ export const AGREE_TOL_DEG = 5;
  * 1.8 m shooter — numerically nothing.
  */
 export const DEPTH_FLAT_EPS = 1e-4;
+
+/**
+ * A bone must measure at most this fraction of its prior before its depth is
+ * resolvable at all — the length-space twin of lift.ts's
+ * {@link MIN_RESOLVABLE_DZ_RATIO} (a bone 0.3 L out of plane projects to
+ * sqrt(1 − 0.3²) = 0.954 of its length). Above it, "flat" is the measurement.
+ */
+const RESOLVABLE_LEN_RATIO = Math.sqrt(1 - MIN_RESOLVABLE_DZ_RATIO * MIN_RESOLVABLE_DZ_RATIO);
 
 /**
  * Limb bones only — the ones whose depth the lift solves from a prior. The
@@ -192,7 +216,10 @@ export interface DepthScaleCheck {
   collapsed: boolean;
 }
 
-/** A rep's 3D posture plus the judgment built on it. */
+/**
+ * A rep's 3D posture plus the judgment built on it. Any surface that renders
+ * the skeleton or a `deg` from here carries {@link DEPTH_DISCLAIMER}.
+ */
 export interface FormCheck3D {
   hand: ShootingHand;
   /** The MEASURED 2D frames the lift consumed (hip-centre, body-height units). */
@@ -290,15 +317,27 @@ function bone2D(frame: DecodedFrame, a: PoseKeypointName, b: PoseKeypointName): 
   return Math.hypot(pa.x - pb.x, pa.y - pb.y);
 }
 
-/** Measure how far this rep's limb bones run over their priors. */
-export function depthScaleCheck(frames2d: readonly DecodedFrame[]): DepthScaleCheck {
+/**
+ * Measure how far this rep's limb bones run over their priors.
+ *
+ * `unitScale` is the scale the lift READ those priors in (see
+ * {@link measureUnitScale}); the default 1 measures against the raw
+ * standing-height priors, which is the mismatch measurement itself. Passing
+ * the applied scale — what {@link liftRep} does — turns this into the residual
+ * check: whatever still runs over its prior AFTER the units were reconciled is
+ * depth the lift genuinely could not recover.
+ */
+export function depthScaleCheck(
+  frames2d: readonly DecodedFrame[],
+  unitScale = 1,
+): DepthScaleCheck {
   const ratios: number[] = [];
   let over = 0;
   for (const frame of frames2d) {
     for (const bp of SCALE_BONES) {
       const len = bone2D(frame, bp.a, bp.b);
       if (len == null) continue;
-      const ratio = len / bp.len;
+      const ratio = len / (bp.len * unitScale);
       ratios.push(ratio);
       if (ratio >= 1) over++;
     }
@@ -341,13 +380,14 @@ interface AngleSpec {
 function bestBoneRatio(
   frame: DecodedFrame,
   bones: readonly [PoseKeypointName, PoseKeypointName][],
+  unitScale = 1,
 ): number | null {
   let best: number | null = null;
   for (const [a, b] of bones) {
     const prior = BONE_PRIORS.find((p) => p.a === a && p.b === b)?.len;
     const len = bone2D(frame, a, b);
     if (prior == null || len == null) return null;
-    const ratio = len / prior;
+    const ratio = len / (prior * unitScale);
     if (best == null || ratio < best) best = ratio;
   }
   return best;
@@ -368,6 +408,9 @@ function judgeAngle(
   frames2d: readonly DecodedFrame[],
   phases: Phase3DIndices,
 ): Judged3DAngle {
+  // Ratios are quoted against the priors AS THE LIFT READ THEM, so a ratio
+  // over 1 always means the same thing: depth this rep could not recover.
+  const unitScale = lifted.unitScale ?? 1;
   const primary = phases[spec.phase];
   const fallback = spec.fallback != null ? phases[spec.fallback] : null;
   const usedPhase: PhaseId | null = primary != null ? spec.phase : fallback != null ? spec.fallback : null;
@@ -416,20 +459,24 @@ function judgeAngle(
       deg: null,
       deg2d,
       c: reading.c,
-      boneRatio: bestBoneRatio(f2, spec.bones),
+      boneRatio: bestBoneRatio(f2, spec.bones, unitScale),
       verdict: 'withheld',
       reason: 'lowDepthConfidence',
       note: `3D ${spec.label} withheld: depth confidence ${reading.c.toFixed(2)} is under ${MIN_DEPTH_C}.`,
     };
   }
 
-  const boneRatio = bestBoneRatio(f2, spec.bones);
+  const boneRatio = bestBoneRatio(f2, spec.bones, unitScale);
   // Flat in z ⇒ this "3D" number is the 2D number. Say so; never dress it up.
   if (zSpread(f3[a]!, f3[b]!, f3[c]!) <= DEPTH_FLAT_EPS) {
     const why =
-      boneRatio != null && boneRatio >= 1
-        ? ` Its bones measure ×${boneRatio.toFixed(2)} of the anthropometric prior, so there was no depth left to recover.`
-        : '';
+      boneRatio == null
+        ? ''
+        : boneRatio >= 1
+          ? ` Its bones measure ×${boneRatio.toFixed(2)} of the anthropometric prior, so there was no depth left to recover.`
+          : boneRatio >= RESOLVABLE_LEN_RATIO
+            ? ` Its bones sit within ${Math.round((1 - boneRatio) * 100)}% of their anthropometric priors — closer than a bone length can resolve depth to — so the lift keeps them in the image plane instead of guessing a bend.`
+            : '';
     return {
       ...base,
       deg: reading.deg,
@@ -525,10 +572,13 @@ function judgeTorsoYaw(lifted: LiftedSequence, scale: DepthScaleCheck): Judged3D
       note: `Torso yaw withheld: depth confidence ${c.toFixed(2)} is under ${MIN_DEPTH_C}.`,
     };
   }
+  // The number rests on the apparent shoulder width read against a body scale
+  // measured off this rep's own bones, so it always carries a tolerance — and
+  // when the bones still run over their priors it is a floor, not a reading.
   const under =
     scale.maxRatio != null && scale.maxRatio > 1
       ? ` Bones here measure up to ×${scale.maxRatio.toFixed(2)} of the prior, which reads as less turn than there is — take it as a lower bound.`
-      : '';
+      : ' Read from shoulder width against a body scale measured off this rep, so take it to a few degrees, not to the digit.';
   return {
     ...base,
     deg: lifted.azimuthDeg,
@@ -556,11 +606,15 @@ export function liftRep(rep: FormCheckRep): FormCheck3D | null {
   const frames2d = decodeSequence(seq);
   if (frames2d.length < MIN_LIFT_FRAMES) return null;
   const hand = seq.hand;
-  const lifted = liftSequence(frames2d, hand);
+  // Units first, THEN the lift: the priors are fractions of standing height
+  // and these frames are in nose→ankle spans, so reading them as-is is what
+  // flattened every limb. The scale is measured off this rep's own bones.
+  const unitScale = measureUnitScale(frames2d);
+  const lifted = liftSequence(frames2d, hand, unitScale);
   if (!lifted) return null;
 
   const phases = phaseIndices(rep, seq, frames2d, hand);
-  const scale = depthScaleCheck(frames2d);
+  const scale = depthScaleCheck(frames2d, lifted.unitScale ?? 1);
   const s = sideNames(hand);
   const specs: AngleSpec[] = [
     {

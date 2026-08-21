@@ -1,0 +1,130 @@
+rules_version = '2';
+
+// Hoopilot — Firestore security rules.
+//
+// THESE RULES ARE THE ENFORCEMENT. The client-side field whitelist in
+// src/data/firebaseRecords.ts is a second lock on the same door, and a lock on
+// the client is a lock an attacker owns: anyone can take the (public, by
+// design) web config out of the app bundle and talk to this project directly.
+// So everything the product promises is stated HERE, server-side:
+//
+//   1. A user's records are readable and writable ONLY by that user.
+//      Not "the app checks"; not "the UI hides it". No cross-user read path
+//      exists at all — not even a listing of which user ids exist.
+//   2. NO FRAMES, NO VIDEO, NO IMAGES. `hasOnly(...)` means a document may
+//      contain ONLY the named numeric/metadata fields. A write carrying
+//      `clipPath`, `trajectoryJson`, `frames`, a base64 blob, a nested map or
+//      any other extra key is REJECTED by the database, whatever the client
+//      thinks it is doing.
+//   3. Nothing else in the project is writable. Every path except a user's own
+//      sessions is denied by default (a request that matches no `allow` is
+//      denied), and the closing rule says so out loud.
+//
+// Deploy with:  firebase deploy --only firestore:rules
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---- helpers ---------------------------------------------------------
+
+    // Signed in AND asking about your own uid. Anonymous (guest) accounts are
+    // real accounts with a real uid, so a guest gets exactly the same
+    // isolation as an email user.
+    function isOwner(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+
+    // Optional-field checks. `data.get(field, null)` is used rather than
+    // `data[field]` on purpose: reading a key that is not present is an ERROR
+    // in rules, and an error denies the whole write — which would reject a
+    // perfectly good document that simply left an optional field out.
+    function numOrNull(data, field) {
+      return data.get(field, null) == null || data.get(field, null) is number;
+    }
+
+    function strOrNull(data, field, maxLen) {
+      return data.get(field, null) == null
+             || (data.get(field, null) is string && data.get(field, null).size() <= maxLen);
+    }
+
+    // The COMPLETE session document contract. Mirrors CLOUD_SESSION_FIELDS in
+    // src/data/firebaseRecords.ts — if you add a field there, add it here, and
+    // if it is not a number, a short string or null, do not add it at all.
+    function sessionShapeOk() {
+      let d = request.resource.data;
+      return d.keys().hasOnly([
+               'schema', 'recordKey', 'originDeviceId', 'localId', 'startedAt',
+               'endedAt', 'label', 'modeId', 'attempts', 'makes', 'fgPct',
+               'shotCount', 'updatedAt'
+             ])
+             && d.keys().hasAll(['schema', 'recordKey', 'startedAt', 'attempts', 'makes'])
+             && d.schema is number
+             && d.recordKey is string && d.recordKey.size() <= 64
+             && d.startedAt is number
+             && d.attempts is number && d.attempts >= 0
+             && d.makes is number && d.makes >= 0
+             && numOrNull(d, 'endedAt')
+             && strOrNull(d, 'label', 120)
+             && strOrNull(d, 'modeId', 120)
+             && strOrNull(d, 'originDeviceId', 32)
+             && numOrNull(d, 'localId')
+             && numOrNull(d, 'fgPct')
+             && numOrNull(d, 'shotCount')
+             && numOrNull(d, 'updatedAt');
+    }
+
+    // The COMPLETE shot document contract. Mirrors CLOUD_SHOT_FIELDS. Note what
+    // is absent and can never be written: trajectory, signals, form report,
+    // arc, clip path, frame-space coordinates.
+    function shotShapeOk() {
+      let d = request.resource.data;
+      return d.keys().hasOnly([
+               'schema', 'shotIndex', 'tStart', 'tResolved', 'outcome',
+               'corrected', 'outcomeCorrected', 'rimBounce', 'entryAngleDeg',
+               'releaseAngleDeg', 'shotValue', 'valueConfidence'
+             ])
+             && d.keys().hasAll(['shotIndex', 'outcome'])
+             && d.shotIndex is number
+             && d.outcome in ['make', 'miss', 'unsure']
+             && numOrNull(d, 'schema')
+             && numOrNull(d, 'tStart')
+             && numOrNull(d, 'tResolved')
+             && numOrNull(d, 'corrected')
+             && numOrNull(d, 'outcomeCorrected')
+             && numOrNull(d, 'rimBounce')
+             && numOrNull(d, 'entryAngleDeg')
+             && numOrNull(d, 'releaseAngleDeg')
+             && numOrNull(d, 'shotValue')
+             && numOrNull(d, 'valueConfidence');
+    }
+
+    // ---- the only writable tree -----------------------------------------
+
+    match /users/{uid} {
+      // The user document itself carries nothing. Denied so no profile data
+      // accretes at a path with no contract.
+      allow read, write: if false;
+
+      match /sessions/{recordKey} {
+        allow read: if isOwner(uid);
+        allow create, update: if isOwner(uid) && sessionShapeOk();
+        // The owner may remove their own cloud copy. The device keeps its
+        // local rows either way — SQLite is the source of truth.
+        allow delete: if isOwner(uid);
+
+        match /shots/{shotIndex} {
+          allow read: if isOwner(uid);
+          allow create, update: if isOwner(uid) && shotShapeOk();
+          allow delete: if isOwner(uid);
+        }
+      }
+    }
+
+    // ---- everything else -------------------------------------------------
+    // A request that matches no `allow` above is already denied; this states
+    // it explicitly so a future collection cannot be added without someone
+    // deliberately writing a rule for it.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

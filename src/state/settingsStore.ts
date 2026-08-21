@@ -7,6 +7,7 @@ import { createJSONStorage, persist } from 'zustand/middleware';
 
 import type { SoundPack } from '../camera/soundPacks';
 import { DEVICE_TUNING, type DeviceTier } from '../core/deviceProfile';
+import type { HeightUnit } from '../core/heightUnits';
 import type { ShootingHand } from '../core/types';
 // Type-only: courtCalibrationStore imports useSettings at runtime, so this
 // import MUST stay `import type` to keep the runtime dependency one-way.
@@ -192,6 +193,15 @@ export interface SettingsState {
   rimHeightM: 3.05 | 2.6;
   /** For jump/release-height calibration. Null until profile setup. */
   playerHeightCm: number | null;
+  /**
+   * Which unit every height readout is shown in — 'cm' or feet+inches.
+   * DISPLAY ONLY. profileStore.heightCm stays canonical centimetres whatever
+   * this says, because height feeds real measurement downstream (see
+   * src/core/heightUnits.ts); conversion happens at the display edge only.
+   * Additive key: a persisted store without it keeps the 'cm' creator default
+   * on rehydrate, so no schema version bump is needed.
+   */
+  heightUnit: HeightUnit;
   onboardingDone: boolean;
   detectorModel: DetectorModel;
   /** Detection frame-rate budget (see DetectionRate). */
@@ -454,6 +464,7 @@ export const useSettings = create<SettingsState>()(
       ballSize: 7,
       rimHeightM: 3.05,
       playerHeightCm: null,
+      heightUnit: 'cm',
       onboardingDone: false,
       detectorModel: 'auto',
       detectionRate: 'auto',

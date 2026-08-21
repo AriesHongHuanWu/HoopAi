@@ -11,6 +11,14 @@
  * Used on the height / weight / wingspan wizard steps and inline in the
  * profile editor. The value is CONTROLLED — the parent owns it and every drag
  * frame calls back on the JS thread (cheap: one setState per settled pixel).
+ *
+ * READOUT RULE — do not nest anything inside the big numeral's <Text>. It is
+ * an `adjustsFontSizeToFit` + `numberOfLines={1}` paragraph, and iOS cannot
+ * shrink one line that mixes font runs: a nested unit chip (96/96 numeral +
+ * 32/34 unit) rendered NOTHING AT ALL on device, which is how the height step
+ * shipped with no number on it. The unit is a sibling. Every other hero
+ * numeral in the app (ModeComplete's hero, Home's START SESSION) already does
+ * it this way; numberSliderReadout.test.tsx pins it here.
  */
 import * as Haptics from 'expo-haptics';
 import { useCallback } from 'react';
@@ -42,6 +50,7 @@ export function NumberSlider({
   unit,
   label,
   formatValue,
+  spokenValue,
   onChange,
 }: {
   value: number;
@@ -54,6 +63,12 @@ export function NumberSlider({
   label: string;
   /** Override the big displayed value (e.g. feet/inches). Defaults to the number. */
   formatValue?: (v: number) => string;
+  /**
+   * Spoken form of the value, when the printed one is punctuation a screen
+   * reader cannot be trusted with (`5'11"`). Defaults to the printed value
+   * plus `unit`.
+   */
+  spokenValue?: (v: number) => string;
   onChange: (v: number) => void;
 }) {
   const trackW = useSharedValue(0);
@@ -106,15 +121,22 @@ export function NumberSlider({
   };
 
   const shown = formatValue ? formatValue(value) : String(value);
-  const spoken = `${label}: ${shown}${unit ? ` ${unit}` : ''}`;
+  const spokenNumber = spokenValue ? spokenValue(value) : `${shown}${unit ? ` ${unit}` : ''}`;
+  const spoken = `${label}: ${spokenNumber}`;
+  // The end-of-track labels wear the SAME formatter as the readout: an
+  // imperial slider must read 3'11" … 7'3", never the raw inch counts.
+  const endLabel = (v: number) => (formatValue ? formatValue(v) : String(v));
 
   return (
     <View style={styles.wrap}>
+      {/* The numeral is the ONLY child of the auto-shrinking Text. iOS cannot
+          shrink a single line that mixes font runs, and the unit nested inside
+          here is what blanked the height readout — it stays a sibling. */}
       <View style={styles.readout} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
         <Text style={styles.value} numberOfLines={1} adjustsFontSizeToFit minimumFontScale={0.6}>
           {shown}
-          {unit != null && <Text style={styles.unit}>{` ${unit}`}</Text>}
         </Text>
+        {unit != null && <Text style={styles.unit}>{unit}</Text>}
       </View>
       <GestureDetector gesture={gesture}>
         <View
@@ -137,8 +159,8 @@ export function NumberSlider({
             <Animated.View style={[styles.knob, knobStyle]} />
           </View>
           <View style={styles.scaleRow} importantForAccessibility="no-hide-descendants">
-            <Text style={styles.scaleLabel}>{min}</Text>
-            <Text style={styles.scaleLabel}>{max}</Text>
+            <Text style={styles.scaleLabel}>{endLabel(min)}</Text>
+            <Text style={styles.scaleLabel}>{endLabel(max)}</Text>
           </View>
         </View>
       </GestureDetector>
@@ -152,12 +174,19 @@ const styles = StyleSheet.create({
     alignSelf: 'stretch',
   },
   readout: {
-    alignItems: 'center',
+    flexDirection: 'row',
+    justifyContent: 'center',
+    // Baseline so the small unit sits on the numeral's feet rather than
+    // floating at the middle of a 96pt line box.
+    alignItems: 'baseline',
+    gap: space.xs,
   },
   value: {
     ...type.scoreboard,
     color: color.text,
     fontVariant: ['tabular-nums'],
+    // Lets the numeral (not the unit) absorb the squeeze on narrow screens.
+    flexShrink: 1,
   },
   unit: {
     ...type.statMedium,

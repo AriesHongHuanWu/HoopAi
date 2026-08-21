@@ -59,6 +59,14 @@ import {
   MIN_HEIGHT_CM,
   useProfile,
 } from '@/state/profileStore';
+import {
+  formatDisplayHeight,
+  fromDisplayHeight,
+  HEIGHT_UNIT_OPTIONS,
+  heightUnitSuffix,
+  spokenHeight,
+  toDisplayHeight,
+} from '@/core/heightUnits';
 import * as Device from 'expo-device';
 import { resolvedTuning } from '@/camera/deviceTuning';
 import { tierLabel, type DeviceTier } from '@/core/deviceProfile';
@@ -608,6 +616,9 @@ export default function SettingsScreen() {
   // "Saved to your profile", so that has to be literally true.
   const heightCm = useProfile((s) => s.heightCm);
   const setProfileField = useProfile((s) => s.set);
+  // Which unit height is SHOWN in — a display preference, so it lives in
+  // settings while the value itself stays centimetres in the profile.
+  const heightUnit = useSettings((s) => s.heightUnit);
   const dailyGoalMakes = useSettings((s) => s.dailyGoalMakes);
   const set = useSettings((s) => s.set);
   const applyTrackingPreset = useSettings((s) => s.applyTrackingPreset);
@@ -710,14 +721,21 @@ export default function SettingsScreen() {
     }
   };
 
+  // Steps by ONE UNIT OF WHAT'S ON SCREEN — 1 cm in metric, 1 inch in
+  // imperial, so a tap always moves the readout. What lands in the profile is
+  // canonical centimetres either way (src/core/heightUnits.ts).
   const bumpHeight = (delta: number) => {
     tick();
-    // First tap lands on a sensible default; later taps step by 1 cm.
-    const next =
-      heightCm == null
-        ? DEFAULT_HEIGHT_CM
-        : Math.min(MAX_HEIGHT_CM, Math.max(MIN_HEIGHT_CM, heightCm + delta));
-    setProfileField('heightCm', next);
+    if (heightCm == null) {
+      // First tap lands on a sensible default rather than stepping off a dash.
+      setProfileField('heightCm', DEFAULT_HEIGHT_CM);
+      return;
+    }
+    const shown = toDisplayHeight(heightCm, heightUnit) + delta;
+    setProfileField(
+      'heightCm',
+      fromDisplayHeight(shown, heightUnit, MIN_HEIGHT_CM, MAX_HEIGHT_CM),
+    );
   };
 
   const version = Constants.expoConfig?.version ?? '1.0.0';
@@ -1145,6 +1163,24 @@ export default function SettingsScreen() {
             </View>
           ))}
           <View style={styles.divider} />
+          <View style={styles.settingText}>
+            <Text style={styles.settingLabel}>Height unit</Text>
+            <Text style={styles.settingDesc}>
+              Show your height in centimetres or in feet and inches. Switching changes the display
+              only — never the height itself.
+            </Text>
+          </View>
+          <View style={styles.chipWrap}>
+            {HEIGHT_UNIT_OPTIONS.map((opt) => (
+              <SelectChip
+                key={opt.value}
+                label={opt.label}
+                selected={heightUnit === opt.value}
+                onPress={() => set('heightUnit', opt.value)}
+              />
+            ))}
+          </View>
+          <View style={styles.divider} />
           <Row style={styles.settingRow} gap={space.lg}>
             <View style={styles.settingText}>
               <Text style={styles.settingLabel}>Height</Text>
@@ -1160,10 +1196,22 @@ export default function SettingsScreen() {
                 disabled={heightCm != null && heightCm <= MIN_HEIGHT_CM}
                 onPress={() => bumpHeight(-1)}
               />
-              <Text style={styles.heightValue}>
-                {heightCm != null ? `${heightCm}` : '—'}
-                <Text style={styles.heightUnit}>{heightCm != null ? ' cm' : ''}</Text>
-              </Text>
+              {/* Numeral and unit stay separate Texts — see NumberSlider's
+                  readout rule; nothing nests inside a hero numeral. */}
+              <View
+                style={styles.heightReadout}
+                accessible
+                accessibilityLabel={`Height: ${heightCm != null ? spokenHeight(heightCm, heightUnit) : 'not set'}`}
+              >
+                <Text style={styles.heightValue}>
+                  {heightCm != null
+                    ? formatDisplayHeight(toDisplayHeight(heightCm, heightUnit), heightUnit)
+                    : '—'}
+                </Text>
+                {heightCm != null && heightUnitSuffix(heightUnit) != null && (
+                  <Text style={styles.heightUnit}>{heightUnitSuffix(heightUnit)}</Text>
+                )}
+              </View>
               <StepperButton
                 glyph="+"
                 label="Increase height"
@@ -1511,11 +1559,18 @@ const styles = StyleSheet.create({
     ...type.heading,
     color: color.text,
   },
+  // The readout owns the fixed width so the +/- buttons never shuffle as the
+  // string changes length (178 cm -> 5'11"); the numeral itself sits natural.
+  heightReadout: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    justifyContent: 'center',
+    gap: space.xs,
+    minWidth: 88,
+  },
   heightValue: {
     ...type.statMedium,
     color: color.text,
-    minWidth: 72,
-    textAlign: 'center',
     fontVariant: ['tabular-nums'],
   },
   stepValue: {

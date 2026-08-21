@@ -26,6 +26,7 @@ import { useReducedMotion } from 'react-native-reanimated';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { color, motion } from '@/constants/tokens';
 import { useDeviceTuning } from '@/camera/deviceTuning';
+import { useAuth } from '@/state/authStore';
 import { useSettings } from '@/state/settingsStore';
 
 SplashScreen.preventAutoHideAsync().catch(() => {
@@ -87,6 +88,14 @@ export default function RootLayout() {
       SplashScreen.hideAsync().catch(() => {});
     }
   }, [ready]);
+
+  // Resolve a persisted cloud session, if this build even has a Firebase
+  // project. Deliberately NOT part of `ready`: it never touches the network on
+  // an unconfigured build, it awaits nothing here, and a signed-out or offline
+  // phone must reach the camera exactly as fast as it does today.
+  useEffect(() => {
+    useAuth.getState().bootstrap();
+  }, []);
 
   // Returning null keeps the native splash visible.
   if (!ready) return null;
@@ -170,6 +179,9 @@ export default function RootLayout() {
                 Their own sub-pages (legal/privacy, terms, licenses) keep the
                 Class 1 drill-down, so going deeper inside a panel still
                 reads as going deeper. */}
+            {/* Account is app machinery too — summoned from Profile, not a step
+                deeper into a session — so it rises like Settings does. */}
+            <Stack.Screen name="account" options={{ animation: utilityPanel }} />
             <Stack.Screen name="settings" options={{ animation: utilityPanel }} />
             <Stack.Screen name="storage" options={{ animation: utilityPanel }} />
             <Stack.Screen name="legal/index" options={{ animation: utilityPanel }} />
