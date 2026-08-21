@@ -54,7 +54,6 @@ jest.mock(
       pointAt: () => ({ x: 0, y: 0 }),
     })),
   }),
-  { virtual: true },
 );
 
 import React from 'react';

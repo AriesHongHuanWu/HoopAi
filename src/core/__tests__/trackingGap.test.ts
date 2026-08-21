@@ -78,7 +78,6 @@ jest.mock(
 
     return { BallKalman };
   },
-  { virtual: true },
 );
 
 import { BallTracker } from '../ballTracker';

@@ -1,11 +1,16 @@
 /**
  * BallTracker tests.
  *
- * `./kalman` is developed in parallel, so it is replaced here by a minimal
- * fake implementing the agreed API (constant-velocity passthrough): the suite
- * exercises BallTracker's gating/occlusion/history logic independently of the
- * real filter's numerics. `virtual: true` keeps the mock working even before
- * kalman.ts exists on disk.
+ * `./kalman` is replaced here by a minimal fake implementing the same API
+ * (constant-velocity passthrough), so the suite exercises BallTracker's
+ * gating/occlusion/history logic independently of the real filter's numerics.
+ *
+ * NO `virtual: true`. It was here from when kalman.ts did not yet exist, and
+ * once the module was real it raced module resolution against the real file:
+ * roughly two runs in five the fake lost, the REAL gain-blended filter loaded,
+ * and nine assertions failed by the blend lag alone (105 vs 104.982) -- the
+ * long-standing "only fails in a full parallel run" flake. A virtual mock on a
+ * module that resolves is always a race; do not put it back.
  */
 jest.mock(
   '../kalman',
@@ -71,7 +76,6 @@ jest.mock(
 
     return { BallKalman };
   },
-  { virtual: true },
 );
 
 import { BallTracker, distToSegment } from '../ballTracker';
