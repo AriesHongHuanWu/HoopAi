@@ -40,8 +40,13 @@
  * comes from the yaw, not from a bone solve). Every prior is therefore
  * multiplied by `unitScale` = normalized units per standing body height before
  * it is used. `unitScale` defaults to 1 — the pre-parameter behaviour, so an
- * existing caller's output is byte-identical — and {@link measureUnitScale}
- * derives it from the frames themselves for callers who need real depth.
+ * existing caller's output is byte-identical — and it may be ONE number or ONE
+ * PER FRAME. Per frame is what this pipeline actually needs: formSequence
+ * divides each frame by that frame's own span, so the units move ~6% across a
+ * rep and a single scale is right for at most one frame of it. {@link
+ * measureUnitScales} measures the per-frame scale off the frames themselves;
+ * {@link measureUnitScale} is the single-scale estimator, correct only when
+ * every frame shares one normalization.
  *
  * Pure TypeScript: no I/O, no wall clock, no randomness.
  */
@@ -75,11 +80,20 @@ export interface LiftedSequence {
   /** Mean signed torso azimuth vs the camera, degrees (0 = square-on). */
   azimuthDeg: number;
   /**
-   * The `unitScale` the priors were read in (normalized units per standing
-   * body height) — see {@link clampUnitScale}. Absent on a sequence produced
-   * before the parameter existed, which means the identity scale 1.
+   * The ONE `unitScale` the priors were read in (normalized units per standing
+   * body height) — see {@link clampUnitScale}. Absent when the scale was
+   * measured per frame ({@link unitScales} is then the record), and on a
+   * sequence produced before the parameter existed, which means the identity
+   * scale 1.
    */
   unitScale?: number;
+  /**
+   * The scale applied to EACH frame, same length and order as {@link frames}.
+   * Present on anything this version lifted; absent only on a sequence
+   * produced before per-frame scales existed. A reader that needs the scale a
+   * given frame was solved at must use this, not {@link unitScale}.
+   */
+  unitScales?: readonly number[];
 }
 
 // ---------------------------------------------------------------------------
@@ -182,6 +196,14 @@ export const SKELETON_BONES: readonly [PoseKeypointName, PoseKeypointName][] = [
 const FORESHORTEN_PENALTY = 0.6;
 
 /**
+ * First-frame depth sign of a chain's END bone, relative to the sign its MID
+ * bone was solved with. See {@link liftChain}: the projection cannot tell the
+ * two apart, so this is the shot's anatomy, stated once.
+ */
+export const ARM_END_SIGN = 1;
+export const LEG_END_SIGN = -1;
+
+/**
  * Smallest out-of-plane offset, as a fraction of the bone, that a LENGTH prior
  * can actually resolve.
  *
@@ -259,16 +281,24 @@ export function unitScaleFromSpanRatio(spanRatio: number): number {
 }
 
 /**
- * MEASURE `unitScale` from the frames themselves: the {@link
+ * MEASURE one `unitScale` for a whole sequence: the {@link
  * UNIT_SCALE_QUANTILE} quantile of measured/prior 2D length over every limb
  * bone in every frame.
  *
- * Why this is the honest estimator: a projection is never longer than the
- * bone, so every sample is a LOWER bound on the scale and the envelope is the
- * smallest scale consistent with all of them. Under-shooting keeps priors
- * short, which keeps dz small or clamped — depth is lost, never invented. The
- * bone that set the envelope solves to dz ≈ 0, which is exactly right: it is
- * the one lying in the image plane.
+ * ONLY FOR FRAMES THAT SHARE ONE NORMALIZATION. Pooling bones across frames
+ * assumes every frame was divided by the same number. When it was not — and
+ * formSequence divides each frame by that frame's own span — the pooled
+ * envelope lands near the LARGEST per-frame scale in the rep and over-scales
+ * every other frame's priors, which fabricates depth in the frames it
+ * over-scales. Use {@link measureUnitScales} for that pipeline; this one is
+ * for a caller whose units are fixed (a single pose, or frames normalized once).
+ *
+ * Why the envelope is the honest estimator WITHIN one normalization: a
+ * projection is never longer than the bone, so every sample is a LOWER bound
+ * on the scale and the envelope is the smallest scale consistent with all of
+ * them. Under-shooting keeps priors short, which keeps dz small or clamped —
+ * depth is lost, never invented. The bone that set the envelope solves to
+ * dz ≈ 0, which is exactly right: it is the one lying in the image plane.
  *
  * Returns {@link UNIT_SCALE_IDENTITY} when there is too little to measure
  * ({@link UNIT_SCALE_MIN_SAMPLES}), and exactly 1 for a capture already in
@@ -288,6 +318,78 @@ export function measureUnitScale(frames: readonly DecodedFrame[]): number {
   ratios.sort((x, y) => x - y);
   const idx = Math.floor(UNIT_SCALE_QUANTILE * (ratios.length - 1));
   return clampUnitScale(ratios[idx]!);
+}
+
+/** Smallest number of limb bones a PER-FRAME scale may be measured from. */
+export const UNIT_SCALE_MIN_FRAME_BONES = 3;
+
+/**
+ * `unitScale` for ONE frame: the largest measured/prior 2D length over that
+ * frame's limb bones.
+ *
+ * WHY PER FRAME AND NOT ONCE PER REP: formSequence divides EVERY frame by
+ * THAT frame's own nose→ankle span, so the units move frame to frame — the
+ * span is ~0.90 of standing height upright and shorter in the dip, a ~6% swing
+ * inside one rep. One sequence-wide scale is therefore right for at most one
+ * frame and wrong for the rest, and it is wrong in the dangerous direction:
+ * read against a scale measured off the dip, an upright frame's IN-PLANE bones
+ * measure ~0.94 of their prior, which solves to dz = 0.33 × the bone — a third
+ * of a bone of depth that is not there. On a straight leg at the release that
+ * is a 36° phantom bend (measured; see formCheck3d.test.ts).
+ *
+ * Per frame the estimator's guarantee holds again: a projection is never
+ * longer than the bone, so every sample is a LOWER bound on THIS frame's
+ * scale and the largest is the tightest bound the frame supports. Undershoot
+ * keeps priors short, which keeps dz small or clamps it — depth is lost, never
+ * invented. What residual is left, {@link MIN_RESOLVABLE_DZ_RATIO} absorbs up
+ * to 4.6% of scale (a bone 0.3 L out of plane projects to 0.954 of its
+ * length): that floor IS the estimator's error budget.
+ *
+ * The bound is against WINTER proportions, not against this shooter: a body
+ * whose limbs run long for its height reads as a smaller scale. That error is
+ * the same size as the anthropometric spread and it is why nothing downstream
+ * quotes depth to better than a few degrees.
+ *
+ * Null when the frame shows fewer than {@link UNIT_SCALE_MIN_FRAME_BONES} limb
+ * bones — too little to place an envelope on.
+ */
+export function measureFrameUnitScale(frame: DecodedFrame): number | null {
+  let best: number | null = null;
+  let samples = 0;
+  for (const bone of LIMB_BONE_PRIORS) {
+    const a = frame[bone.a];
+    const b = frame[bone.b];
+    if (!a || !b) continue;
+    samples++;
+    const ratio = Math.hypot(a.x - b.x, a.y - b.y) / bone.len;
+    if (best == null || ratio > best) best = ratio;
+  }
+  if (best == null || samples < UNIT_SCALE_MIN_FRAME_BONES) return null;
+  return clampUnitScale(best);
+}
+
+/**
+ * Per-frame `unitScale` for a whole sequence — one entry per input frame, in
+ * order, ready to hand to {@link liftSequence}.
+ *
+ * A frame too thin to measure borrows its nearest measured neighbour's scale
+ * (earlier one first, so the result is deterministic) instead of the identity:
+ * the scale tracks the shooter's span, which moves smoothly across 40 ms,
+ * whereas the identity would flatten that frame's limbs AND tell the torso yaw
+ * it was square-on at full confidence. When NO frame can be measured every
+ * entry is {@link UNIT_SCALE_IDENTITY} — priors as-is, the pre-parameter
+ * behaviour, depth lost rather than guessed.
+ */
+export function measureUnitScales(frames: readonly DecodedFrame[]): number[] {
+  const raw = frames.map((f) => measureFrameUnitScale(f));
+  return raw.map((v, i) => {
+    if (v != null) return v;
+    for (let d = 1; d < raw.length; d++) {
+      const near = raw[i - d] ?? raw[i + d] ?? null;
+      if (near != null) return near;
+    }
+    return UNIT_SCALE_IDENTITY;
+  });
 }
 
 /** Every prior this lift uses, in the units one sequence actually arrived in. */
@@ -373,6 +475,14 @@ interface BoneSolve {
   sign: 1 | -1;
 }
 
+/** The previous frame's solve for the SAME bone: both ends' depth. */
+interface PrevBone {
+  /** Child z last frame. */
+  z: number;
+  /** Parent z last frame — so this frame can tell dz = 0 from dz ≠ 0. */
+  parentZ: number;
+}
+
 /**
  * Generic single-bone depth rule. Given the lifted parent (z, c), the 2D
  * offset parent→child and the bone's prior length, returns the child z and
@@ -382,7 +492,8 @@ interface BoneSolve {
  * - foreshortening → c ×= 1 − FORESHORTEN_PENALTY·(dz/L)² (a bone pointing at
  *   the camera has maximal sign ambiguity);
  * - c = min(c, parent.c) — a child is never more certain than its anchor.
- * Sign: previous-frame continuity when available, else `fallbackSign`.
+ * Sign: previous-frame continuity when the previous frame ACTUALLY RESOLVED a
+ * depth for this bone, else `fallbackSign`.
  */
 function solveBone(
   parentZ: number,
@@ -390,7 +501,7 @@ function solveBone(
   dx: number,
   dy: number,
   prior: number,
-  prevZ: number | null,
+  prev: PrevBone | null,
   fallbackSign: 1 | -1,
 ): BoneSolve {
   const len2D = Math.hypot(dx, dy);
@@ -408,21 +519,42 @@ function solveBone(
   // ratio, before the snap, so the snap hides nothing.
   if (ratio < MIN_RESOLVABLE_DZ_RATIO) dz = 0;
   let sign: 1 | -1 = fallbackSign;
-  if (prevZ != null && dz > 0) {
+  // A bone the floor placed IN the plane last frame has dz exactly 0, so its z
+  // carries no sign — it is the parent's z, not evidence. Locking onto it
+  // hands the sign to whichever way the parent happened to drift, and the lock
+  // then keeps it: measured square-on, a forearm that spent seven frames
+  // pinned flat came out of the floor with the right magnitude and the WRONG
+  // sign, and the follow-through elbow read 121° against a true 165°. Only a
+  // frame that resolved a depth gets to vote.
+  const prevResolved = prev != null && prev.z !== prev.parentZ;
+  if (prevResolved && dz > 0) {
     // Continuity on absolute z (not the raw dz sign): candidate z is
     // parentZ ± dz; pick whichever lands closest to last frame's z.
-    sign = Math.abs(parentZ + dz - prevZ) <= Math.abs(parentZ - dz - prevZ) ? 1 : -1;
+    sign = Math.abs(parentZ + dz - prev.z) <= Math.abs(parentZ - dz - prev.z) ? 1 : -1;
   }
   return { z: parentZ + sign * dz, c: Math.min(c, parentC), sign };
 }
 
 /**
- * Lift one two-bone chain (shoulder→elbow→wrist or hip→knee→ankle). The mid
- * joint's first-frame sign is + (toward the torso front: the front
- * z-component is +cosθ ≥ 0 — elbows/knees flex toward the camera when the
- * shooter faces it); the end joint inherits the mid bone's chosen sign on its
- * first frame. A chain broken by a missing mid keypoint leaves the end joint
- * absent too — there is no anchor to lift it from honestly.
+ * Lift one two-bone chain (shoulder→elbow→wrist or hip→knee→ankle).
+ *
+ * The mid joint's first-frame sign is + (toward the torso front: the front
+ * z-component is +cosθ ≥ 0 — elbows and knees flex toward the camera when the
+ * shooter faces it). The END joint's is `endSignVsMid` × the mid bone's chosen
+ * sign, and THE TWO CHAINS WANT OPPOSITE ANSWERS — a projection cannot tell
+ * them apart, so the anatomy of a jump shot has to:
+ * - ARM (+1, {@link ARM_END_SIGN}): the shooting arm stays on ONE side of the
+ *   torso plane from dip to follow-through — the ball is in front of the chest
+ *   and then pushed further out — so the forearm continues the upper arm's
+ *   depth direction.
+ * - LEG (−1, {@link LEG_END_SIGN}): the foot is planted under the hip while
+ *   the knee travels forward over the toes, so the shank comes BACK toward the
+ *   torso plane. Continuing the thigh's sign puts the ankle most of a shank in
+ *   front of the hip, which is how a loaded leg reads as straight: measured
+ *   square-on, that mistake read a true 135° knee as 180°.
+ *
+ * A chain broken by a missing mid keypoint leaves the end joint absent too —
+ * there is no anchor to lift it from honestly.
  */
 function liftChain(
   frame: DecodedFrame,
@@ -433,30 +565,34 @@ function liftChain(
   end: PoseKeypointName,
   midPrior: number,
   endPrior: number,
+  endSignVsMid: 1 | -1,
 ): void {
   const rootJ = out[root];
   const mid2D = frame[mid];
   if (!rootJ || !mid2D) return;
+  const prevRoot = prev?.[root];
+  const prevMid = prev?.[mid];
   const midSolve = solveBone(
     rootJ.z,
     rootJ.c,
     mid2D.x - rootJ.x,
     mid2D.y - rootJ.y,
     midPrior,
-    prev?.[mid]?.z ?? null,
+    prevMid && prevRoot ? { z: prevMid.z, parentZ: prevRoot.z } : null,
     1,
   );
   out[mid] = { x: mid2D.x, y: mid2D.y, z: midSolve.z, c: midSolve.c };
   const end2D = frame[end];
   if (!end2D) return;
+  const prevEnd = prev?.[end];
   const endSolve = solveBone(
     midSolve.z,
     midSolve.c,
     end2D.x - mid2D.x,
     end2D.y - mid2D.y,
     endPrior,
-    prev?.[end]?.z ?? null,
-    midSolve.sign,
+    prevEnd && prevMid ? { z: prevEnd.z, parentZ: prevMid.z } : null,
+    (midSolve.sign * endSignVsMid) as 1 | -1,
   );
   out[end] = { x: end2D.x, y: end2D.y, z: endSolve.z, c: endSolve.c };
 }
@@ -542,21 +678,26 @@ export function liftFrame(
   // sign +: the head sits toward the torso front.
   const nose = frame.nose;
   if (nose) {
+    const prevNose = prev?.nose;
     const solve = solveBone(
       0,
       torsoC,
       nose.x - (ls.x + rs.x) / 2,
       nose.y - (ls.y + rs.y) / 2,
       p.neck,
-      prev?.nose?.z ?? null,
+      // The neck hangs off the shoulder-centre pivot, which the lift holds at
+      // z = 0 in every frame — so that pivot IS the previous parent z.
+      prevNose ? { z: prevNose.z, parentZ: 0 } : null,
       1,
     );
     out.nose = { x: nose.x, y: nose.y, z: solve.z, c: solve.c };
   }
-  liftChain(frame, out, prev, 'left_shoulder', 'left_elbow', 'left_wrist', p.upperArm, p.forearm);
-  liftChain(frame, out, prev, 'right_shoulder', 'right_elbow', 'right_wrist', p.upperArm, p.forearm);
-  liftChain(frame, out, prev, 'left_hip', 'left_knee', 'left_ankle', p.thigh, p.shank);
-  liftChain(frame, out, prev, 'right_hip', 'right_knee', 'right_ankle', p.thigh, p.shank);
+  const arm = ARM_END_SIGN;
+  const leg = LEG_END_SIGN;
+  liftChain(frame, out, prev, 'left_shoulder', 'left_elbow', 'left_wrist', p.upperArm, p.forearm, arm);
+  liftChain(frame, out, prev, 'right_shoulder', 'right_elbow', 'right_wrist', p.upperArm, p.forearm, arm);
+  liftChain(frame, out, prev, 'left_hip', 'left_knee', 'left_ankle', p.thigh, p.shank, leg);
+  liftChain(frame, out, prev, 'right_hip', 'right_knee', 'right_ankle', p.thigh, p.shank, leg);
   return out;
 }
 
@@ -575,28 +716,38 @@ export function liftFrame(
  * `unitScale` (normalized units per standing body height) rescales every
  * prior, INCLUDING the shoulder half-width the yaw is read against — so a
  * caller whose frames are 1.1 × too big gets both real limb depth and a real
- * yaw instead of flat limbs and a square-on torso. Default 1 keeps the
- * pre-parameter output bit-for-bit; {@link measureUnitScale} derives it from
- * the frames.
+ * yaw instead of flat limbs and a square-on torso. Pass ONE number for one
+ * scale over the whole sequence, or an ARRAY of one scale per frame when the
+ * encoder's units move frame to frame — which is exactly what formSequence's
+ * per-frame normalization does, so {@link measureUnitScales} is what a Form
+ * Check rep should hand in. Default 1 keeps the pre-parameter output
+ * bit-for-bit.
  */
 export function liftSequence(
   frames: readonly DecodedFrame[],
   hand: ShootingHand,
-  unitScale: number = UNIT_SCALE_IDENTITY,
+  unitScale: number | readonly number[] = UNIT_SCALE_IDENTITY,
 ): LiftedSequence | null {
   let usable = 0;
   for (const f of frames) if (isUsable(f)) usable++;
   if (usable < 2) return null;
 
-  const p = scalePriors(unitScale);
+  // One scale or one per frame; a short/ragged array falls back to identity
+  // for the frames it does not cover rather than borrowing another frame's.
+  const uniform = typeof unitScale === 'number' ? clampUnitScale(unitScale) : null;
+  const unitScales = frames.map((_, i) =>
+    uniform ?? clampUnitScale((unitScale as readonly number[])[i]),
+  );
   const out: Frame3D[] = [];
   let prev: Frame3D | null = null;
   let thetaSumRad = 0;
-  for (const f of frames) {
+  for (let i = 0; i < frames.length; i++) {
+    const f = frames[i]!;
     if (!isUsable(f)) {
       out.push({});
       continue; // prev stays: continuity bridges detection dropouts
     }
+    const p = scalePriors(unitScales[i]!);
     const cosT = clamp(apparentShoulderHalf(f) / p.shoulderHalf, 0, 1);
     const thetaMag = Math.acos(cosT);
     // Same deterministic resolution liftFrame performs — keeps the reported
@@ -620,10 +771,13 @@ export function liftSequence(
       }
     }
   }
-  return {
+  const result: LiftedSequence = {
     frames: out,
     confidence: cCount > 0 ? cSum / cCount : 0,
     azimuthDeg: (thetaSumRad / usable) * (180 / Math.PI),
-    unitScale: p.unitScale,
+    unitScales,
   };
+  // Only a sequence solved at ONE scale gets to report one.
+  if (uniform != null) result.unitScale = uniform;
+  return result;
 }

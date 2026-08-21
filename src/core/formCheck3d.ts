@@ -19,19 +19,28 @@
  * not from a bone solve), the limbs do not. Origin, units and axis convention
  * all line up; only the scale does not.
  *
- * FIXED WHERE IT BELONGS (in the lift, not here): lift.ts now takes a
- * `unitScale` — normalized units per standing body height — and multiplies
- * every prior by it, so the priors are read in the units the frames actually
- * arrived in. This adapter MEASURES that scale off the rep's own bones
- * ({@link measureUnitScale}: the upper envelope of measured/prior 2D length,
- * which is the smallest scale consistent with "a projection is never longer
- * than the bone") and hands it to {@link liftSequence}. Nothing is rescaled
- * behind the reader's back: the scale that was applied rides on
- * `lifted.unitScale`, and {@link DepthScaleCheck} still measures how far the
- * bones run over the priors AS THE LIFT READ THEM — so a rep whose scale
- * could not be recovered still collapses to `depthCollapsed` and still vetoes
- * the 3D claim. formSequence's normalization is NOT touched: exact-score pins
- * in formSimilarity and postureFix depend on it.
+ * FIXED WHERE IT BELONGS (in the lift, not here): lift.ts takes a `unitScale`
+ * — normalized units per standing body height — and multiplies every prior by
+ * it, so the priors are read in the units the frames actually arrived in. This
+ * adapter measures that scale off the rep's own bones and hands it to {@link
+ * liftSequence}.
+ *
+ * ONE SCALE PER FRAME, NOT ONE PER REP ({@link measureUnitScales}). The span
+ * the encoder divides by is the shooter's own nose→ankle span in THAT frame,
+ * and it shortens ~6% into the dip, so a single scale for the rep is right for
+ * at most one frame of it — and wrong in the direction that FABRICATES depth,
+ * because an over-long prior turns an in-plane bone into a bent one. Measured
+ * on the profile fixture: at a strict 90° profile, where every joint's true z
+ * is zero, the rep-wide scale bent a straight leg 36° at the release and
+ * over-read a 75° torso turn as 75.55°. Per frame both go to zero error.
+ *
+ * Nothing is rescaled behind the reader's back: the scale each frame was
+ * solved at rides on `lifted.unitScales`, every ratio this file quotes is
+ * quoted against the priors AS THE LIFT READ THEM ON THAT FRAME, and {@link
+ * DepthScaleCheck} measures the residual — so a rep whose scale could not be
+ * recovered at all still collapses to `depthCollapsed` and still vetoes the 3D
+ * claim. formSequence's normalization is NOT touched: exact-score pins in
+ * formSimilarity and postureFix depend on it.
  *
  * HONESTY CONTRACT (inherited, enforced in the data):
  * - x/y are MEASURED, z is an ESTIMATE — see {@link DEPTH_DISCLAIMER}.
@@ -41,6 +50,10 @@
  * - a 3D angle is only called an upgrade when the depth it rests on was
  *   actually recovered AND it moves the number. Otherwise the verdict says
  *   2D is the one to trust.
+ * - a reading that spans a bone the lift PLACED in the image plane instead of
+ *   solving says so ({@link Judged3DAngle.restsOnUnresolvedBone}): part of it
+ *   is an assumption, and no confidence number shows that — the depth was
+ *   placed by policy, not solved badly.
  * - deterministic: same rep → deep-equal result.
  *
  * Pure TypeScript: no I/O, no wall clock, no randomness.
@@ -54,7 +67,7 @@ import {
   BONE_PRIORS,
   MIN_RESOLVABLE_DZ_RATIO,
   liftSequence,
-  measureUnitScale,
+  measureUnitScales,
 } from './pose3d/lift';
 import type { Frame3D, Joint3D, LiftedSequence } from './pose3d/lift';
 import type { FormSequence, PoseKeypointName, ShootingHand } from './types';
@@ -85,6 +98,16 @@ export const MIN_DEPTH_C = 0.45;
 export const AGREE_TOL_DEG = 5;
 
 /**
+ * Torso yaw under this many degrees is a direction, not a measurement.
+ * cos θ = width ÷ prior width, so dθ = Δratio ÷ sin θ: the 8% or so of spread
+ * between one shooter's shoulders and Winter's average is ~1° at a profile and
+ * ~25° at 20°, where it can flatten the reading to 0 outright. The number is
+ * still reported — it is the only source there is — but the note stops quoting
+ * it as degrees.
+ */
+export const YAW_TRUSTWORTHY_DEG = 25;
+
+/**
  * Depth spread (body heights) under which three joints are FLAT in z: the 3D
  * angle is then arithmetically the 2D one. 1e-4 body heights is ~0.2 mm on a
  * 1.8 m shooter — numerically nothing.
@@ -97,7 +120,9 @@ export const DEPTH_FLAT_EPS = 1e-4;
  * {@link MIN_RESOLVABLE_DZ_RATIO} (a bone 0.3 L out of plane projects to
  * sqrt(1 − 0.3²) = 0.954 of its length). Above it, "flat" is the measurement.
  */
-const RESOLVABLE_LEN_RATIO = Math.sqrt(1 - MIN_RESOLVABLE_DZ_RATIO * MIN_RESOLVABLE_DZ_RATIO);
+export const RESOLVABLE_LEN_RATIO = Math.sqrt(
+  1 - MIN_RESOLVABLE_DZ_RATIO * MIN_RESOLVABLE_DZ_RATIO,
+);
 
 /**
  * Limb bones only — the ones whose depth the lift solves from a prior. The
@@ -189,10 +214,30 @@ export interface Judged3DAngle {
   c: number | null;
   /**
    * BEST (smallest) measured/prior 2D length ratio across the bones this angle
-   * rests on, at that frame. ≥ 1 means every one of them ran over its prior,
-   * so the lift had no depth left to recover for any of them.
+   * rests on, at that frame — the bone with the most depth left to recover.
+   * With the scale measured off the frame's own bones this cannot exceed 1:
+   * the frame's scale IS the largest ratio in it (see measureFrameUnitScale).
+   * It only reaches 1 when this angle's bone is the one that set the scale.
    */
   boneRatio: number | null;
+  /**
+   * WORST (largest) of the same ratios. At or above
+   * {@link RESOLVABLE_LEN_RATIO} at least one bone under this angle was placed
+   * IN the image plane rather than measured out of it, and the reading carries
+   * that assumption — see {@link restsOnUnresolvedBone}.
+   */
+  worstBoneRatio: number | null;
+  /**
+   * True when a bone this angle rests on had its depth placed by the
+   * resolution floor instead of solved. The reading is then part measurement,
+   * part assumption. NOT an error bar: the unseen offset is bounded by
+   * dz ≤ L·sqrt(1 − ratio²) only if the frame's scale is right, and square to
+   * the camera — where nothing in frame lies in the image plane to measure the
+   * scale off — it need not be. Measured on the test fixture, such a bound
+   * covered the true angle in 230 of 504 readings, so this stays a disclosure
+   * and never becomes a number.
+   */
+  restsOnUnresolvedBone: boolean;
   verdict: Angle3DVerdict;
   reason: Angle3DReason;
   /** One short honest sentence, ready to render. */
@@ -309,6 +354,15 @@ export function phaseIndices(
 // Depth-scale check
 // ---------------------------------------------------------------------------
 
+/**
+ * The scale frame `i` was actually solved at. Per-frame first: a rep whose
+ * units move between frames has no single scale to quote, and quoting the
+ * wrong one is how a ratio starts meaning something else.
+ */
+export function scaleAt(lifted: LiftedSequence, i: number): number {
+  return lifted.unitScales?.[i] ?? lifted.unitScale ?? 1;
+}
+
 /** 2D length of a bone in a frame, or null when an end is missing. */
 function bone2D(frame: DecodedFrame, a: PoseKeypointName, b: PoseKeypointName): number | null {
   const pa = frame[a];
@@ -320,24 +374,30 @@ function bone2D(frame: DecodedFrame, a: PoseKeypointName, b: PoseKeypointName): 
 /**
  * Measure how far this rep's limb bones run over their priors.
  *
- * `unitScale` is the scale the lift READ those priors in (see
- * {@link measureUnitScale}); the default 1 measures against the raw
- * standing-height priors, which is the mismatch measurement itself. Passing
- * the applied scale — what {@link liftRep} does — turns this into the residual
- * check: whatever still runs over its prior AFTER the units were reconciled is
- * depth the lift genuinely could not recover.
+ * `unitScale` is the scale the lift READ those priors in — ONE number, or one
+ * per frame, matching what was handed to the lift. The default 1 measures
+ * against the raw standing-height priors, which is the mismatch measurement
+ * itself. Passing the applied scales — what {@link liftRep} does — turns this
+ * into the residual check: whatever still runs over its prior AFTER the units
+ * were reconciled is depth the lift genuinely could not recover, and with a
+ * per-frame scale that means the scale itself could not be measured (a frame's
+ * scale is the largest ratio in it, so nothing in a measured frame can exceed
+ * it).
  */
 export function depthScaleCheck(
   frames2d: readonly DecodedFrame[],
-  unitScale = 1,
+  unitScale: number | readonly number[] = 1,
 ): DepthScaleCheck {
   const ratios: number[] = [];
   let over = 0;
-  for (const frame of frames2d) {
+  const scaleOf = (i: number): number =>
+    typeof unitScale === 'number' ? unitScale : (unitScale[i] ?? 1);
+  for (let i = 0; i < frames2d.length; i++) {
+    const frame = frames2d[i]!;
     for (const bp of SCALE_BONES) {
       const len = bone2D(frame, bp.a, bp.b);
       if (len == null) continue;
-      const ratio = len / (bp.len * unitScale);
+      const ratio = len / (bp.len * scaleOf(i));
       ratios.push(ratio);
       if (ratio >= 1) over++;
     }
@@ -374,23 +434,50 @@ interface AngleSpec {
 }
 
 /**
- * Best (smallest) measured/prior ratio among an angle's bones at one frame —
- * the one with the most depth left to recover. Null if a bone end is missing.
+ * Measured/prior 2D length ratios for an angle's bones at one frame: the BEST
+ * (smallest — most depth left to recover) and the WORST (largest — closest to
+ * lying in the image plane). Both null if a bone end is missing.
  */
-function bestBoneRatio(
+function boneRatios(
   frame: DecodedFrame,
   bones: readonly [PoseKeypointName, PoseKeypointName][],
   unitScale = 1,
-): number | null {
+): { best: number | null; worst: number | null } {
   let best: number | null = null;
+  let worst: number | null = null;
   for (const [a, b] of bones) {
     const prior = BONE_PRIORS.find((p) => p.a === a && p.b === b)?.len;
     const len = bone2D(frame, a, b);
-    if (prior == null || len == null) return null;
+    if (prior == null || len == null) return { best: null, worst: null };
     const ratio = len / (prior * unitScale);
     if (best == null || ratio < best) best = ratio;
+    if (worst == null || ratio > worst) worst = ratio;
   }
-  return best;
+  return { best, worst };
+}
+
+/**
+ * The sentence a reading owes the reader when a bone under it was PLACED in
+ * the image plane rather than measured out of it (ratio at or over
+ * {@link RESOLVABLE_LEN_RATIO}, the length-space twin of the lift's dz floor).
+ * Empty when every bone the angle rests on had its depth solved.
+ *
+ * Deliberately NOT a number. The unseen offset is bounded by
+ * dz <= L*sqrt(1 - ratio^2) only if the frame's scale is right, and square to
+ * the camera — where nothing in frame lies in the image plane for the scale to
+ * be measured off — it need not be: on the test fixture that bound held for
+ * 230 of 504 readings and missed by up to 30°. A tolerance nobody can stand
+ * behind is worse than naming the assumption.
+ */
+function unresolvedBoneNote(worst: number | null, label: string): string {
+  if (worst == null || worst < RESOLVABLE_LEN_RATIO) return '';
+  const why =
+    worst >= 1
+      ? 'over its prior, so the priors and this capture disagree and no depth was recoverable for it'
+      : 'closer to its prior than a bone length can resolve depth to';
+  return ` One bone under this ${label} measures ×${worst.toFixed(
+    2,
+  )} of its prior — ${why} — so the lift placed it in the image plane, and the reading carries that as an assumption, not a measurement.`;
 }
 
 /**
@@ -408,13 +495,13 @@ function judgeAngle(
   frames2d: readonly DecodedFrame[],
   phases: Phase3DIndices,
 ): Judged3DAngle {
-  // Ratios are quoted against the priors AS THE LIFT READ THEM, so a ratio
-  // over 1 always means the same thing: depth this rep could not recover.
-  const unitScale = lifted.unitScale ?? 1;
   const primary = phases[spec.phase];
   const fallback = spec.fallback != null ? phases[spec.fallback] : null;
   const usedPhase: PhaseId | null = primary != null ? spec.phase : fallback != null ? spec.fallback : null;
   const frame = primary ?? fallback ?? null;
+  // Ratios are quoted against the priors AS THE LIFT READ THEM ON THIS FRAME,
+  // so a ratio always means the same thing wherever it is read.
+  const unitScale = frame != null ? scaleAt(lifted, frame) : 1;
   // Form Check's number describes ITS phase; drop it if we fell back.
   const repDeg2d = usedPhase === spec.phase ? spec.repDeg2d : null;
   const base = { id: spec.id, phase: usedPhase, frame, repDeg2d };
@@ -426,6 +513,8 @@ function judgeAngle(
       deg2d: null,
       c: null,
       boneRatio: null,
+      worstBoneRatio: null,
+      restsOnUnresolvedBone: false,
       verdict: 'withheld',
       reason: 'noPhaseFrame',
       note: `No ${spec.label} reading: this rep never located its ${spec.phase} frame.`,
@@ -448,25 +537,30 @@ function judgeAngle(
       deg2d,
       c: null,
       boneRatio: null,
+      worstBoneRatio: null,
+      restsOnUnresolvedBone: false,
       verdict: 'withheld',
       reason: 'missingJoint',
       note: `No 3D ${spec.label}: a joint it needs was not detected, so it is absent in 3D too.`,
     };
   }
+  const { best: boneRatio, worst: worstBoneRatio } = boneRatios(f2, spec.bones, unitScale);
+  const restsOnUnresolvedBone = worstBoneRatio != null && worstBoneRatio >= RESOLVABLE_LEN_RATIO;
+  const unresolved = unresolvedBoneNote(worstBoneRatio, spec.label);
   if (reading.c < MIN_DEPTH_C) {
     return {
       ...base,
       deg: null,
       deg2d,
       c: reading.c,
-      boneRatio: bestBoneRatio(f2, spec.bones, unitScale),
+      boneRatio,
+      worstBoneRatio,
+      restsOnUnresolvedBone,
       verdict: 'withheld',
       reason: 'lowDepthConfidence',
       note: `3D ${spec.label} withheld: depth confidence ${reading.c.toFixed(2)} is under ${MIN_DEPTH_C}.`,
     };
   }
-
-  const boneRatio = bestBoneRatio(f2, spec.bones, unitScale);
   // Flat in z ⇒ this "3D" number is the 2D number. Say so; never dress it up.
   if (zSpread(f3[a]!, f3[b]!, f3[c]!) <= DEPTH_FLAT_EPS) {
     const why =
@@ -483,6 +577,8 @@ function judgeAngle(
       deg2d,
       c: reading.c,
       boneRatio,
+      worstBoneRatio,
+      restsOnUnresolvedBone,
       verdict: 'prefer2d',
       reason: 'depthCollapsed',
       note: `3D ${spec.label} equals the 2D reading — the lift placed these joints flat.${why} Trust the 2D number.`,
@@ -495,9 +591,11 @@ function judgeAngle(
       deg2d,
       c: reading.c,
       boneRatio,
+      worstBoneRatio,
+      restsOnUnresolvedBone,
       verdict: 'only3d',
       reason: 'no2dEquivalent',
-      note: `3D ${spec.label} — no 2D reading on this frame to compare against.`,
+      note: `3D ${spec.label} — no 2D reading on this frame to compare against.${unresolved}`,
     };
   }
   const delta = Math.abs(reading.deg - deg2d);
@@ -508,9 +606,11 @@ function judgeAngle(
       deg2d,
       c: reading.c,
       boneRatio,
+      worstBoneRatio,
+      restsOnUnresolvedBone,
       verdict: 'prefer3d',
       reason: 'foreshortened2d',
-      note: `3D ${spec.label} ${reading.deg.toFixed(0)}° vs 2D ${deg2d.toFixed(0)}°: the camera foreshortens this joint by ${delta.toFixed(0)}°, so the 3D estimate is the better read.`,
+      note: `3D ${spec.label} ${reading.deg.toFixed(0)}° vs 2D ${deg2d.toFixed(0)}°: the camera foreshortens this joint by ${delta.toFixed(0)}°, so the 3D estimate is the better read.${unresolved}`,
     };
   }
   return {
@@ -519,17 +619,35 @@ function judgeAngle(
     deg2d,
     c: reading.c,
     boneRatio,
+    worstBoneRatio,
+    restsOnUnresolvedBone,
     verdict: 'parity',
     reason: 'agrees2d',
-    note: `3D ${spec.label} agrees with 2D within ${delta.toFixed(0)}° — same number, one more witness.`,
+    note: `3D ${spec.label} agrees with 2D within ${delta.toFixed(0)}° — same number, one more witness.${unresolved}`,
   };
 }
 
 /**
- * Torso yaw: the one reading 2D cannot produce at all. It comes from apparent
- * shoulder width, so the same over-scaling that flattens the limbs reads as
- * LESS turn than there is — when bones run over prior the number is a lower
- * bound, and the note says so.
+ * Torso yaw: the one reading 2D cannot produce at all. cos θ = apparent
+ * shoulder half-width ÷ (the prior half-width × the frame's scale), so its
+ * error is the error in that denominator — and both terms of it are stated,
+ * because neither is small:
+ *
+ * - THE SCALE IS A LOWER BOUND (measureFrameUnitScale) ON CLEAN KEYPOINTS, so
+ *   the prior width is not over-long and the turn is not over-claimed — at a
+ *   true 0° the noiseless fixture reads 0.2°, the floor of acos itself. Real
+ *   keypoints break the bound in one direction: noise makes bones look SHORT,
+ *   which inflates the measured scale and the prior width with it. Measured
+ *   over 24 noise realizations at a true 75°, the reading drifts UP by +0.4°,
+ *   +0.9° and +1.8° at 0.5%, 1% and 2% of standing height per keypoint.
+ * - THE WIDTH PRIOR IS WINTER'S, NOT THIS SHOOTER'S. dθ = Δratio ÷ sin θ, so
+ *   the same 8% of anthropometric spread is ~1° near a profile and swallows
+ *   the whole reading near square-on (cos 20° + 8% > 1 → reads 0°). Near a
+ *   profile this number is worth a few degrees; near square-on it is worth
+ *   only its own sign, and the note says so instead of the digits.
+ *
+ * Measured on the profile fixture: a 75° turn reads 74.996°, a 90° turn reads
+ * 90.000°, a 0° turn reads 0.21° (formCheck3d.test.ts).
  */
 function judgeTorsoYaw(lifted: LiftedSequence, scale: DepthScaleCheck): Judged3DAngle {
   let sum = 0;
@@ -550,7 +668,11 @@ function judgeTorsoYaw(lifted: LiftedSequence, scale: DepthScaleCheck): Judged3D
     frame: null,
     deg2d: null,
     repDeg2d: null,
+    // Rep-wide residual, not one bone under one angle: the yaw rests on the
+    // shoulder-width prior, which is not a bone the lift ever solves depth for.
     boneRatio: scale.maxRatio,
+    worstBoneRatio: scale.maxRatio,
+    restsOnUnresolvedBone: false,
   };
   if (c == null) {
     return {
@@ -572,20 +694,31 @@ function judgeTorsoYaw(lifted: LiftedSequence, scale: DepthScaleCheck): Judged3D
       note: `Torso yaw withheld: depth confidence ${c.toFixed(2)} is under ${MIN_DEPTH_C}.`,
     };
   }
-  // The number rests on the apparent shoulder width read against a body scale
-  // measured off this rep's own bones, so it always carries a tolerance — and
-  // when the bones still run over their priors it is a floor, not a reading.
-  const under =
-    scale.maxRatio != null && scale.maxRatio > 1
-      ? ` Bones here measure up to ×${scale.maxRatio.toFixed(2)} of the prior, which reads as less turn than there is — take it as a lower bound.`
-      : ' Read from shoulder width against a body scale measured off this rep, so take it to a few degrees, not to the digit.';
+  // The tolerance is unconditional: it comes from the shoulder-width prior
+  // being an anthropometric average, which no rep can measure away. What IS
+  // conditional is the floor language, and it keys off a fact — this rep's
+  // bones still running over their priors after the scale was reconciled,
+  // i.e. a scale that could not be recovered — rather than off the last bit of
+  // a float. (With a per-frame scale the residual max sits AT 1 by
+  // construction: the frame's scale is the largest ratio in it.)
+  const near = Math.abs(lifted.azimuthDeg) < YAW_TRUSTWORTHY_DEG;
+  const tolerance = near
+    ? ` Under ${YAW_TRUSTWORTHY_DEG}° the shoulder width barely changes with turn, so read this as "close to square-on" and not as a number.`
+    : ' Read from shoulder width against an average build, so it carries a few degrees — never the digit.';
+  const under = scale.collapsed
+    ? ` This rep's bones still measure up to ×${(scale.maxRatio ?? 1).toFixed(
+        2,
+      )} of their priors, so the width is over-scaled and the turn is a lower bound.`
+    : '';
   return {
     ...base,
     deg: lifted.azimuthDeg,
     c,
     verdict: 'only3d',
     reason: 'no2dEquivalent',
-    note: `Torso yaw ${lifted.azimuthDeg.toFixed(0)}° from square-on — 2D cannot report this at all.${under}`,
+    note: `Torso yaw ${lifted.azimuthDeg.toFixed(
+      0,
+    )}° from square-on — 2D cannot report this at all.${tolerance}${under}`,
   };
 }
 
@@ -609,12 +742,17 @@ export function liftRep(rep: FormCheckRep): FormCheck3D | null {
   // Units first, THEN the lift: the priors are fractions of standing height
   // and these frames are in nose→ankle spans, so reading them as-is is what
   // flattened every limb. The scale is measured off this rep's own bones.
-  const unitScale = measureUnitScale(frames2d);
-  const lifted = liftSequence(frames2d, hand, unitScale);
+  // PER FRAME, not once per rep: formSequence divides every frame by that
+  // frame's own nose→ankle span, so the units move ~6% between the dip and the
+  // release. One scale for the whole rep over-scales most of it, and an
+  // over-scaled prior invents depth (a straight leg read against the dip's
+  // scale bends 36°). See measureUnitScales.
+  const unitScales = measureUnitScales(frames2d);
+  const lifted = liftSequence(frames2d, hand, unitScales);
   if (!lifted) return null;
 
   const phases = phaseIndices(rep, seq, frames2d, hand);
-  const scale = depthScaleCheck(frames2d, lifted.unitScale ?? 1);
+  const scale = depthScaleCheck(frames2d, lifted.unitScales ?? lifted.unitScale ?? 1);
   const s = sideNames(hand);
   const specs: AngleSpec[] = [
     {

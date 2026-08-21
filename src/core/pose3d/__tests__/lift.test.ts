@@ -15,8 +15,11 @@ import {
   UNIT_SCALE_MAX,
   UPPER_ARM_LEN,
   clampUnitScale,
+  liftFrame,
   liftSequence,
+  measureFrameUnitScale,
   measureUnitScale,
+  measureUnitScales,
   unitScaleFromSpanRatio,
 } from '../lift';
 import type { Frame3D, Joint3D } from '../lift';
@@ -472,5 +475,159 @@ describe('unitScale — priors in the units the frames actually arrived in', () 
     const a = liftSequence(frames, 'right', 1.1);
     const b = liftSequence(frames, 'right', 1.1);
     expect(JSON.stringify(a)).toBe(JSON.stringify(b));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Per-frame unitScale, and the two signs a projection cannot see
+// ---------------------------------------------------------------------------
+
+/** The same shooter, normalized by two different spans — upright, then dipped. */
+function normalizedBy(over: number): DecodedFrame {
+  const flat = project(mixedDepthSkeleton());
+  const out: DecodedFrame = {};
+  for (const name of Object.keys(flat) as PoseKeypointName[]) {
+    const q = flat[name]!;
+    out[name] = { x: q.x * over, y: q.y * over };
+  }
+  return out;
+}
+
+/** formSequence's nose→ankle span upright, and in a deep dip. */
+const UPRIGHT_OVER = 1.1;
+const DIP_OVER = 1.18;
+
+describe('unitScale per frame — the encoder divides each frame by its own span', () => {
+  test('measures each frame on its own bones; pooling lands near the largest', () => {
+    expect(measureFrameUnitScale(normalizedBy(UPRIGHT_OVER))).toBeCloseTo(UPRIGHT_OVER, 9);
+    expect(measureFrameUnitScale(normalizedBy(DIP_OVER))).toBeCloseTo(DIP_OVER, 9);
+    const scales = measureUnitScales([
+      normalizedBy(UPRIGHT_OVER),
+      normalizedBy(DIP_OVER),
+      normalizedBy(UPRIGHT_OVER),
+    ]);
+    expect(scales[0]!).toBeCloseTo(UPRIGHT_OVER, 9);
+    expect(scales[1]!).toBeCloseTo(DIP_OVER, 9);
+    expect(scales[2]!).toBeCloseTo(UPRIGHT_OVER, 9);
+    // Pooling bones ACROSS frames assumes one normalization for all of them.
+    // These frames do not have one, and the pooled envelope lands on the
+    // largest — 7% too big for the two upright frames.
+    expect(measureUnitScale([normalizedBy(UPRIGHT_OVER), normalizedBy(DIP_OVER)])).toBeCloseTo(
+      DIP_OVER,
+      9,
+    );
+  });
+
+  test('one scale for a rep whose units move INVENTS depth; per frame does not', () => {
+    // The shanks lie EXACTLY in the image plane in this skeleton, so any depth
+    // the lift gives them is fabricated. Read against the dip's scale, an
+    // upright frame's shank measures 1.10/1.18 = 0.93 of its prior and solves
+    // to dz = 0.36 of a shank — a third of a bone of depth that is not there,
+    // enough to bend a straight leg 36° (formCheck3d.test.ts pins that end of
+    // it on the shooting fixture).
+    const upright = normalizedBy(UPRIGHT_OVER);
+    const pooled = liftFrame(upright, 'right', null, 0, DIP_OVER);
+    const own = liftFrame(upright, 'right', null, 0, UPRIGHT_OVER);
+    expect(dzOf(pooled.right_knee!, pooled.right_ankle!)).toBeGreaterThan(
+      0.3 * SHANK_LEN * UPRIGHT_OVER,
+    );
+    expect(dzOf(own.right_knee!, own.right_ankle!)).toBe(0);
+  });
+
+  test('a frame too thin to measure borrows a neighbour; a rep with none stays at identity', () => {
+    // Torso only: no limb bone has both ends, so there is no envelope to place.
+    const thin = frontFacingBase();
+    expect(measureFrameUnitScale(thin)).toBeNull();
+    const scales = measureUnitScales([normalizedBy(UPRIGHT_OVER), thin, normalizedBy(DIP_OVER)]);
+    // The earlier neighbour first — deterministic, and the scale moves slowly.
+    expect(scales[1]!).toBeCloseTo(UPRIGHT_OVER, 9);
+    // Nothing measurable anywhere: priors as-is, which loses depth rather than
+    // guessing it — the pre-parameter behaviour.
+    expect(measureUnitScales([thin, thin])).toEqual([UNIT_SCALE_IDENTITY, UNIT_SCALE_IDENTITY]);
+  });
+
+  test('the sequence reports the scale it used: one number, or one per frame', () => {
+    const frames = [
+      normalizedBy(UPRIGHT_OVER),
+      normalizedBy(DIP_OVER),
+      normalizedBy(UPRIGHT_OVER),
+      normalizedBy(DIP_OVER),
+    ];
+    const single = liftSequence(frames, 'right', 1.12)!;
+    expect(single.unitScale).toBe(1.12);
+    expect(single.unitScales).toEqual([1.12, 1.12, 1.12, 1.12]);
+    // No single scale was applied, so none is quoted — a reader that needs the
+    // scale a frame was solved at has to read the frame's own.
+    const perFrame = liftSequence(frames, 'right', measureUnitScales(frames))!;
+    expect(perFrame.unitScale).toBeUndefined();
+    expect(perFrame.unitScales!.length).toBe(frames.length);
+    expect(perFrame.unitScales![0]!).toBeCloseTo(UPRIGHT_OVER, 9);
+    expect(perFrame.unitScales![1]!).toBeCloseTo(DIP_OVER, 9);
+  });
+});
+
+describe('depth signs — the half of a projection that is never measured', () => {
+  /** Square-on torso plus a right arm hanging straight down the image. */
+  function armFrame(upper2D: number, fore2D: number): DecodedFrame {
+    const f = frontFacingBase();
+    const sh = f.right_shoulder!;
+    f.right_elbow = { x: sh.x, y: sh.y + upper2D };
+    f.right_wrist = { x: sh.x, y: sh.y + upper2D + fore2D };
+    return f;
+  }
+
+  test('a bone leaving the image plane does not take its sign from a frame that had none', () => {
+    // Frame 0: the forearm's true offset is 0.20 of the bone — under
+    // MIN_RESOLVABLE_DZ_RATIO — so the lift places it IN the plane and the
+    // wrist's z IS the elbow's. That z is a placement, not evidence, and it
+    // carries no sign. Frame 1: the same forearm is 0.80 of a bone out of
+    // plane while the elbow has moved further toward the camera. Reading
+    // continuity off frame 0 picks the branch BEHIND the elbow — measured on
+    // the shooting fixture square-on, that flipped the whole follow-through
+    // and read a true 165° elbow as 121°.
+    const frames = [
+      armFrame(0.98 * UPPER_ARM_LEN, 0.98 * FOREARM_LEN),
+      armFrame(0.5 * UPPER_ARM_LEN, 0.6 * FOREARM_LEN),
+    ];
+    const f0 = liftFrame(frames[0]!, 'right', null, 0);
+    const f1 = liftFrame(frames[1]!, 'right', f0, 0);
+    expect(f0.right_wrist!.z).toBe(f0.right_elbow!.z);
+    expect(f1.right_wrist!.z).toBeGreaterThan(f1.right_elbow!.z);
+
+    // A previous frame that DID resolve a depth still rules the sign: hand the
+    // lift a wrist that sat behind its elbow last frame and it stays behind.
+    const behind: Frame3D = {
+      ...f1,
+      right_elbow: { ...f1.right_elbow!, z: -0.1 },
+      right_wrist: { ...f1.right_wrist!, z: -0.22 },
+    };
+    const locked = liftFrame(frames[1]!, 'right', behind, 0);
+    expect(locked.right_wrist!.z).toBeLessThan(locked.right_elbow!.z);
+  });
+
+  test('the shank returns toward the torso plane; the forearm continues away from it', () => {
+    // Neither is readable from one view, so each is an anatomical choice the
+    // lift states (liftChain): the foot is planted under the hip while the knee
+    // travels forward over the toes, and the shooting arm stays on one side of
+    // the torso plane from dip to follow-through. Continuing the thigh's sign
+    // instead would put the ankle two thirds of a shank in front of the hip,
+    // which is how a loaded leg reads as straight — measured square-on on the
+    // shooting fixture, a true 135° knee came out at 180°.
+    const KNEE_DY = 0.2;
+    const KNEE_DZ = Math.sqrt(THIGH_LEN * THIGH_LEN - KNEE_DY * KNEE_DY);
+    const PLANTED_DY = Math.sqrt(SHANK_LEN * SHANK_LEN - KNEE_DZ * KNEE_DZ);
+    const frame = armFrame(0.6 * UPPER_ARM_LEN, 0.6 * FOREARM_LEN);
+    const hip = frame.right_hip!;
+    frame.right_knee = { x: hip.x, y: hip.y + KNEE_DY };
+    frame.right_ankle = { x: hip.x, y: hip.y + KNEE_DY + PLANTED_DY };
+
+    const f = liftFrame(frame, 'right', null, 0);
+    // Knee forward, ankle back in the hip's own plane — where the fixture put
+    // it, to the last decimal the priors allow.
+    expect(f.right_knee!.z - f.right_hip!.z).toBeCloseTo(KNEE_DZ, 9);
+    expect(f.right_ankle!.z).toBeCloseTo(f.right_hip!.z, 9);
+    // Arm: elbow forward, wrist further forward still.
+    expect(f.right_elbow!.z).toBeGreaterThan(f.right_shoulder!.z);
+    expect(f.right_wrist!.z).toBeGreaterThan(f.right_elbow!.z);
   });
 });

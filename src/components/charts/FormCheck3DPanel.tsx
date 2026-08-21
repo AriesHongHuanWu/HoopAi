@@ -18,6 +18,11 @@
  *   WITHHELD — never a dimmed guess, never a number in a lighter grey.
  * - a bone the lift could not place out of plane is labeled IN PLANE, so a
  *   flat limb reads as "depth not resolved", not as "your arm is flat".
+ * - an ANGLE that spans such a bone is labeled too: it is part measurement,
+ *   part assumption, and the row says which bone did that to it. Square to the
+ *   camera that is the difference between a 148° elbow reading and the 161° it
+ *   really was (formCheck3d.test.ts) — a gap no confidence number shows,
+ *   because the depth was placed by policy, not solved badly.
  * - COCO-17 has no hand or foot keypoints, so wrist and ankle angles do not
  *   exist here at all; the shooting wrist shows FOREARM TILT, labeled as the
  *   proxy it is (the angles3d contract).
@@ -141,6 +146,11 @@ export interface JointRow {
   angleSpan: string | null;
   /** The angle exists but its depth confidence is under the floor. */
   angleWithheld: boolean;
+  /**
+   * The angle spans a bone the lift placed IN the image plane, so part of it
+   * is an assumption rather than a measurement. False when there is no angle.
+   */
+  angleOnFlatBone: boolean;
 }
 
 const SHORT: Record<string, string> = {
@@ -174,6 +184,14 @@ function spanLabel(triple: [PoseKeypointName, PoseKeypointName, PoseKeypointName
  * WHICH joint is missing rather than a shorter table.
  */
 export function jointRows(frame: Frame3D, hand: ShootingHand): JointRow[] {
+  /** Is this joint's own bone (parent → joint) sitting in the image plane? */
+  const flatBone = (joint: PoseKeypointName): boolean => {
+    const pos = frame[joint];
+    const parent = PARENT_OF[joint];
+    if (!pos || !parent) return false;
+    const p = frame[parent];
+    return p != null && Math.abs(pos.z - p.z) <= DEPTH_FLAT_EPS;
+  };
   const rows: JointRow[] = LIFT_JOINTS.map((joint) => {
     const pos = frame[joint] ?? null;
     const parent = PARENT_OF[joint];
@@ -190,6 +208,16 @@ export function jointRows(frame: Frame3D, hand: ShootingHand): JointRow[] {
     }
     const triple = ANGLE_AT[joint];
     const reading = triple ? jointAngleDeg(frame[triple[0]], frame[triple[1]], frame[triple[2]]) : null;
+    // The angle's own bones are the triple's members whose PARENT is also in
+    // the triple — the two legs of the angle. If either was placed in the
+    // plane, the angle inherits that assumption.
+    const angleOnFlatBone =
+      triple != null &&
+      reading != null &&
+      triple.some((j) => {
+        const parent = PARENT_OF[j];
+        return parent != null && triple.includes(parent) && flatBone(j);
+      });
     return {
       joint,
       label: jointLabel(joint),
@@ -199,6 +227,7 @@ export function jointRows(frame: Frame3D, hand: ShootingHand): JointRow[] {
       angleDeg: reading && reading.c >= MIN_DEPTH_C ? reading.deg : null,
       angleSpan: triple ? spanLabel(triple) : null,
       angleWithheld: reading != null && reading.c < MIN_DEPTH_C,
+      angleOnFlatBone,
     };
   });
   // Shooting side, then the off side, then the head — order, not filtering.
@@ -459,6 +488,9 @@ export default function FormCheck3DPanel({
                       : r.depth === 'yaw'
                         ? 'depth from torso turn'
                         : null,
+                    r.angleOnFlatBone && r.angleDeg != null
+                      ? 'angle spans a bone in the image plane · part assumption'
+                      : null,
                     `depth confidence ${conf(r.pos.c)}`,
                   ]
                     .filter(Boolean)
@@ -512,6 +544,9 @@ export default function FormCheck3DPanel({
                 <Chip compact label={badge.label} tone={badge.tone} />
                 {a.deg2d != null && <Chip compact label={`2D ${deg(a.deg2d)}`} />}
                 {a.c != null && <Chip compact label={`depth ${conf(a.c)}`} />}
+                {a.deg != null && a.restsOnUnresolvedBone && (
+                  <Chip compact label="depth assumed" tone="unsure" />
+                )}
               </Row>
               <Text style={styles.rowNote}>{a.note}</Text>
             </View>
