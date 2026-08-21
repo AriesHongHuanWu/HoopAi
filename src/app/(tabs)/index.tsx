@@ -79,7 +79,7 @@ import {
   pickWeeklyChallenges,
   type WeekAggregate,
 } from '@/core/weeklyChallenges';
-import { listSessions, type SessionSummaryRow } from '@/data/db';
+import { listSessions, sessionShotOutcomes, type SessionSummaryRow } from '@/data/db';
 import { useCameraPermission } from 'react-native-vision-camera';
 
 import { loadTodayAggregate, loadWeekAggregate, useChallenges } from '@/state/challengeStore';
@@ -205,6 +205,18 @@ export default function HomeScreen() {
 
   // undefined = loading, null = no sessions yet.
   const [lastSession, setLastSession] = useState<SessionSummaryRow | null | undefined>(undefined);
+  /**
+   * Unsure count for the last-session card's row, stamped with the id it was
+   * read for. The summary row carries attempts/makes/fgPct but NOT this, and
+   * the detail's continuity preview requires it (see history/[id].tsx) — a
+   * hero that grows an "N shots unsure" line a beat later is a moment of
+   * unearned certainty. So we read the outcome stream for the one row this
+   * card shows and send the real number.
+   *
+   * null = not in hand: the push omits the param and the detail takes its
+   * plain skeleton path. Never a stand-in zero.
+   */
+  const [lastUnsure, setLastUnsure] = useState<{ id: number; unsure: number } | null>(null);
   /** FG% of recent sessions with shots, oldest first — the trend band. */
   const [recentTrend, setRecentTrend] = useState<number[]>([]);
   const [dbFailed, setDbFailed] = useState(false);
@@ -316,7 +328,26 @@ export default function HomeScreen() {
         .then((rows) => {
           if (!alive) return;
           const recent = rows.slice(0, RECENT_LIMIT);
-          setLastSession(recent[0] ?? null);
+          const newest = recent[0] ?? null;
+          setLastSession(newest);
+          // Second narrow read, for the ONE row the card shows — this is not
+          // History's N+1 (that screen needs pips for a whole page). Uses the
+          // outcome-only reader so the trajectory/form blobs stay unread.
+          setLastUnsure(null);
+          if (newest != null) {
+            void sessionShotOutcomes(newest.id).then((outcomes) => {
+              if (!alive) return;
+              // sessionShotOutcomes resolves to [] on a failed read, and []
+              // would count as "0 unsure" — a claim we'd be making up. The
+              // summary row already counted every shot, so only a stream that
+              // matches it is the real one; anything shorter stays null.
+              if (outcomes.length !== newest.attempts) return;
+              setLastUnsure({
+                id: newest.id,
+                unsure: outcomes.filter((o) => o.outcome === 'unsure').length,
+              });
+            });
+          }
           setRecentTrend(
             recent
               .filter((r) => r.attempts > 0)
@@ -334,6 +365,7 @@ export default function HomeScreen() {
           // One read, one failure path: every derived surface falls back to its
           // honest empty state rather than showing stale numbers.
           setLastSession(null);
+          setLastUnsure(null);
           setRecentTrend([]);
           setDbFailed(true);
           setGoalMakes(0);
@@ -822,6 +854,14 @@ export default function HomeScreen() {
                   fg: String(Math.round(lastSession.fgPct * 100)),
                   makes: String(lastSession.makes),
                   attempts: String(lastSession.attempts),
+                  tag: lastSession.label,
+                  // The detail gates its whole preview on the unsure count,
+                  // so without this the push always landed on the skeleton.
+                  // Sent ONLY when the read for THIS row is in hand — an
+                  // absent count must never arrive as zero.
+                  ...(lastUnsure?.id === lastSession.id
+                    ? { unsure: String(lastUnsure.unsure) }
+                    : null),
                 },
               })
             }
