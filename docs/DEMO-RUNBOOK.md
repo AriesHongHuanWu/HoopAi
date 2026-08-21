@@ -174,7 +174,7 @@ One action each. Phrased so it looks intentional.
 | 13 | Total loss | **Cancel** → **Start form check** | The model stays warm; this costs about a second. |
 | 14 | Report is thin (< 3 reps) | Tap **Check again** on the report, do four | "Let me give it enough reps to talk about consistency." |
 | 15 | `No camera frames — the pose loop stalled.` *(banner, every chip amber)* | Tap **Restart**. If it returns, **Cancel** → **Start form check** | "It noticed its own camera stopped feeding it — it would rather say nothing than grade a frozen picture." |
-| 16 | A metric reads **not measured** on the report | Nothing. Do another rep with a clear gather (ball at the waist, then up) | "It refused that one. It only reports the numbers it actually read a frame for — that is the whole product." |
+| 16 | A metric shows **—** where a number should be | Nothing. Do another rep with a clear gather (hands to the waist, then up) | "It refused that one. It only reports numbers it actually read a frame for — that is the whole product." |
 
 ---
 
@@ -283,11 +283,18 @@ judged against the wrong band. They are fixed, so the report now says different 
   open near 25/100 now scores like a person, not like an artifact. **Re-take every Compare
   screenshot.**
 
-### A metric can now say "not measured" — this is the demo, not a bug
+### A metric can now refuse — this is the demo, not a bug
 
 When the dip frame is not a plausible gather, set point, knee flexion and release time are refused
-*together*, with the reason. Do not apologise for it. It is the same rule as the ball: **the app
-does not report what it did not see.** Playbook row 16 has the line.
+*together*. On screen that row shows an **em-dash (—)**, not the words "not measured" — the label is
+what VoiceOver reads, so do not go hunting for that text on stage. The row stays where it is; the
+layout does not move, and nothing prints a zero.
+
+Do not apologise for it. It is the same rule as the ball: **the app does not report what it did not
+see.** Playbook row 16 has the line.
+
+The refusal *reason* is recorded in the data but is not drawn on the report yet — so you can say
+*that* it refused, and why in your own words, but the screen will not back you up with a sentence.
 
 ### If you are left-handed, do this before you go on
 
@@ -305,18 +312,22 @@ non-shooting arm, silently and plausibly. It now re-syncs on the guide screen an
 readiness chip drops to amber and **Count anyway is suppressed**, because an override over a dead
 loop is a promise the screen cannot keep. Playbook row 15.
 
-> **Force it once in rehearsal** so it is not the first time you see it: start a session, background
-> the app mid-capture, come back. Expect the banner within about a second, and expect every chip
-> amber rather than a stale green.
+> **Backgrounding the app does NOT produce this banner.** Coming back stops and restarts the camera,
+> which reads `Starting the camera… Rep counting is paused.` — the warm-up message outranks the stall
+> message on purpose, so a slow start is never called a failure. Either way the chips go amber and no
+> rep is counted, so the honest answer on stage is the same: *"it stopped measuring, so it stopped
+> talking."* The stall banner proper is for a loop that dies while the camera is still nominally
+> running; you are unlikely to see it, and Restart is the answer if you do.
 
 ### Still unverified on hardware
 
 These are code-level fixes verified by 2,751 offline tests. **Nothing below has been seen on a
 phone yet** — do §0 twice on the demo device before you believe any of it:
 
-- [ ] The gather gate refuses the rest-start rep and *accepts* a real one (do both deliberately).
+- [ ] The gather gate refuses the rest-start rep (row shows —) and *accepts* a real one. Do both deliberately.
 - [ ] Follow-through prints a real millisecond number, not 0 and not a refusal, on a held finish.
-- [ ] The stall banner appears within ~1 s of a forced stall, and clears on **Restart**.
+- [ ] Background the app mid-capture and return: expect `Starting the camera…`, every chip amber (never a
+      stale green), and the rep count intact.
 - [ ] With a left-hand setting, the ARM chip and the report both track the left arm.
 - [ ] Compare opens on a believable score, and the "N of 6 rules measured" line matches what it drew.
 - [ ] Room fps chip ≥ 22 after three back-to-back runs (thermal).

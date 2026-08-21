@@ -627,6 +627,53 @@ export function frameStall(
   return framesDelta <= 0 && elapsedMs >= FRAME_STALL_MS;
 }
 
+/** The six live gauges the readiness chips draw, after the no-reading rule. */
+export interface ChipGauges {
+  fps: number;
+  fpsOk: boolean;
+  overridden: boolean;
+  fullBodyOk: boolean;
+  armOk: boolean;
+  sideOk: boolean;
+}
+
+/**
+ * Resolve the chip gauges from the last readiness verdict.
+ *
+ * THE RULE: a gauge may read green only when it is reading something RIGHT
+ * NOW. `readiness` is a latched verdict from the last frame that arrived, so
+ * whenever frames are not arriving, showing it is the rail asserting a
+ * measurement it is not taking — the same over-claim the app refuses to make
+ * about a basket.
+ *
+ * Two ways to have no reading, and both must be handled or the rule leaks:
+ *  - STALLED: the loop died while the camera was nominally running.
+ *  - WARMING: no frame has arrived yet this run. This is the COMMON one —
+ *    returning from the background stops and restarts the capture session, so
+ *    for the ~1s reacquire the verdict is pre-interruption and was rendering
+ *    green underneath a banner that says the camera is starting.
+ * Cold start needs no special case: `readiness` is null, so everything is
+ * already amber.
+ *
+ * Pure so the rule can be pinned; the chips themselves are presentation.
+ */
+export function chipGauges(
+  readiness: FormCheckReadiness | null,
+  opts: { stalled?: boolean; warming?: boolean } = {},
+): ChipGauges {
+  const noReading = opts.stalled === true || opts.warming === true;
+  return {
+    fps: noReading ? 0 : (readiness?.fps ?? 0),
+    fpsOk: !noReading && (readiness?.fpsOk ?? false),
+    overridden: !noReading && readiness?.fpsOverridden === true,
+    fullBodyOk: !noReading && (readiness?.fullBodyOk ?? false),
+    armOk: !noReading && (readiness?.armOk ?? false),
+    // Side-profile defaults OPEN (true) when unknown, so it must not turn
+    // green just because nothing contradicted it while blind.
+    sideOk: !noReading && (readiness?.sideOk ?? true),
+  };
+}
+
 /**
  * The ONE guidance banner, chosen by priority: model error → model warmup →
  * camera warmup → frame stall → fps → full body → arm → side-profile →
@@ -1740,6 +1787,7 @@ function LiveRail({
     <ChipRow
       readiness={readiness}
       stalled={stalled}
+      warming={warming}
       calib={calib}
       onFlipHand={onFlipHand}
       orient={orient}
@@ -1890,6 +1938,7 @@ function LiveRail({
 function ChipRow({
   readiness,
   stalled = false,
+  warming = false,
   calib,
   onFlipHand,
   orient,
@@ -1898,22 +1947,21 @@ function ChipRow({
   readiness: FormCheckReadiness | null;
   /** The pose loop stopped delivering frames — see {@link frameStall}. */
   stalled?: boolean;
+  /** No frames yet this run: cold start, or the camera restarting after the
+   *  app came back to the foreground. */
+  warming?: boolean;
   calib: CalibrationState | null;
   onFlipHand: () => void;
   orient: PoseOrientationState;
   onFlipOrientation: () => void;
 }) {
-  // A stalled loop has no CURRENT reading: `readiness` still holds the last
-  // live frame's verdict, and rendering it green is the rail asserting a
-  // measurement it is not taking. Every gauge drops to amber instead. The
-  // VIEW chip is untouched — it reports a latched verdict about the buffer,
-  // not a live gauge.
-  const fps = stalled ? 0 : (readiness?.fps ?? 0);
-  const fpsOk = !stalled && (readiness?.fpsOk ?? false);
-  const overridden = !stalled && readiness?.fpsOverridden === true;
-  const fullBodyOk = !stalled && (readiness?.fullBodyOk ?? false);
-  const armOk = !stalled && (readiness?.armOk ?? false);
-  const sideOk = !stalled && (readiness?.sideOk ?? true);
+  // The no-reading rule lives in {@link chipGauges} so it can be pinned. The
+  // VIEW chip is deliberately NOT in it — that one reports a latched verdict
+  // about the buffer, not a live gauge.
+  const { fps, fpsOk, overridden, fullBodyOk, armOk, sideOk } = chipGauges(readiness, {
+    stalled,
+    warming,
+  });
   const chipHand = calib?.hand ?? 'right';
   const chipSource = calib?.handSource ?? 'settings';
 

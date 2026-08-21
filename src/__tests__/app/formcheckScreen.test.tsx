@@ -300,6 +300,7 @@ jest.mock('@/components/ShotList', () => ({ BackPill: () => null }));
 import FormCheckScreen, {
   FormCheckReport,
   armChipLabel,
+  chipGauges,
   formSessionRowOf,
   frameStall,
   guidanceBanner,
@@ -1695,6 +1696,88 @@ describe('armChipLabel', () => {
     expect(armChipLabel('right', 'settings')).toBe('ASSUMED RIGHT');
     expect(armChipLabel('left', 'auto')).toBe('AUTO LEFT');
     expect(armChipLabel('left', 'manual')).toBe('LEFT ARM');
+  });
+});
+
+describe('chipGauges — a gauge may only read green while it is reading', () => {
+  // `readiness` is a LATCHED verdict from the last frame that arrived. Drawing
+  // it while no frame is arriving is the rail claiming a measurement it is not
+  // taking, which is the same over-claim the app refuses to make about a shot.
+  const green = {
+    fps: 30,
+    fpsOk: true,
+    fpsOverridden: false,
+    fullBodyOk: true,
+    armOk: true,
+    sideOk: true,
+  } as unknown as Parameters<typeof chipGauges>[0];
+
+  it('passes a live verdict through untouched', () => {
+    expect(chipGauges(green)).toEqual({
+      fps: 30,
+      fpsOk: true,
+      overridden: false,
+      fullBodyOk: true,
+      armOk: true,
+      sideOk: true,
+    });
+  });
+
+  it('refuses every gauge while STALLED, however green the last verdict was', () => {
+    const g = chipGauges(green, { stalled: true });
+    expect(g).toEqual({
+      fps: 0,
+      fpsOk: false,
+      overridden: false,
+      fullBodyOk: false,
+      armOk: false,
+      sideOk: false,
+    });
+  });
+
+  it('refuses every gauge while WARMING — the common case, and the one that leaked', () => {
+    // Returning from the background stops and restarts the capture session.
+    // For the ~1s reacquire the verdict is pre-interruption; it used to render
+    // green underneath a banner saying the camera was starting. The stall path
+    // was covered from the start and this one was not, which is exactly why
+    // the rule lives in one pure function now.
+    const g = chipGauges(green, { warming: true });
+    expect(g).toEqual({
+      fps: 0,
+      fpsOk: false,
+      overridden: false,
+      fullBodyOk: false,
+      armOk: false,
+      sideOk: false,
+    });
+  });
+
+  it('never shows an OVERRIDE as a passing rate, and never while blind', () => {
+    const overridden = { ...(green as object), fpsOk: false, fpsOverridden: true } as Parameters<
+      typeof chipGauges
+    >[0];
+    expect(chipGauges(overridden).overridden).toBe(true);
+    expect(chipGauges(overridden).fpsOk).toBe(false);
+    expect(chipGauges(overridden, { warming: true }).overridden).toBe(false);
+  });
+
+  it('does not let the open-by-default side gate turn green while blind', () => {
+    // sideOk defaults TRUE when unknown, so it is the one gauge that could go
+    // green purely because nothing contradicted it while nothing was watching.
+    expect(chipGauges(null).sideOk).toBe(true);
+    expect(chipGauges(null, { warming: true }).sideOk).toBe(false);
+    expect(chipGauges(null, { stalled: true }).sideOk).toBe(false);
+  });
+
+  it('is already honest on a cold start, with no verdict at all', () => {
+    expect(chipGauges(null)).toEqual({
+      fps: 0,
+      fpsOk: false,
+      overridden: false,
+      fullBodyOk: false,
+      armOk: false,
+      sideOk: true,
+    });
   });
 });
 
