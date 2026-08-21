@@ -218,6 +218,12 @@ import { posturePlan, type PostureCue } from '@/core/postureFix';
 import type { PoseKeypointName, ShootingHand } from '@/core/types';
 import { insertFormSession, type FormSessionFullRow } from '@/data/db';
 import { parseMoveNet } from '@/ml/poseParser';
+import {
+  poseTensorDead,
+  poseWarmupVerdict,
+  poseXChannelLive,
+  type PoseWarmupVerdict,
+} from '@/ml/poseTensorHealth';
 import { useProfile } from '@/state/profileStore';
 import { useSettings } from '@/state/settingsStore';
 import { haptic } from '@/utils/haptics';
@@ -378,11 +384,27 @@ interface FormPoseSample {
  * useShotEngine has always done this ("the second one is timed"); this
  * screen's verbatim copy of the loader had dropped it.
  *
- * Async `run`, never `runSync`, so it cannot block the JS thread. Any failure
- * is swallowed — a model that will not take a dummy frame must still be
- * published and allowed to fail honestly on real ones.
+ * Async `run`, never `runSync`, so it cannot block the JS thread. A THROW is
+ * still swallowed — a model that will not take a dummy frame must still be
+ * published and allowed to fail honestly on real ones, and the loader's own
+ * catch already owns the throwing case.
+ *
+ * V6 — THE SECOND OUTPUT IS NO LONGER THROWN AWAY. Both runs used to be
+ * discarded, which made this the exact place where an accelerated delegate
+ * that constructs, invokes and returns GARBAGE won the ladder: the rungs
+ * below only ever fell through on a throw, and nothing anywhere in the load
+ * path looked at a single output number. The second run's tensor is now
+ * compared against the fingerprint {@link poseWarmupVerdict} holds — recorded
+ * from this exact asset on the CPU reference, on the same all-zero buffer fed
+ * here — and the verdict is returned so the ladder can treat a wrong answer
+ * the way it already treats a throw. See src/ml/poseTensorHealth.ts for the
+ * epsilon reasoning and for what is and is not being claimed about Core ML.
+ *
+ * The SECOND run is the one judged, not the first: the first Invoke is where
+ * a lazy delegate does its graph partitioning and compile, so it is the one
+ * with the least claim to be representative.
  */
-async function warmUpPose(m: TensorflowModel): Promise<void> {
+async function warmUpPose(m: TensorflowModel): Promise<PoseWarmupVerdict> {
   try {
     // Size from the model's own input tensor; fall back to what the resizer
     // is configured to emit (uint8 192×192×3 interleaved).
@@ -391,11 +413,19 @@ async function warmUpPose(m: TensorflowModel): Promise<void> {
       shape != null && shape.length > 0
         ? shape.reduce((a, b) => a * Math.max(1, b), 1)
         : POSE_INPUT * POSE_INPUT * 3;
+    // ZERO-FILLED, and it must stay that way: the fingerprint is only valid
+    // against this buffer. A uniform grey of 8 moves a golden coordinate by
+    // 0.39 — six times the epsilon — so "warm it up with something more
+    // realistic" would silently turn this check into a random rung rejector.
     const dummy = new Uint8Array(elems).buffer;
     await m.run([dummy]);
-    await m.run([dummy]);
+    return poseWarmupVerdict(await m.run([dummy]));
   } catch (err) {
     console.warn('[formcheck] pose warm-up skipped', err);
+    // A throw during warm-up is NOT a fingerprint verdict. The loader's own
+    // catch never sees this (the throw is swallowed here, as it always was),
+    // so saying "unverifiable" is the literal truth: nothing was measured.
+    return { kind: 'unverifiable', detail: 'warm-up threw' };
   }
 }
 
@@ -428,6 +458,17 @@ function useFormPose(
    * is caught by the fps gate exactly as it always was.
    */
   const [cpuOnly, setCpuOnly] = useState(false);
+  /**
+   * The LADDER dropped the accelerated rung by itself — its warm-up output
+   * did not match the fingerprint, so the published model is the CPU one
+   * without the presenter ever asking for it.
+   *
+   * Distinct from `cpuOnly`, which is the presenter's own latch, because the
+   * two say different things on the rail: a manual switch needs no
+   * explanation, a silent self-heal that costs frame rate does. Both mean
+   * "there is no accelerated rung left to offer", and both are read for that.
+   */
+  const [fellBack, setFellBack] = useState(false);
   const boxedPoseSv = useSharedValue<ReturnType<typeof NitroModules.box> | null>(null);
   const framesSv = useSharedValue(0);
   /**
@@ -436,6 +477,18 @@ function useFormPose(
    * at 0. This is the second observable that separates them.
    */
   const failedSv = useSharedValue(0);
+  /**
+   * CONSECUTIVE frames whose inference SUCCEEDED and whose x channel carried
+   * no lateral information — see {@link poseXChannelLive}.
+   *
+   * The third observable, and the one neither of the others can be: a
+   * delegate that mis-runs the graph but does not throw advances the SUCCESS
+   * counter on every frame and the failure counter on none, so both of the
+   * counters above report a perfectly healthy session while the figure on
+   * screen is a vertical line. A streak, not a total — one live frame is a
+   * counter-example and zeroes it.
+   */
+  const deadXSv = useSharedValue(0);
 
   // Ask for the camera at SCREEN MOUNT, not at Start: the OS dialog then
   // resolves while the presenter is reading the guide instead of landing in
@@ -465,6 +518,9 @@ function useFormPose(
       // Both counters or neither: a stale failure count against a fresh
       // success count would accuse the reacquire of the last run's deaths.
       failedSv.value = 0;
+      // Third counter, same rule — a dead-x streak from before the
+      // interruption is not evidence about the session that comes back.
+      deadXSv.value = 0;
     },
     onForeground: () => setForeground(true),
   });
@@ -530,6 +586,10 @@ function useFormPose(
   useEffect(() => {
     let alive = true;
     setModelErr(null);
+    // A new load decides the fallback question afresh — carrying the last
+    // ladder's verdict would leave a self-heal advisory on the rail over an
+    // accelerated rung that has since been published.
+    setFellBack(false);
     // A retry must not leave the previous model boxed: the worklet already
     // no-ops on a null box, so this parks the frame path during the reload.
     boxedPoseSv.value = null;
@@ -545,15 +605,41 @@ function useFormPose(
       // is the suspect. Nothing else about the load changes.
       const rungs = cpuOnly ? [cpu] : [accel, cpu];
       let lastError = '';
-      for (const d of rungs) {
+      let dropped = false;
+      for (let i = 0; i < rungs.length; i++) {
+        const d = rungs[i]!;
+        // THE LAST RUNG IS PUBLISHED WHATEVER ITS WARM-UP SAID. There is
+        // nothing beneath it to fall through to, so rejecting it would turn
+        // a check that is meant to cost frame rate into one that costs the
+        // whole screen — and this check has never been proven against a real
+        // delegate. A wrong-looking bottom rung goes out with a console line
+        // and is left to the LIVE guard, which says so on the rail without
+        // ever refusing a frame.
+        const last = i === rungs.length - 1;
         try {
           const m = await loadTensorflowModel(POSE_ASSET, d);
           if (!alive) return;
-          await warmUpPose(m);
+          const verdict = await warmUpPose(m);
           if (!alive) return;
+          if (verdict.kind === 'mismatch') {
+            console.warn(
+              `[formcheck] pose rung [${d.join(',') || 'cpu'}] warm-up mismatch: ${verdict.detail}`,
+            );
+            if (!last) {
+              // Treated EXACTLY like a throw, which is the whole point: the
+              // ladder already knew how to fall through, it just had no way
+              // to notice a rung that answered wrongly instead of loudly.
+              lastError = `pose warm-up mismatch (${verdict.detail})`;
+              dropped = true;
+              continue;
+            }
+          }
           clearTimeout(watchdog);
           setModel(m);
           setModelErr(null);
+          // Only ever true for a rung that was actually REACHED because an
+          // earlier one was rejected — never for a hand-picked CPU load.
+          setFellBack(dropped);
           boxedPoseSv.value = NitroModules.box(m);
           return;
         } catch (err) {
@@ -584,8 +670,9 @@ function useFormPose(
   const retryModel = useCallback(() => {
     framesSv.value = 0;
     failedSv.value = 0;
+    deadXSv.value = 0;
     setLoadNonce((n) => n + 1);
-  }, [failedSv, framesSv]);
+  }, [deadXSv, failedSv, framesSv]);
 
   /**
    * Reload WITHOUT the accelerated rung, and zero the frame counters so the
@@ -596,9 +683,10 @@ function useFormPose(
   const usePoseCpu = useCallback(() => {
     framesSv.value = 0;
     failedSv.value = 0;
+    deadXSv.value = 0;
     setCpuOnly(true);
     setLoadNonce((n) => n + 1);
-  }, [failedSv, framesSv]);
+  }, [deadXSv, failedSv, framesSv]);
 
   // MoveNet wants NHWC uint8 192×192 (interleaved) — same config as the
   // engine's pose resizer.
@@ -645,14 +733,28 @@ function useFormPose(
           // prune loops and poisons every filter downstream — drop it here,
           // the way PoseOrientationDetector and useShotEngine already do.
           if (!Number.isFinite(tSec)) return;
+          const raw = new Float32Array(out[0]!);
+          // THE LIVE RAW-TENSOR GUARD, at the first place the numbers exist
+          // in JS. An inference that SUCCEEDS is not an inference that was
+          // RIGHT: a delegate that mis-runs this graph advances the success
+          // counter on every frame, and the whole screen — chips, banner,
+          // rep count — then reports a healthy session over a figure that is
+          // one vertical column. `poseXChannelLive` is workletised and lives
+          // in a module (the parseMoveNet pattern, one line below), and is a
+          // single pass over 17 triplets with no allocation: a handful of
+          // comparisons per frame at 30 fps.
+          //
+          // It COUNTS and never refuses. The frame goes downstream exactly as
+          // it always did, so if this guard is itself wrong the app is
+          // unchanged and the only cost is a wrong sentence on the rail.
+          if (poseXChannelLive(raw)) {
+            if (deadXSv.value !== 0) deadXSv.value = 0;
+          } else {
+            deadXSv.value += 1;
+          }
           // De-normalize into the 192-square analysis space — the detector's
           // vy threshold and the sequence packer both live there.
-          const pose = parseMoveNet(
-            new Float32Array(out[0]!),
-            POSE_INPUT,
-            POSE_INPUT,
-            tSec,
-          );
+          const pose = parseMoveNet(raw, POSE_INPUT, POSE_INPUT, tSec);
           framesSv.value += 1;
           scheduleOnRN(onSample, {
             pose,
@@ -690,9 +792,12 @@ function useFormPose(
     retryModel,
     usePoseCpu,
     poseCpuOnly: cpuOnly,
+    /** The ladder dropped the accelerated rung on its own — see {@link fellBack}. */
+    poseFellBack: fellBack,
     foreground,
     framesSv,
     failedSv,
+    deadXSv,
     /** What the capture session has reported — read by the rail's poll. */
     camSession,
     /** Handed straight to `<Camera>`; see the session-channel note above. */
@@ -965,6 +1070,10 @@ export function bannerActionKind(
     /** The accelerated rung is already dropped — there is nothing to switch
      *  to, so the only honest remaining move is another load. */
     poseCpuOnly?: boolean;
+    /** The LADDER dropped it, unasked — same "nothing left to switch to". */
+    poseFellBack?: boolean;
+    /** Inference SUCCEEDS and the x channel is flat — see {@link poseTensorDead}. */
+    deadTensor?: boolean;
     /** No frame has arrived yet this run. */
     warming?: boolean;
     /** …and the warm-up budget is spent — see {@link noFirstFrame}. */
@@ -986,7 +1095,7 @@ export function bannerActionKind(
   if (opts.cameraFault != null) return null;
   if (opts.modelLoaded === false) return null;
   if (opts.inferenceFailing === true) {
-    return opts.poseCpuOnly === true ? 'retryModel' : 'poseCpu';
+    return noAccelLeft(opts) ? 'retryModel' : 'poseCpu';
   }
   if (r == null) return null;
   // Nothing has arrived yet: past the budget the flip is the one control that
@@ -1009,7 +1118,29 @@ export function bannerActionKind(
   // The side gate is the one gate the shooter cannot always comply with —
   // the room decides where they may stand. See FormCheckSession.overrideSideFloor.
   if (!r.sideOk) return 'countSideAnyway';
+  // — advisories, in guidanceBanner's order —
+  // The dead-tensor guard is the only advisory with a control: it names a
+  // rung, and the rung can be changed. Everything below it (the two
+  // overrides, the angled-stance note, the tilt hint and the self-heal
+  // notice) describes something already decided or already measured, and a
+  // button under any of those would be a control that changes nothing.
+  if (opts.deadTensor === true) {
+    return noAccelLeft(opts) ? 'retryModel' : 'poseCpu';
+  }
   return null;
+}
+
+/**
+ * Is there still an accelerated rung to offer to switch away FROM?
+ *
+ * Two ways there is not, and the rail must not tell them apart when picking a
+ * button: the presenter latched CPU-only by hand, or the loader's own
+ * fingerprint check dropped the accelerated rung and published the CPU one.
+ * Offering "Switch to CPU" in either case is a button that reloads into the
+ * same place — a promise the screen cannot keep.
+ */
+function noAccelLeft(opts: { poseCpuOnly?: boolean; poseFellBack?: boolean }): boolean {
+  return opts.poseCpuOnly === true || opts.poseFellBack === true;
 }
 
 /** The live gauges the readiness chips draw, after the no-reading rule. */
@@ -1101,6 +1232,18 @@ export function guidanceBanner(
      *  switch to, and saying otherwise would be an offer the screen can't
      *  keep. */
     poseCpuOnly?: boolean;
+    /**
+     * The LOADER dropped the accelerated rung on its own, because its
+     * warm-up output did not match the fingerprint. Same "nothing left to
+     * switch to" as `poseCpuOnly`, and additionally its own advisory: a
+     * self-heal that costs frame rate is not something to keep quiet about.
+     */
+    poseFellBack?: boolean;
+    /**
+     * Inference is SUCCEEDING and the x channel is flat — the delegate is
+     * returning numbers that are not a body. See {@link poseTensorDead}.
+     */
+    deadTensor?: boolean;
     /** No camera frame has arrived yet. */
     warming?: boolean;
     /** …and the warm-up budget is spent — see {@link noFirstFrame}. */
