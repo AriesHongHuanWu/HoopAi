@@ -101,6 +101,24 @@
  *  - {@link computePhaseTiming} takes the same tilt as the metrics, so both
  *    dips are found in one rotated space.
  *
+ * V5 — AN ESCAPE FROM EVERY PAUSING GATE. A pausing gate with no override is
+ * a dead end on stage: the room decides where the shooter is allowed to
+ * stand, and "turn 90°" is not an instruction a demo floor can always
+ * satisfy. The side-profile gate now has the same labeled escape the fps
+ * floor has ({@link FormCheckSession.overrideSideFloor}), and the same price:
+ *  - {@link SIDE_PROFILE_MIN} does NOT move. `readiness.sideOverridden` says
+ *    the override is the only thing carrying the gate, and every rep caught
+ *    under it carries the EXISTING 'angledStance' reason — a stance below
+ *    {@link SIDE_PROFILE_TRUSTED} already meant exactly "these 2D angles are
+ *    foreshortened", so the reason is extended to the relaxed gate rather
+ *    than duplicated by a new one.
+ *  - THE GATE MOVED; THE MATH DID NOT. Below {@link SIDE_PROFILE_MIN} the 2D
+ *    joint angles are foreshortened past the point where the number means
+ *    anything, so setPointElbowDeg, kneeFlexionDeg and BOTH follow-through
+ *    readings are REFUSED ({@link MetricRefusalKind} 'stanceNotSideOn')
+ *    instead of reported small. What survives is what a yaw cannot distort:
+ *    the dip→release tempo, the release height, and the phase bars.
+ *
  * Pure TypeScript: no I/O, no wall clock — time comes exclusively from the
  * camera timestamps on each {@link PoseFrame}.
  */
@@ -269,6 +287,13 @@ export const SHADOW_REPS_TARGET = 2;
  * pauses the whole session with no override and no way to comply. The gate
  * still fails a MEASURED face-on stance, and still passes when the gauge
  * cannot vote (occlusion is not evidence of facing the camera).
+ *
+ * V5: the value is also the floor the METRIC MATH respects. A measured
+ * stance below it can now be counted through
+ * {@link FormCheckSession.overrideSideFloor}, but every 2D joint angle read
+ * there is refused ('stanceNotSideOn'), so relaxing the gate never turns
+ * this threshold into a softer one — it only moves what the threshold is
+ * allowed to pause.
  */
 export const SIDE_PROFILE_MIN = 0.35;
 
@@ -504,6 +529,18 @@ export interface FormCheckReadiness {
    */
   fpsOverridden?: boolean;
   /**
+   * The stance is MEASURABLY below {@link SIDE_PROFILE_MIN} and only the
+   * presenter's explicit override is carrying `sideOk`. The exact mirror of
+   * {@link fpsOverridden}: the floor itself never moved, the measured
+   * `sideness` stays in the verdict, and every rep counted here is worth
+   * less than one shot in profile — the UI must say so. False whenever the
+   * stance passes on its own, and false when the gauge could not vote (an
+   * unmeasurable stance was never blocking, so nothing is being overridden).
+   * Optional for the same fixture-compatibility reason as
+   * {@link fpsOverridden}.
+   */
+  sideOverridden?: boolean;
+  /**
    * The stance is square enough ({@link SIDE_PROFILE_TRUSTED}) for 2D joint
    * angles to be taken at face value. False with a measured-but-angled
    * stance — the session still counts, the angles just read small — and
@@ -600,10 +637,21 @@ function median(values: readonly number[]): number | null {
  * {@link FPS_OVERRIDE_MIN}, where no velocity sample survives anyway, and it
  * never manufactures readiness out of an empty window (fps 0 = no data yet,
  * not a slow camera).
+ *
+ * V5: `opts.sideFloorOverride` is the same escape for the side gate — the
+ * one gate a shooter cannot always comply with, because the room decides
+ * where they may stand. It does NOT lower {@link SIDE_PROFILE_MIN}: the
+ * measured `sideness` and the `sideOverridden` flag both stay in the verdict,
+ * `sideTrusted` stays false, and the reps it lets through are labeled. There
+ * is deliberately no floor beneath it (the {@link FPS_OVERRIDE_MIN}
+ * analogue): no yaw makes the wrist-snap signature unmeasurable, so a floor
+ * here would be an invented number rather than a mechanical limit. What
+ * protects the report instead is the metric refusal at the same threshold —
+ * see 'stanceNotSideOn' in {@link MetricRefusalKind}.
  */
 export function readinessOf(
   samples: readonly ReadinessSample[],
-  opts: { fpsFloorOverride?: boolean } = {},
+  opts: { fpsFloorOverride?: boolean; sideFloorOverride?: boolean } = {},
 ): FormCheckReadiness {
   const n = samples.length;
   const fps = medianFps(samples.map((s) => s.t));
@@ -628,7 +676,11 @@ export function readinessOf(
   const fpsOk = measuredFpsOk || fpsOverridden;
   const fullBodyOk = n > 0 && fullBodyFrac >= VISIBILITY_MIN_FRAC;
   const armOk = n > 0 && armFrac >= VISIBILITY_MIN_FRAC;
-  const sideOk = sideness == null || sideness >= SIDE_PROFILE_MIN;
+  const measuredSideOk = sideness == null || sideness >= SIDE_PROFILE_MIN;
+  // Only ever true against a MEASURED sub-floor stance: an unmeasurable one
+  // already passed, so there is nothing there to override.
+  const sideOverridden = opts.sideFloorOverride === true && !measuredSideOk;
+  const sideOk = measuredSideOk || sideOverridden;
   return {
     fps,
     fullBodyFrac,
@@ -640,6 +692,7 @@ export function readinessOf(
     sideOk,
     ready: fpsOk && fullBodyOk && armOk && sideOk,
     fpsOverridden,
+    sideOverridden,
     sideTrusted: sideness != null && sideness >= SIDE_PROFILE_TRUSTED,
   };
 }
@@ -1342,6 +1395,11 @@ function rotateFrames(
  * rides on {@link computeRepMetricsDetailed}. `opts.dipEpsPx` defaults to
  * the mirrored {@link DIP_EPS_PX}; live call sites pass {@link dipEpsFor}.
  *
+ * V5 — `opts.sideness`: this window's measured side-profile gauge. Below
+ * {@link SIDE_PROFILE_MIN} every 2D joint angle is refused
+ * ({@link SIDE_REFUSED_METRICS}). Absent / null ⇒ output identical to V4, so
+ * no existing call site or fixture changes behavior by adding nothing.
+ *
  * Anything unmeasurable (missing landmarks, no dip, empty tail) is null —
  * never NaN.
  */
@@ -1354,21 +1412,70 @@ export function computeRepMetrics(
     tiltDeg?: number | null;
     /** Dip-confirmation epsilon, px. Default: the mirrored DIP_EPS_PX. */
     dipEpsPx?: number;
+    /** Window side-profile gauge (0..1); null/absent = no stance refusal. */
+    sideness?: number | null;
   },
 ): FormMetrics {
   return computeRepMetricsDetailed(frames, opts).metrics;
 }
 
-/** Why a metric was refused, in the data — never only in the copy layer. */
-export type MetricRefusalKind = 'dipNotGather';
+/**
+ * Why a metric was refused, in the data — never only in the copy layer.
+ *  - 'dipNotGather'    — the dip frame is not a plausible gather, so nothing
+ *                        read off it describes a set point.
+ *  - 'stanceNotSideOn' — the stance was measured below
+ *                        {@link SIDE_PROFILE_MIN}, where a 2D joint angle is
+ *                        a projection of an arm pointing at the lens. Only
+ *                        reachable through
+ *                        {@link FormCheckSession.overrideSideFloor}: without
+ *                        it such a stance produces no rep at all.
+ */
+export type MetricRefusalKind = 'dipNotGather' | 'stanceNotSideOn';
 
 /** One refusal: which metrics it took away, and the reason to show. */
 export interface MetricRefusal {
   kind: MetricRefusalKind;
-  /** {@link FormMetrics} keys this refusal nulled. */
+  /**
+   * {@link FormMetrics} keys this refusal nulled. Two refusals may name the
+   * same key — each states an independent reason that number is absent, and
+   * neither is implied by the other.
+   */
   metrics: readonly (keyof FormMetrics)[];
   /** Stated reason, ready to render. Never empty. */
   reason: string;
+}
+
+/**
+ * The metrics a sub-{@link SIDE_PROFILE_MIN} stance takes away. All four are
+ * read from a 2D interior joint angle — shoulder→elbow→wrist and
+ * hip→knee→ankle — which is the projection of a limb whose long axis is
+ * swinging toward the lens at that yaw. It does not read "a bit small"; it
+ * reads whatever the projection happens to be, and a follow-through judged
+ * against {@link FT_ELBOW_MIN_DEG} in that space reports an arm collapse
+ * nobody watched. Everything a yaw cannot distort survives untouched:
+ * releaseTimeMs (a duration), releaseHeightNorm / releaseHeightM (vertical),
+ * and the dip / rise / release phase bars (vertical + temporal).
+ */
+const SIDE_REFUSED_METRICS: readonly (keyof FormMetrics)[] = [
+  'setPointElbowDeg',
+  'kneeFlexionDeg',
+  'followThroughElbowDeg',
+  'followThroughHeldMs',
+];
+
+/**
+ * Is this window's stance too square for a 2D joint angle to mean anything?
+ * Null sideness (the gauge could not vote) abstains — the same
+ * refuse-don't-guess contract the gate itself keeps: occlusion is not
+ * evidence of facing the camera.
+ */
+function anglesForeshortened(sideness: number | null | undefined): boolean {
+  return sideness != null && Number.isFinite(sideness) && sideness < SIDE_PROFILE_MIN;
+}
+
+/** The stated reason on a 'stanceNotSideOn' refusal. */
+function sideRefusalReason(sideness: number): string {
+  return `stance was ${Math.round(sideness * 100)}% side-on — 2D joint angles are foreshortened below ${Math.round(SIDE_PROFILE_MIN * 100)}%`;
 }
 
 /** {@link computeRepMetrics} plus the refusals that shaped it. */
@@ -1391,6 +1498,7 @@ export function computeRepMetricsDetailed(
     releaseT: number;
     tiltDeg?: number | null;
     dipEpsPx?: number;
+    sideness?: number | null;
   },
 ): RepMetricsResult {
   const { hand, frameHeight, releaseT } = opts;
@@ -1466,7 +1574,7 @@ export function computeRepMetricsDetailed(
     }
   }
 
-  const { followThroughElbowDeg, followThroughHeldMs } = followThroughOf(
+  let { followThroughElbowDeg, followThroughHeldMs } = followThroughOf(
     work,
     series,
     shoulderName,
@@ -1474,6 +1582,24 @@ export function computeRepMetricsDetailed(
     wristName,
     releaseT,
   );
+
+  // THE STANCE GATE. Applied LAST, as a suppression pass over numbers that
+  // were really computed — it can only take a metric away, never produce
+  // one, and it never disturbs the refusals above it (a dip that was not a
+  // gather is still not a gather; both reasons are true and both are
+  // reported). Only reachable via FormCheckSession.overrideSideFloor: with
+  // the gate at its default there is no rep here to refuse anything on.
+  if (anglesForeshortened(opts.sideness)) {
+    setPointElbowDeg = null;
+    kneeFlexionDeg = null;
+    followThroughElbowDeg = null;
+    followThroughHeldMs = null;
+    refusals.push({
+      kind: 'stanceNotSideOn',
+      metrics: SIDE_REFUSED_METRICS,
+      reason: sideRefusalReason(opts.sideness!),
+    });
+  }
 
   return {
     metrics: {
@@ -1530,6 +1656,12 @@ export interface RepPhaseTiming {
  * same dip. `opts.dipEpsPx` defaults to DIP_EPS_PX (pins unchanged), and the
  * same gather gate applies: a dip frame that is not a gather yields no
  * dip / rise / release segment, only the follow-through it really observed.
+ *
+ * V5 — `opts.sideness` mirrors {@link computeRepMetrics}: below
+ * {@link SIDE_PROFILE_MIN} `followMs` is refused, because it is the same
+ * elbow-angle streak the metric refuses and the bar must not draw a hold the
+ * number above it declined to report. dip / rise / release are vertical and
+ * temporal — a yaw cannot distort them — so they stand.
  */
 export function computePhaseTiming(
   frames: readonly RawSeqFrame[],
@@ -1542,6 +1674,8 @@ export function computePhaseTiming(
     frameHeight?: number;
     /** Dip-confirmation epsilon, px. Default: the mirrored DIP_EPS_PX. */
     dipEpsPx?: number;
+    /** Window side-profile gauge (0..1); null/absent = no stance refusal. */
+    sideness?: number | null;
   },
 ): RepPhaseTiming {
   const { hand, releaseT } = opts;
@@ -1627,7 +1761,12 @@ export function computePhaseTiming(
     releaseT,
   );
 
-  return { dipMs, riseMs, releaseMs, followMs: followThroughHeldMs };
+  return {
+    dipMs,
+    riseMs,
+    releaseMs,
+    followMs: anglesForeshortened(opts.sideness) ? null : followThroughHeldMs,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1972,6 +2111,8 @@ export class FormCheckSession {
   private lastReadinessT = -Infinity;
   /** Presenter's labeled escape from the MIN_POSE_FPS floor. */
   private fpsFloorOverride = false;
+  /** Presenter's labeled escape from the SIDE_PROFILE_MIN floor. */
+  private sideFloorOverride = false;
 
   /** Last frame on which the STRICT readiness verdict passed (latch anchor). */
   private lastStrictReadyT = -Infinity;
@@ -2102,6 +2243,43 @@ export class FormCheckSession {
     this.lastReadinessT = -Infinity;
   }
 
+  /** Whether the side-profile override is currently switched on. */
+  get sideFloorOverridden(): boolean {
+    return this.sideFloorOverride;
+  }
+
+  /**
+   * Count reps even though the shooter is measurably squarer to the camera
+   * than {@link SIDE_PROFILE_MIN} — the presenter's one-tap escape from a
+   * room that will not let anyone stand side-on. "Turn 90°" is not an
+   * instruction a demo floor can always satisfy: the furniture, the wall and
+   * the audience decide where the shooter may stand, and without this the
+   * screen pauses everything — scoring AND calibration — with nothing on it
+   * that can help.
+   *
+   * The floor is NOT lowered, in either of the two senses that matter:
+   *  - `readiness.sideOverridden` stays true for as long as the override is
+   *    doing the work, `readiness.sideness` keeps reporting the measured
+   *    stance, `sideTrusted` stays false, and every rep captured under it
+   *    carries the 'lowConfidence' reason 'angledStance';
+   *  - the METRICS still refuse. Every 2D joint angle read below
+   *    {@link SIDE_PROFILE_MIN} is dropped with a 'stanceNotSideOn'
+   *    {@link MetricRefusal} rather than reported foreshortened, so the
+   *    escape buys a rep COUNT and the numbers a yaw cannot distort — never
+   *    a set-point or follow-through claim the camera could not see.
+   *
+   * Unlike {@link overrideFpsFloor} there is no floor beneath it: no stance
+   * makes the wrist-snap signature unmeasurable, so a cutoff here would be
+   * invented. It is a no-op against a stance the gauge cannot measure (that
+   * one already passes). Takes effect on the next pushed frame.
+   */
+  overrideSideFloor(on = true): void {
+    this.sideFloorOverride = on;
+    // Same as the fps override: flip the strip on the next frame rather than
+    // waiting out the readiness poll.
+    this.lastReadinessT = -Infinity;
+  }
+
   /**
    * Switch the watched shooting arm (the live screen's tap-to-flip chip).
    * Resets the detector and any pending rep — a half-captured rep from the
@@ -2208,6 +2386,7 @@ export class FormCheckSession {
       this.lastReadinessT = t;
       this.cachedReadiness = readinessOf(this.readySamples, {
         fpsFloorOverride: this.fpsFloorOverride,
+        sideFloorOverride: this.sideFloorOverride,
       });
     }
 
@@ -2670,12 +2849,21 @@ export class FormCheckSession {
     // confirm off jitter. Median over the window (not the calibration
     // baseline) so a skipped calibration is no worse off.
     const dipEpsPx = dipEpsFor(this.windowBodyHeightPx(window));
+    // The stance this rep was actually captured at, measured over the rep's
+    // OWN window — the receipt AND the metric refusal below are decided from
+    // it, never from the session-wide override switch. A window that cannot
+    // vote abstains and nothing is refused; that is not a loophole, because
+    // the buffer this window is sliced from is a SUBSET of the frames the
+    // readiness gate votes over, so a rep window too occluded to vote could
+    // never have belonged to a session whose side gate was failing.
+    const sideness = this.windowSideness(window);
     const { metrics, refusals } = computeRepMetricsDetailed(window, {
       hand: this.handSide,
       frameHeight: this.frameHeight,
       releaseT,
       tiltDeg,
       dipEpsPx,
+      sideness,
     });
 
     // Metric release height — an ESTIMATE, only with a calibration scale
@@ -2701,16 +2889,17 @@ export class FormCheckSession {
       phases: computePhaseTiming(window, {
         hand: this.handSide,
         releaseT,
-        // Same rotation, same epsilon, same dip as the metrics above.
+        // Same rotation, same epsilon, same dip, same stance as the metrics.
         tiltDeg,
         frameHeight: this.frameHeight,
         dipEpsPx,
+        sideness,
       }),
       releaseHeightM,
       flags: this.repFlags(window, releaseT, dipEpsPx),
       tips: [],
       poseFps,
-      lowConfidence: this.repConfidence(window, poseFps, lo),
+      lowConfidence: this.repConfidence(poseFps, lo, sideness),
       refusals,
     };
     // coachingTips already skips null metrics, so the ball-derived nulls
@@ -2728,9 +2917,9 @@ export class FormCheckSession {
    * observed over the rep's own window, not from a session-wide setting.
    */
   private repConfidence(
-    window: readonly RawSeqFrame[],
     poseFps: number,
     windowStartT: number,
+    sideness: number | null,
   ): RepConfidenceReason[] {
     const reasons: RepConfidenceReason[] = [];
 
@@ -2745,23 +2934,40 @@ export class FormCheckSession {
 
     // Measurably angled toward the camera ⇒ foreshortened 2D angles. An
     // unmeasurable stance abstains (occlusion is not evidence of anything).
-    let sideSum = 0;
-    let sideN = 0;
-    for (const f of window) {
-      const s = sideProfileOfRaw(f);
-      if (s != null) {
-        sideSum += s;
-        sideN++;
-      }
-    }
-    if (
-      sideN >= SIDE_VOTE_MIN_FRAC * window.length &&
-      sideN > 0 &&
-      sideSum / sideN < SIDE_PROFILE_TRUSTED
-    ) {
+    //
+    // A rep captured under the side override lands here BY CONSTRUCTION —
+    // the override only engages against a stance measured below
+    // SIDE_PROFILE_MIN, which is below SIDE_PROFILE_TRUSTED. The reason is
+    // EXTENDED to it rather than duplicated by a second one: 'angledStance'
+    // already says the one thing that is true of both, and a report reading
+    // the union of reasons must not have to learn two words for it. What
+    // separates the two cases in the data is the rep's REFUSALS — a
+    // sub-floor rep carries 'stanceNotSideOn' and has no joint angle to
+    // qualify, an angled-but-passing rep carries the angles with this
+    // caveat on them.
+    if (sideness != null && sideness < SIDE_PROFILE_TRUSTED) {
       reasons.push('angledStance');
     }
     return reasons;
+  }
+
+  /**
+   * Mean side-profile gauge over a rep window, or null when too few of its
+   * frames could vote ({@link SIDE_VOTE_MIN_FRAC}) — the same abstain rule
+   * {@link readinessOf} applies to the live window, so a rep is judged the
+   * way the gate that let it through was judged.
+   */
+  private windowSideness(window: readonly RawSeqFrame[]): number | null {
+    let sum = 0;
+    let n = 0;
+    for (const f of window) {
+      const s = sideProfileOfRaw(f);
+      if (s != null) {
+        sum += s;
+        n++;
+      }
+    }
+    return n > 0 && n >= SIDE_VOTE_MIN_FRAC * window.length ? sum / n : null;
   }
 
   /**

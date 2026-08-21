@@ -42,6 +42,14 @@
  *     or over a manual pick; and the pure frameStall() watchdog plus its
  *     banner priority, which is what stops a frozen pose loop from wearing
  *     the last live frame's green readiness verdict.
+ *  9. V5 LEGIBLE BRING-UP FAILURE — the three states that used to collapse
+ *     into an eternal "Starting the camera…": every inference throwing
+ *     (inferenceFailing), the BACK camera facing away from the shooter
+ *     (nobodyInFrame), and a loop that never produced a first frame
+ *     (noFirstFrame, the case frameStall cannot reach by contract) — plus
+ *     bannerActionKind, which pins that each of those banners carries the
+ *     action that actually helps and that the words and the button can never
+ *     disagree.
  *
  * What these CANNOT reach: anything downstream of a real pose frame. The
  * frame output is stubbed inert, so the session never receives a sample and
@@ -56,7 +64,11 @@
  * SESSION REBUILD out of reach here: it fires on the frame where the
  * correction switches on or off, and no frame ever arrives under jest, so
  * its rail copy ("restarted after the view flipped") is verifiable only on a
- * device. Nothing below claims otherwise.
+ * device. The same limit covers all of the V5 WIRING — the worklet's
+ * failed-frame counter, the rail's two new poll reads and the CPU reload —
+ * because no frame is ever inferred here, successfully or otherwise: the
+ * three DECISIONS are pinned as pure helpers below and the wiring is
+ * device-verified only. Nothing below claims otherwise.
  *
  * Mock set follows src/__tests__/app/sessionFormReport.test.tsx.
  */
@@ -300,11 +312,15 @@ jest.mock('@/components/ShotList', () => ({ BackPill: () => null }));
 import FormCheckScreen, {
   FormCheckReport,
   armChipLabel,
+  bannerActionKind,
   chipGauges,
   formSessionRowOf,
   frameStall,
   guidanceBanner,
+  inferenceFailing,
   lowConfidenceLine,
+  nobodyInFrame,
+  noFirstFrame,
   orientationChipHint,
   orientationChipLabel,
   repCallout,
@@ -312,6 +328,7 @@ import FormCheckScreen, {
 } from '@/app/formcheck';
 import {
   ELBOW_SPREAD_FLAG_DEG,
+  FPS_OVERRIDE_MIN,
   KNEE_SPREAD_FLAG_DEG,
   MIN_SPREAD_REPS,
   RELEASE_HEIGHT_SPREAD_FLAG,
@@ -1647,6 +1664,98 @@ describe('guidanceBanner', () => {
     ).toContain("didn't load");
   });
 
+  it('every frame failing is its own state, ahead of the copy that hid it', () => {
+    // The worklet counts SUCCESSES only, so a model whose delegate cannot
+    // Invoke this graph throws on every frame and pins that counter at 0 —
+    // "Starting the camera…" then owned the rail for the whole session over
+    // a live preview. The failure counter is what separates the two.
+    expect(
+      guidanceBanner(true, readyAll, 'right', null, false, {
+        inferenceFailing: true,
+        warming: true,
+      }),
+    ).toEqual({ text: "The pose model isn't running — tap Switch to CPU.", pauses: true });
+    // A dead LOADER still outranks it — that one names a different recovery.
+    expect(
+      guidanceBanner(true, readyAll, 'right', null, false, {
+        modelErr: 'boom',
+        inferenceFailing: true,
+      })!.text,
+    ).toContain("didn't load");
+    // Already on CPU: there is no accelerator left to drop, and offering one
+    // would be a promise the screen cannot keep.
+    expect(
+      guidanceBanner(true, readyAll, 'right', null, false, {
+        inferenceFailing: true,
+        poseCpuOnly: true,
+      })!.text,
+    ).toBe("The pose model isn't running — tap Retry.");
+    // A dead frame path is worth saying with or without a session to poll.
+    expect(
+      guidanceBanner(true, null, 'right', null, false, { inferenceFailing: true })!.text,
+    ).toContain("isn't running");
+  });
+
+  it('"no first frame ever" is a LATER state than the cold start, not a wider one', () => {
+    // frameStall takes started=false and returns false BY CONTRACT, so a loop
+    // that never produced a first frame could not be diagnosed at all. The
+    // cold-start copy keeps the whole budget: calling a slow cold start a
+    // failure is the worse mistake, and the test above pins that order.
+    expect(
+      guidanceBanner(true, readyAll, 'right', null, false, { warming: true })!.text,
+    ).toBe('Starting the camera…');
+    const spent = guidanceBanner(true, readyAll, 'right', null, false, {
+      warming: true,
+      noFirstFrame: true,
+    })!;
+    expect(spent.text).toContain('No camera frames yet');
+    expect(spent.text).toContain('Flip camera');
+    expect(spent.pauses).toBe(true);
+    // Everything pinned ABOVE the warm-up branch still outranks it.
+    expect(
+      guidanceBanner(true, readyAll, 'right', null, false, {
+        modelErr: 'boom',
+        noFirstFrame: true,
+      })!.text,
+    ).toContain("didn't load");
+    expect(
+      guidanceBanner(false, readyAll, 'right', null, false, { noFirstFrame: true })!.text,
+    ).toContain('Warming up the pose model');
+  });
+
+  it('an empty BACK frame says which way the lens is facing, not "step back"', () => {
+    // 12807b6 flipped the default front → back: right for the propped
+    // protocol, wrong for anyone holding the phone to test it. The lens then
+    // faces the wall and the only thing the rail said was a message about
+    // DISTANCE for a problem about FACING.
+    const empty = {
+      ...readyAll,
+      fullBodyFrac: 0,
+      armFrac: 0,
+      fullBodyOk: false,
+      armOk: false,
+      sideness: null,
+      ready: false,
+    };
+    expect(guidanceBanner(true, empty, 'right', null, false, { camPosition: 'back' })).toEqual({
+      text: 'No one in frame — tap Flip camera if it faces away.',
+      pauses: true,
+    });
+    // FRONT: the preview is the user's own face, so "nobody is there" is not
+    // the likely story and the framing message is the honest one.
+    expect(
+      guidanceBanner(true, empty, 'right', null, false, { camPosition: 'front' })!.text,
+    ).toContain('Step back');
+    // Unstated sensor claims nothing either way.
+    expect(guidanceBanner(true, empty, 'right', null, false)!.text).toContain('Step back');
+    // A shooter framed from the knees up IS in frame and is never told
+    // otherwise — only a wholly empty frame earns that sentence.
+    const partial = { ...readyAll, fullBodyFrac: 0, fullBodyOk: false, ready: false };
+    expect(
+      guidanceBanner(true, partial, 'right', null, false, { camPosition: 'back' })!.text,
+    ).toContain('Step back');
+  });
+
   it('heavy tilt is an ADVISORY — it never pauses rep counting', () => {
     const banner = guidanceBanner(
       true,
@@ -1688,6 +1797,150 @@ describe('frameStall', () => {
     expect(frameStall(0, 0, true)).toBe(false);
     expect(frameStall(0, 250, true)).toBe(false);
     expect(frameStall(0, 750, true)).toBe(true);
+  });
+});
+
+describe('inferenceFailing', () => {
+  it('one frame that parsed is a counter-example — never "every frame"', () => {
+    expect(inferenceFailing(1, 500)).toBe(false);
+    expect(inferenceFailing(30, 30)).toBe(false);
+  });
+
+  it('a camera that has not started is not a model that is failing', () => {
+    // Both leave the SUCCESS counter at 0. The failure counter is the only
+    // thing that tells them apart — which is why the worklet's catch, which
+    // used to count nothing, now counts.
+    expect(inferenceFailing(0, 0)).toBe(false);
+  });
+
+  it('holds until enough frames have died to be a verdict, not a hiccup', () => {
+    expect(inferenceFailing(0, 1)).toBe(false);
+    expect(inferenceFailing(0, 11)).toBe(false);
+    expect(inferenceFailing(0, 12)).toBe(true);
+    expect(inferenceFailing(0, 900)).toBe(true);
+  });
+});
+
+describe('noFirstFrame', () => {
+  it('never fires once a frame has landed', () => {
+    expect(noFirstFrame(true, 60_000)).toBe(false);
+  });
+
+  it('gives a cold start a genuinely generous budget', () => {
+    // A cold AVCaptureSession plus the first CoreML Invoke on an old iPhone
+    // is seconds, not milliseconds. None of these may be called a failure.
+    expect(noFirstFrame(false, 0)).toBe(false);
+    expect(noFirstFrame(false, 3_000)).toBe(false);
+    expect(noFirstFrame(false, 8_000)).toBe(false);
+  });
+
+  it('diagnoses the case frameStall cannot reach, once the budget is spent', () => {
+    // frameStall(…, started=false) is false BY CONTRACT — correct for the
+    // stall banner (it must not call every cold start a failure) and the
+    // reason "no first frame, ever" had no diagnosis at all.
+    expect(frameStall(0, 60_000, false)).toBe(false);
+    expect(noFirstFrame(false, 12_000)).toBe(true);
+    expect(noFirstFrame(false, 60_000)).toBe(true);
+  });
+});
+
+describe('nobodyInFrame', () => {
+  const seen: FormCheckReadiness = {
+    fps: 30,
+    fullBodyFrac: 1,
+    armFrac: 1,
+    sideness: 0.8,
+    fpsOk: true,
+    fullBodyOk: true,
+    armOk: true,
+    sideOk: true,
+    ready: true,
+  };
+  const empty: FormCheckReadiness = {
+    ...seen,
+    fullBodyFrac: 0,
+    armFrac: 0,
+    fullBodyOk: false,
+    armOk: false,
+    sideness: null,
+    ready: false,
+  };
+
+  it('only ever speaks about the sensor that can be pointing away', () => {
+    expect(nobodyInFrame(empty, 'back')).toBe(true);
+    expect(nobodyInFrame(empty, 'front')).toBe(false);
+    expect(nobodyInFrame(empty, undefined)).toBe(false);
+    expect(nobodyInFrame(null, 'back')).toBe(false);
+  });
+
+  it('a badly framed shooter is IN frame and is never told otherwise', () => {
+    // Knees up: the body gate fails, the arm is plainly visible. "No one in
+    // frame" would be a false statement about them — they need "step back".
+    expect(nobodyInFrame({ ...empty, armFrac: 1 }, 'back')).toBe(false);
+    // A flickering false positive must not turn "nobody there" into a claim
+    // that somebody is, either.
+    expect(nobodyInFrame({ ...empty, fullBodyFrac: 0.04, armFrac: 0.02 }, 'back')).toBe(true);
+    expect(nobodyInFrame({ ...empty, fullBodyFrac: 0.3, armFrac: 0.3 }, 'back')).toBe(false);
+  });
+
+  it('says nothing while the body gate is passing', () => {
+    expect(nobodyInFrame(seen, 'back')).toBe(false);
+  });
+});
+
+describe('bannerActionKind — the words and the button can never disagree', () => {
+  const ready: FormCheckReadiness = {
+    fps: 30,
+    fullBodyFrac: 1,
+    armFrac: 1,
+    sideness: 0.8,
+    fpsOk: true,
+    fullBodyOk: true,
+    armOk: true,
+    sideOk: true,
+    ready: true,
+  };
+
+  it('a dead loader retries; a dead frame path drops the accelerated rung', () => {
+    expect(bannerActionKind(ready, { modelErr: 'boom' })).toBe('retryModel');
+    expect(bannerActionKind(ready, { inferenceFailing: true, warming: true })).toBe('poseCpu');
+    // Nothing left to switch to — the offer would be theatre.
+    expect(
+      bannerActionKind(ready, { inferenceFailing: true, poseCpuOnly: true }),
+    ).toBe('retryModel');
+  });
+
+  it('offers the flip exactly where the banner names it', () => {
+    // Inside the budget the honest answer is patience, not a button.
+    expect(bannerActionKind(ready, { warming: true })).toBeNull();
+    expect(bannerActionKind(ready, { warming: true, noFirstFrame: true })).toBe('flipCamera');
+    const empty = {
+      ...ready,
+      fullBodyFrac: 0,
+      armFrac: 0,
+      fullBodyOk: false,
+      armOk: false,
+      ready: false,
+    };
+    expect(bannerActionKind(empty, { camPosition: 'back' })).toBe('flipCamera');
+    expect(bannerActionKind(empty, { camPosition: 'front' })).toBeNull();
+  });
+
+  it('keeps the fps override exactly where the core will honour it', () => {
+    const slow = { ...ready, fps: FPS_OVERRIDE_MIN + 3, fpsOk: false, ready: false };
+    expect(bannerActionKind(slow, {})).toBe('countAnyway');
+    // Below the floor the core refuses the override — no velocity sample
+    // survives — so offering it would be a promise the screen can't keep.
+    expect(bannerActionKind({ ...slow, fps: FPS_OVERRIDE_MIN - 1 }, {})).toBeNull();
+    // Never over a stalled loop: the rate it would override is the last live
+    // frame's, and counting anyway needs frames.
+    expect(bannerActionKind(slow, { stalled: true })).toBeNull();
+  });
+
+  it('offers nothing when there is nothing to fix', () => {
+    expect(bannerActionKind(ready, {})).toBeNull();
+    expect(bannerActionKind(null, {})).toBeNull();
+    expect(bannerActionKind(ready, { stalled: true })).toBeNull();
   });
 });
 

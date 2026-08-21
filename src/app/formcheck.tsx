@@ -83,6 +83,38 @@
  * The default camera is now the BACK one: the capture protocol puts the phone
  * at the shooter's side 2–4 m away, where the screen cannot be read anyway,
  * and the back sensor is the better one.
+ *
+ * ── V5 — a silent bring-up failure is now a legible one ──────────────────────
+ * Nearly every way this screen can fail to come up collapsed into the same
+ * eternal "Starting the camera… Rep counting is paused." with amber chips, no
+ * diagnosis, and a most-prominent recovery control that cannot fix any of
+ * them. Three states now separate themselves out of it, each with the action
+ * that actually helps:
+ *  - EVERY FRAME IS FAILING. The worklet counted only SUCCESSES, and a model
+ *    whose delegate cannot Invoke this graph throws on every frame into a
+ *    bare `catch {}` — so the success counter never left 0 and the rail said
+ *    the camera was starting for the whole session. The catch now counts (it
+ *    still swallows: a bad frame must never kill the frame processor), and
+ *    (0 successes, N failures) is its own banner with "Switch to CPU", which
+ *    reloads the model with the accelerated rung dropped.
+ *  - NOBODY IN FRAME on the BACK camera. The back default is right for the
+ *    propped protocol and wrong for a person holding the phone to test, and
+ *    the only thing the rail said was "Step back — head to feet in frame":
+ *    a message about distance for a problem about facing. When nothing at all
+ *    is being seen on the sensor that can be pointing away, the rail says so
+ *    and puts Flip camera on the banner. The DEFAULT does not move.
+ *  - NO FIRST FRAME EVER. {@link frameStall} takes started=false and returns
+ *    false by contract, so a loop that never produced a frame could not be
+ *    diagnosed at all. It now gets its own bounded warm-up budget as a
+ *    DISTINCT, later state — the cold-start copy still owns the whole budget,
+ *    because calling a slow cold start a failure is the worse mistake.
+ * Every decision above is a pure exported helper next to frameStall and is
+ * unit-tested there. The WIRING (the worklet's failure counter, the rail's
+ * two new poll reads, the CPU reload) cannot run under jest — the camera and
+ * tflite are stubbed inert — and is DEVICE-VERIFIED ONLY.
+ * Honesty: none of these actions relaxes a gate or produces a number the app
+ * did not read. The CPU interpreter computes the same keypoints more slowly,
+ * and a slower rate is caught by the fps gate exactly as before.
  */
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
@@ -240,6 +272,45 @@ const WARMUP_FRAMES = 8;
 const FRAME_STALL_MS = 750;
 
 /**
+ * FAILED inferences — with ZERO successful ones — before the rail stops
+ * calling this a warm-up and says the pose model is not running.
+ *
+ * The worklet only advances its success counter after a whole
+ * resize → getPixelBuffer → runSync → parseMoveNet chain lands, so a delegate
+ * that constructs but cannot Invoke this graph throws on EVERY frame and the
+ * success counter never leaves 0 — "Starting the camera…", forever, over a
+ * live preview. 12 is ~0.4 s at 30 fps: long enough that a couple of ragged
+ * frames at capture start are not a verdict, short enough that the presenter
+ * is not reading a lie for a second.
+ */
+const INFERENCE_FAIL_FRAMES = 12;
+
+/**
+ * How long the live view may sit with NO first frame at all — none counted,
+ * none failed — before the rail offers a way out, ms.
+ *
+ * {@link frameStall} cannot cover this by contract: it takes `started=false`
+ * and returns false, because arming before the first frame would call every
+ * cold start a failure. That is the right call for the stall banner and it
+ * leaves "the loop never produced a frame" undiagnosable, so this budget is
+ * its own, LATER state. 12 s is deliberately generous — the same order as
+ * {@link MODEL_LOAD_TIMEOUT_MS} — because a cold AVCaptureSession + first
+ * CoreML Invoke on an A11 is seconds, and a premature accusation here would
+ * be worse than the silence it replaces. The clock only runs while a model is
+ * actually published (see the rail's poll): the camera must never be blamed
+ * for the loader's seconds.
+ */
+const FIRST_FRAME_BUDGET_MS = 12000;
+
+/**
+ * Body-visible fraction at or below which nothing is in frame AT ALL, as
+ * opposed to a shooter framed badly. Not zero: one flickering false-positive
+ * keypoint set in a two-second window must not turn "nobody is there" into
+ * "step back".
+ */
+const EMPTY_FRAME_FRAC = 0.05;
+
+/**
  * Frame timestamps are nanoseconds on Android and CMTime SECONDS since boot
  * on iOS. This used to be guessed from the magnitude (`timestamp > 1e6`),
  * which silently inverts on an iPhone that has been up for more than 11.6
@@ -325,8 +396,25 @@ function useFormPose(
   /** Non-null once BOTH loader rungs have failed (or the watchdog fired). */
   const [modelErr, setModelErr] = useState<string | null>(null);
   const [loadNonce, setLoadNonce] = useState(0);
+  /**
+   * Skip the accelerated rung entirely on the next load. A delegate can be
+   * constructed successfully and still be unable to Invoke this graph — the
+   * quantised-MoveNet-on-CoreML case — and re-running the IDENTICAL ladder is
+   * not a recovery. This is what the rail's "Switch to CPU" action changes,
+   * and it is the only escape on this screen from a rung that is broken for
+   * the whole install. It relaxes NO gate and invents no number: the CPU
+   * interpreter computes the same keypoints, more slowly, and a slower rate
+   * is caught by the fps gate exactly as it always was.
+   */
+  const [cpuOnly, setCpuOnly] = useState(false);
   const boxedPoseSv = useSharedValue<ReturnType<typeof NitroModules.box> | null>(null);
   const framesSv = useSharedValue(0);
+  /**
+   * Frames whose inference THREW. The success counter alone cannot tell
+   * "the camera has not started" from "every frame is dying": both leave it
+   * at 0. This is the second observable that separates them.
+   */
+  const failedSv = useSharedValue(0);
 
   // Ask for the camera at SCREEN MOUNT, not at Start: the OS dialog then
   // resolves while the presenter is reading the guide instead of landing in
@@ -353,6 +441,9 @@ function useFormPose(
       // The rail's "Starting the camera…" state is keyed off this counter, so
       // a restart reads as starting rather than as stale green chips.
       framesSv.value = 0;
+      // Both counters or neither: a stale failure count against a fresh
+      // success count would accuse the reacquire of the last run's deaths.
+      failedSv.value = 0;
     },
     onForeground: () => setForeground(true),
   });
@@ -373,8 +464,13 @@ function useFormPose(
     void (async () => {
       const accel: ('core-ml' | 'android-gpu')[] =
         Platform.OS === 'ios' ? ['core-ml'] : ['android-gpu'];
+      const cpu = [] as ('core-ml' | 'android-gpu')[];
+      // `cpuOnly` drops the accelerated rung: the presenter has just told the
+      // screen that the published model throws on every frame, and that rung
+      // is the suspect. Nothing else about the load changes.
+      const rungs = cpuOnly ? [cpu] : [accel, cpu];
       let lastError = '';
-      for (const d of [accel, [] as ('core-ml' | 'android-gpu')[]]) {
+      for (const d of rungs) {
         try {
           const m = await loadTensorflowModel(POSE_ASSET, d);
           if (!alive) return;
@@ -401,9 +497,22 @@ function useFormPose(
       clearTimeout(watchdog);
       boxedPoseSv.value = null;
     };
-  }, [boxedPoseSv, loadNonce]);
+  }, [boxedPoseSv, cpuOnly, loadNonce]);
 
   const retryModel = useCallback(() => setLoadNonce((n) => n + 1), []);
+
+  /**
+   * Reload WITHOUT the accelerated rung, and zero the frame counters so the
+   * rail judges the new interpreter on its own frames rather than on the dead
+   * one's. The re-entered loader effect parks the frame path (it nulls the
+   * box) until the CPU rung publishes.
+   */
+  const usePoseCpu = useCallback(() => {
+    framesSv.value = 0;
+    failedSv.value = 0;
+    setCpuOnly(true);
+    setLoadNonce((n) => n + 1);
+  }, [failedSv, framesSv]);
 
   // MoveNet wants NHWC uint8 192×192 (interleaved) — same config as the
   // engine's pose resizer.
@@ -468,7 +577,16 @@ function useFormPose(
           if (resized != null) resized.dispose();
         }
       } catch {
-        // A single bad frame must never kill the frame processor.
+        // A single bad frame must never kill the frame processor — that
+        // contract is unchanged. What changes is that the frame is now
+        // COUNTED: a model whose delegate cannot Invoke this graph throws
+        // here on every frame, and with nothing counting them the only word
+        // the screen had for it was "Starting the camera…", forever.
+        try {
+          failedSv.value += 1;
+        } catch {
+          // The counter must never become a second way to kill the loop.
+        }
       } finally {
         frame.dispose();
       }
@@ -484,8 +602,11 @@ function useFormPose(
     modelLoaded: model != null,
     modelErr,
     retryModel,
+    usePoseCpu,
+    poseCpuOnly: cpuOnly,
     foreground,
     framesSv,
+    failedSv,
   };
 }
 
@@ -627,6 +748,134 @@ export function frameStall(
   return framesDelta <= 0 && elapsedMs >= FRAME_STALL_MS;
 }
 
+/**
+ * EVERY-FRAME-FAILING DETECTOR (pure).
+ *
+ * The frame worklet advances its success counter only after a whole
+ * resize → getPixelBuffer → runSync → parseMoveNet chain lands; anything that
+ * throws is counted by the failure counter instead. A published model that
+ * the delegate cannot actually Invoke throws on every frame, so the two
+ * counters read (0 successes, N failures) — frames ARE arriving and every one
+ * of them is dying, which is a diagnosis, not a warm-up.
+ *
+ * Deliberately keyed on `okFrames === 0`: "every frame is failing" is a
+ * claim, and one frame that parsed is a counter-example. A loop that ran and
+ * then started throwing stops ADVANCING the success counter, which is the
+ * state {@link frameStall} already owns.
+ *
+ * @param okFrames     Frames that completed inference this run.
+ * @param failedFrames Frames whose inference threw this run.
+ */
+export function inferenceFailing(okFrames: number, failedFrames: number): boolean {
+  if (okFrames > 0) return false;
+  return failedFrames >= INFERENCE_FAIL_FRAMES;
+}
+
+/**
+ * NO-FIRST-FRAME BUDGET (pure).
+ *
+ * {@link frameStall} returns false for `started=false` BY CONTRACT, so a loop
+ * that never produced a first frame can never be called stalled — correct for
+ * that banner (it must not call every cold start a failure) and the reason
+ * "no frame, ever" had no diagnosis at all. This is that diagnosis: a
+ * distinct, LATER state that only speaks once a genuinely generous warm-up
+ * budget has elapsed with nothing to show for it.
+ *
+ * @param started   Has ANY frame arrived this run?
+ * @param elapsedMs Wall clock since the warm-up clock started — which the
+ *                  caller runs only while a model is published, so the camera
+ *                  is never blamed for the loader's seconds.
+ */
+export function noFirstFrame(started: boolean, elapsedMs: number): boolean {
+  if (started) return false;
+  return elapsedMs >= FIRST_FRAME_BUDGET_MS;
+}
+
+/**
+ * NOBODY-IN-FRAME DETECTOR (pure) — the back camera facing the wrong way.
+ *
+ * The screen opens on the BACK sensor, which is right for the documented
+ * protocol (phone propped at the shooter's side, screen turned away) and
+ * exactly wrong for the way anyone smoke-tests a build: holding the phone and
+ * looking at the screen. Then the sensor faces the room, MoveNet clears no
+ * keypoint, and the rail says "Step back — head to feet in frame" — a message
+ * about DISTANCE for a problem about FACING.
+ *
+ * The default is not changed here and must not be: propped-with-the-back-
+ * camera is the protocol the runbook is written around. What changes is that
+ * the mistake is now named and one tap from fixed.
+ *
+ * Both fractions, not just the body one: a shooter framed from the knees up
+ * has `fullBodyFrac` at 0 and `armFrac` near 1, and "no one in frame" would
+ * be a false statement about them. Only when nothing at all is being seen —
+ * on the sensor that can be pointing away — does this speak.
+ */
+export function nobodyInFrame(
+  r: FormCheckReadiness | null,
+  camPosition: 'front' | 'back' | undefined,
+): boolean {
+  if (r == null || camPosition !== 'back') return false;
+  if (r.fullBodyOk) return false;
+  return r.fullBodyFrac <= EMPTY_FRAME_FRAC && r.armFrac <= EMPTY_FRAME_FRAC;
+}
+
+/**
+ * The ONE action the banner may carry, by the same priority the banner text
+ * uses — pure, so the pairing can be pinned off-device.
+ *
+ *  - `retryModel`   the loader gave up; re-run it.
+ *  - `poseCpu`      a published model is throwing on every frame; reload it
+ *                   without the accelerated rung (the suspect).
+ *  - `flipCamera`   nothing is arriving, or nothing is in frame on the sensor
+ *                   that can be facing away. One tap re-negotiates the
+ *                   capture session on the other sensor AND turns the lens
+ *                   around — the two failures it answers.
+ *  - `countAnyway`  the measured rate is under the floor but above what the
+ *                   core will accept an override for.
+ *
+ * Every one of these is a RECOVERY, not a relaxation of a measurement: none
+ * of them makes the screen claim a number it did not read. `countAnyway` is
+ * the single one that relaxes a gate, and it is the pre-existing one whose
+ * reps already ride into the report marked low-confidence.
+ */
+export type BannerActionKind = 'retryModel' | 'poseCpu' | 'flipCamera' | 'countAnyway';
+
+export function bannerActionKind(
+  r: FormCheckReadiness | null,
+  opts: {
+    modelErr?: string | null;
+    /** See {@link inferenceFailing}. */
+    inferenceFailing?: boolean;
+    /** The accelerated rung is already dropped — there is nothing to switch
+     *  to, so the only honest remaining move is another load. */
+    poseCpuOnly?: boolean;
+    /** No frame has arrived yet this run. */
+    warming?: boolean;
+    /** …and the warm-up budget is spent — see {@link noFirstFrame}. */
+    noFirstFrame?: boolean;
+    /** Frames STARTED and then stopped — see {@link frameStall}. */
+    stalled?: boolean;
+    camPosition?: 'front' | 'back';
+  } = {},
+): BannerActionKind | null {
+  if (opts.modelErr != null) return 'retryModel';
+  if (opts.inferenceFailing === true) {
+    return opts.poseCpuOnly === true ? 'retryModel' : 'poseCpu';
+  }
+  // Nothing has arrived yet: past the budget the flip is the one control that
+  // rebuilds the capture session, and before it there is nothing to offer but
+  // patience.
+  if (opts.warming === true) return opts.noFirstFrame === true ? 'flipCamera' : null;
+  // A stalled loop is not a rate to override — see the banner's own note.
+  if (opts.stalled === true) return null;
+  if (r == null) return null;
+  if (nobodyInFrame(r, opts.camPosition)) return 'flipCamera';
+  // The core refuses an override below FPS_OVERRIDE_MIN (no velocity sample
+  // survives), so offering one there would be a promise the screen can't keep.
+  if (!r.fpsOk && r.fps >= FPS_OVERRIDE_MIN) return 'countAnyway';
+  return null;
+}
+
 /** The six live gauges the readiness chips draw, after the no-reading rule. */
 export interface ChipGauges {
   fps: number;
@@ -676,7 +925,8 @@ export function chipGauges(
 
 /**
  * The ONE guidance banner, chosen by priority: model error → model warmup →
- * camera warmup → frame stall → fps → full body → arm → side-profile →
+ * every-frame-failing → camera warmup (and, past its budget, no-first-frame)
+ * → frame stall → fps → nobody-in-frame → full body → arm → side-profile →
  * low-confidence advisories → all clear. Hard gates pause rep counting (the caller appends
  * the paused line); the advisories never pause — the capture is degraded,
  * not refused, and the honest move is to say so and keep counting.
@@ -696,8 +946,16 @@ export function guidanceBanner(
   opts: {
     /** Both loader rungs failed (or the watchdog fired) — Retry is offered. */
     modelErr?: string | null;
+    /** Frames are arriving and EVERY one is throwing — {@link inferenceFailing}. */
+    inferenceFailing?: boolean;
+    /** The accelerated rung is already dropped — there is no CPU left to
+     *  switch to, and saying otherwise would be an offer the screen can't
+     *  keep. */
+    poseCpuOnly?: boolean;
     /** No camera frame has arrived yet. */
     warming?: boolean;
+    /** …and the warm-up budget is spent — see {@link noFirstFrame}. */
+    noFirstFrame?: boolean;
     /** Frames STARTED and then stopped — see {@link frameStall}. */
     stalled?: boolean;
     /** Front camera in a dim room has a recovery the presenter can perform. */
@@ -708,10 +966,34 @@ export function guidanceBanner(
     return { text: "The pose model didn't load — tap Retry.", pauses: true };
   }
   if (!modelLoaded) return { text: 'Warming up the pose model…', pauses: true };
+  // A model that loaded and then throws on every single frame outranks the
+  // warm-up copy, because it IS what the warm-up copy was hiding: the counter
+  // it is keyed off can never move, so "Starting the camera…" would own the
+  // rail for the whole session. Ahead of the null-readiness return too — a
+  // dead frame path is worth saying with or without a session to poll.
+  if (opts.inferenceFailing === true) {
+    return {
+      text:
+        opts.poseCpuOnly === true
+          ? "The pose model isn't running — tap Retry."
+          : "The pose model isn't running — tap Switch to CPU.",
+      pauses: true,
+    };
+  }
   if (r == null) return null;
   // "No data yet" is NOT "measured and too slow". Blaming the room's light
   // before a single frame has landed is the first thing the audience reads.
   if (opts.warming === true || r.fps <= 0) {
+    // A DISTINCT, later state — never a widening of the line above it. Cold
+    // starts keep "Starting the camera…" for as long as the budget allows;
+    // only a warm-up that has run out of budget with nothing to show gets
+    // called anything else.
+    if (opts.noFirstFrame === true) {
+      return {
+        text: 'No camera frames yet — tap Flip camera to try the other one.',
+        pauses: true,
+      };
+    }
     return { text: 'Starting the camera…', pauses: true };
   }
   // Ahead of every readiness gate below, because those gates are reading a
@@ -730,6 +1012,13 @@ export function guidanceBanner(
           : `Pose is at ${Math.round(r.fps)} fps — too slow. More light helps.`,
       pauses: true,
     };
+  }
+  // Ahead of "Step back", because it is the same gate failing for a reason
+  // stepping back cannot fix: on the BACK sensor with nothing at all in
+  // frame, the likeliest truth is that the lens is pointing away from the
+  // person reading this. See {@link nobodyInFrame}.
+  if (nobodyInFrame(r, opts.camPosition)) {
+    return { text: 'No one in frame — tap Flip camera if it faces away.', pauses: true };
   }
   if (!r.fullBodyOk) return { text: 'Step back — head to feet in frame.', pauses: true };
   if (!collecting && !r.armOk) {
@@ -1530,8 +1819,12 @@ function LiveOverlay({
           modelLoaded={pose.modelLoaded}
           modelErr={pose.modelErr}
           onRetryModel={pose.retryModel}
+          onPoseCpu={pose.usePoseCpu}
+          poseCpuOnly={pose.poseCpuOnly}
           framesSv={pose.framesSv}
+          failedSv={pose.failedSv}
           camPosition={camPosition}
+          onFlipCamera={onFlipCamera}
           onFlipHand={onFlipHand}
           orientRef={orientRef}
           onFlipOrientation={onFlipOrientation}
@@ -1650,8 +1943,12 @@ function LiveRail({
   modelLoaded,
   modelErr,
   onRetryModel,
+  onPoseCpu,
+  poseCpuOnly,
   framesSv,
+  failedSv,
   camPosition,
+  onFlipCamera,
   onFlipHand,
   orientRef,
   onFlipOrientation,
@@ -1661,9 +1958,16 @@ function LiveRail({
   modelLoaded: boolean;
   modelErr: string | null;
   onRetryModel: () => void;
+  /** Reload the model without the accelerated rung. */
+  onPoseCpu: () => void;
+  /** The accelerated rung is already dropped — offering it again is a lie. */
+  poseCpuOnly: boolean;
   /** Frame counter written by the worklet; read ONLY inside the poll below. */
   framesSv: { value: number };
+  /** Failed-frame counter, same contract — see {@link inferenceFailing}. */
+  failedSv: { value: number };
   camPosition: 'front' | 'back';
+  onFlipCamera: () => void;
   onFlipHand: () => void;
   orientRef: React.MutableRefObject<PoseOrientationDetector>;
   onFlipOrientation: () => void;
@@ -1675,23 +1979,49 @@ function LiveRail({
   const [snap, setSnap] = useState<RailSnap | null>(() => railSnapOf(sessionRef.current));
   const [warming, setWarming] = useState(true);
   const [stalled, setStalled] = useState(false);
+  /** Frames are arriving and every one is throwing — {@link inferenceFailing}. */
+  const [failing, setFailing] = useState(false);
+  /** No first frame at all, past the budget — {@link noFirstFrame}. */
+  const [noFrames, setNoFrames] = useState(false);
   const [orient, setOrient] = useState<PoseOrientationState>(() =>
     orientRef.current.state(),
   );
   /** Frame counter and wall clock as of the last tick that saw NEW frames. */
   const lastFramesRef = useRef(0);
   const lastFramesAtRef = useRef(0);
+  /**
+   * When the warm-up budget started running. Held (reset to now) while no
+   * model is published, so the 12 s belongs to the CAMERA and never to the
+   * loader — which has its own watchdog and its own copy.
+   */
+  const warmClockRef = useRef(0);
+  const modelReadyRef = useRef(modelLoaded);
+  useEffect(() => {
+    modelReadyRef.current = modelLoaded;
+  }, [modelLoaded]);
   useEffect(() => {
     const id = setInterval(() => {
       setSnap(railSnapOf(sessionRef.current));
       // A SharedValue read on the JS thread is legal in a callback, never in
       // a render body — this is the file's existing poll pattern.
       const frames = framesSv?.value ?? 0;
+      const failed = failedSv?.value ?? 0;
       setWarming(frames < WARMUP_FRAMES);
       // Frame-stall watchdog on the SAME poll. Wall clock, not frame time:
       // the whole point is that no frame time is arriving.
       const now = Date.now();
       if (lastFramesAtRef.current === 0) lastFramesAtRef.current = now;
+      // Frames arriving, none surviving. Nothing to time — the counters say
+      // it outright.
+      setFailing(inferenceFailing(frames, failed));
+      // The warm-up budget. The clock is HELD at `now` while there is no
+      // model to run or a frame has already landed, so it only accumulates
+      // over the window where a published model and a live camera should be
+      // producing frames and are not.
+      if (warmClockRef.current === 0 || frames > 0 || !modelReadyRef.current) {
+        warmClockRef.current = now;
+      }
+      setNoFrames(noFirstFrame(frames > 0, now - warmClockRef.current));
       if (frames < lastFramesRef.current) {
         // The counter went BACKWARDS — the loop was reset (the foreground
         // guard zeroes it on every background/restore). That is a restart,
@@ -1714,7 +2044,7 @@ function LiveRail({
       setOrient(orientRef.current.state());
     }, READINESS_POLL_MS);
     return () => clearInterval(id);
-  }, [sessionRef, framesSv, orientRef]);
+  }, [sessionRef, framesSv, failedSv, orientRef]);
   const refresh = useCallback(() => setSnap(railSnapOf(sessionRef.current)), [sessionRef]);
   /** The override must land on the chip NOW, not on the next 250 ms tick. */
   const flipOrientation = useCallback(() => {
@@ -1744,44 +2074,67 @@ function LiveRail({
   const collecting = calibPhase === 'collecting';
   const railW = Math.max(0, winW - space.lg * 2 - space.md * 2);
 
+  const bannerOpts = {
+    modelErr,
+    inferenceFailing: failing,
+    poseCpuOnly,
+    warming,
+    noFirstFrame: noFrames,
+    stalled,
+    camPosition,
+  };
   const banner = guidanceBanner(
     modelLoaded,
     readiness,
     calib?.hand ?? 'right',
     calib,
     collecting,
-    { modelErr, warming, stalled, camPosition },
+    bannerOpts,
   );
 
   /**
-   * The ONE action attached to the banner. Both are escapes from a state the
-   * presenter cannot otherwise leave on stage: a loader that gave up, and a
-   * room + phone that cannot make the fps floor. "Count anyway" is offered
-   * only above FPS_OVERRIDE_MIN, below which the core refuses it because no
-   * velocity sample survives and it would be a promise it can't keep.
+   * The ONE action attached to the banner — WHICH one is decided by the pure
+   * {@link bannerActionKind}, in the same priority the banner text uses, so
+   * the words and the button can never disagree. Every one of them is an
+   * escape from a state the presenter cannot otherwise leave on stage: a
+   * loader that gave up, a published model that throws on every frame, a
+   * camera that has produced nothing (or is pointing at the wall), and a
+   * room + phone that cannot make the fps floor.
    *
-   * No "already overridden" test is needed: while the override is doing the
-   * work `fpsOk` is true, and below FPS_OVERRIDE_MIN the rate test hides the
-   * pill anyway — which is exactly where the core would refuse it.
+   * "Count anyway" needs no "already overridden" test: while the override is
+   * doing the work `fpsOk` is true, and below FPS_OVERRIDE_MIN the rate test
+   * hides the pill anyway — which is exactly where the core would refuse it.
    */
-  const canOverrideFps =
-    // Never over a stalled loop: the rate it would override is the last live
-    // frame's, and counting anyway is a promise the screen cannot keep while
-    // no frames arrive.
-    !stalled && readiness != null && !readiness.fpsOk && readiness.fps >= FPS_OVERRIDE_MIN;
+  const actionKind = bannerActionKind(readiness, bannerOpts);
   const bannerAction: { label: string; onPress: () => void } | null =
-    modelErr != null
+    actionKind === 'retryModel'
       ? { label: 'Retry', onPress: onRetryModel }
-      : canOverrideFps
+      : actionKind === 'poseCpu'
         ? {
-            label: 'Count anyway',
+            label: 'Switch to CPU',
             onPress: () => {
-              sessionRef.current?.overrideFpsFloor();
+              onPoseCpu();
               haptic.impactMedium();
-              refresh();
             },
           }
-        : null;
+        : actionKind === 'flipCamera'
+          ? {
+              label: 'Flip camera',
+              onPress: () => {
+                onFlipCamera();
+                haptic.impactMedium();
+              },
+            }
+          : actionKind === 'countAnyway'
+            ? {
+                label: 'Count anyway',
+                onPress: () => {
+                  sessionRef.current?.overrideFpsFloor();
+                  haptic.impactMedium();
+                  refresh();
+                },
+              }
+            : null;
 
   const chipRow = (
     <ChipRow

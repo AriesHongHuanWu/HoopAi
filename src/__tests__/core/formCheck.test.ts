@@ -1989,6 +1989,251 @@ describe('the side-profile gate and the angle confidence it costs', () => {
     expect(report.lowConfidence).toEqual({ reps: 0, reasons: [] });
     expect(session.reps[0]!.lowConfidence).toEqual([]);
   });
+
+  // -------------------------------------------------------------------------
+  // V5 — the side gate's labeled escape
+  // -------------------------------------------------------------------------
+
+  /** The same face-on run, with the presenter's side override switched on. */
+  const runOverridden = (): { session: FormCheckSession; reps: FormCheckRep[] } => {
+    const session = new FormCheckSession({
+      hand: 'right',
+      frameHeight: FRAME,
+      calibrate: false,
+    });
+    session.overrideSideFloor();
+    const reps: FormCheckRep[] = [];
+    for (let i = 0; i < 45; i++) {
+      const rep = session.push(faceOnPose(i * DT, i, 20));
+      if (rep != null) reps.push(rep);
+    }
+    return { session, reps };
+  };
+
+  test('the floor itself never moves', () => {
+    // The override is relief, not a redefinition — the exact contract the
+    // fps floor keeps. A sub-floor stance still refuses on its own.
+    expect(SIDE_PROFILE_MIN).toBe(0.35);
+    const win = (sideness: number | null, sideFloorOverride?: boolean) =>
+      readinessOf(
+        Array.from({ length: 30 }, (_, i) => ({
+          t: i * DT,
+          fullBody: true,
+          arm: true,
+          sideness,
+        })),
+        sideFloorOverride == null ? {} : { sideFloorOverride },
+      );
+    expect(win(0.2).sideOk).toBe(false);
+    expect(win(0.2).sideOverridden).toBe(false);
+    expect(win(0.2).ready).toBe(false);
+  });
+
+  test('with the override the session counts, and SAYS the stance is square', () => {
+    const r = readinessOf(
+      Array.from({ length: 30 }, (_, i) => ({
+        t: i * DT,
+        fullBody: true,
+        arm: true,
+        sideness: 0.2,
+      })),
+      { sideFloorOverride: true },
+    );
+    expect(r.ready).toBe(true);
+    expect(r.sideOk).toBe(true);
+    expect(r.sideOverridden).toBe(true);
+    // The measured stance is reported unchanged — no rounding it up to the
+    // floor, and it is emphatically not a trusted view.
+    expect(r.sideness).toBeCloseTo(0.2, 6);
+    expect(r.sideTrusted).toBe(false);
+  });
+
+  test('a stance that passes on its own is never marked overridden', () => {
+    const at = (sideness: number) =>
+      readinessOf(
+        Array.from({ length: 30 }, (_, i) => ({
+          t: i * DT,
+          fullBody: true,
+          arm: true,
+          sideness,
+        })),
+        { sideFloorOverride: true },
+      );
+    expect(at(0.9).sideOverridden).toBe(false);
+    expect(at(SIDE_PROFILE_MIN + 0.01).sideOverridden).toBe(false);
+  });
+
+  test('an unmeasurable stance is not something to override', () => {
+    // The gauge abstaining already PASSES the gate (occlusion is not
+    // evidence of facing the camera), so there is nothing here for the
+    // override to carry — and it must not claim there was.
+    const blind = readinessOf(
+      Array.from({ length: 30 }, (_, i) => ({
+        t: i * DT,
+        fullBody: true,
+        arm: true,
+        sideness: null,
+      })),
+      { sideFloorOverride: true },
+    );
+    expect(blind.sideness).toBeNull();
+    expect(blind.sideOk).toBe(true);
+    expect(blind.sideOverridden).toBe(false);
+  });
+
+  test('a face-on session counts nothing until the presenter overrides', () => {
+    expect(run(faceOnPose).reps).toHaveLength(0);
+
+    const { session, reps } = runOverridden();
+    expect(session.sideFloorOverridden).toBe(true);
+    expect(session.readiness.sideOverridden).toBe(true);
+    expect(session.readiness.sideness!).toBeLessThan(SIDE_PROFILE_MIN);
+    expect(reps).toHaveLength(1);
+
+    // The rep is real and it says what it cost: the SAME 'angledStance'
+    // reason a merely-angled stance carries, extended to the relaxed gate
+    // rather than duplicated by a second word for the same fact.
+    expect(reps[0]!.lowConfidence).toEqual(['angledStance']);
+    expect(session.finalizeSession().lowConfidence).toEqual({
+      reps: 1,
+      reasons: ['angledStance'],
+    });
+  });
+
+  test('THE GATE MOVED, THE MATH DID NOT: every 2D joint angle is refused', () => {
+    const { reps } = runOverridden();
+    const rep = reps[0]!;
+    // Below SIDE_PROFILE_MIN a joint angle is the projection of a limb
+    // swinging at the lens. Refused with its reason — never reported small.
+    expect(rep.metrics.setPointElbowDeg).toBeNull();
+    expect(rep.metrics.kneeFlexionDeg).toBeNull();
+    expect(rep.metrics.followThroughElbowDeg).toBeNull();
+    expect(rep.metrics.followThroughHeldMs).toBeNull();
+    const refusal = (rep.refusals ?? []).find((r) => r.kind === 'stanceNotSideOn');
+    expect(refusal).toBeDefined();
+    expect(refusal!.metrics).toEqual([
+      'setPointElbowDeg',
+      'kneeFlexionDeg',
+      'followThroughElbowDeg',
+      'followThroughHeldMs',
+    ]);
+    expect(refusal!.reason).toContain('side-on');
+    expectNoNaN(rep.metrics);
+  });
+
+  test('what a yaw cannot distort survives the refusal', () => {
+    // The escape has to buy something, or it is not an escape: a duration
+    // and a vertical position are the same number at any stance.
+    const { reps } = runOverridden();
+    const rep = reps[0]!;
+    expect(rep.metrics.releaseTimeMs).not.toBeNull();
+    expect(rep.metrics.releaseHeightNorm).not.toBeNull();
+    expect(rep.phases.riseMs).not.toBeNull();
+    expect(rep.phases.releaseMs).not.toBeNull();
+    // followMs is the same elbow streak the metric refused — the bar must
+    // not draw a hold the number above it declined to report.
+    expect(rep.phases.followMs).toBeNull();
+  });
+
+  test('a refused follow-through cannot produce a collapse cue', () => {
+    // The whole point of refusing rather than reporting small: a straight
+    // arm projected at 120° reads as an arm collapse nobody watched, and
+    // that cue is the loudest thing this screen says.
+    const { reps } = runOverridden();
+    expect(reps[0]!.tips.map((t) => t.metric)).not.toContain('followThroughElbowDeg');
+    expect(reps[0]!.tips.map((t) => t.metric)).not.toContain('setPointElbowDeg');
+  });
+
+  test('the angled-but-passing band is untouched by the escape', () => {
+    // REGRESSION PIN: the stance refusal is armed at SIDE_PROFILE_MIN, NOT
+    // at SIDE_PROFILE_TRUSTED. The 0.35–0.6 band is a shipped decision —
+    // count, report, qualify — and adding an escape below the floor must
+    // not quietly tighten the band above it.
+    const { reps } = run(angledPose);
+    expect(reps[0]!.metrics.setPointElbowDeg).not.toBeNull();
+    expect(reps[0]!.metrics.followThroughHeldMs).not.toBeNull();
+    expect(reps[0]!.phases.followMs).not.toBeNull();
+    expect((reps[0]!.refusals ?? []).map((r) => r.kind)).not.toContain(
+      'stanceNotSideOn',
+    );
+  });
+
+  test('switching the override back off restores the refusal', () => {
+    const session = new FormCheckSession({
+      hand: 'right',
+      frameHeight: FRAME,
+      calibrate: false,
+    });
+    session.overrideSideFloor();
+    for (let i = 0; i < 45; i++) session.push(faceOnPose(i * DT, i, 20));
+    expect(session.reps).toHaveLength(1);
+
+    session.overrideSideFloor(false);
+    expect(session.sideFloorOverridden).toBe(false);
+    for (let i = 0; i < 45; i++) session.push(faceOnPose(10 + i * DT, i, 20));
+    expect(session.reps).toHaveLength(1);
+    expect(session.readiness.sideOk).toBe(false);
+  });
+
+  test('the receipt survives into the SAVED record', () => {
+    // A relaxed capture that reappears in history looking as certain as a
+    // clean one is the one thing a relaxation may never do.
+    const { session } = runOverridden();
+    const report = session.finalizeSession();
+    const saved = savedLowConfidenceOf({
+      summaryJson: JSON.stringify({ lowConfidence: report.lowConfidence }),
+      medianPoseFps: report.medianPoseFps,
+    });
+    expect(saved).toEqual({ reps: 1, reasons: ['angledStance'] });
+  });
+});
+
+describe('computeRepMetrics under a square stance', () => {
+  const frames = Array.from({ length: 38 }, (_, i) => rawAt(i * DT, i, 20));
+  const releaseT = 23 * DT;
+  const base = { hand: 'right' as const, frameHeight: FRAME, releaseT };
+
+  test('REGRESSION PIN: absent / null / above-floor sideness are identical', () => {
+    const plain = computeRepMetricsDetailed(frames, base);
+    expect(computeRepMetricsDetailed(frames, { ...base, sideness: null })).toEqual(
+      plain,
+    );
+    expect(
+      computeRepMetricsDetailed(frames, { ...base, sideness: SIDE_PROFILE_MIN }),
+    ).toEqual(plain);
+    expect(computeRepMetricsDetailed(frames, { ...base, sideness: 0.9 })).toEqual(
+      plain,
+    );
+    expect(plain.metrics.setPointElbowDeg).not.toBeNull();
+  });
+
+  test('one hundredth below the floor refuses the angles and nothing else', () => {
+    const strict = computeRepMetricsDetailed(frames, base);
+    const refused = computeRepMetricsDetailed(frames, {
+      ...base,
+      sideness: SIDE_PROFILE_MIN - 0.01,
+    });
+    expect(refused.metrics.setPointElbowDeg).toBeNull();
+    expect(refused.metrics.kneeFlexionDeg).toBeNull();
+    expect(refused.metrics.followThroughElbowDeg).toBeNull();
+    expect(refused.metrics.followThroughHeldMs).toBeNull();
+    // Untouched: a duration and a normalized height are yaw-invariant.
+    expect(refused.metrics.releaseTimeMs).toBe(strict.metrics.releaseTimeMs);
+    expect(refused.metrics.releaseHeightNorm).toBe(strict.metrics.releaseHeightNorm);
+    expect(refused.refusals.map((r) => r.kind)).toEqual(['stanceNotSideOn']);
+  });
+
+  test('phase timing refuses the same hold, and keeps the rest', () => {
+    const strict = computePhaseTiming(frames, base);
+    const refused = computePhaseTiming(frames, {
+      ...base,
+      sideness: SIDE_PROFILE_MIN - 0.01,
+    });
+    expect(refused.followMs).toBeNull();
+    expect(refused.dipMs).toBe(strict.dipMs);
+    expect(refused.riseMs).toBe(strict.riseMs);
+    expect(refused.releaseMs).toBe(strict.releaseMs);
+  });
 });
 
 describe('calibration under a relaxed gate', () => {
@@ -2010,6 +2255,40 @@ describe('calibration under a relaxed gate', () => {
     runRep(session, { t0: 10, fps: 10, dipFrames: 20, parkFrames: 20 });
     expect(session.calibration.shadowReps).toBe(SHADOW_REPS_TARGET);
     expect(session.armed).toBe(true);
+  });
+
+  test('the side override unsticks one a front-facing room freezes', () => {
+    // Same shape of failure, and the one the owner actually hit on stage:
+    // the shadow collector reads the SIDE gate too, so a room that only
+    // lets the shooter stand square freezes the stepper on "practice motion
+    // 1 of 2" — before a single rep is ever attempted, with a red chip and
+    // an instruction ("turn 90°") the floor plan forbids.
+    const faceOn = (t: number, i: number, dipFrames: number): PoseFrame => {
+      const pose = poseAt(t, i, dipFrames);
+      pose.keypoints.left_shoulder = { x: 68, y: 45, score: 0.9 };
+      pose.keypoints.left_hip = { x: 73, y: 95, score: 0.9 };
+      return pose;
+    };
+    const shadowRep = (session: FormCheckSession, t0: number) => {
+      for (let i = 0; i < 41; i++) session.push(faceOn(t0 + i * DT, i, 20));
+    };
+
+    const stuck = new FormCheckSession({ hand: 'right', frameHeight: FRAME });
+    shadowRep(stuck, 0);
+    shadowRep(stuck, 10);
+    expect(stuck.readiness.sideOk).toBe(false);
+    expect(stuck.calibration.shadowReps).toBe(0);
+    expect(stuck.armed).toBe(false);
+
+    const session = new FormCheckSession({ hand: 'right', frameHeight: FRAME });
+    session.overrideSideFloor();
+    shadowRep(session, 0);
+    shadowRep(session, 10);
+    expect(session.calibration.shadowReps).toBe(SHADOW_REPS_TARGET);
+    expect(session.armed).toBe(true);
+    // The calibration receipt keeps the measured stance it was taken at —
+    // the gate opened, the gauge did not change its mind.
+    expect(session.calibration.sidenessAvg!).toBeLessThan(SIDE_PROFILE_MIN);
   });
 });
 
