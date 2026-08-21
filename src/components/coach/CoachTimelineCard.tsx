@@ -13,6 +13,7 @@ import { SectionEyebrow } from '@/components/ScreenHeader';
 import { Card, Row } from '@/components/ui';
 import { color, radius, space, type } from '@/constants/tokens';
 import type { TimelineWeek } from '@/core/coachInsights';
+import { haptic } from '@/utils/haptics';
 
 /** Fixed bar-track height; WSS (0–100) maps directly onto it as a % fill. */
 const TRACK_HEIGHT = 72;
@@ -64,7 +65,12 @@ export function CoachTimelineCard({
                     }`
                   : `Week of ${w.label}: no sessions.`
               }
-              onPress={() => onPickWeek(w.weekStartMs)}
+              onPress={() => {
+                // A column IS a week pick — same tick, same change-only gate,
+                // as the SegmentedTabs and week chips around it.
+                if (!active) haptic.selection();
+                onPickWeek(w.weekStartMs);
+              }}
               style={({ pressed }) => [styles.colPress, pressed && !active && { opacity: 0.7 }]}
             >
               <View style={[styles.track, active && styles.trackActive]}>

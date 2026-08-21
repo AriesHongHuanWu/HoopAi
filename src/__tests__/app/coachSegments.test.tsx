@@ -43,6 +43,12 @@ jest.mock('react-native-reanimated', () => ({
   },
   Easing: { out: (fn: unknown) => fn, cubic: 'cubic' },
   FadeInDown: { duration: () => ({ delay: () => ({}) }) },
+  // Builder stubs for the wave-3 choreography: the segment body's keyed
+  // week-swap fade (FadeIn, built at module scope) and the skeleton dissolve
+  // (FadeOut). Chainable to .reduceMotion, which is all the screen asks of them.
+  FadeIn: { duration: () => ({ reduceMotion: () => ({}) }) },
+  FadeOut: { duration: () => ({ reduceMotion: () => ({}) }) },
+  ReduceMotion: { System: 'system' },
   useReducedMotion: () => true,
   useSharedValue: (value: unknown) => ({ value }),
   useAnimatedStyle: () => ({}),
@@ -57,6 +63,9 @@ jest.mock('@/components/motion', () => ({
   __esModule: true,
   useCardStagger: jest.fn(() => mockEnter),
   useStaggerAt: jest.fn(() => () => undefined),
+  // Skeleton dissolve — undefined is the barrel's own reduced-motion idiom,
+  // so the loading branch renders as a plain View here.
+  useSkeletonExit: jest.fn(() => undefined),
   // The hero rolls its numerals with MotionStat (a CountUp TextInput — its
   // value is invisible to textOf anyway) and the loading state is Shimmer
   // blocks; both are presentation, so they stub to null here. The headline

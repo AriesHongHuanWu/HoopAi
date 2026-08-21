@@ -13,13 +13,25 @@
  * statically. Empty state until at least two sessions exist.
  */
 import { Ionicons } from '@expo/vector-icons';
-import { Canvas, Rect, RoundedRect } from '@shopify/react-native-skia';
+import { Canvas, Group, Rect, RoundedRect, Skia } from '@shopify/react-native-skia';
 import { router, useFocusEffect } from 'expo-router';
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
-import Animated, { FadeIn, ReduceMotion } from 'react-native-reanimated';
+import Animated, {
+  Easing,
+  FadeIn,
+  FadeOut,
+  ReduceMotion,
+  useDerivedValue,
+  useReducedMotion,
+  useSharedValue,
+  withTiming,
+} from 'react-native-reanimated';
 
 import { CountUp, MotionStat, useCardStagger } from '@/components/motion';
+// Concrete path, not the '@/components/motion' barrel: suites mock the barrel
+// down to the symbols they assert on (the SegmentedTabs idiom).
+import { useSkeletonExit } from '@/components/motion/stagger';
 import { SectionEyebrow } from '@/components/ScreenHeader';
 import { BackPill } from '@/components/ShotList';
 import {
@@ -106,23 +118,96 @@ function TrendChip({ deltaPct }: { deltaPct: number }) {
 /**
  * One bar per session, rounded caps. Accent-consistent recency ramp: older
  * bars sit low-heat, the latest runs full leather. Gridlines at 100 / 50 /
- * baseline anchor the y-axis labels beside the canvas.
+ * baseline anchor the y-axis labels beside the canvas — they stay STATIC;
+ * only the bars rise.
+ *
+ * Rise-on follows Sparkline's exact opt-in `progress` contract: PASSING the
+ * prop opts the bars into a rise to the target on mount (the lens switch
+ * remounts this subtree, so the rise re-fires naturally); omitting it — or
+ * reduced motion — renders the finished chart statically, pixel-identical.
+ * One shared value drives ONE derived SkPath holding every bar at h × reveal;
+ * it clips the static recency-ramped bars, so each bar rises to its real
+ * height while keeping its own opacity, and at reveal 1 the frame is exactly
+ * the static chart. Worklet boundary rule: the derived worklet calls no JS
+ * helpers — inline arithmetic over plain numbers plus Skia factories only
+ * (the Sparkline precedent); withTiming only, nothing repeats.
  */
 function TrendBars({
   data,
   width,
   height,
+  progress,
 }: {
   data: readonly number[];
   width: number;
   height: number;
+  /** Reveal target, 0..1 — see the rise-on contract above. */
+  progress?: number;
 }) {
+  const reducedMotion = useReducedMotion();
+  const target = clamp01(progress ?? 1);
+  const animateIn = progress != null && !reducedMotion;
   const n = data.length;
   const slot = width / n;
   const barW = Math.min(28, Math.max(4, slot * 0.55));
   const capR = Math.min(4, barW / 2);
   /** Same value→y mapping the bars use, so gridlines are honest. */
   const yFor = (v: number) => height - clamp01(v) * (height - 4);
+
+  // Rise head — starts at 0 only when it will actually rise; otherwise it
+  // holds the target so the first frame IS the finished chart.
+  const reveal = useSharedValue(animateIn ? 0 : target);
+  useEffect(() => {
+    if (!animateIn) {
+      reveal.value = target;
+      return;
+    }
+    reveal.value = withTiming(target, {
+      duration: motion.celebrate,
+      easing: Easing.out(Easing.cubic),
+    });
+  }, [animateIn, target, reveal]);
+
+  // Plain numbers only past this line — the worklet closes over this array,
+  // never over helpers (clamp01/yFor run here, on the JS side).
+  const geom = useMemo(
+    () =>
+      data.map((v, i) => ({
+        x: slot * i + (slot - barW) / 2,
+        h: Math.max(3, clamp01(v) * (height - 4)),
+      })),
+    [data, slot, barW, height],
+  );
+
+  // The ONE derived SkPath: every bar at h × reveal, clipping the static bars.
+  const risePath = useDerivedValue(() => {
+    const path = Skia.Path.Make();
+    for (let i = 0; i < geom.length; i++) {
+      const h = geom[i]!.h * reveal.value;
+      if (h <= 0) continue;
+      const r = Math.min(capR, h / 2);
+      path.addRRect(Skia.RRectXY(Skia.XYWHRect(geom[i]!.x, height - h, barW, h), r, r));
+    }
+    return path;
+  });
+
+  const bars = data.map((v, i) => {
+    const { x, h } = geom[i]!;
+    const latest = i === n - 1;
+    return (
+      <RoundedRect
+        key={i}
+        x={x}
+        y={height - h}
+        width={barW}
+        height={h}
+        r={capR}
+        color={color.accent}
+        opacity={latest ? 1 : 0.16 + (n > 1 ? (i / (n - 1)) * 0.22 : 0)}
+      />
+    );
+  });
+
   return (
     <Canvas style={{ width, height }}>
       <Rect
@@ -142,23 +227,7 @@ function TrendBars({
         opacity={0.6}
       />
       <Rect x={0} y={height - 1} width={width} height={1} color={color.border} />
-      {data.map((v, i) => {
-        const h = Math.max(3, clamp01(v) * (height - 4));
-        const x = slot * i + (slot - barW) / 2;
-        const latest = i === n - 1;
-        return (
-          <RoundedRect
-            key={i}
-            x={x}
-            y={height - h}
-            width={barW}
-            height={h}
-            r={capR}
-            color={color.accent}
-            opacity={latest ? 1 : 0.16 + (n > 1 ? (i / (n - 1)) * 0.22 : 0)}
-          />
-        );
-      })}
+      {animateIn ? <Group clip={risePath}>{bars}</Group> : bars}
     </Canvas>
   );
 }
@@ -167,11 +236,13 @@ function TrendBars({
 type ChartKind = 'line' | 'bars';
 
 /**
- * Lens-swap entrance: the chart-slot subtree is keyed on the lens, so picking
- * Line/Bars remounts it and the new lens cross-fades in (no exiting — the old
- * lens unmounts instantly by design, per the shared disclosure grammar).
+ * Lens-swap crossfade: the chart-slot subtree is keyed on the lens, so picking
+ * Line/Bars remounts it — the new lens fades in while the outgoing one takes
+ * a shorter dissolve (instant beat), so the swap reads as one crossfade
+ * instead of a hard subtree cut.
  */
 const lensSwap = FadeIn.duration(motion.quick).reduceMotion(ReduceMotion.System);
+const lensExit = FadeOut.duration(motion.instant).reduceMotion(ReduceMotion.System);
 
 export default function TrendsScreen() {
   const [trend, setTrend] = useState<TrendPoint[] | null>(null);
@@ -189,6 +260,8 @@ export default function TrendsScreen() {
   // Canonical card cascade — this screen keeps its wider 70 ms step
   // (undefined under reduced motion — cards render static).
   const enter = useCardStagger({ stepMs: 70, durationMs: motion.standard });
+  // The one skeleton dissolve (undefined under reduced motion — plain swap).
+  const skeletonExit = useSkeletonExit();
 
   useFocusEffect(
     useCallback(() => {
@@ -270,8 +343,11 @@ export default function TrendsScreen() {
       )}
 
       {trend === null ? (
-        // One loading language: the shape of the hero card that is arriving.
-        <SkeletonCard hero lines={2} />
+        // One loading language: the shape of the hero card that is arriving,
+        // dissolving under it (see useSkeletonExit).
+        <Animated.View exiting={skeletonExit}>
+          <SkeletonCard hero lines={2} />
+        </Animated.View>
       ) : !enough ? (
         <EmptyState
           title="Not enough sessions yet"
@@ -316,8 +392,8 @@ export default function TrendsScreen() {
               style={{ marginTop: space.lg }}
             />
             {/* Keyed on the lens: a SegmentedTabs switch remounts this subtree
-                and the incoming chart fades in (see lensSwap). */}
-            <Animated.View key={chartKind} entering={lensSwap}>
+                and the lenses crossfade (see lensSwap / lensExit). */}
+            <Animated.View key={chartKind} entering={lensSwap} exiting={lensExit}>
               {chartKind === 'line' ? (
                 <>
                   <View style={{ marginTop: space.lg }}>
@@ -351,7 +427,11 @@ export default function TrendsScreen() {
                       <MeasuredWidth
                         accessibilityLabel={`Bar chart of FG% for the last ${points.length} sessions`}
                       >
-                        {(w) => <TrendBars data={points} width={w} height={BARS_H} />}
+                        {(w) => (
+                          // progress opts the bars into their rise-on (static
+                          // under reduced motion — see TrendBars).
+                          <TrendBars data={points} width={w} height={BARS_H} progress={1} />
+                        )}
                       </MeasuredWidth>
                     </View>
                   </Row>
@@ -409,7 +489,9 @@ export default function TrendsScreen() {
               <SectionEyebrow icon="analytics-outline" style={styles.cardKicker}>
                 Entry angles — last session
               </SectionEyebrow>
-              <AngleHistogram angles={lastAngles} />
+              {/* progress opts the bars into their rise-on (the Sparkline
+                  contract — static under reduced motion). */}
+              <AngleHistogram angles={lastAngles} progress={1} />
             </Card>
           )}
 

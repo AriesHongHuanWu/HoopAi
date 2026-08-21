@@ -19,6 +19,7 @@ import { color, font, radius, space, type } from '@/constants/tokens';
 import type { WeeklyAssignment } from '@/core/coachEngine';
 import { getDrill } from '@/core/drills';
 import { LEVEL_LABEL, type DrillLevel } from '@/core/drillProgression';
+import { haptic } from '@/utils/haptics';
 
 export function WeeklyPlanCard({
   plan,
@@ -65,12 +66,14 @@ export function WeeklyPlanCard({
                 <Pressable
                   accessibilityRole="button"
                   accessibilityLabel={`Practice ${drill.title} at level ${lv?.level ?? 1} in Train`}
-                  onPress={() =>
+                  onPress={() => {
+                    // Arming a drill — the same tick modes' pickDrill carries.
+                    haptic.impactLight();
                     router.push({
                       pathname: '/modes',
                       params: { drill: item.drillId, level: String(lv?.level ?? 1) },
-                    })
-                  }
+                    });
+                  }}
                   style={({ pressed }) => [styles.planDrill, pressed && { opacity: 0.6 }]}
                 >
                   <Ionicons name="basketball" size={14} color={color.accent} />

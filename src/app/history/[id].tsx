@@ -19,6 +19,9 @@ import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import Animated, { FadeInDown, LinearTransition, ReduceMotion } from 'react-native-reanimated';
 
 import { useCardStagger } from '@/components/motion';
+// Concrete path, not the '@/components/motion' barrel: suites mock the barrel
+// down to the symbols they assert on (the SegmentedTabs idiom).
+import { useSkeletonExit } from '@/components/motion/stagger';
 import { SectionEyebrow } from '@/components/ScreenHeader';
 import { haptic } from '@/utils/haptics';
 import { shareSessionCard } from '@/components/ShareCard';
@@ -42,6 +45,9 @@ import { RecheckPanel } from '@/components/RecheckPanel';
 import { ReelEntryButton } from '@/components/ReelEntryButton';
 import { ModeMark } from '@/components/modes/modeIdentity';
 import { Card, Chip, ErrorCard, Eyebrow, PillButton, Row, Screen, SkeletonCard } from '@/components/ui';
+// The SAME hero the recap renders once loaded — so the continuity preview and
+// the arrived card are the same object, not two shapes that swap.
+import { HeroArcStat } from '@/components/charts/ShotChart';
 import { color, motion, radius, space, touch, type } from '@/constants/tokens';
 import { getModeDef, type ModeState } from '@/core/gameModes';
 import type { SessionStats } from '@/core/types';
@@ -205,13 +211,52 @@ function ModeBreakdownCard({ modeId, resultJson }: { modeId: string; resultJson:
   );
 }
 
+/** Defensive route-param number parse — the id idiom, for continuity params. */
+function paramNumber(v: string | undefined): number | null {
+  const n = typeof v === 'string' && v.length > 0 ? Number(v) : Number.NaN;
+  return Number.isFinite(n) ? n : null;
+}
+
 export default function SessionDetailScreen() {
   // Canonical card cascade over the detail's top-level blocks, in visual
   // order (undefined under reduced motion — everything renders static).
   const enter = useCardStagger();
-  const { id } = useLocalSearchParams<{ id: string }>();
+  // Skeleton dissolve for the loading placeholder (undefined under reduced
+  // motion — the swap becomes a plain cut).
+  const skeletonExit = useSkeletonExit();
+  const { id, startedAt, fg, makes, attempts, unsure, tag: tagParam } =
+    useLocalSearchParams<{
+      id: string;
+      // Card-to-detail continuity params (optional — deep links omit them):
+      // the SAME persisted row values the pushing card displayed, replaced by
+      // the identical loaded record. Never projected.
+      startedAt?: string;
+      fg?: string;
+      makes?: string;
+      attempts?: string;
+      unsure?: string;
+      tag?: string;
+    }>();
   const parsed = typeof id === 'string' ? Number(id) : Number.NaN;
   const sessionId = Number.isInteger(parsed) ? parsed : null;
+  const previewStartedAt = paramNumber(startedAt);
+  const previewFg = paramNumber(fg);
+  const previewMakes = paramNumber(makes);
+  const previewAttempts = paramNumber(attempts);
+  const previewUnsure = paramNumber(unsure);
+  const previewTag = typeof tagParam === 'string' ? tagParam : null;
+  /**
+   * True when the push carried the row's numbers — Block 0 + a static hero
+   * FG% render immediately and the skeleton demotes below the hero.
+   *
+   * The unsure count is REQUIRED, not optional. A preview hero without it
+   * would show a bare FG% for a beat and only then grow an "N shots unsure"
+   * line above itself — a moment of unearned certainty, and a numeral that
+   * jumps. History omits the param past its first page (pips uncapped is an
+   * N+1 read), and those rows simply take the plain skeleton path instead.
+   */
+  const hasPreview =
+    previewStartedAt != null && previewFg != null && previewUnsure != null;
   const record = useSessionRecord(sessionId);
   const session = record.session;
   // Corrections (tap or swipe) run through the persisted-record pathway with
@@ -238,7 +283,7 @@ export default function SessionDetailScreen() {
   // Tag: optimistic local override on top of the persisted label so the
   // pill updates immediately; persists via updateSessionLabel (never throws).
   const [tagOverride, setTagOverride] = useState<string | null>(null);
-  const tag = tagOverride ?? (session?.label ?? '');
+  const tag = tagOverride ?? session?.label ?? previewTag ?? '';
   const onTagChange = (next: string) => {
     setTagOverride(next);
     if (sessionId != null) void updateSessionLabel(sessionId, next);
@@ -338,8 +383,79 @@ export default function SessionDetailScreen() {
       <Eyebrow>Session</Eyebrow>
 
       {!record.loaded ? (
-        // One loading language: the shape of the recap card that is arriving.
-        <SkeletonCard hero lines={2} />
+        hasPreview ? (
+          // Card-to-detail continuity: the header and hero FG% render
+          // IMMEDIATELY from the pushed row values (the same persisted
+          // numbers the card showed — the loaded record replaces them with
+          // identical ones). Only the blocks below the hero keep a skeleton,
+          // so known data never hides behind a placeholder. Kept in the
+          // pinned block order: header → recap → …
+          <View>
+            <Text style={styles.title}>
+              {formatSessionDate(previewStartedAt!)}
+            </Text>
+            <Row gap={space.xs} style={styles.metaRow}>
+              <Ionicons
+                name="time-outline"
+                size={12}
+                color={color.textFaint}
+                importantForAccessibility="no"
+              />
+              <Text style={styles.meta}>
+                {formatSessionTime(previewStartedAt!)}
+              </Text>
+            </Row>
+            {/* The tag pill renders here too — same component, same wrapper,
+                same height as loaded Block 0. Omitting it made the hero sit
+                one row higher and then drop when the record arrived. */}
+            <View style={{ marginTop: space.sm }}>
+              <TagField tag={tag} onChange={onTagChange} />
+            </View>
+            <View style={styles.recapSection}>
+              {/* Integrity line FIRST, exactly where the loaded recap puts it
+                  and in the same words. hasPreview requires the unsure count,
+                  so this is the real number the card was showing — never an
+                  assumed zero. */}
+              {previewUnsure! > 0 && (
+                <View
+                  style={styles.integrityLine}
+                  accessible
+                  accessibilityLabel={`${previewUnsure} ${
+                    previewUnsure === 1 ? 'shot' : 'shots'
+                  } flagged unsure and not counted, so your field-goal percentage stays honest.`}
+                >
+                  <View style={styles.integrityDot} importantForAccessibility="no" />
+                  <Text style={styles.integrityText}>
+                    {`${previewUnsure} ${previewUnsure === 1 ? 'shot' : 'shots'} unsure — not counted either way`}
+                  </Text>
+                </View>
+              )}
+              {/* STATIC hero — no roll-in, and the SAME HeroArcStat the recap
+                  renders. With the tag pill and the integrity line both in
+                  place above it, the numeral holds its exact y when the
+                  record lands. Caption carries only what the row actually
+                  holds (points are a shot-level sum, so no PTS half is
+                  invented). */}
+              <HeroArcStat
+                value={`${previewFg}%`}
+                caption={
+                  previewMakes != null && previewAttempts != null
+                    ? `${previewMakes}/${previewAttempts} FG`
+                    : undefined
+                }
+              />
+              <Animated.View exiting={skeletonExit} style={styles.previewSkeleton}>
+                <SkeletonCard lines={3} />
+              </Animated.View>
+            </View>
+          </View>
+        ) : (
+          // Deep-link path (no params): the one loading language — the shape
+          // of the recap card that is arriving, dissolving under it.
+          <Animated.View exiting={skeletonExit}>
+            <SkeletonCard hero lines={2} />
+          </Animated.View>
+        )
       ) : session == null ? (
         <ErrorCard
           title="Session not found"
@@ -490,7 +606,9 @@ export default function SessionDetailScreen() {
               <SectionEyebrow icon="analytics-outline" style={styles.cardKicker}>
                 Entry angles
               </SectionEyebrow>
-              <AngleHistogram angles={entryAngles} />
+              {/* progress opts the bars into their rise-on (the Sparkline
+                  contract — static under reduced motion). */}
+              <AngleHistogram angles={entryAngles} progress={1} />
             </Card>
           </View>
         </View>
@@ -602,7 +720,9 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingHorizontal: space.md,
     borderRadius: radius.pill,
-    borderWidth: 1,
+    // One elevation scale: plain boundaries are hairlines; borderWidth 1 is
+    // reserved for hierarchy and identity rings.
+    borderWidth: StyleSheet.hairlineWidth,
     borderColor: color.border,
     backgroundColor: color.surfaceRaised,
   },
@@ -616,7 +736,14 @@ const styles = StyleSheet.create({
     minHeight: touch.minTarget,
     paddingHorizontal: space.md,
     borderRadius: radius.pill,
+    // NOT a hairline: this is the ACTIVE edit ring, and the elevation scale
+    // keeps borderWidth 1 for hierarchy and identity rings. Only plain
+    // color.border boundaries drop to a hairline (see tagPill).
     borderWidth: 1,
     borderColor: color.accent,
+  },
+  /** The demoted skeleton — only the blocks BELOW the known hero load. */
+  previewSkeleton: {
+    marginTop: space.xl,
   },
 });

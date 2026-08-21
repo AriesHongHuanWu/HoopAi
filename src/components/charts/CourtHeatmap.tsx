@@ -8,20 +8,32 @@
 import React from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
-import { color, radius, space, type } from '@/constants/tokens';
+import { color, palette, radius, space, type } from '@/constants/tokens';
 import { cellLabel, type Heatmap, type HeatBand, type HeatZone } from '@/core/heatmap';
 
 const ZONES: HeatZone[] = ['left', 'center', 'right'];
 // Rows render far (top, out at the arc) → near (bottom, at the rim).
 const BANDS: HeatBand[] = ['far', 'mid', 'near'];
 
+/** Hex → "r,g,b" so the tier fills are BUILT from the palette (the previous
+ *  cold tier had drifted off token brick, and empty cells sat on pure white
+ *  instead of chalk). */
+function rgbOf(hex: string): string {
+  return `${parseInt(hex.slice(1, 3), 16)},${parseInt(hex.slice(3, 5), 16)},${parseInt(hex.slice(5, 7), 16)}`;
+}
+
+const HOT_RGB = rgbOf(palette.swish);
+const WARM_RGB = rgbOf(palette.leather);
+const COLD_RGB = rgbOf(palette.brick);
+const EMPTY_FILL = `rgba(${rgbOf(palette.chalk)},0.035)`;
+
 /** Zone fill by FG% (3 tiers) with intensity scaling by attempts. */
 function heatFill(fgPct: number, attempts: number): string {
-  if (attempts === 0) return 'rgba(255,255,255,0.035)';
+  if (attempts === 0) return EMPTY_FILL;
   const a = 0.18 + 0.5 * Math.min(1, attempts / 8);
-  if (fgPct >= 0.55) return `rgba(47,214,163,${a})`; // hot — swish green
-  if (fgPct >= 0.4) return `rgba(240,90,36,${a})`; // warm — accent orange
-  return `rgba(214,69,65,${a})`; // cold — brick red
+  if (fgPct >= 0.55) return `rgba(${HOT_RGB},${a})`; // hot — swish green
+  if (fgPct >= 0.4) return `rgba(${WARM_RGB},${a})`; // warm — accent orange
+  return `rgba(${COLD_RGB},${a})`; // cold — brick red
 }
 
 export function CourtHeatmap({ heatmap }: { heatmap: Heatmap }) {

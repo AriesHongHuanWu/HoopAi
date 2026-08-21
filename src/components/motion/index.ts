@@ -31,3 +31,8 @@ export {
 } from './ArcReveal';
 export { CountUp, type CountUpProps } from '../fx/CountUp';
 export { Confetti, type ConfettiProps } from '../fx/Confetti';
+// Wave-3 primitives. Both are ALSO importable from their concrete paths —
+// suites that stub this barrel down to a few symbols reach past it the same
+// way ui.tsx reaches for PressScale.
+export { SheetScrim, type SheetScrimProps } from './SheetScrim';
+export { SelectableChip, type SelectableChipProps } from './SelectableChip';

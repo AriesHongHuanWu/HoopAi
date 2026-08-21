@@ -174,6 +174,15 @@ function getShimmer(): ShimmerComponent {
   return shimmerImpl;
 }
 
+/** Skia, on first use only — same reason as getShimmer: keep the ESM-only
+ *  package out of every suite that renders a Card but never draws the arc. */
+type SkiaModule = typeof import('@shopify/react-native-skia');
+let skiaImpl: SkiaModule | null = null;
+function getSkia(): SkiaModule {
+  skiaImpl ??= require('@shopify/react-native-skia') as SkiaModule;
+  return skiaImpl;
+}
+
 /** Hero block height — a `statLarge` numeral is what's arriving. */
 const SKELETON_HERO_H = type.statLarge.lineHeight;
 /** Text-bar height: the ink height of a body line, not its full line box. */
@@ -377,7 +386,7 @@ export function Chip({
     make: { bg: color.makeTint, fg: color.make },
     miss: { bg: color.missTint, fg: color.miss },
     accent: { bg: color.accentTint, fg: color.accent },
-    unsure: { bg: 'rgba(232,184,79,0.14)', fg: color.unsure },
+    unsure: { bg: color.unsureTint, fg: color.unsure },
   };
   const t = tones[tone]!;
   return (
@@ -474,24 +483,78 @@ export function ErrorCard({
   );
 }
 
+/** Height of the EmptyArc vignette, px. */
+const EMPTY_ARC_H = 120;
+
+/**
+ * EmptyArc — the dashed shot arc waiting on its first session (the Data tab's
+ * empty-state vignette, promoted to the kit so every empty screen can draw
+ * the same signature). Static Skia, zero worklets, and deliberately NO
+ * looping ambient motion; hidden from assistive tech as pure decoration.
+ */
+export function EmptyArc() {
+  const { Canvas, Circle, DashPathEffect, Line, Path, vec } = getSkia();
+  const [w, setW] = useState(0);
+  const h = EMPTY_ARC_H;
+  const rimX = w * 0.82;
+  const rimY = h * 0.36;
+  const path = `M ${w * 0.08} ${h - 18} Q ${w * 0.45} ${-h * 0.28} ${rimX} ${rimY - 10}`;
+  return (
+    <View
+      onLayout={(e) => setW(e.nativeEvent.layout.width)}
+      style={{ height: h }}
+      importantForAccessibility="no-hide-descendants"
+    >
+      {w > 0 && (
+        <Canvas style={{ width: w, height: h }}>
+          <Line
+            p1={vec(space.sm, h - 12)}
+            p2={vec(w - space.sm, h - 12)}
+            color={color.border}
+            strokeWidth={2}
+          />
+          <Path path={path} style="stroke" strokeWidth={2.5} color={color.accent} opacity={0.5}>
+            <DashPathEffect intervals={[1, 9]} />
+          </Path>
+          <Circle cx={rimX} cy={rimY} r={9} style="stroke" color={color.textDim} strokeWidth={3} />
+          <Line
+            p1={vec(rimX + 15, rimY - 24)}
+            p2={vec(rimX + 15, rimY + 9)}
+            color={color.textDim}
+            strokeWidth={3}
+          />
+        </Canvas>
+      )}
+    </View>
+  );
+}
+
 /**
  * EmptyState — same shape as ErrorCard for the non-error "nothing here yet"
  * case (distinct name so call sites read intent-first), with an optional
- * primary action instead of a retry.
+ * primary action instead of a retry. `illustration: 'arc'` draws the shared
+ * EmptyArc vignette above the title (opt-in — plain empties stay plain).
  */
 export function EmptyState({
   title,
   body,
   actionLabel,
   onAction,
+  illustration,
 }: {
   title: string;
   body?: string;
   actionLabel?: string;
   onAction?: () => void;
+  illustration?: 'arc';
 }) {
   return (
     <Card>
+      {illustration === 'arc' && (
+        <View style={styles.emptyIllo}>
+          <EmptyArc />
+        </View>
+      )}
       <Text style={styles.errorTitle} accessibilityRole="header">
         {title}
       </Text>
@@ -603,5 +666,8 @@ const styles = StyleSheet.create({
   errorRetry: {
     marginTop: space.lg,
     alignSelf: 'flex-start',
+  },
+  emptyIllo: {
+    marginBottom: space.md,
   },
 });

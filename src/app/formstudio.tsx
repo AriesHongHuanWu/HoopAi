@@ -29,6 +29,9 @@ import {
 import { FadeInDown, useReducedMotion } from 'react-native-reanimated';
 
 import { BackPill } from '@/components/ShotList';
+// Concrete path (the ScreenHeader precedent): suites that stub the motion
+// barrel down to a few symbols must not lose the wave-3 chip.
+import { SelectableChip } from '@/components/motion/SelectableChip';
 import { FormMotionStage, type StagePhase } from '@/components/charts/FormMotionStage';
 import { Card, Chip, EmptyState, PillButton, Row, Screen } from '@/components/ui';
 import { color, font, radius, space, type } from '@/constants/tokens';
@@ -40,6 +43,7 @@ import { posturePlan, type PostureCue } from '@/core/postureFix';
 import type { ResolvedShot } from '@/core/types';
 import { useSession } from '@/state/sessionStore';
 import { useSettings } from '@/state/settingsStore';
+import { haptic } from '@/utils/haptics';
 
 /** Frames-per-second the autoplay loop advances the aligned timeline. */
 const PLAY_FPS = 20;
@@ -228,17 +232,17 @@ export default function FormStudioScreen() {
                 contentContainerStyle={styles.pickerRow}
               >
                 {studioShots.map((s, i) => (
-                  <Pressable
+                  <SelectableChip
                     key={s.shot.id}
+                    label={s.label}
+                    selected={i === shotIdx}
                     onPress={() => setShotIdx(i)}
-                    accessibilityRole="button"
-                    accessibilityState={{ selected: i === shotIdx }}
-                    style={[styles.pick, i === shotIdx && styles.pickOn]}
-                  >
-                    <Text style={[styles.pickText, i === shotIdx && styles.pickTextOn]}>
-                      {s.label}
-                    </Text>
-                  </Pressable>
+                    // Rest fill is this screen's raised pill, not a transparent
+                    // accent — the chip crossfades from it into accentTint.
+                    unselectedTint={color.surfaceRaised}
+                    style={styles.pick}
+                    labelStyle={styles.pickText}
+                  />
                 ))}
               </ScrollView>
 
@@ -249,17 +253,15 @@ export default function FormStudioScreen() {
                 contentContainerStyle={styles.pickerRow}
               >
                 {PLAYER_ARCHETYPES.map((a, i) => (
-                  <Pressable
+                  <SelectableChip
                     key={a.name}
+                    label={a.name}
+                    selected={i === archIdx}
                     onPress={() => setArchIdx(i)}
-                    accessibilityRole="button"
-                    accessibilityState={{ selected: i === archIdx }}
-                    style={[styles.pick, i === archIdx && styles.pickOn]}
-                  >
-                    <Text style={[styles.pickText, i === archIdx && styles.pickTextOn]}>
-                      {a.name}
-                    </Text>
-                  </Pressable>
+                    unselectedTint={color.surfaceRaised}
+                    style={styles.pick}
+                    labelStyle={styles.pickText}
+                  />
                 ))}
               </ScrollView>
             </Card>
@@ -311,11 +313,14 @@ export default function FormStudioScreen() {
                 {/* Transport: reduced-motion → frame stepper; else play/slow-mo. */}
                 {reducedMotion ? (
                   <Row gap={space.md} style={styles.transport}>
+                    {/* Per-frame steppers: pressed feedback only. No haptic —
+                        these are repeat-tap surfaces and a tick per frame
+                        would buzz continuously. */}
                     <Pressable
                       onPress={() => stepFrame(-1)}
                       accessibilityRole="button"
                       accessibilityLabel="Previous frame"
-                      style={styles.stepBtn}
+                      style={({ pressed }) => [styles.stepBtn, pressed && { opacity: 0.7 }]}
                     >
                       <Ionicons name="play-back" size={18} color={color.text} />
                     </Pressable>
@@ -324,7 +329,7 @@ export default function FormStudioScreen() {
                       onPress={() => stepFrame(1)}
                       accessibilityRole="button"
                       accessibilityLabel="Next frame"
-                      style={styles.stepBtn}
+                      style={({ pressed }) => [styles.stepBtn, pressed && { opacity: 0.7 }]}
                     >
                       <Ionicons name="play-forward" size={18} color={color.text} />
                     </Pressable>
@@ -338,7 +343,7 @@ export default function FormStudioScreen() {
                       }}
                       accessibilityRole="button"
                       accessibilityLabel={playing ? 'Pause' : 'Play'}
-                      style={styles.playBtn}
+                      style={({ pressed }) => [styles.playBtn, pressed && { opacity: 0.85 }]}
                     >
                       <Ionicons
                         name={playing ? 'pause' : 'play'}
@@ -347,11 +352,18 @@ export default function FormStudioScreen() {
                       />
                     </Pressable>
                     <Pressable
-                      onPress={() => setSlowMo((s) => !s)}
+                      onPress={() => {
+                        haptic.selection();
+                        setSlowMo((s) => !s);
+                      }}
                       accessibilityRole="button"
                       accessibilityState={{ selected: slowMo }}
                       accessibilityLabel="Toggle quarter-speed slow motion"
-                      style={[styles.slowBtn, slowMo && styles.slowBtnOn]}
+                      style={({ pressed }) => [
+                        styles.slowBtn,
+                        slowMo && styles.slowBtnOn,
+                        pressed && { opacity: 0.7 },
+                      ]}
                     >
                       <Text style={[styles.slowText, slowMo && styles.slowTextOn]}>0.25×</Text>
                     </Pressable>
@@ -483,24 +495,19 @@ const styles = StyleSheet.create({
     paddingVertical: 2,
     paddingRight: space.sm,
   },
+  // Geometry only: SelectableChip owns the fill, the border color and the
+  // label color in both its animated and reduced-motion branches, so anything
+  // colored here would fight the selected state. minHeight 0 keeps the
+  // picker's compact row exactly as it was.
   pick: {
+    minHeight: 0,
     borderRadius: radius.pill,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: color.border,
-    backgroundColor: color.surfaceRaised,
     paddingHorizontal: space.md,
     paddingVertical: 7,
   },
-  pickOn: {
-    backgroundColor: color.accentTint,
-    borderColor: color.accent,
-  },
   pickText: {
     ...type.caption,
-    color: color.textDim,
-  },
-  pickTextOn: {
-    color: color.accent,
   },
   frameCounter: {
     ...type.micro,

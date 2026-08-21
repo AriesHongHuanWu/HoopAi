@@ -118,8 +118,16 @@ export default function RootLayout() {
             }}
           >
             {/* The bottom-tab navigator is the app's home surface; every other
-                route in this Stack pushes full-bleed OVER its tab bar. */}
-            <Stack.Screen name="(tabs)" />
+                route in this Stack pushes full-bleed OVER its tab bar.
+                CLASS 3 — PAYOFF ARRIVAL (same class as session/summary below):
+                Home is where sessions RESOLVE to, never a level deeper, so
+                arriving here (onboarding's finish, summary's Done) cross-fades
+                instead of sliding. Safe by construction: the initial mount
+                does not animate; a native-stack POP reverses the POPPED
+                screen's animation, so back-navigation and dismissTo('/history')
+                are untouched; and fade is already the reduced-motion
+                substitute, so both paths converge on the same arrival. */}
+            <Stack.Screen name="(tabs)" options={{ animation: 'fade' }} />
 
             {/* CLASS 2 — TAKEOVER: a screen that owns the device until it is
                 finished. Arrives by cross-fade (there is no "back" to point

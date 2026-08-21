@@ -43,8 +43,16 @@ import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import React, { useEffect, useMemo, useState } from 'react';
 import { Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
+import Animated, { FadeIn, ReduceMotion } from 'react-native-reanimated';
 
-import { MotionStat, Shimmer, arcMotif, useCardStagger, useStaggerAt } from '@/components/motion';
+import {
+  MotionStat,
+  Shimmer,
+  arcMotif,
+  useCardStagger,
+  useSkeletonExit,
+  useStaggerAt,
+} from '@/components/motion';
 import { BodyDirectionCard } from '@/components/BodyDirectionCard';
 import { SectionEyebrow } from '@/components/ScreenHeader';
 import { SegmentedTabs, type SegmentedTabItem } from '@/components/SegmentedTabs';
@@ -85,6 +93,7 @@ import { matchArchetype, type ArchetypeMatch } from '@/core/shotLab';
 import { listFormSessions, listSessions, sessionShots, shotFromRow, type FormSessionRow } from '@/data/db';
 import { recomputeStats } from '@/core/stats';
 import { useProfile } from '@/state/profileStore';
+import { haptic } from '@/utils/haptics';
 import type { ChartZone } from '@/core/types';
 
 /** Sessions scanned back for the coach window (a couple of months of weeks). */
@@ -98,6 +107,14 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  */
 type CoachSegment = 'week' | 'form' | 'plan';
 const DEFAULT_SEGMENT: CoachSegment = 'week';
+
+/**
+ * Week page-turn — trends' lensSwap idiom. The segment body is keyed on the
+ * active week, so picking a week (selector chip or timeline bar) remounts the
+ * whole section under the re-rolling hero: cards re-run their entrance ladder
+ * instead of swapping data in place. Reduced motion snaps.
+ */
+const weekSwap = FadeIn.duration(motion.quick).reduceMotion(ReduceMotion.System);
 
 // ---------------------------------------------------------------------------
 // WSS ring (the hero's expressive moment)
@@ -229,6 +246,7 @@ function WeeklyHero({ report }: { report: WeeklyReport }) {
             accessibilityLabel="Share my week"
             hitSlop={8}
             onPress={() => {
+              haptic.impactMedium();
               void shareWeekCard({
                 label: report.label,
                 fgPct: report.fgPct,
@@ -289,7 +307,10 @@ function WeeklyHero({ report }: { report: WeeklyReport }) {
             <Pressable
               accessibilityRole="button"
               accessibilityLabel={`Best session this week, ${Math.round(report.bestSession.fgPct * 100)} percent field goals. Opens the session.`}
-              onPress={() => router.push(`/history/${report.bestSession!.id}`)}
+              onPress={() => {
+                haptic.selection();
+                router.push(`/history/${report.bestSession!.id}`);
+              }}
               style={({ pressed }) => [styles.receipt, pressed && styles.receiptPressed]}
             >
               <Text style={styles.receiptLabel}>BEST SESSION</Text>
@@ -307,7 +328,7 @@ function WeeklyHero({ report }: { report: WeeklyReport }) {
 
       {/* Next-week focus banner */}
       <View style={styles.focusBanner} accessible accessibilityLabel={`Next week's focus: ${report.nextWeekFocus}`}>
-        <Ionicons name="flag" size={14} color={color.accent} />
+        <Ionicons name="flag" size={iconSize.sm} color={color.accent} />
         <Text style={styles.focusText} numberOfLines={2}>
           <Text style={styles.focusKicker}>NEXT WEEK  </Text>
           {report.nextWeekFocus}
@@ -536,6 +557,14 @@ export default function CoachScreen() {
   const formChecks = load.status === 'ready' ? load.formChecks : [];
   const weeks = useMemo(() => weeksOf(sessions), [sessions]);
   const activeWeek = weeks[Math.min(weekIndex, Math.max(0, weeks.length - 1))];
+  /**
+   * Remount key for the segment bodies (the week page-turn). Falls back to the
+   * index: a `key` of undefined is not a key at all — React reads the element
+   * as unkeyed, reuses it across weeks, and the page-turn silently stops
+   * playing. The rendered branch always has a week, but the key must not be
+   * the thing that depends on it.
+   */
+  const weekKey = String(activeWeek?.startMs ?? weekIndex);
 
   const report = useMemo<WeeklyReport | null>(() => {
     if (activeWeek == null) return null;
@@ -661,6 +690,10 @@ export default function CoachScreen() {
   // that a section is short enough to arrive as one gesture.
   const cardEnter = useCardStagger({ stepMs: 70, durationMs: 380 });
 
+  // The ONE skeleton dissolve — the loading block fades out under the
+  // arriving hero instead of hard-cutting (undefined under reduced motion).
+  const skeletonExit = useSkeletonExit();
+
   // Badges carry only counts the screen actually has: findings for the week
   // read, assignments for the plan. Zero renders no badge (SegmentedTabs drops
   // it), so an empty section never advertises phantom content.
@@ -694,7 +727,11 @@ export default function CoachScreen() {
         </View>
 
         {load.status === 'loading' ? (
-          <CoachSkeleton />
+          // The stack View above stays mounted across the swap, so the
+          // skeleton can dissolve under the content that replaces it.
+          <Animated.View exiting={skeletonExit}>
+            <CoachSkeleton />
+          </Animated.View>
         ) : load.status === 'error' ? (
           <EmptyState
             title="Couldn't load your sessions"
@@ -721,7 +758,7 @@ export default function CoachScreen() {
                 the populated path byte-identical. */}
             <Card entering={cardEnter(1)}>
               <Row gap={space.sm} style={styles.promoHead}>
-                <Ionicons name="scan-outline" size={18} color={color.accent} />
+                <Ionicons name="scan-outline" size={iconSize.lg} color={color.accent} />
                 <Text style={styles.promoTitle} numberOfLines={1}>
                   Form Check
                 </Text>
@@ -731,7 +768,10 @@ export default function CoachScreen() {
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel="Check your shooting form with the camera. Motion only, no ball needed. Opens Form Check."
-                onPress={() => router.push('/formcheck')}
+                onPress={() => {
+                  haptic.selection();
+                  router.push('/formcheck');
+                }}
                 style={({ pressed }) => [styles.promoRow, pressed && { opacity: 0.6 }]}
               >
                 <Ionicons name="body-outline" size={iconSize.sm} color={color.accent} />
@@ -767,7 +807,11 @@ export default function CoachScreen() {
 
               {/* ---- [This week] what happened ---------------------------- */}
               {segment === 'week' && (
-                <View style={styles.segmentBody}>
+                <Animated.View
+                  key={weekKey}
+                  entering={weekSwap}
+                  style={styles.segmentBody}
+                >
                   {/* Four-week timeline — tap a bar to jump the week selector */}
                   {timeline.some((w) => w.sessions > 0) && (
                     <View style={styles.timelineBlock}>
@@ -829,6 +873,7 @@ export default function CoachScreen() {
                       icon="share-outline"
                       variant="ghost"
                       onPress={() => {
+                        haptic.impactMedium();
                         void shareCoachCard({
                           label: report.label,
                           wss: report.wss,
@@ -842,12 +887,16 @@ export default function CoachScreen() {
                       }}
                     />
                   )}
-                </View>
+                </Animated.View>
               )}
 
               {/* ---- [Your form] what my shot looks like ------------------ */}
               {segment === 'form' && (
-                <View style={styles.segmentBody}>
+                <Animated.View
+                  key={weekKey}
+                  entering={weekSwap}
+                  style={styles.segmentBody}
+                >
                   {/* THE headline read: body data sets the style DIRECTION, the
                       user's own logged shots set the practice DISTANCE. Each half
                       renders its own honest gap state when its data is missing. */}
@@ -867,7 +916,7 @@ export default function CoachScreen() {
                       while routing to the other. */}
                   <Card entering={cardEnter(3)}>
                     <Row gap={space.sm} style={styles.promoHead}>
-                      <Ionicons name="body-outline" size={18} color={color.accent} />
+                      <Ionicons name="body-outline" size={iconSize.lg} color={color.accent} />
                       <Text style={styles.promoTitle} numberOfLines={1}>
                         Form Studio
                       </Text>
@@ -880,7 +929,10 @@ export default function CoachScreen() {
                     <Pressable
                       accessibilityRole="button"
                       accessibilityLabel="Compare your motion side-by-side. Opens Form Studio."
-                      onPress={() => router.push('/formstudio')}
+                      onPress={() => {
+                        haptic.selection();
+                        router.push('/formstudio');
+                      }}
                       style={({ pressed }) => [styles.promoRow, pressed && { opacity: 0.6 }]}
                     >
                       <Ionicons name="albums-outline" size={iconSize.sm} color={color.accent} />
@@ -890,7 +942,10 @@ export default function CoachScreen() {
                     <Pressable
                       accessibilityRole="button"
                       accessibilityLabel="Orbit your shot in 3D, estimated. Opens Form Studio 3D."
-                      onPress={() => router.push('/formstudio3d')}
+                      onPress={() => {
+                        haptic.selection();
+                        router.push('/formstudio3d');
+                      }}
                       style={({ pressed }) => [styles.promoRow, pressed && { opacity: 0.6 }]}
                     >
                       <Ionicons name="cube-outline" size={iconSize.sm} color={color.accent} />
@@ -909,7 +964,7 @@ export default function CoachScreen() {
                       verbatim. Routes to the feature screen either way. */}
                   <Card entering={cardEnter(4)}>
                     <Row gap={space.sm} style={styles.promoHead}>
-                      <Ionicons name="scan-outline" size={18} color={color.accent} />
+                      <Ionicons name="scan-outline" size={iconSize.lg} color={color.accent} />
                       <Text style={styles.promoTitle} numberOfLines={1}>
                         Form Check
                       </Text>
@@ -921,7 +976,10 @@ export default function CoachScreen() {
                         <Pressable
                           accessibilityRole="button"
                           accessibilityLabel="Check your shooting form with the camera. Motion only, no ball needed. Opens Form Check."
-                          onPress={() => router.push('/formcheck')}
+                          onPress={() => {
+                            haptic.selection();
+                            router.push('/formcheck');
+                          }}
                           style={({ pressed }) => [styles.promoRow, pressed && { opacity: 0.6 }]}
                         >
                           <Ionicons name="body-outline" size={iconSize.sm} color={color.accent} />
@@ -958,7 +1016,10 @@ export default function CoachScreen() {
                         <Pressable
                           accessibilityRole="button"
                           accessibilityLabel="Check your shooting form again. Motion only, no ball needed. Opens Form Check."
-                          onPress={() => router.push('/formcheck')}
+                          onPress={() => {
+                            haptic.selection();
+                            router.push('/formcheck');
+                          }}
                           style={({ pressed }) => [styles.promoRow, pressed && { opacity: 0.6 }]}
                         >
                           <Ionicons name="body-outline" size={iconSize.sm} color={color.accent} />
@@ -978,12 +1039,16 @@ export default function CoachScreen() {
                     onOpenFormStudio={() => router.push('/formstudio')}
                     entering={cardEnter(5)}
                   />
-                </View>
+                </Animated.View>
               )}
 
               {/* ---- [Plan] what to do about it --------------------------- */}
               {segment === 'plan' && (
-                <View style={styles.segmentBody}>
+                <Animated.View
+                  key={weekKey}
+                  entering={weekSwap}
+                  style={styles.segmentBody}
+                >
                   {/* This week's plan — the top fixes + drills to groove them */}
                   {plan.length > 0 ? (
                     <WeeklyPlanCard plan={plan} levels={planLevels} entering={cardEnter(0)} />
@@ -1021,7 +1086,7 @@ export default function CoachScreen() {
                       style={styles.deepBtn}
                     />
                   </Card>
-                </View>
+                </Animated.View>
               )}
             </View>
           </>

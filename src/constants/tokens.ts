@@ -33,6 +33,13 @@ export const palette = {
    * selected week chip, WSS badge) was hand-rolling its own 0.4–0.5 alpha.
    */
   leatherEdge: 'rgba(240, 90, 36, 0.45)',
+  /**
+   * Leather at ZERO alpha — the transparent end of an accent-tint crossfade.
+   * A fade between `transparent` and leatherTint ramps through black on some
+   * interpolators; starting on the same hue keeps the ramp clean. Lives here
+   * so a leather hue change carries, instead of desyncing a hardcoded rgba.
+   */
+  leatherClear: 'rgba(240, 90, 36, 0)',
 
   /** Make — cyan-leaning green (separable for deuteranopia). */
   swish: '#2FD6A3',
@@ -53,6 +60,13 @@ export const palette = {
   /** 3-point accent — downtown gold, distinct from make-green & leather. */
   downtown: '#F2C14E',
   downtownTint: 'rgba(242, 193, 78, 0.16)',
+  /**
+   * Dimmed downtown gold as a SOLID, pre-blended on `court` (downtown at
+   * ~66%). Replaces the 0.6-alpha gold that secondary 3PT numerals wore,
+   * which measured under AA: this hue holds 5.2:1 on surface and 4.7:1 on
+   * surfaceRaised, so the "/attempts" half of a gold split stays legible.
+   */
+  downtownDim: '#A9883B',
 
   /** Ghost Challenge — spectral violet, distinct from paint blue & leather. */
   spectral: '#9C7BF0',
@@ -105,6 +119,8 @@ export const color = {
   accentTint: palette.leatherTint,
   /** Border for accent-emphasized surfaces — see palette.leatherEdge. */
   accentEdge: palette.leatherEdge,
+  /** Accent at zero alpha — the rest end of a tint fade. See leatherClear. */
+  accentClear: palette.leatherClear,
   onAccent: palette.onLeather,
   make: palette.swish,
   makeTint: palette.swishTint,
@@ -129,6 +145,8 @@ export const color = {
   /** 3-point shots / stat pill accent. */
   threePt: palette.downtown,
   threePtTint: palette.downtownTint,
+  /** Dimmed 3-point gold for secondary numerals — see palette.downtownDim. */
+  threePtDim: palette.downtownDim,
   /** Ghost Challenge accent (mode identity, race HUD). */
   ghost: palette.spectral,
   ghostTint: palette.spectralTint,
@@ -307,4 +325,23 @@ export const motion = {
 /** Hit targets: 48dp Android / 44pt iOS floor. */
 export const touch = {
   minTarget: 48,
+} as const;
+
+/**
+ * Elevation. depth = borders and surface steps; shadow.pop is the ONLY drop
+ * shadow, reserved for transient overlays. Everything that sits IN the page
+ * separates with hairlines and surface/surfaceRaised steps (borderWidth
+ * 1/1.5 marks hierarchy and identity rings); only a surface floating OVER
+ * the darkened app (coach-mark popover, and overlays like it) earns the
+ * drop. The recipe is the CoachMarks popover's — soft and wide, no harsh
+ * edge — on the warm coal instead of pure black.
+ */
+export const shadow = {
+  pop: {
+    shadowColor: palette.coal,
+    shadowOpacity: 0.4,
+    shadowRadius: 24,
+    shadowOffset: { width: 0, height: 12 },
+    elevation: 12,
+  },
 } as const;

@@ -34,6 +34,9 @@ import {
   exportHardExamples,
 } from '@/data/hardExamples';
 import { useCardStagger, type EnteringProp } from '@/components/motion';
+// Concrete path (the ScreenHeader precedent): suites that stub the motion
+// barrel down to the stagger hooks must not lose the wave-3 primitive.
+import { SelectableChip } from '@/components/motion/SelectableChip';
 import { haptic } from '@/utils/haptics';
 import { useSettings, type DetectionRate } from '@/state/settingsStore';
 
@@ -101,6 +104,7 @@ function MoreDetail({ label, detail }: { label: string; detail: string }) {
         accessibilityState={{ expanded }}
         hitSlop={space.sm}
         onPress={() => setExpanded((v) => !v)}
+        style={({ pressed }) => pressed && { opacity: 0.7 }}
       >
         <Text style={styles.moreLink}>{expanded ? 'Less' : 'More'}</Text>
       </Pressable>
@@ -167,25 +171,12 @@ function SelectChip({
   selected: boolean;
   onPress: () => void;
 }) {
-  return (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityLabel={label}
-      accessibilityState={{ selected }}
-      onPress={onPress}
-      style={({ pressed }) => [
-        styles.selectChip,
-        selected && styles.selectChipSelected,
-        pressed && !selected && styles.selectChipPressed,
-        pressed && selected && { opacity: 0.82 },
-      ]}
-    >
-      {selected && <Ionicons name="checkmark" size={iconSize.sm} color={color.accent} />}
-      <Text style={[styles.selectChipLabel, selected && styles.selectChipLabelSelected]}>
-        {label}
-      </Text>
-    </Pressable>
-  );
+  // SelectableChip owns the press spring, the selected-color crossfade and
+  // the (settings-gated) selection tick - call sites no longer tick() here.
+  // Same a11y shape as the hand-rolled chip: role button, label, {selected}.
+  // `check` keeps the checkmark the hand-rolled chip carried: on a picker
+  // the chip is the ONLY record of the choice, so it may not be color-only.
+  return <SelectableChip check label={label} selected={selected} onPress={onPress} />;
 }
 
 /** Radio row with a one-line blurb per choice (mirrors settings.tsx OptionRow). */
@@ -360,7 +351,6 @@ export default function SettingsAdvancedScreen() {
               label="Auto · recommended"
               selected={detectorModel === 'auto'}
               onPress={() => {
-                tick();
                 set('detectorModel', 'auto');
               }}
             />
@@ -368,7 +358,6 @@ export default function SettingsAdvancedScreen() {
               label="Standard · fast"
               selected={detectorModel === 'standard'}
               onPress={() => {
-                tick();
                 set('detectorModel', 'standard');
               }}
             />
@@ -376,7 +365,6 @@ export default function SettingsAdvancedScreen() {
               label="Precise · accurate"
               selected={detectorModel === 'precise'}
               onPress={() => {
-                tick();
                 set('detectorModel', 'precise');
               }}
             />
@@ -403,7 +391,6 @@ export default function SettingsAdvancedScreen() {
               label="YOLOX · default"
               selected={detectorEngine === 'yolox'}
               onPress={() => {
-                tick();
                 set('detectorEngine', 'yolox');
               }}
             />
@@ -411,7 +398,6 @@ export default function SettingsAdvancedScreen() {
               label="YOLO11 · fallback"
               selected={detectorEngine === 'yolo'}
               onPress={() => {
-                tick();
                 set('detectorEngine', 'yolo');
               }}
             />
@@ -435,7 +421,6 @@ export default function SettingsAdvancedScreen() {
                   label="CPU · accurate"
                   selected={detectorAccel === 'cpu'}
                   onPress={() => {
-                    tick();
                     set('detectorAccel', 'cpu');
                   }}
                 />
@@ -443,7 +428,6 @@ export default function SettingsAdvancedScreen() {
                   label="GPU · faster"
                   selected={detectorAccel === 'gpu'}
                   onPress={() => {
-                    tick();
                     set('detectorAccel', 'gpu');
                   }}
                 />
@@ -466,7 +450,6 @@ export default function SettingsAdvancedScreen() {
               label="Quality · best ball"
               selected={perfMode === 'quality'}
               onPress={() => {
-                tick();
                 set('perfMode', 'quality');
               }}
             />
@@ -474,7 +457,6 @@ export default function SettingsAdvancedScreen() {
               label="Speed · faster"
               selected={perfMode === 'speed'}
               onPress={() => {
-                tick();
                 set('perfMode', 'speed');
               }}
             />
@@ -755,32 +737,6 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
     gap: space.sm,
     marginTop: space.md,
-  },
-  selectChip: {
-    minHeight: touch.minTarget,
-    paddingHorizontal: space.lg,
-    borderRadius: radius.pill,
-    borderWidth: 1,
-    borderColor: color.border,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: space.xs,
-  },
-  selectChipSelected: {
-    backgroundColor: color.accentTint,
-    borderColor: color.accent,
-  },
-  selectChipPressed: {
-    backgroundColor: color.surfaceRaised,
-    borderColor: color.textFaint,
-  },
-  selectChipLabel: {
-    ...type.bodyMedium,
-    color: color.textDim,
-  },
-  selectChipLabelSelected: {
-    color: color.accent,
   },
   optionRow: {
     minHeight: touch.minTarget,

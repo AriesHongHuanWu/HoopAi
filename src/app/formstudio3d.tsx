@@ -65,6 +65,7 @@ import {
 } from '@/core/pose3d/camera3d';
 import { liftSequence } from '@/core/pose3d/lift';
 import type { FormSequence, PoseKeypointName, ResolvedShot, ShootingHand } from '@/core/types';
+import { haptic } from '@/utils/haptics';
 import { useSession } from '@/state/sessionStore';
 import { useSettings } from '@/state/settingsStore';
 
@@ -168,11 +169,16 @@ function StagePill({
 }) {
   return (
     <Pressable
-      onPress={onPress}
+      onPress={() => {
+        // Every pill here TOGGLES or SWITCHES something — a selection tick on
+        // each tap, through the settings-gated gateway.
+        haptic.selection();
+        onPress();
+      }}
       accessibilityRole="button"
       accessibilityLabel={a11yLabel}
       accessibilityState={{ selected }}
-      style={[styles.pick, selected && styles.pickOn]}
+      style={({ pressed }) => [styles.pick, selected && styles.pickOn, pressed && { opacity: 0.7 }]}
     >
       <Text style={[styles.pickText, selected && styles.pickTextOn]}>{label}</Text>
     </Pressable>
@@ -732,11 +738,13 @@ export default function FormStudio3DScreen() {
                     {/* Transport: reduced-motion → frame stepper; else play/slow-mo. */}
                     {reducedMotion ? (
                       <Row gap={space.md} style={styles.transport}>
+                        {/* Per-frame steppers: pressed feedback only. No
+                            haptic — repeat-tap surfaces would buzz per frame. */}
                         <Pressable
                           onPress={() => stepFrame(-1)}
                           accessibilityRole="button"
                           accessibilityLabel="Previous frame"
-                          style={styles.stepBtn}
+                          style={({ pressed }) => [styles.stepBtn, pressed && { opacity: 0.7 }]}
                         >
                           <Ionicons name="play-back" size={18} color={color.text} />
                         </Pressable>
@@ -744,7 +752,7 @@ export default function FormStudio3DScreen() {
                           onPress={() => stepFrame(1)}
                           accessibilityRole="button"
                           accessibilityLabel="Next frame"
-                          style={styles.stepBtn}
+                          style={({ pressed }) => [styles.stepBtn, pressed && { opacity: 0.7 }]}
                         >
                           <Ionicons name="play-forward" size={18} color={color.text} />
                         </Pressable>
@@ -758,7 +766,7 @@ export default function FormStudio3DScreen() {
                           }}
                           accessibilityRole="button"
                           accessibilityLabel={playing ? 'Pause' : 'Play'}
-                          style={styles.playBtn}
+                          style={({ pressed }) => [styles.playBtn, pressed && { opacity: 0.85 }]}
                         >
                           <Ionicons
                             name={playing ? 'pause' : 'play'}
@@ -767,11 +775,18 @@ export default function FormStudio3DScreen() {
                           />
                         </Pressable>
                         <Pressable
-                          onPress={() => setSlowMo((s) => !s)}
+                          onPress={() => {
+                            haptic.selection();
+                            setSlowMo((s) => !s);
+                          }}
                           accessibilityRole="button"
                           accessibilityState={{ selected: slowMo }}
                           accessibilityLabel="Toggle quarter-speed slow motion"
-                          style={[styles.slowBtn, slowMo && styles.slowBtnOn]}
+                          style={({ pressed }) => [
+                            styles.slowBtn,
+                            slowMo && styles.slowBtnOn,
+                            pressed && { opacity: 0.7 },
+                          ]}
                         >
                           <Text style={[styles.slowText, slowMo && styles.slowTextOn]}>
                             0.25×
@@ -850,11 +865,19 @@ export default function FormStudio3DScreen() {
                     ) : (
                       <>
                         <Pressable
-                          onPress={() => setGhostOn((g) => !g)}
+                          onPress={() => {
+                            haptic.selection();
+                            setGhostOn((g) => !g);
+                          }}
                           accessibilityRole="button"
                           accessibilityState={{ selected: ghostOn }}
                           accessibilityLabel="Toggle the NBA ghost overlay"
-                          style={[styles.pick, styles.ghostToggle, ghostOn && styles.pickOn]}
+                          style={({ pressed }) => [
+                            styles.pick,
+                            styles.ghostToggle,
+                            ghostOn && styles.pickOn,
+                            pressed && { opacity: 0.7 },
+                          ]}
                         >
                           <Text style={[styles.pickText, ghostOn && styles.pickTextOn]}>
                             NBA GHOST

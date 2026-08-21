@@ -15,6 +15,7 @@ import React, { useEffect, useRef } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text } from 'react-native';
 
 import { color, font, radius, space, type } from '@/constants/tokens';
+import { haptic } from '@/utils/haptics';
 
 export function WeekSelector({
   weeks,
@@ -60,7 +61,13 @@ export function WeekSelector({
             accessibilityRole="tab"
             accessibilityState={{ selected: active }}
             accessibilityLabel={`Week of ${w.label}, ${w.sessions} ${w.sessions === 1 ? 'session' : 'sessions'}`}
-            onPress={() => onPick(i)}
+            onPress={() => {
+              // Selection tick only when the week actually CHANGES — the
+              // SegmentedTabs grammar. Gateway call, JS thread (this file's
+              // no-UI-thread-code rule holds).
+              if (!active) haptic.selection();
+              onPick(i);
+            }}
             onLayout={(e) => chipX.current.set(i, e.nativeEvent.layout.x)}
             style={({ pressed }) => [
               styles.weekChip,

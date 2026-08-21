@@ -15,13 +15,17 @@
  * except that the app has two of everything.
  */
 import { Ionicons } from '@expo/vector-icons';
-import { Canvas, Circle, DashPathEffect, Line, Path, vec } from '@shopify/react-native-skia';
 import { router, useFocusEffect } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import Animated, { LinearTransition, ReduceMotion } from 'react-native-reanimated';
 
 import { useCardStagger } from '@/components/motion';
+// Concrete paths, not the '@/components/motion' barrel: several suites mock
+// the barrel down to the symbols they assert on, and a barrel import would
+// resolve to undefined under those doubles (the SegmentedTabs idiom).
+import { PressScale } from '@/components/motion/PressScale';
+import { useSkeletonExit } from '@/components/motion/stagger';
 import { SectionEyebrow } from '@/components/ScreenHeader';
 import {
   PipRow,
@@ -33,6 +37,7 @@ import { NavTileRow } from '@/components/NavTiles';
 import {
   Card,
   Chip,
+  EmptyState,
   Eyebrow,
   PillButton,
   Row,
@@ -41,6 +46,7 @@ import {
   StatNumber,
 } from '@/components/ui';
 import { color, font, layout, motion, radius, space, touch, type } from '@/constants/tokens';
+import { haptic } from '@/utils/haptics';
 import { exportCsv, sessionsToCsv } from '@/core/csvExport';
 import { getModeDef } from '@/core/gameModes';
 import type { ShotOutcome } from '@/core/types';
@@ -79,35 +85,6 @@ function ModeChip({ modeId }: { modeId: string | null }) {
     <View style={styles.modeChip}>
       <ModeMark modeId={def.id} size={14} />
       <Text style={styles.modeChipLabel}>{def.name}</Text>
-    </View>
-  );
-}
-
-const EMPTY_ILLO_H = 120;
-
-/** Empty state — a dashed shot arc waiting on its first session. */
-function EmptyArc() {
-  const [w, setW] = useState(0);
-  const h = EMPTY_ILLO_H;
-  const rimX = w * 0.82;
-  const rimY = h * 0.36;
-  const path = `M ${w * 0.08} ${h - 18} Q ${w * 0.45} ${-h * 0.28} ${rimX} ${rimY - 10}`;
-  return (
-    <View
-      onLayout={(e) => setW(e.nativeEvent.layout.width)}
-      style={{ height: h }}
-      importantForAccessibility="no-hide-descendants"
-    >
-      {w > 0 && (
-        <Canvas style={{ width: w, height: h }}>
-          <Line p1={vec(space.sm, h - 12)} p2={vec(w - space.sm, h - 12)} color={color.border} strokeWidth={2} />
-          <Path path={path} style="stroke" strokeWidth={2.5} color={color.accent} opacity={0.5}>
-            <DashPathEffect intervals={[1, 9]} />
-          </Path>
-          <Circle cx={rimX} cy={rimY} r={9} style="stroke" color={color.textDim} strokeWidth={3} />
-          <Line p1={vec(rimX + 15, rimY - 24)} p2={vec(rimX + 15, rimY + 9)} color={color.textDim} strokeWidth={3} />
-        </Canvas>
-      )}
     </View>
   );
 }
@@ -154,6 +131,9 @@ const fetchLifetimeTotals = (): Promise<Awaited<ReturnType<typeof lifetimeTotals
 export default function HistoryScreen() {
   // Canonical card cascade (undefined under reduced motion — static render).
   const enter = useCardStagger({ durationMs: motion.standard });
+  // The one skeleton dissolve: placeholders fade under the arriving cards
+  // instead of hard-cutting (undefined under reduced motion — plain swap).
+  const skeletonExit = useSkeletonExit();
   const [items, setItems] = useState<HistoryItem[] | null>(null);
   /** How many sessions the list currently asks for (+PAGE_SIZE per "older" tap). */
   const [pageLimit, setPageLimit] = useState(PAGE_SIZE);
@@ -169,6 +149,8 @@ export default function HistoryScreen() {
   const [exportFailed, setExportFailed] = useState(false);
 
   const confirmDelete = useCallback((row: SessionSummaryRow) => {
+    // Destructive intent gets the warning tick (settings-gated gateway).
+    haptic.warning();
     Alert.alert(
       'Delete this session?',
       'Its shots and stats are removed and the recording is deleted from the app. Videos already saved to Photos stay in Photos.',
@@ -348,7 +330,10 @@ export default function HistoryScreen() {
             accessibilityRole="button"
             accessibilityState={{ selected: tagFilter == null }}
             accessibilityLabel="All sessions"
-            onPress={() => setTagFilter(null)}
+            onPress={() => {
+              haptic.selection();
+              setTagFilter(null);
+            }}
             style={({ pressed }) => [
               styles.filterChip,
               tagFilter == null && styles.filterChipSelected,
@@ -367,7 +352,10 @@ export default function HistoryScreen() {
                 accessibilityRole="button"
                 accessibilityState={{ selected }}
                 accessibilityLabel={`Filter by tag ${tag}`}
-                onPress={() => setTagFilter(selected ? null : tag)}
+                onPress={() => {
+                  haptic.selection();
+                  setTagFilter(selected ? null : tag);
+                }}
                 style={({ pressed }) => [
                   styles.filterChip,
                   selected && styles.filterChipSelected,
@@ -390,26 +378,21 @@ export default function HistoryScreen() {
         // One loading language — the shape of the session cards that are
         // arriving. Gated behind a short delay (see SKELETON_DELAY_MS).
         showSkeleton ? (
-          <View style={{ gap: layout.cardGap }}>
+          // Skeletons dissolve under the arriving cards (see useSkeletonExit);
+          // the Screen container stays mounted, so the exit actually plays.
+          <Animated.View exiting={skeletonExit} style={{ gap: layout.cardGap }}>
             <SkeletonCard lines={3} />
             <SkeletonCard lines={3} />
-          </View>
+          </Animated.View>
         ) : null
       ) : items.length === 0 ? (
-        <Card>
-          <EmptyArc />
-          <Text style={[styles.heading, { marginTop: space.md }]}>
-            No sessions yet
-          </Text>
-          <Text style={[styles.dim, { marginTop: space.xs }]}>
-            Finish your first tracked session and it lands here.
-          </Text>
-          <PillButton
-            label="Start a session"
-            onPress={() => router.replace('/')}
-            style={{ marginTop: space.lg }}
-          />
-        </Card>
+        <EmptyState
+          illustration="arc"
+          title="No sessions yet"
+          body="Finish your first tracked session and it lands here."
+          actionLabel="Start a session"
+          onAction={() => router.replace('/')}
+        />
       ) : visibleItems != null && visibleItems.length === 0 ? (
         <Card>
           <Text style={styles.heading}>No sessions with this tag</Text>
@@ -448,18 +431,36 @@ export default function HistoryScreen() {
                 : null;
             const tag = row.label.trim();
             const card = (
-              <Pressable
-                accessibilityRole="button"
+              // PressScale (concrete path — see the import note) replaces the
+              // raw pressed-opacity Pressable: same spring + gated tick as
+              // every other card press in the app.
+              <PressScale
                 accessibilityLabel={`Session on ${formatSessionDate(row.startedAt)}${modeName != null ? `, ${modeName}` : ''}, ${makes} of ${row.attempts} makes, ${fg} percent field goals${unsure > 0 ? `, ${unsure} unsure` : ''}${hasVideo ? ', has replay video' : ''}${tag.length > 0 ? `, tagged ${tag}` : ''}`}
-                accessibilityHint="Opens the session detail. Long press to delete."
+                haptic="selection"
                 onPress={() =>
                   router.push({
                     pathname: '/history/[id]',
-                    params: { id: String(row.id) },
+                    params: {
+                      id: String(row.id),
+                      // Card-to-detail continuity: the SAME persisted row
+                      // values this card renders ride the push, so the detail
+                      // opens on the numbers just read — never a projection.
+                      startedAt: String(row.startedAt),
+                      fg: String(fg),
+                      makes: String(makes),
+                      attempts: String(row.attempts),
+                      tag,
+                      // The unsure count rides too, so the detail's preview
+                      // carries the integrity line instead of showing a bare
+                      // FG% for a beat. Sent ONLY when the pips are in hand:
+                      // past the first page they are not fetched, and an
+                      // absent count must never be reported as zero. Without
+                      // it the detail falls back to its plain skeleton.
+                      ...(pips.length > 0 ? { unsure: String(unsure) } : null),
+                    },
                   })
                 }
                 onLongPress={() => confirmDelete(row)}
-                style={({ pressed }) => pressed && { opacity: 0.8 }}
               >
                 <Card>
                   <Row style={styles.cardHeader} gap={space.lg}>
@@ -515,7 +516,7 @@ export default function HistoryScreen() {
                     </View>
                   )}
                 </Card>
-              </Pressable>
+              </PressScale>
             );
             return (
               <Animated.View
@@ -665,7 +666,9 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingHorizontal: space.lg,
     borderRadius: radius.pill,
-    borderWidth: 1,
+    // One elevation scale: a plain boundary is a hairline; borderWidth 1 is
+    // reserved for hierarchy and identity rings.
+    borderWidth: StyleSheet.hairlineWidth,
     borderColor: color.border,
     maxWidth: 180,
   },

@@ -181,7 +181,7 @@ const styles = StyleSheet.create({
     backgroundColor: color.surfaceRaised,
   },
   chipFlagged: {
-    backgroundColor: 'rgba(232,184,79,0.14)',
+    backgroundColor: color.unsureTint,
   },
   chipText: {
     ...type.micro,

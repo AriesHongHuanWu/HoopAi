@@ -30,12 +30,14 @@ import {
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import * as VideoThumbnails from 'expo-video-thumbnails';
+import Animated, { FadeIn, FadeOut, ReduceMotion } from 'react-native-reanimated';
 
 import { ErrorBoundary } from '../../components/ErrorBoundary';
 import { AnimatedProgressBar, Shimmer } from '../../components/motion';
 import { BackPill } from '../../components/ShotList';
 import { Card, Eyebrow, EmptyState, PillButton, Row, Screen } from '../../components/ui';
-import { color, radius, space, type } from '../../constants/tokens';
+import { color, motion, radius, space, type } from '../../constants/tokens';
+import { haptic } from '../../utils/haptics';
 import {
   loadDetector,
   detectImageToBoxes,
@@ -70,6 +72,18 @@ const CLASS_LABEL: Record<DetBox['cls'], string> = {
   ball_in_basket: 'IN BASKET',
   person: 'PERSON',
 };
+
+/**
+ * Phase-swap crossfade — the trends.tsx lensSwap idiom, both directions: each
+ * phase root is keyed on phase.kind, so a phase change remounts it and the
+ * outgoing subtree fades under the incoming one instead of hard-cutting
+ * (progress → results lands the real thumbs into the skeleton strip's own
+ * 72 px geometry). Honesty untouched: only the swap is softened — counts and
+ * results render exactly what the run produced. Reduced motion collapses both
+ * builders to a plain cut.
+ */
+const phaseSwapIn = FadeIn.duration(motion.quick).reduceMotion(ReduceMotion.System);
+const phaseSwapOut = FadeOut.duration(motion.quick).reduceMotion(ReduceMotion.System);
 
 /** One sampled frame + whatever the detector found on it. */
 interface FrameResult {
@@ -270,13 +284,20 @@ function AnalyzeScreen() {
 
   if (phase.kind === 'done') {
     return (
-      <ResultsView
-        frames={phase.frames}
-        config={phase.config}
-        index={index}
-        onIndexChange={setIndex}
-        onPickAnother={() => void pick()}
-      />
+      <Animated.View
+        key={phase.kind}
+        style={styles.phaseRoot}
+        entering={phaseSwapIn}
+        exiting={phaseSwapOut}
+      >
+        <ResultsView
+          frames={phase.frames}
+          config={phase.config}
+          index={index}
+          onIndexChange={setIndex}
+          onPickAnother={() => void pick()}
+        />
+      </Animated.View>
     );
   }
 
@@ -317,38 +338,42 @@ function AnalyzeScreen() {
       )}
 
       {(phase.kind === 'sampling' || phase.kind === 'detecting') && (
-        <Card style={styles.card}>
-          <Row gap={space.md}>
-            <ActivityIndicator color={color.accent} />
-            <View style={styles.progressBody}>
-              <Text style={styles.progressLabel}>
-                {phase.kind === 'sampling' ? 'Sampling frames' : 'Analyzing frames'}
-              </Text>
-              <Text
-                style={styles.progressCount}
-                accessibilityLiveRegion="polite"
-                accessibilityLabel={`${phase.kind === 'sampling' ? 'Sampling' : 'Analyzing'} frame ${phase.done} of ${phase.total}`}
-              >
-                {phase.done}/{phase.total}
-              </Text>
+        // Keyed on the phase: sampling → detecting remounts the card and the
+        // incoming phase crossfades in (entrance re-runs by design).
+        <Animated.View key={phase.kind} entering={phaseSwapIn} exiting={phaseSwapOut}>
+          <Card style={styles.card}>
+            <Row gap={space.md}>
+              <ActivityIndicator color={color.accent} />
+              <View style={styles.progressBody}>
+                <Text style={styles.progressLabel}>
+                  {phase.kind === 'sampling' ? 'Sampling frames' : 'Analyzing frames'}
+                </Text>
+                <Text
+                  style={styles.progressCount}
+                  accessibilityLiveRegion="polite"
+                  accessibilityLabel={`${phase.kind === 'sampling' ? 'Sampling' : 'Analyzing'} frame ${phase.done} of ${phase.total}`}
+                >
+                  {phase.done}/{phase.total}
+                </Text>
+              </View>
+            </Row>
+            <AnimatedProgressBar
+              progress={phase.total > 0 ? phase.done / phase.total : 0}
+              style={styles.progressBar}
+            />
+            {/* Skeleton filmstrip — the SAME 72 px thumb geometry the results
+                scrubber renders into, so frames arrive into the exact space
+                they will occupy. Clipped row, JS-thread sizing only. */}
+            <View style={styles.skeletonStrip}>
+              {Array.from(
+                { length: Math.max(3, Math.floor((width - space.lg * 4) / (72 + space.sm))) },
+                (_, i) => (
+                  <Shimmer key={i} width={72} height={72} radius={radius.sm} />
+                ),
+              )}
             </View>
-          </Row>
-          <AnimatedProgressBar
-            progress={phase.total > 0 ? phase.done / phase.total : 0}
-            style={styles.progressBar}
-          />
-          {/* Skeleton filmstrip — the SAME 72 px thumb geometry the results
-              scrubber renders into, so frames arrive into the exact space
-              they will occupy. Clipped row, JS-thread sizing only. */}
-          <View style={styles.skeletonStrip}>
-            {Array.from(
-              { length: Math.max(3, Math.floor((width - space.lg * 4) / (72 + space.sm))) },
-              (_, i) => (
-                <Shimmer key={i} width={72} height={72} radius={radius.sm} />
-              ),
-            )}
-          </View>
-        </Card>
+          </Card>
+        </Animated.View>
       )}
 
       {phase.kind !== 'sampling' && phase.kind !== 'detecting' && (
@@ -493,12 +518,19 @@ function ResultsView({
               key={f.uri}
               onPress={() => {
                 setPlaying(false); // manual scrub pauses playback
+                // Tick only when the tap changes the frame (the SelectableChip
+                // grammar); re-tapping the shown frame is silent.
+                if (i !== safeIndex) haptic.selection();
                 onIndexChange(i);
               }}
               accessibilityRole="button"
               accessibilityLabel={`Frame ${i + 1}, ${f.boxes.length} detections`}
               accessibilityState={{ selected }}
-              style={[styles.thumb, selected && styles.thumbSelected]}
+              style={({ pressed }) => [
+                styles.thumb,
+                selected && styles.thumbSelected,
+                pressed && { opacity: 0.7 },
+              ]}
             >
               <Image source={{ uri: f.uri }} style={styles.thumbImage} resizeMode="cover" />
               {/* Detection markers so you can find the "good" frames without
@@ -619,6 +651,10 @@ function formatMs(ms: number): string {
 // ---------------------------------------------------------------------------
 
 const styles = StyleSheet.create({
+  /** Keyed phase wrapper around a full-screen phase (see phaseSwapIn). */
+  phaseRoot: {
+    flex: 1,
+  },
   backRow: {
     marginBottom: space.md,
   },

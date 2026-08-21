@@ -21,7 +21,6 @@
  * users never see it again — that exact contract is preserved here.
  */
 import { Ionicons } from '@expo/vector-icons';
-import * as Haptics from 'expo-haptics';
 import { router } from 'expo-router';
 import { useCallback, useMemo, useState, type ReactNode } from 'react';
 import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
@@ -67,6 +66,7 @@ import {
   type TrainingGoal,
 } from '@/state/profileStore';
 import { useSettings } from '@/state/settingsStore';
+import { haptic } from '@/utils/haptics';
 import type { ShootingHand } from '@/core/types';
 
 const DEFAULT_BIRTH_YEAR = 2005;
@@ -141,7 +141,6 @@ const BALL_OPTIONS: { value: 7 | 6 | 5; label: string }[] = [
 export default function OnboardingScreen() {
   const insets = useSafeAreaInsets();
   const reducedMotion = useReducedMotion();
-  const hapticsEnabled = useSettings((s) => s.hapticsEnabled);
 
   // Live profile values so a tapped-back step shows what was entered.
   const profile = useProfile();
@@ -164,19 +163,20 @@ export default function OnboardingScreen() {
   const maxYear = maxBirthYear();
 
   const finish = useCallback(() => {
-    if (hapticsEnabled) {
-      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    }
+    // Wizard complete — through the settings-gated gateway, never
+    // expo-haptics directly, so Settings > Haptics is always honored.
+    haptic.success();
     // Stamp the profile as done (even a fully-skipped one) and honor the exact
     // onboardingDone contract index.tsx / _layout depend on.
     useProfile.getState().markComplete();
     setSetting('onboardingDone', true);
     router.replace('/');
-  }, [hapticsEnabled, setSetting]);
+  }, [setSetting]);
 
   const steps: StepChrome[] = useMemo(() => {
+    // The gateway runs the settings check itself — no local gate needed.
     const tick = () => {
-      if (useSettings.getState().hapticsEnabled) void Haptics.selectionAsync();
+      haptic.selection();
     };
     return [
       // 0 — Welcome (non-data): value + the privacy promise up front.
@@ -523,13 +523,13 @@ export default function OnboardingScreen() {
 
   const back = () => {
     if (step <= 0) return;
-    if (hapticsEnabled) void Haptics.selectionAsync();
+    haptic.selection();
     setStep((s) => Math.max(0, s - 1));
   };
 
   /** Skip = advance WITHOUT committing this step's draft (leaves it null). */
   const skip = () => {
-    if (hapticsEnabled) void Haptics.selectionAsync();
+    haptic.selection();
     if (step >= lastIndex) {
       finish();
       return;

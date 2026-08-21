@@ -9,16 +9,24 @@
  *     `undefined` when the OS asks for reduced motion, which exactly matches
  *     Card's optional `entering?:` contract (Card renders a plain View).
  *
- * Never use `.reduceMotion(ReduceMotion.System)` here — undefined-under-
- * reduced is the idiom, so a gated call site can never half-animate.
+ * Never use `.reduceMotion(ReduceMotion.System)` as a hook's ONLY gate here —
+ * undefined-under-reduced is the idiom, so a gated call site can never
+ * half-animate. useSkeletonExit chains it ON TOP of that gate: an EXIT plays
+ * at unmount, possibly long after the render that captured the builder, so
+ * the extra gate also covers a mid-session toggle of the OS setting.
  */
-import { useCallback } from 'react';
+import { useCallback, useMemo } from 'react';
 import type React from 'react';
 import type Animated from 'react-native-reanimated';
-import { FadeInDown, useReducedMotion } from 'react-native-reanimated';
+import { FadeInDown, FadeOut, ReduceMotion, useReducedMotion } from 'react-native-reanimated';
+
+import { motion } from '@/constants/tokens';
 
 /** The type Card (and Animated.View) accepts for its `entering` prop. */
 export type EnteringProp = React.ComponentProps<typeof Animated.View>['entering'];
+
+/** The type Animated.View accepts for its `exiting` prop. */
+export type ExitingProp = React.ComponentProps<typeof Animated.View>['exiting'];
 
 /** Canonical per-card stagger step (ms). */
 export const STAGGER_MS = 60;
@@ -93,5 +101,29 @@ export function useStaggerAt(opts?: {
       return FadeInDown.delay(delayMs).duration(durationMs);
     },
     [reduced, durationMs],
+  );
+}
+
+/**
+ * useSkeletonExit — the ONE skeleton dissolve. Screens that swap SkeletonCard
+ * placeholders for arriving content pass this as the skeleton's `exiting`, so
+ * every loading state in the app dissolves under its cards at the same quick
+ * beat instead of hard-cutting. Reduced motion: `undefined` (the barrel
+ * idiom — the swap becomes a plain cut); the builder additionally chains
+ * .reduceMotion(System) because exits fire at unmount, which can be long
+ * after the render that captured this value.
+ */
+export function useSkeletonExit(): ExitingProp | undefined {
+  const reduced = useReducedMotion();
+  // MEMOIZED, unlike `entering`. Reanimated configures an entering animation
+  // once, in componentDidMount, so a fresh builder there costs one discarded
+  // object. `exiting` is re-registered from componentDidUpdate on EVERY
+  // update, and it bails out on reference equality alone — so an unmemoized
+  // builder fires a JSI call per re-render for as long as the skeleton is
+  // mounted. Screens re-render freely during that window (filters, timers,
+  // arriving pages), so the identity has to be stable.
+  return useMemo(
+    () => (reduced ? undefined : FadeOut.duration(motion.quick).reduceMotion(ReduceMotion.System)),
+    [reduced],
   );
 }

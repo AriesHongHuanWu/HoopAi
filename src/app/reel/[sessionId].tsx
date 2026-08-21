@@ -101,8 +101,8 @@ function outcomeTint(outcome: ShotOutcome): string {
 function outcomeTintBg(outcome: ShotOutcome): string {
   if (outcome === 'make') return color.makeTint;
   if (outcome === 'miss') return color.missTint;
-  // Matches the ui.tsx Chip "unsure" tone tint.
-  return 'rgba(232, 184, 79, 0.14)';
+  // The ONE caution fill — same token the ui.tsx Chip "unsure" tone wears.
+  return color.unsureTint;
 }
 
 const OUTCOME_ICON: Record<ShotOutcome, React.ComponentProps<typeof Ionicons>['name']> = {
@@ -648,7 +648,8 @@ function ReelPlayer({
             accessibilityRole="button"
             accessibilityLabel={isPlaying ? 'Pause reel' : 'Resume reel'}
             accessibilityHint="Toggles reel playback"
-            style={styles.videoBox}
+            // Gentle dim only — this is footage, not chrome.
+            style={({ pressed }) => [styles.videoBox, pressed && { opacity: 0.85 }]}
           >
             <VideoView
               player={player}

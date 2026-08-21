@@ -28,6 +28,9 @@ import { router, useFocusEffect } from 'expo-router';
 
 import { DayStreakShelf } from '@/components/DayStreakShelf';
 import { ArcReveal, MotionStat, useCardStagger, type EnteringProp } from '@/components/motion';
+// Concrete path (the ScreenHeader precedent): suites that stub the motion
+// barrel down to the stagger hooks must not lose the sheet primitive.
+import { SheetScrim } from '@/components/motion/SheetScrim';
 import { ChoiceCard, ChipSelect } from '@/components/profile/Choice';
 import { NumberSlider } from '@/components/profile/NumberSlider';
 import { SeasonCard } from '@/components/SeasonCard';
@@ -171,31 +174,38 @@ function EditorSheet({
   children: ReactNode;
 }) {
   const insets = useSafeAreaInsets();
-  const reducedMotion = useReducedMotion();
+  // ONE sheet grammar: scrim fades in quick, panel rises FadeInDown standard
+  // (SheetScrim owns both, Reduce Motion included). Reanimated `exiting` does
+  // not play when an RN Modal unmounts, so ONLY the entrance moves to the
+  // primitive. That is a real trade: animationType="slide" also animated the
+  // CLOSE, and the close is now a hard cut. Accepted — a consistent, faster
+  // open beats a matched pair, and RN's own animation cannot be mixed with
+  // the primitive's rise without double-moving the panel.
   return (
-    <Modal visible transparent animationType={reducedMotion ? 'fade' : 'slide'} onRequestClose={onClose}>
-      <Pressable style={styles.scrim} accessibilityRole="button" accessibilityLabel="Close" onPress={onClose} />
-      <View style={[styles.sheet, { paddingBottom: insets.bottom + space.lg }]}>
-        <View style={styles.sheetHandle} importantForAccessibility="no-hide-descendants" />
-        <Row style={styles.sheetHeader}>
-          <Text style={styles.sheetTitle} accessibilityRole="header">
-            {title}
-          </Text>
-          {onClear != null && (
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Clear this field"
-              onPress={onClear}
-              hitSlop={space.sm}
-              style={({ pressed }) => [styles.clearBtn, pressed && styles.topBtnPressed]}
-            >
-              <Text style={styles.clearLabel}>Clear</Text>
-            </Pressable>
-          )}
-        </Row>
-        <View style={styles.sheetBody}>{children}</View>
-        <PillButton label="Done" onPress={onClose} />
-      </View>
+    <Modal visible transparent animationType="none" onRequestClose={onClose}>
+      <SheetScrim onDismiss={onClose} panelStyle={styles.sheetPanel}>
+        <View style={[styles.sheet, { paddingBottom: insets.bottom + space.lg }]}>
+          <View style={styles.sheetHandle} importantForAccessibility="no-hide-descendants" />
+          <Row style={styles.sheetHeader}>
+            <Text style={styles.sheetTitle} accessibilityRole="header">
+              {title}
+            </Text>
+            {onClear != null && (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Clear this field"
+                onPress={onClear}
+                hitSlop={space.sm}
+                style={({ pressed }) => [styles.clearBtn, pressed && styles.topBtnPressed]}
+              >
+                <Text style={styles.clearLabel}>Clear</Text>
+              </Pressable>
+            )}
+          </Row>
+          <View style={styles.sheetBody}>{children}</View>
+          <PillButton label="Done" onPress={onClose} />
+        </View>
+      </SheetScrim>
     </Modal>
   );
 }
@@ -515,7 +525,7 @@ export default function ProfileScreen() {
               accessibilityLabel="Why we ask"
               accessibilityHint="Explains how your profile is used and stored"
               onPress={() => setWhyOpen((v) => !v)}
-              style={styles.whyHeader}
+              style={({ pressed }) => [styles.whyHeader, pressed && { opacity: 0.7 }]}
             >
               <Row gap={space.sm}>
                 <Ionicons name="lock-closed" size={iconSize.sm} color={color.make} />
@@ -876,22 +886,13 @@ const styles = StyleSheet.create({
     color: color.textDim,
   },
   // ---- Editor sheet ----
-  scrim: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    // The one app-wide overlay scrim. Darker than the old 0.55 black; the
-    // sheet content below still reads through as shapes, which is all a
-    // dismiss target needs to show.
-    backgroundColor: color.scrim,
+  // SheetScrim's slot insets by space.lg; the sheet is a full-bleed bottom
+  // panel, so the panel slot pulls back to the screen edges.
+  sheetPanel: {
+    marginHorizontal: -space.lg,
+    marginBottom: -space.lg,
   },
   sheet: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    bottom: 0,
     backgroundColor: color.surface,
     borderTopLeftRadius: radius.lg,
     borderTopRightRadius: radius.lg,

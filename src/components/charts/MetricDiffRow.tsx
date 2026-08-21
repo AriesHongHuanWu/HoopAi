@@ -22,8 +22,6 @@ import type { MetricSplit } from '@/core/shotLab';
 /** Track height including both lanes, px. */
 const TRACK_H = 40;
 const DOT = 7;
-/** Accent hue (palette.leather) at edge-line alpha. */
-const BAND_EDGE = 'rgba(240, 90, 36, 0.4)';
 
 export function MetricDiffRow({ split }: { split: MetricSplit }) {
   const { def, make, miss, points, delta, effect } = split;
@@ -192,8 +190,6 @@ const styles = StyleSheet.create({
   missMarker: {
     ...type.micro,
     color: color.miss,
-    fontSize: 9,
-    lineHeight: 11,
   },
   track: {
     height: TRACK_H,
@@ -216,12 +212,10 @@ const styles = StyleSheet.create({
     bottom: 0,
     width: 1,
     marginLeft: -0.5,
-    backgroundColor: BAND_EDGE,
+    backgroundColor: color.accentEdge,
   },
   bandLabel: {
     ...type.micro,
-    fontSize: 8,
-    lineHeight: 10,
     letterSpacing: 1.2,
     color: color.accent,
     opacity: 0.9,

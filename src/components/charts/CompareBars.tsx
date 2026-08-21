@@ -6,13 +6,18 @@
  * make-green; for entry angle "better" means closer to the optimal-band
  * center (FORM.entryAngle). Null-safe: a metric without data shows an em dash
  * and an empty track, and never earns a marker.
+ *
+ * Bars render through the shared AnimatedProgressBar primitive (the one
+ * chart-fill motion in the app), imported from its concrete path because
+ * suites mock the motion barrel.
  */
 import { Ionicons } from '@expo/vector-icons';
 import React from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 
+import { AnimatedProgressBar } from '@/components/motion/AnimatedProgressBar';
 import { Row } from '@/components/ui';
-import { color, radius, space, type } from '@/constants/tokens';
+import { color, iconSize, radius, space, type } from '@/constants/tokens';
 import { FORM } from '@/core/config';
 import type { SessionStats } from '@/core/types';
 
@@ -92,21 +97,18 @@ function BarLine({
 }) {
   return (
     <Row gap={space.sm}>
-      <View style={styles.track}>
-        {frac != null && frac > 0 && (
-          <View
-            style={[
-              styles.fill,
-              { width: `${Math.min(100, frac * 100)}%`, backgroundColor: fill },
-            ]}
-          />
-        )}
-      </View>
+      <AnimatedProgressBar
+        progress={frac ?? 0}
+        height={BAR_H}
+        trackColor={color.surfaceRaised}
+        fillColor={fill}
+        style={styles.bar}
+      />
       <Row gap={3} style={styles.valueCell}>
         {win && (
           <Ionicons
             name="caret-up"
-            size={11}
+            size={iconSize.xs}
             color={color.make}
             importantForAccessibility="no"
           />
@@ -212,16 +214,8 @@ const styles = StyleSheet.create({
     borderTopColor: color.border,
     paddingTop: space.md,
   },
-  track: {
+  bar: {
     flex: 1,
-    height: BAR_H,
-    borderRadius: radius.pill,
-    backgroundColor: color.surfaceRaised,
-    overflow: 'hidden',
-  },
-  fill: {
-    height: '100%',
-    borderRadius: radius.pill,
   },
   valueCell: {
     width: VALUE_W,
@@ -231,9 +225,5 @@ const styles = StyleSheet.create({
     ...type.bodyMedium,
     color: color.text,
     fontVariant: ['tabular-nums'],
-  },
-  win: {
-    ...type.micro,
-    color: color.make,
   },
 });

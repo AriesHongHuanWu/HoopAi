@@ -20,6 +20,7 @@ import Animated from 'react-native-reanimated';
 import { useCardStagger } from '@/components/motion';
 import { Row } from '@/components/ui';
 import { color, font, radius, space, type } from '@/constants/tokens';
+import { haptic } from '@/utils/haptics';
 import type { CoachFinding, Severity, Trend } from '@/core/coachEngine';
 
 // ---------------------------------------------------------------------------
@@ -96,7 +97,12 @@ export function FindingCard({
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="Drill this — opens this week's plan"
-          onPress={onDrillThis}
+          onPress={() => {
+            // Arming a drill is a commitment tick, not a selection — the same
+            // weight modes' pickDrill carries (via the settings-gated gateway).
+            haptic.impactLight();
+            onDrillThis();
+          }}
           style={({ pressed }) => [styles.drillRow, pressed && { opacity: 0.6 }]}
         >
           <Text style={styles.drillRowText}>Drill this</Text>

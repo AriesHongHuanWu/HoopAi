@@ -46,7 +46,7 @@ import Animated, {
 } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { color, motion, radius, space, touch, type } from '../../constants/tokens';
+import { color, motion, radius, shadow, space, touch, type } from '../../constants/tokens';
 import { useSettings, type TutorialScreen } from '../../state/settingsStore';
 import { Row } from '../ui';
 import { cardPosFor, HIGHLIGHT_PAD } from './coachMarkLayout';
@@ -75,9 +75,6 @@ export interface CoachStep {
 }
 
 const CARD_MAX_WIDTH = 360;
-
-/** Darker than hudGlass: while teaching, the app behind should clearly recede. */
-const SCRIM_COLOR = 'rgba(10, 9, 9, 0.82)';
 
 const dotGrow = LinearTransition.duration(motion.quick).reduceMotion(ReduceMotion.System);
 
@@ -249,8 +246,10 @@ export function useCoachMarks(screenKey: TutorialScreen, steps: CoachStep[]) {
 
 const styles = StyleSheet.create({
   scrim: {
+    // The app-wide overlay scrim (the exact value this file used to inline —
+    // darker than hudGlass, so the app behind clearly recedes while teaching).
     ...absoluteFill,
-    backgroundColor: SCRIM_COLOR,
+    backgroundColor: color.scrim,
     paddingHorizontal: space.lg,
   },
   highlightRing: {
@@ -279,12 +278,9 @@ const styles = StyleSheet.create({
     borderWidth: StyleSheet.hairlineWidth,
     borderColor: color.hudGlassBorder,
     padding: space.lg,
-    // Soft, wide drop — lifts the card off the darkened app without a harsh edge.
-    shadowColor: '#000',
-    shadowOpacity: 0.4,
-    shadowRadius: 24,
-    shadowOffset: { width: 0, height: 12 },
-    elevation: 12,
+    // The ONE sanctioned drop shadow — this popover is the transient-overlay
+    // case shadow.pop exists for (iOS shadow + Android elevation together).
+    ...shadow.pop,
   },
   cardTitle: {
     ...type.heading,

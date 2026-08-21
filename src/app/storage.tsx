@@ -27,11 +27,15 @@ import * as FileSystem from 'expo-file-system/legacy';
 import { useFocusEffect } from 'expo-router';
 import React, { useCallback, useState } from 'react';
 import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
+import Animated from 'react-native-reanimated';
 
 import { BackPill, formatSessionDate } from '@/components/ShotList';
 import { ScreenHeader, SectionEyebrow } from '@/components/ScreenHeader';
 import { Card, EmptyState, PillButton, Row, Screen, SkeletonCard } from '@/components/ui';
 import { AnimatedProgressBar, MotionStat, useCardStagger } from '@/components/motion';
+// Concrete path, not the '@/components/motion' barrel: suites mock the barrel
+// down to the symbols they assert on (the SegmentedTabs idiom).
+import { useSkeletonExit } from '@/components/motion/stagger';
 import { color, iconSize, layout, radius, space, touch, type } from '@/constants/tokens';
 import { clearSessionVideo, listSessions, type SessionSummaryRow } from '@/data/db';
 import { deleteLocalVideo } from '@/data/videoLibrary';
@@ -122,6 +126,9 @@ export default function StorageScreen() {
 
   // Card entrance choreography — the shared stagger, reduced-motion aware.
   const enter = useCardStagger();
+  // The one skeleton dissolve: placeholders fade under the arriving cards
+  // instead of hard-cutting (undefined under reduced motion — plain swap).
+  const skeletonExit = useSkeletonExit();
 
   const refresh = useCallback(() => {
     let alive = true;
@@ -225,13 +232,17 @@ export default function StorageScreen() {
 
         {items == null ? (
           // Skeleton rows in the shared loading language — the hero block and
-          // the list reserve their real geometry while sizes are read.
-          <>
+          // the list reserve their real geometry while sizes are read, then
+          // dissolve under the arriving cards (see useSkeletonExit). The
+          // wrapper re-states the stack's gap so the two rows sit exactly
+          // where they did as loose children.
+          <Animated.View exiting={skeletonExit} style={styles.skeletonStack}>
             <SkeletonCard hero lines={2} />
             <SkeletonCard lines={4} />
-          </>
+          </Animated.View>
         ) : items.length === 0 ? (
           <EmptyState
+            illustration="arc"
             title="No session recordings on this phone"
             // Text diet: one line, keeping the stats-are-kept claim.
             body="Kept session videos land here — deleting one only ever removes the video, never your stats."
@@ -332,6 +343,10 @@ const styles = StyleSheet.create({
   header: {
     marginBottom: space.sm,
   },
+  /** Skeleton wrapper — carries the stack's own rhythm, nothing else. */
+  skeletonStack: {
+    gap: layout.sectionGap,
+  },
   sectionEyebrow: {
     marginBottom: space.md,
   },
@@ -384,7 +399,9 @@ const styles = StyleSheet.create({
     width: touch.minTarget,
     height: touch.minTarget,
     borderRadius: radius.pill,
-    borderWidth: 1,
+    // One elevation scale: a plain boundary is a hairline; borderWidth 1 is
+    // reserved for hierarchy and identity rings.
+    borderWidth: StyleSheet.hairlineWidth,
     borderColor: color.border,
     alignItems: 'center',
     justifyContent: 'center',

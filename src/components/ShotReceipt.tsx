@@ -237,6 +237,7 @@ export function ShotReceipt({
       accessibilityState={{ expanded: open }}
       hitSlop={6}
       onPress={() => setOpen((v) => !v)}
+      style={({ pressed }) => (pressed ? { opacity: 0.7 } : null)}
     >
       {column}
     </Pressable>

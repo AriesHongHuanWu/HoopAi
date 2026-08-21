@@ -12,6 +12,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { color, font, radius, space, touch, type } from '@/constants/tokens';
+import { haptic } from '@/utils/haptics';
 
 const TICK_MS = 250;
 const COUNTDOWN_STEP_SEC = 30;
@@ -49,6 +50,8 @@ export function GameClock() {
   };
 
   const toggleRunning = () => {
+    // Starting/stopping the clock is the gateway's medium-impact class.
+    haptic.impactMedium();
     if (running) {
       bankedMs.current = elapsedMs();
       runStartedAt.current = null;
@@ -60,12 +63,15 @@ export function GameClock() {
   };
 
   const reset = () => {
+    haptic.selection();
     bankedMs.current = 0;
     runStartedAt.current = running ? Date.now() : null;
   };
 
   const swapMode = () => {
+    // Tick only when the tap changes something — the chip is inert while running.
     if (running) return;
+    haptic.selection();
     setMode((m) => (m === 'countUp' ? 'countdown' : 'countUp'));
     bankedMs.current = 0;
     runStartedAt.current = null;
@@ -73,6 +79,7 @@ export function GameClock() {
 
   const bumpCountdown = (deltaSec: number) => {
     if (running) return;
+    haptic.selection();
     setCountdownTotalSec((s) =>
       Math.min(COUNTDOWN_MAX_SEC, Math.max(COUNTDOWN_MIN_SEC, s + deltaSec)),
     );
@@ -180,7 +187,8 @@ const styles = StyleSheet.create({
     minHeight: touch.minTarget,
     paddingHorizontal: space.lg,
     borderRadius: radius.pill,
-    borderWidth: 1,
+    // Plain boundary — hairline. borderWidth 1 is reserved for hierarchy.
+    borderWidth: StyleSheet.hairlineWidth,
     borderColor: color.border,
     alignItems: 'center',
     justifyContent: 'center',
@@ -212,7 +220,7 @@ const styles = StyleSheet.create({
     width: touch.minTarget,
     height: touch.minTarget,
     borderRadius: radius.pill,
-    borderWidth: 1,
+    borderWidth: StyleSheet.hairlineWidth,
     borderColor: color.border,
     alignItems: 'center',
     justifyContent: 'center',
@@ -237,7 +245,7 @@ const styles = StyleSheet.create({
     minHeight: touch.minTarget,
     paddingHorizontal: space.lg,
     borderRadius: radius.pill,
-    borderWidth: 1,
+    borderWidth: StyleSheet.hairlineWidth,
     borderColor: color.border,
     alignItems: 'center',
     justifyContent: 'center',

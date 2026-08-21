@@ -25,6 +25,7 @@ import Animated, {
 
 import { Card, Eyebrow } from '@/components/ui';
 import { color, motion, space, touch, type } from '@/constants/tokens';
+import { haptic } from '@/utils/haptics';
 
 export function CollapsibleSection({
   title,
@@ -75,12 +76,17 @@ export function CollapsibleSection({
 
   const header = (
     <Pressable
-      onPress={onToggle}
+      onPress={() => {
+        // A section opening/closing is a selection tick (gateway-gated); the
+        // chevron flip above is the visual half of the same feedback.
+        haptic.selection();
+        onToggle();
+      }}
       accessibilityRole="button"
       accessibilityState={{ expanded }}
       accessibilityLabel={subtitle != null ? `${title}, ${subtitle}` : title}
       accessibilityHint={expanded ? 'Collapses this section' : 'Expands this section'}
-      style={styles.header}
+      style={({ pressed }) => [styles.header, pressed && { opacity: 0.7 }]}
     >
       <View style={styles.headerText}>
         <Eyebrow>{title}</Eyebrow>

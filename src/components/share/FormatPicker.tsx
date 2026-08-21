@@ -10,9 +10,11 @@
 import React, { useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 
+import { SheetScrim } from '../motion/SheetScrim';
 import { Card, PillButton, Row } from '../ui';
 import { color, radius, space, type } from '../../constants/tokens';
 import { ShareCard, type CardFormat, type ShareCardData } from '../ShareCard';
+import { haptic } from '../../utils/haptics';
 
 interface FormatOption {
   format: CardFormat;
@@ -44,8 +46,10 @@ export function FormatPicker({
   const [selected, setSelected] = useState<CardFormat>(initial);
 
   return (
-    <View style={styles.scrim} accessibilityViewIsModal>
-      <Card style={styles.card}>
+    // No onDismiss: "Cancel" is the explicit exit — an outside tap never
+    // dismissed this sheet, and callers reset pendingBg in onCancel.
+    <SheetScrim align="center" panelStyle={styles.panel}>
+      <Card>
         <Text style={styles.title}>Choose a look</Text>
         <Text style={styles.sub}>Every format is branded — pick the one that fits.</Text>
 
@@ -59,11 +63,22 @@ export function FormatPicker({
             return (
               <Pressable
                 key={opt.format}
-                onPress={() => setSelected(opt.format)}
+                onPress={() => {
+                  // Tick only when the tap changes the selection — the
+                  // SelectableChip grammar; re-tapping the active card is
+                  // silent. (SelectableChip itself can't host the live Skia
+                  // preview + blurb, so this radio card keeps its own shape.)
+                  if (!active) haptic.selection();
+                  setSelected(opt.format);
+                }}
                 accessibilityRole="radio"
                 accessibilityState={{ selected: active }}
                 accessibilityLabel={`${opt.label} format`}
-                style={[styles.option, active && styles.optionActive]}
+                style={({ pressed }) => [
+                  styles.option,
+                  active && styles.optionActive,
+                  pressed && { opacity: 0.85 },
+                ]}
               >
                 <View style={styles.previewWrap}>
                   <ShareCard data={data} width={PREVIEW_W} format={opt.format} />
@@ -80,25 +95,16 @@ export function FormatPicker({
           <PillButton label="Share this" onPress={() => onPick(selected)} style={styles.btn} />
         </Row>
       </Card>
-    </View>
+    </SheetScrim>
   );
 }
 
 const styles = StyleSheet.create({
-  scrim: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: color.hudGlass,
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: space.lg,
-  },
-  card: {
+  /** Panel slot: centered, capped — SheetScrim owns the scrim + motion. */
+  panel: {
     width: '100%',
     maxWidth: 560,
+    alignSelf: 'center',
   },
   title: {
     ...type.heading,

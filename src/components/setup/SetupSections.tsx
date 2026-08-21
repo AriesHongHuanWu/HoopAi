@@ -572,10 +572,12 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingHorizontal: space.lg,
     borderRadius: radius.pill,
-    borderWidth: 1,
+    // Plain boundary — hairline. The selected accent ring below stays at 1.
+    borderWidth: StyleSheet.hairlineWidth,
     borderColor: color.border,
   },
   chipSelected: {
+    borderWidth: 1,
     borderColor: color.accent,
     backgroundColor: color.accentTint,
   },

@@ -14,6 +14,9 @@ import { StyleSheet, Text, View } from 'react-native';
 import Animated from 'react-native-reanimated';
 
 import { AnimatedProgressBar, ArcReveal, MotionStat, useCardStagger } from '@/components/motion';
+// Concrete path, not the '@/components/motion' barrel: suites mock the barrel
+// down to the symbols they assert on (the SegmentedTabs idiom).
+import { useSkeletonExit } from '@/components/motion/stagger';
 import { SectionEyebrow } from '@/components/ScreenHeader';
 import { AchievementRow } from '@/components/AchievementRow';
 import { ProBadge } from '@/components/ProBadge';
@@ -131,6 +134,9 @@ export default function RecordsScreen() {
   // Measured width of the hero card's inner stage, for the arc canvas.
   const [heroWidth, setHeroWidth] = useState(0);
   const seenHydrated = useAchievementsSeenHydrated();
+  // The one skeleton dissolve: the placeholder fades under the arriving hero
+  // instead of hard-cutting (undefined under reduced motion — plain swap).
+  const skeletonExit = useSkeletonExit();
 
   useFocusEffect(
     useCallback(() => {
@@ -169,8 +175,12 @@ export default function RecordsScreen() {
         </Row>
         <Eyebrow>Records</Eyebrow>
         <Text style={styles.title}>Lifetime</Text>
-        {/* One loading language: the shape of the hero card that is arriving. */}
-        <SkeletonCard hero lines={3} />
+        {/* One loading language: the shape of the hero card that is arriving,
+            dissolving under it (see useSkeletonExit). The Screen container
+            reconciles across the swap, so the exit actually plays. */}
+        <Animated.View exiting={skeletonExit}>
+          <SkeletonCard hero lines={3} />
+        </Animated.View>
       </Screen>
     );
   }

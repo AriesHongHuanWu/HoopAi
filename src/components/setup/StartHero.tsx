@@ -27,6 +27,7 @@ import Animated, {
 // barrel down to the hooks under test, and arcMotif is pure geometry.
 import { arcMotif } from '@/components/motion/ArcReveal';
 import { color, font, radius, space, touch, type } from '@/constants/tokens';
+import { haptic } from '@/utils/haptics';
 import type { SetupSectionId } from './setupDefaults';
 
 /**
@@ -116,7 +117,12 @@ function GoCta({
   const [size, setSize] = useState<{ w: number; h: number } | null>(null);
   return (
     <AnimatedPressable
-      onPress={onPress}
+      onPress={() => {
+        // The session-start thump — the same medium impact Home's hero uses
+        // to LEAD here. Gateway-gated, so Settings › Haptics still wins.
+        haptic.impactMedium();
+        onPress();
+      }}
       disabled={disabled}
       onLayout={(e: LayoutChangeEvent) =>
         setSize({ w: e.nativeEvent.layout.width, h: e.nativeEvent.layout.height })
@@ -294,7 +300,8 @@ const styles = StyleSheet.create({
     gap: space.xs,
     paddingHorizontal: space.md,
     borderRadius: radius.pill,
-    borderWidth: 1,
+    // Plain boundary — hairline. The warning ring below keeps full weight.
+    borderWidth: StyleSheet.hairlineWidth,
     borderColor: color.border,
   },
   chipPressed: {
@@ -302,6 +309,7 @@ const styles = StyleSheet.create({
   },
   /** The unsure/chalkYellow treatment — the camera chip when access is blocked. */
   chipWarning: {
+    borderWidth: 1,
     backgroundColor: color.unsureTint,
     borderColor: color.unsure,
   },

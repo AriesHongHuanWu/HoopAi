@@ -237,7 +237,8 @@ const styles = StyleSheet.create({
     minHeight: touch.minTarget,
     minWidth: touch.minTarget * 2,
     borderRadius: radius.md,
-    borderWidth: 1,
+    // Plain boundary — hairline; borderWidth 1 is reserved for hierarchy.
+    borderWidth: StyleSheet.hairlineWidth,
     borderColor: color.border,
     alignItems: 'center',
     justifyContent: 'center',

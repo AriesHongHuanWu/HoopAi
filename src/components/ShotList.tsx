@@ -19,7 +19,6 @@
  *                  their scroll view so it stays pinned to the bottom.
  * - BackPill / date + clock formatters — small shared screen chrome.
  */
-import * as Haptics from 'expo-haptics';
 import { router } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -71,6 +70,7 @@ import {
   type ShotRow as DbShotRow,
 } from '@/data/db';
 import { useSettings } from '@/state/settingsStore';
+import { haptic } from '@/utils/haptics';
 
 /**
  * Optional label-rename persistence. The shots/sessions data layer is owned
@@ -196,7 +196,7 @@ export function SessionTitle({
       }
       accessibilityHint="Opens a text field to rename this session"
       onPress={() => {
-        void Haptics.selectionAsync();
+        haptic.selection();
         setDraft(label);
         setEditing(true);
       }}
@@ -297,7 +297,7 @@ function ValuePill({
   return (
     <Pressable
       onPress={() => {
-        void Haptics.selectionAsync();
+        haptic.selection();
         onFlip(next);
       }}
       accessibilityRole="button"
@@ -306,7 +306,7 @@ function ValuePill({
       }
       accessibilityHint="Toggles this shot between a 2 and a 3"
       hitSlop={12}
-      style={styles.valueWrap}
+      style={({ pressed }) => [styles.valueWrap, pressed && { opacity: 0.7 }]}
     >
       {body}
       {rw != null && <Text style={styles.valueRw}>{rw}</Text>}
@@ -353,7 +353,7 @@ const ShotListItem = React.memo(function ShotListItem({
   const [formOpen, setFormOpen] = useState(false);
   const swipeRef = useRef<SwipeableMethods>(null);
   const correct = (outcome: ShotOutcome) => {
-    void Haptics.selectionAsync();
+    haptic.selection();
     onCorrect?.(shot, outcome);
   };
   const flipTo: ShotOutcome | null =
@@ -397,10 +397,13 @@ const ShotListItem = React.memo(function ShotListItem({
                   accessibilityHint="Toggles this shot's pose-based form analysis"
                   hitSlop={8}
                   onPress={() => {
-                    void Haptics.selectionAsync();
+                    haptic.selection();
                     setFormOpen((v) => !v);
                   }}
-                  style={styles.formChipTouch}
+                  style={({ pressed }) => [
+                    styles.formChipTouch,
+                    pressed && { opacity: 0.7 },
+                  ]}
                 >
                   <Chip label={formOpen ? 'Form ▲' : 'Form ▼'} tone="accent" />
                 </Pressable>
@@ -1230,11 +1233,10 @@ const styles = StyleSheet.create({
     color: color.textFaint,
   },
   valuePillUnit3: {
-    color: 'rgba(242, 193, 78, 0.7)',
+    color: color.threePtDim,
   },
   valueRw: {
     ...type.micro,
-    fontSize: 9,
     color: color.textFaint,
   },
 
@@ -1289,15 +1291,17 @@ const styles = StyleSheet.create({
     ...type.body,
     color: color.textFaint,
   },
+  // Secondary gold: the ONE dimmed-downtown solid (color.threePtDim) instead
+  // of a per-site alpha ladder — the 0.6 mix measured borderline AA.
   splitOfGold: {
     ...type.body,
-    color: 'rgba(242, 193, 78, 0.6)',
+    color: color.threePtDim,
   },
   splitPct: {
     ...type.caption,
     color: color.textDim,
   },
   splitPctGold: {
-    color: 'rgba(242, 193, 78, 0.85)',
+    color: color.threePtDim,
   },
 });

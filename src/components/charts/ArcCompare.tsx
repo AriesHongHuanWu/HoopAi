@@ -10,6 +10,17 @@
  * All arcs share one vertical scale, so a higher rainbow genuinely reads
  * higher. A hoop tick marks the common arrival point; a dashed floor line
  * with RELEASE/RIM end labels anchors the reading direction.
+ *
+ * Optional draw-on reveal: PASSING `progress` opts the chart into a trim
+ * sweep on mount (Sparkline's exact contract). One shared value drives the
+ * two mean arcs and the dashed NBA reference through Skia Path's native
+ * start/end trim (the ArcReveal mechanism — no path rebuilding); the per-shot
+ * flights opacity-fade on the same value and the entry-angle callouts FadeIn
+ * after the trim completes. Floor and rim furniture stay static. Omitting
+ * `progress` (default 1) renders the finished chart statically, so every
+ * existing caller stays pixel-identical. Reduced motion always renders
+ * static. The trim worklets stay inline over the shared value only — no JS
+ * helpers (the fx/particles crash precedent).
  */
 import {
   BlurMask,
@@ -22,10 +33,19 @@ import {
   vec,
   type SkPath,
 } from '@shopify/react-native-skia';
-import React, { useMemo } from 'react';
+import React, { useEffect, useMemo } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
+import Animated, {
+  Easing,
+  FadeIn,
+  ReduceMotion,
+  useDerivedValue,
+  useReducedMotion,
+  useSharedValue,
+  withTiming,
+} from 'react-native-reanimated';
 
-import { color, radius, space, type } from '@/constants/tokens';
+import { color, motion, radius, space, type } from '@/constants/tokens';
 import { BENCHMARK_AXES } from '@/core/nbaBenchmarks';
 import { meanArc, type NormalizedArc } from '@/core/shotLab';
 
@@ -41,11 +61,25 @@ const NBA_RELEASE_DEG =
 /** Series hues at graded alpha for Skia glow passes (rgba strings). */
 const MAKE_GLOW = 'rgba(47, 214, 163, 0.5)';
 const ACCENT_GLOW = 'rgba(240, 90, 36, 0.45)';
+/** Static per-shot flight opacities — the trim fade lands on these. */
+const MAKE_FLIGHT_OPACITY = 0.26;
+const MISS_FLIGHT_OPACITY = 0.2;
+
+function clamp01(v: number): number {
+  return v < 0 ? 0 : v > 1 ? 1 : v;
+}
 
 export interface ArcCompareProps {
   arcs: readonly NormalizedArc[];
   width: number;
   height: number;
+  /**
+   * Reveal target, 0..1. PROVIDING this prop opts the chart into a trim
+   * draw-on to the target on mount (static under reduced motion); omitting
+   * it (the default, 1) renders the full chart statically — existing
+   * callers stay pixel-identical.
+   */
+  progress?: number;
   accessibilityLabel?: string;
 }
 
@@ -75,7 +109,40 @@ function entryDeg(pts: readonly { x: number; y: number }[]): number | null {
   return Number.isFinite(deg) ? Math.round(deg) : null;
 }
 
-export function ArcCompare({ arcs, width, height, accessibilityLabel }: ArcCompareProps) {
+export function ArcCompare({
+  arcs,
+  width,
+  height,
+  progress,
+  accessibilityLabel,
+}: ArcCompareProps) {
+  const reducedMotion = useReducedMotion();
+  const target = clamp01(progress ?? 1);
+  // Draw-on only when the caller explicitly threaded a progress in — the
+  // default renders finished from the first frame, exactly as before.
+  const animateIn = progress != null && !reducedMotion;
+
+  // Trim head. Starts at 0 only when it will actually draw in; otherwise it
+  // holds the target so the static render is the finished chart.
+  const trim = useSharedValue(animateIn ? 0 : target);
+
+  useEffect(() => {
+    if (!animateIn) {
+      trim.value = target;
+      return;
+    }
+    trim.value = withTiming(target, {
+      duration: motion.celebrate,
+      easing: Easing.out(Easing.cubic),
+    });
+  }, [animateIn, target, trim]);
+
+  // The ArcReveal mechanism verbatim: Path start/end take the derived trim,
+  // the flights fade on the same value. Math stays inline in the worklets.
+  const end = useDerivedValue(() => trim.value);
+  const makeFlightOpacity = useDerivedValue(() => MAKE_FLIGHT_OPACITY * trim.value);
+  const missFlightOpacity = useDerivedValue(() => MISS_FLIGHT_OPACITY * trim.value);
+
   const geom = useMemo<Geometry | null>(() => {
     if (arcs.length === 0 || width <= 0 || height <= 0) return null;
     const innerW = width - PAD * 2;
@@ -161,28 +228,28 @@ export function ArcCompare({ arcs, width, height, accessibilityLabel }: ArcCompa
         </Line>
         {/* Individual flights: quiet, so the averages own the frame. */}
         {geom.misses.map((p, i) => (
-          <Path key={`ms-${i}`} path={p} style="stroke" strokeWidth={1.5} color={color.miss} opacity={0.2} />
+          <Path key={`ms-${i}`} path={p} style="stroke" strokeWidth={1.5} color={color.miss} opacity={missFlightOpacity} />
         ))}
         {geom.makes.map((p, i) => (
-          <Path key={`mk-${i}`} path={p} style="stroke" strokeWidth={1.5} color={color.make} opacity={0.26} />
+          <Path key={`mk-${i}`} path={p} style="stroke" strokeWidth={1.5} color={color.make} opacity={makeFlightOpacity} />
         ))}
         {/* NBA-average launch reference: dashed chalk, unmistakably not yours. */}
         {geom.nbaRef && (
-          <Path path={geom.nbaRef} style="stroke" strokeWidth={2} strokeCap="round" color={color.textDim}>
+          <Path path={geom.nbaRef} style="stroke" strokeWidth={2} strokeCap="round" color={color.textDim} start={0} end={end}>
             <DashPathEffect intervals={[7, 7]} />
           </Path>
         )}
         {geom.missMean && (
-          <Path path={geom.missMean} style="stroke" strokeWidth={3} strokeCap="round" color={color.miss} />
+          <Path path={geom.missMean} style="stroke" strokeWidth={3} strokeCap="round" color={color.miss} start={0} end={end} />
         )}
         {/* The make mean is the hero: soft glow underlay + bold stroke. */}
         {geom.makeMean && (
-          <Path path={geom.makeMean} style="stroke" strokeWidth={8} strokeCap="round" color={MAKE_GLOW}>
+          <Path path={geom.makeMean} style="stroke" strokeWidth={8} strokeCap="round" color={MAKE_GLOW} start={0} end={end}>
             <BlurMask blur={7} style="normal" />
           </Path>
         )}
         {geom.makeMean && (
-          <Path path={geom.makeMean} style="stroke" strokeWidth={3.5} strokeCap="round" color={color.make} />
+          <Path path={geom.makeMean} style="stroke" strokeWidth={3.5} strokeCap="round" color={color.make} start={0} end={end} />
         )}
         {/* Arrival hoop tick with a warm halo. */}
         <Circle cx={geom.hoop.x} cy={geom.hoop.y} r={8} color={ACCENT_GLOW}>
@@ -210,9 +277,19 @@ export function ArcCompare({ arcs, width, height, accessibilityLabel }: ArcCompa
           </View>
         )}
       </View>
-      {/* Entry-angle callouts by the rim. */}
+      {/* Entry-angle callouts by the rim — FadeIn once the trim completes. */}
       {(geom.makeEntryDeg != null || geom.missEntryDeg != null) && (
-        <View style={[styles.callouts, { top: geom.calloutTop }]} pointerEvents="none">
+        <Animated.View
+          entering={
+            animateIn
+              ? FadeIn.delay(motion.celebrate)
+                  .duration(motion.standard)
+                  .reduceMotion(ReduceMotion.System)
+              : undefined
+          }
+          style={[styles.callouts, { top: geom.calloutTop }]}
+          pointerEvents="none"
+        >
           {geom.makeEntryDeg != null && (
             <Text style={[styles.calloutText, { color: color.make }]}>
               IN AT {geom.makeEntryDeg}°
@@ -223,7 +300,7 @@ export function ArcCompare({ arcs, width, height, accessibilityLabel }: ArcCompa
               MISSES {geom.missEntryDeg}°
             </Text>
           )}
-        </View>
+        </Animated.View>
       )}
       {/* End labels under the floor line. */}
       <Text style={[styles.axisLabel, { left: PAD }]} pointerEvents="none">
@@ -269,8 +346,6 @@ const styles = StyleSheet.create({
   missX: {
     ...type.micro,
     color: color.miss,
-    fontSize: 9,
-    lineHeight: 11,
   },
   dashSwatch: {
     flexDirection: 'row',

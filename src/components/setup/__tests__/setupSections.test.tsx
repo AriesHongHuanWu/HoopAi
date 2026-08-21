@@ -32,6 +32,19 @@ jest.mock('react-native-reanimated', () => ({
 // Icons are decorative in every body under test; skip the font machinery.
 jest.mock('@expo/vector-icons', () => ({ Ionicons: () => null }));
 
+// A section header tick routes through the settings-gated gateway; stub it so
+// header presses never reach expo-haptics or the settings store.
+jest.mock('@/utils/haptics', () => ({
+  haptic: {
+    selection: jest.fn(),
+    impactLight: jest.fn(),
+    impactMedium: jest.fn(),
+    success: jest.fn(),
+    warning: jest.fn(),
+    error: jest.fn(),
+  },
+}));
+
 // CalibrationHealthCard subscribes to stores — WI-2 only forwards props to
 // it, so mock the boundary and assert the forwarding.
 jest.mock('@/components/CalibrationHealthCard', () => ({

@@ -22,7 +22,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import { router, useLocalSearchParams } from 'expo-router';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Pressable, StyleSheet, Text, View, type LayoutRectangle } from 'react-native';
+import { StyleSheet, Text, View, type LayoutRectangle } from 'react-native';
 import Animated from 'react-native-reanimated';
 
 import { ReelEntryButton } from '@/components/ReelEntryButton';
@@ -43,6 +43,9 @@ import { CourtHeatmap } from '@/components/charts/CourtHeatmap';
 import { CourtPlacementMap } from '@/components/charts/CourtPlacementMap';
 import { HintChip } from '@/components/hud/HintChip';
 import { Confetti, useCardStagger } from '@/components/motion';
+// Concrete path, NOT the barrel — same dodge as SectionEyebrow below, so a
+// suite that stubs '@/components/motion' can't resolve this to undefined.
+import { PressScale } from '@/components/motion/PressScale';
 import { PersonalBestBanner } from '@/components/PersonalBestBanner';
 import { RecheckPanel } from '@/components/RecheckPanel';
 // Concrete import (not a barrel) — sessionSummaryRender.test.tsx mounts this
@@ -74,6 +77,7 @@ import { saveSessionVideo } from '@/data/videoLibrary';
 import { useMode } from '@/state/modeStore';
 import { useSession } from '@/state/sessionStore';
 import { useSettings } from '@/state/settingsStore';
+import { haptic } from '@/utils/haptics';
 
 export default function SessionSummaryScreen() {
   const params = useLocalSearchParams<{ id: string }>();
@@ -275,6 +279,9 @@ export default function SessionSummaryScreen() {
   // then jump to live with the persisted orientation (recordVideo/keepMode
   // flow from persisted settings automatically — that IS "same setup").
   const runItBack = useCallback(() => {
+    // Session restart is the gateway's documented impactMedium class — the
+    // same tick Home's startSession fires.
+    haptic.impactMedium();
     const mode = prevMode;
     resetToIdle();
     const m = useMode.getState();
@@ -650,27 +657,39 @@ export default function SessionSummaryScreen() {
                 the SAME setup, and the sub-line states exactly which setup
                 that is (see runBackSummary — never a promise the restart
                 can't keep). */}
-            <Pressable
+            {/* The a11y node is this wrapper, not the PressScale inside it:
+                PressScale forwards a role and a label but not
+                `accessibilityHint`, and the hint is what tells a screen-reader
+                user this card RESTARTS rather than reviews (the SegmentedTabs
+                idiom). `onAccessibilityTap` keeps VoiceOver's double-tap on
+                the same handler as a finger. */}
+            <View
+              accessible
               accessibilityRole="button"
               accessibilityLabel={`Run it back — ${runBackSummary}`}
               accessibilityHint="Restarts a session with the same setup"
-              onPress={runItBack}
-              style={({ pressed }) => [styles.runBackCard, pressed && { opacity: 0.85 }]}
+              onAccessibilityTap={runItBack}
             >
-              <View style={styles.runBackIcon}>
-                <Ionicons name="refresh" size={20} color={color.accent} />
-              </View>
-              <View style={styles.runBackBody}>
-                <Text style={styles.runBackTitle}>Run it back</Text>
-                {/* StartHero's chip language: small accent glyph + caption. */}
-                <Row gap={space.xs} style={styles.runBackSubRow}>
-                  <Ionicons name="basketball-outline" size={13} color={color.accent} />
-                  <Text style={styles.runBackSub} numberOfLines={1}>
-                    {runBackSummary}
-                  </Text>
-                </Row>
-              </View>
-            </Pressable>
+              <PressScale
+                onPress={runItBack}
+                accessibilityRole="none"
+                style={styles.runBackCard}
+              >
+                <View style={styles.runBackIcon}>
+                  <Ionicons name="refresh" size={20} color={color.accent} />
+                </View>
+                <View style={styles.runBackBody}>
+                  <Text style={styles.runBackTitle}>Run it back</Text>
+                  {/* StartHero's chip language: small accent glyph + caption. */}
+                  <Row gap={space.xs} style={styles.runBackSubRow}>
+                    <Ionicons name="basketball-outline" size={13} color={color.accent} />
+                    <Text style={styles.runBackSub} numberOfLines={1}>
+                      {runBackSummary}
+                    </Text>
+                  </Row>
+                </View>
+              </PressScale>
+            </View>
             <PillButton
               label="Done"
               icon="checkmark"
@@ -872,7 +891,9 @@ const styles = StyleSheet.create({
     gap: space.md,
     backgroundColor: color.surface,
     borderRadius: radius.lg,
-    borderWidth: 1,
+    // Hairline: the accentEdge HUE carries the emphasis — borderWidth 1 is
+    // reserved for hierarchy/identity rings (the one elevation scale).
+    borderWidth: StyleSheet.hairlineWidth,
     borderColor: color.accentEdge,
     padding: space.lg,
   },

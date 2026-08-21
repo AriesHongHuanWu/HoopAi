@@ -44,6 +44,10 @@ jest.mock('react-native-reanimated', () => ({
   // disclosure grammar (trends lens swap, history list reflow, detail chip).
   FadeIn: { duration: () => ({ reduceMotion: () => ({}) }) },
   FadeInDown: { duration: () => ({ delay: () => ({}), reduceMotion: () => ({}) }) },
+  // Exit stub: the skeleton dissolve (useSkeletonExit) and trends' lens-swap
+  // exit build FadeOut.duration(..).reduceMotion(..) — some at module scope,
+  // so the stub must exist before the screens import.
+  FadeOut: { duration: () => ({ reduceMotion: () => ({}) }) },
   LinearTransition: { duration: () => ({ reduceMotion: () => ({}) }) },
   ReduceMotion: { System: 'system' },
   useReducedMotion: () => true,

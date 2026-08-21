@@ -67,6 +67,18 @@ jest.mock('@expo/vector-icons', () => {
       ReactLocal.createElement(Text, null, `icon:${name}`),
   };
 });
+// The GO CTA thumps through the settings-gated gateway; stub it so pressing
+// the CTA here never reaches expo-haptics or the settings store.
+jest.mock('@/utils/haptics', () => ({
+  haptic: {
+    selection: jest.fn(),
+    impactLight: jest.fn(),
+    impactMedium: jest.fn(),
+    success: jest.fn(),
+    warning: jest.fn(),
+    error: jest.fn(),
+  },
+}));
 
 import { color, space } from '@/constants/tokens';
 import { PLACEMENT_TIPS, StartHero, layoutBottom, type StartHeroProps } from '../StartHero';

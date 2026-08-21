@@ -24,9 +24,14 @@ import * as path from 'path';
 import { layout, space, type } from '@/constants/tokens';
 
 const APP = path.join(__dirname, '..', '..', 'app');
+const SRC = path.join(__dirname, '..', '..');
 
 const read = (...parts: string[]): string =>
   fs.readFileSync(path.join(APP, ...parts), 'utf8');
+
+/** For pins that reach outside app/ (the shared kit). */
+const readSrc = (...parts: string[]): string =>
+  fs.readFileSync(path.join(SRC, ...parts), 'utf8');
 
 /**
  * Line comments stripped. These files DOCUMENT the values they no longer use
@@ -133,11 +138,19 @@ describe('owned screens honour the scale instead of overriding it', () => {
 
 describe('status tints are one value per status', () => {
   it('the amber caution fill is the token, never a local alpha', () => {
-    const src = read('jump.tsx');
     // jump.tsx used rgba(232,184,79,0.10) while the shared Chip used 0.14, so
-    // the identical warning read weaker in Jump Lab than anywhere else.
-    expect(code(src)).not.toMatch(/rgba\(\s*232\s*,\s*184\s*,\s*79/);
-    expect(src).toContain('color.unsureTint');
+    // the identical warning read weaker in Jump Lab than anywhere else. The
+    // kit and the licenses screen carried the same literal at 0.14 — now that
+    // all three pull the token, none of them may re-inline the alpha.
+    const sources: readonly [name: string, src: string][] = [
+      ['jump', read('jump.tsx')],
+      ['ui kit', readSrc('components', 'ui.tsx')],
+      ['licenses', read('legal', 'licenses.tsx')],
+    ];
+    for (const [name, src] of sources) {
+      expect([name, /rgba\(\s*232\s*,\s*184\s*,\s*79/.test(code(src))]).toEqual([name, false]);
+      expect([name, src.includes('color.unsureTint')]).toEqual([name, true]);
+    }
   });
 
   it('coach carries no raw accent/miss rgba edges', () => {

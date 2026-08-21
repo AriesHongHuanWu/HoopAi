@@ -16,7 +16,6 @@
  */
 import { Ionicons } from '@expo/vector-icons';
 import { useEvent, useEventListener } from 'expo';
-import * as Haptics from 'expo-haptics';
 import { useLocalSearchParams } from 'expo-router';
 import {
   useVideoPlayer,
@@ -57,6 +56,7 @@ import { clamp } from '@/core/geometry';
 import type { ResolvedShot } from '@/core/types';
 import type { SessionRow } from '@/data/db';
 import { useSettings } from '@/state/settingsStore';
+import { haptic } from '@/utils/haptics';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -189,7 +189,7 @@ function HighlightsSegmented({
         accessibilityLabel="Full game"
         accessibilityHint="Plays the whole recording"
         accessibilityState={{ checked: !highlightsOn }}
-        style={styles.segment}
+        style={({ pressed }) => [styles.segment, pressed && { opacity: 0.7 }]}
       >
         <Text style={[styles.segLabel, !highlightsOn && styles.segLabelActive]}>
           Full game
@@ -202,7 +202,11 @@ function HighlightsSegmented({
         accessibilityLabel="Highlights"
         accessibilityHint="Plays only the moments around your shots"
         accessibilityState={{ checked: highlightsOn, disabled: highlightsDisabled }}
-        style={[styles.segment, highlightsDisabled && { opacity: 0.35 }]}
+        style={({ pressed }) => [
+          styles.segment,
+          highlightsDisabled && { opacity: 0.35 },
+          pressed && { opacity: 0.7 },
+        ]}
       >
         <Ionicons
           name="sparkles"
@@ -407,7 +411,7 @@ function ReplayPlayer({
 
   const handleMarkerPress = useCallback(
     (m: TimelineMarker) => {
-      void Haptics.selectionAsync();
+      haptic.selection();
       seekTo(m.timeSec - preRollSec);
     },
     [seekTo, preRollSec],
@@ -426,19 +430,19 @@ function ReplayPlayer({
   }
 
   const goPrev = () => {
-    void Haptics.selectionAsync();
+    haptic.selection();
     seekTo(prevTarget ?? 0);
   };
   const goNext = () => {
     if (nextTarget == null) return;
-    void Haptics.selectionAsync();
+    haptic.selection();
     seekTo(nextTarget);
   };
 
   // ---- Transport / highlights ----------------------------------------------
 
   const togglePlay = () => {
-    void Haptics.selectionAsync();
+    haptic.selection();
     if (player.playing) player.pause();
     else player.play();
   };
@@ -455,7 +459,7 @@ function ReplayPlayer({
   }, [player]);
 
   const toggleHighlights = () => {
-    void Haptics.selectionAsync();
+    haptic.selection();
     if (highlightsOn) {
       setHighlightsOn(false);
       setHighlightsDone(false);

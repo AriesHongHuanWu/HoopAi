@@ -4,8 +4,10 @@
  * expo-video-thumbnails, same as the Test AI screen), opens ON the auto-detected
  * moment, and lets the user scrub a filmstrip. Returns the chosen frame's uri.
  *
- * Presented as a full-screen overlay over the summary/history screen. Never
- * throws: a clip that can't be sampled shows a friendly message + "Skip photo".
+ * Presented as a full-screen overlay over the summary/history screen — a
+ * SheetScrim (the one overlay grammar), mounted inline so both the entrance
+ * and the exit play. Never throws: a clip that can't be sampled shows a
+ * friendly message + "Skip photo".
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -19,8 +21,10 @@ import {
 } from 'react-native';
 import * as VideoThumbnails from 'expo-video-thumbnails';
 
+import { SheetScrim } from './motion/SheetScrim';
 import { Card, PillButton, Row } from './ui';
 import { color, radius, space, type } from '../constants/tokens';
+import { haptic } from '../utils/haptics';
 
 const FRAME_COUNT = 24;
 const THUMB_QUALITY = 0.6;
@@ -111,8 +115,11 @@ export function FramePickerModal({
   const current = frames?.[Math.max(0, Math.min(index, frames.length - 1))];
 
   return (
-    <View style={styles.scrim} accessibilityViewIsModal>
-      <Card style={styles.card}>
+    // No onDismiss: the sheet keeps its explicit "Skip photo" exit — an
+    // outside tap has never dismissed this picker, and a silent dismiss would
+    // skip the onCancel → format-sheet handoff the callers rely on.
+    <SheetScrim align="center" panelStyle={styles.panel}>
+      <Card>
         <Text style={styles.title}>Pick your moment</Text>
         <Text style={styles.sub}>
           Choose the frame from your session to feature behind your stats.
@@ -142,11 +149,20 @@ export function FramePickerModal({
               {frames.map((f, i) => (
                 <Pressable
                   key={f.uri}
-                  onPress={() => setIndex(i)}
+                  onPress={() => {
+                    // Tick only when the tap changes the selection (the
+                    // SelectableChip grammar); re-tapping the frame is silent.
+                    if (i !== index) haptic.selection();
+                    setIndex(i);
+                  }}
                   accessibilityRole="button"
                   accessibilityLabel={`Frame ${i + 1} of ${frames.length}`}
                   accessibilityState={{ selected: i === index }}
-                  style={[styles.thumb, i === index && styles.thumbSelected]}
+                  style={({ pressed }) => [
+                    styles.thumb,
+                    i === index && styles.thumbSelected,
+                    pressed && { opacity: 0.7 },
+                  ]}
                 >
                   <Image source={{ uri: f.uri }} style={styles.thumbImg} resizeMode="cover" />
                 </Pressable>
@@ -170,25 +186,16 @@ export function FramePickerModal({
           />
         </Row>
       </Card>
-    </View>
+    </SheetScrim>
   );
 }
 
 const styles = StyleSheet.create({
-  scrim: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: color.hudGlass,
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: space.lg,
-  },
-  card: {
+  /** Panel slot: centered, capped — SheetScrim owns the scrim + motion. */
+  panel: {
     width: '100%',
     maxWidth: 520,
+    alignSelf: 'center',
   },
   title: {
     ...type.heading,

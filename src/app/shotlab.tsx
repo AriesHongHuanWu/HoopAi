@@ -119,6 +119,7 @@ export default function ShotLabScreen() {
           <Text style={styles.dim}>Loading session…</Text>
         ) : decided === 0 ? (
           <EmptyState
+            illustration="arc"
             title="No decided shots yet"
             body="Track a session with a few makes and misses, then come back — Shot Lab compares the two to find what actually changes your shot."
             actionLabel="Back"
@@ -150,6 +151,7 @@ export default function ShotLabScreen() {
                     arcs={arcs}
                     width={chartW}
                     height={210}
+                    progress={1}
                     accessibilityLabel="Overlay of every shot's flight arc, makes versus misses, with an NBA-average launch reference"
                   />
                 </View>
@@ -182,6 +184,7 @@ export default function ShotLabScreen() {
                 <RadarChart
                   scores={radar}
                   size={Math.min(chartW, 320)}
+                  progress={1}
                   accessibilityLabel="Radar chart of your shooting profile against NBA average and elite references"
                 />
               </View>
@@ -442,7 +445,7 @@ const styles = StyleSheet.create({
     marginTop: space.lg,
     backgroundColor: color.accentTint,
     borderWidth: StyleSheet.hairlineWidth,
-    borderColor: 'rgba(240, 90, 36, 0.45)',
+    borderColor: color.accentEdge,
     borderRadius: radius.md,
     padding: space.md,
   },

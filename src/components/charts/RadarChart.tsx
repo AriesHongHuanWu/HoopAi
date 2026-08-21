@@ -9,21 +9,40 @@
  *
  * Unmeasured axes (user score null) render at 0 and dim their label — the
  * shape stays honest instead of inventing a value.
+ *
+ * Optional draw-on reveal: PASSING `progress` opts ONLY the user series
+ * (gradient fill, accent stroke, vertex dots) into a scale-up from the chart
+ * center with an opacity fade on mount (Sparkline's exact contract). Grid,
+ * spokes, elite envelope, NBA outline and the RN-Text labels are static from
+ * frame one, and the final geometry is unchanged — the pop never redraws the
+ * shape, so it can't imply a different profile. Omitting `progress` (default
+ * 1) renders the finished chart statically, so existing callers stay
+ * pixel-identical. Reduced motion always renders static. The transform
+ * worklets return plain arrays over the shared value only — no JS helpers
+ * (the fx/particles crash precedent).
  */
 import {
   Canvas,
   Circle,
   DashPathEffect,
+  Group,
   LinearGradient,
   Path,
   Skia,
   vec,
   type SkPath,
 } from '@shopify/react-native-skia';
-import React, { useMemo } from 'react';
+import React, { useEffect, useMemo } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
+import {
+  Easing,
+  useDerivedValue,
+  useReducedMotion,
+  useSharedValue,
+  withTiming,
+} from 'react-native-reanimated';
 
-import { color, radius, space, type } from '@/constants/tokens';
+import { color, motion, radius, space, type } from '@/constants/tokens';
 import type { RadarAxisScore } from '@/core/shotLab';
 
 /** Space reserved around the polygon for the labels, px. */
@@ -39,9 +58,23 @@ const USER_FILL_BOTTOM = 'rgba(240, 90, 36, 0.07)';
 const ELITE_FILL = 'rgba(245, 241, 236, 0.06)';
 const ELITE_EDGE = 'rgba(245, 241, 236, 0.18)';
 
+/** Scale the user series pops in from (about the chart center). */
+const POP_FROM_SCALE = 0.5;
+
+function clampProgress01(v: number): number {
+  return v < 0 ? 0 : v > 1 ? 1 : v;
+}
+
 export interface RadarChartProps {
   scores: readonly RadarAxisScore[];
   size: number;
+  /**
+   * Reveal target, 0..1. PROVIDING this prop opts the user series into a
+   * scale/opacity pop on mount (static under reduced motion); omitting it
+   * (the default, 1) renders the full chart statically — existing callers
+   * stay pixel-identical.
+   */
+  progress?: number;
   accessibilityLabel?: string;
 }
 
@@ -68,7 +101,35 @@ function polygon(pts: { x: number; y: number }[]): SkPath {
   return p;
 }
 
-export function RadarChart({ scores, size, accessibilityLabel }: RadarChartProps) {
+export function RadarChart({ scores, size, progress, accessibilityLabel }: RadarChartProps) {
+  const reducedMotion = useReducedMotion();
+  const target = clampProgress01(progress ?? 1);
+  // Draw-on only when the caller explicitly threaded a progress in — the
+  // default renders finished from the first frame, exactly as before.
+  const animateIn = progress != null && !reducedMotion;
+
+  // Pop head. Starts at 0 only when it will actually draw in; otherwise it
+  // holds the target so the static render is the finished chart.
+  const pop = useSharedValue(animateIn ? 0 : target);
+
+  useEffect(() => {
+    if (!animateIn) {
+      pop.value = target;
+      return;
+    }
+    pop.value = withTiming(target, {
+      duration: motion.celebrate,
+      easing: Easing.out(Easing.cubic),
+    });
+  }, [animateIn, target, pop]);
+
+  // Plain transform array + opacity for the user-series Group; math stays
+  // inline in the worklets over the shared value only.
+  const userTransform = useDerivedValue(() => [
+    { scale: POP_FROM_SCALE + (1 - POP_FROM_SCALE) * pop.value },
+  ]);
+  const userOpacity = useDerivedValue(() => pop.value);
+
   const geom = useMemo<Geometry | null>(() => {
     const n = scores.length;
     if (n < 3 || size <= 0) return null;
@@ -158,21 +219,29 @@ export function RadarChart({ scores, size, accessibilityLabel }: RadarChartProps
           <Path path={geom.nba} style="stroke" strokeWidth={1.5} color={color.textDim}>
             <DashPathEffect intervals={[6, 5]} />
           </Path>
-          {/* The user: gradient fill + accent stroke + vertex dots. Unmistakable. */}
-          <Path path={geom.user}>
-            <LinearGradient
-              start={vec(geom.center.x, geom.center.y - geom.radius)}
-              end={vec(geom.center.x, geom.center.y + geom.radius)}
-              colors={[USER_FILL_TOP, USER_FILL_BOTTOM]}
-            />
-          </Path>
-          <Path path={geom.user} style="stroke" strokeWidth={2.5} strokeJoin="round" color={color.accent} />
-          {geom.userDots.map((p, i) => (
-            <React.Fragment key={`ud-${i}`}>
-              <Circle cx={p.x} cy={p.y} r={4} color={color.accent} />
-              <Circle cx={p.x} cy={p.y} r={1.6} color={color.bg} />
-            </React.Fragment>
-          ))}
+          {/* The user: gradient fill + accent stroke + vertex dots. Unmistakable.
+              The ONLY animated group — it pops about the chart center while the
+              references hold still, and lands on the exact static geometry. */}
+          <Group
+            transform={userTransform}
+            origin={vec(geom.center.x, geom.center.y)}
+            opacity={userOpacity}
+          >
+            <Path path={geom.user}>
+              <LinearGradient
+                start={vec(geom.center.x, geom.center.y - geom.radius)}
+                end={vec(geom.center.x, geom.center.y + geom.radius)}
+                colors={[USER_FILL_TOP, USER_FILL_BOTTOM]}
+              />
+            </Path>
+            <Path path={geom.user} style="stroke" strokeWidth={2.5} strokeJoin="round" color={color.accent} />
+            {geom.userDots.map((p, i) => (
+              <React.Fragment key={`ud-${i}`}>
+                <Circle cx={p.x} cy={p.y} r={4} color={color.accent} />
+                <Circle cx={p.x} cy={p.y} r={1.6} color={color.bg} />
+              </React.Fragment>
+            ))}
+          </Group>
           <Circle cx={geom.center.x} cy={geom.center.y} r={2} color={color.textFaint} />
         </Canvas>
         {geom.labels.map((l) => {

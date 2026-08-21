@@ -1,12 +1,16 @@
 /**
- * useCardStagger / useStaggerAt — the canonical stagger contract:
+ * useCardStagger / useStaggerAt / useSkeletonExit — the canonical stagger
+ * contract:
  *   - reduced motion → undefined for EVERY index (Card renders a plain View);
  *   - otherwise FadeInDown.delay(base + i*step).duration(duration) with the
- *     canonical STAGGER_MS/ENTER_MS defaults and per-call opts respected.
+ *     canonical STAGGER_MS/ENTER_MS defaults and per-call opts respected;
+ *   - the skeleton dissolve is a FadeOut of motion.quick that is REFERENTIALLY
+ *     STABLE across re-renders (see its describe for why that is load-bearing).
  *
  * Reanimated's worklets runtime can't load under jest without native modules,
- * so this test carries a minimal mock: FadeInDown builds a plain inspectable
- * record and useReducedMotion is a controllable jest.fn.
+ * so this test carries a minimal mock: the builders make plain inspectable
+ * records (a FRESH record per .duration() call, as Reanimated does) and
+ * useReducedMotion is a controllable jest.fn.
  */
 jest.mock('react-native-reanimated', () => {
   const FadeInDown = {
@@ -20,9 +24,22 @@ jest.mock('react-native-reanimated', () => {
       },
     }),
   };
+  const FadeOut = {
+    duration: (durationMs: number) => ({
+      kind: 'FadeOut',
+      durationMs,
+      reduceMotionMode: undefined as string | undefined,
+      reduceMotion(mode: string) {
+        this.reduceMotionMode = mode;
+        return this;
+      },
+    }),
+  };
   return {
     __esModule: true,
     FadeInDown,
+    FadeOut,
+    ReduceMotion: { System: 'system' },
     useReducedMotion: jest.fn(() => false),
   };
 });
@@ -31,7 +48,16 @@ import React from 'react';
 import renderer, { act } from 'react-test-renderer';
 import { useReducedMotion } from 'react-native-reanimated';
 
-import { ENTER_MS, STAGGER_CAP_INDEX, STAGGER_MS, useCardStagger, useStaggerAt } from '../stagger';
+import { motion } from '@/constants/tokens';
+
+import {
+  ENTER_MS,
+  STAGGER_CAP_INDEX,
+  STAGGER_MS,
+  useCardStagger,
+  useSkeletonExit,
+  useStaggerAt,
+} from '../stagger';
 
 const reducedMock = useReducedMotion as jest.Mock;
 
@@ -48,11 +74,44 @@ function renderHook<T>(useHook: () => T): { current: T } {
   return result;
 }
 
+/** Re-renderable probe: returns the latest hook value plus a rerender(). */
+function renderHookWithRerender<T>(useHook: () => T): {
+  result: { current: T };
+  rerender: () => void;
+} {
+  const result = { current: undefined as unknown as T };
+  let bump: () => void = () => undefined;
+  function Probe(): null {
+    const [, setTick] = React.useState(0);
+    bump = () => setTick((t) => t + 1);
+    result.current = useHook();
+    return null;
+  }
+  act(() => {
+    renderer.create(React.createElement(Probe));
+  });
+  return {
+    result,
+    rerender: () => {
+      act(() => {
+        bump();
+      });
+    },
+  };
+}
+
 /** The mock builder's inspectable shape. */
 interface FakeEntering {
   kind: string;
   delayMs: number;
   durationMs: number | undefined;
+}
+
+/** The mock exit builder's inspectable shape. */
+interface FakeExiting {
+  kind: string;
+  durationMs: number;
+  reduceMotionMode: string | undefined;
 }
 
 beforeEach(() => {
@@ -117,6 +176,46 @@ describe('useCardStagger', () => {
     // pattern still works, it just stops growing.
     const e = result.current(4 + 2) as unknown as FakeEntering;
     expect(e.delayMs).toBe(60 + STAGGER_CAP_INDEX * 50);
+  });
+});
+
+describe('useSkeletonExit', () => {
+  it('returns undefined under reduced motion (the barrel idiom)', () => {
+    reducedMock.mockReturnValue(true);
+    const { result } = renderHookWithRerender(() => useSkeletonExit());
+    expect(result.current).toBeUndefined();
+  });
+
+  it('builds FadeOut at motion.quick and ALSO chains reduceMotion(System)', () => {
+    // The second gate covers an OS toggle between the render that captured
+    // the builder and the unmount that plays it.
+    const { result } = renderHookWithRerender(() => useSkeletonExit());
+    const e = result.current as unknown as FakeExiting;
+    expect(e.kind).toBe('FadeOut');
+    expect(e.durationMs).toBe(motion.quick);
+    expect(e.reduceMotionMode).toBe('system');
+  });
+
+  it('keeps ONE identity across re-renders', () => {
+    // REGRESSION. Unlike `entering`, which Reanimated configures once in
+    // componentDidMount, `exiting` is re-configured from componentDidUpdate
+    // on every update and bails out on reference equality alone. An
+    // unmemoized builder therefore fired a native re-register on every
+    // re-render for as long as the skeleton was mounted — and loading
+    // screens re-render constantly (filters, paging, the delay timer).
+    const { result, rerender } = renderHookWithRerender(() => useSkeletonExit());
+    const first = result.current;
+    rerender();
+    rerender();
+    expect(result.current).toBe(first);
+  });
+
+  it('rebuilds when the reduced-motion setting itself flips', () => {
+    const { result, rerender } = renderHookWithRerender(() => useSkeletonExit());
+    expect(result.current).toBeDefined();
+    reducedMock.mockReturnValue(true);
+    rerender();
+    expect(result.current).toBeUndefined();
   });
 });
 

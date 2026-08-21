@@ -11,7 +11,6 @@
  */
 import { Ionicons } from '@expo/vector-icons';
 import { Canvas, Circle, Path } from '@shopify/react-native-skia';
-import * as Haptics from 'expo-haptics';
 import { Link, Redirect, router, useFocusEffect } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -87,6 +86,7 @@ import { loadTodayAggregate, loadWeekAggregate, useChallenges } from '@/state/ch
 import { useMode } from '@/state/modeStore';
 import { useSession } from '@/state/sessionStore';
 import { useSettings } from '@/state/settingsStore';
+import { haptic } from '@/utils/haptics';
 
 type IoniconName = React.ComponentProps<typeof Ionicons>['name'];
 
@@ -190,7 +190,6 @@ function useChallengesHydrated(): boolean {
 
 export default function HomeScreen() {
   const onboardingDone = useSettings((s) => s.onboardingDone);
-  const hapticsEnabled = useSettings((s) => s.hapticsEnabled);
   const cameraPermission = useCameraPermission();
   const dailyGoalMakes = useSettings((s) => s.dailyGoalMakes);
   const { width } = useWindowDimensions();
@@ -490,7 +489,9 @@ export default function HomeScreen() {
   if (!onboardingDone) return <Redirect href="/onboarding" />;
 
   const startSession = () => {
-    if (hapticsEnabled) void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    // Primary action tick — through the settings-gated gateway, never
+    // expo-haptics directly, so Settings > Haptics is always honored.
+    haptic.impactMedium();
     // The hero ALWAYS opens setup — orientation choice and the pre-flight
     // checklist live there. (An earlier "one tap to ball" hero skipped it and
     // made orientation unpickable; the quick chip below is the deliberate shortcut.)
@@ -498,7 +499,9 @@ export default function HomeScreen() {
   };
 
   const quickStart = () => {
-    if (hapticsEnabled) void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    // Primary action tick — through the settings-gated gateway, never
+    // expo-haptics directly, so Settings > Haptics is always honored.
+    haptic.impactMedium();
     // Skip the checklist, reuse the last orientation. An open run — clear any
     // mode picked in a past session so a stale game HUD never leaks in.
     useMode.getState().reset();
@@ -805,7 +808,23 @@ export default function HomeScreen() {
             accessibilityLabel={`Last session, ${formatSessionDate(lastSession.startedAt)}, ${
               lastSession.attempts
             } attempts, ${Math.round(lastSession.fgPct * 100)} percent field goals`}
-            onPress={() => router.push(`/history/${lastSession.id}`)}
+            onPress={() =>
+              router.push({
+                pathname: '/history/[id]',
+                params: {
+                  id: String(lastSession.id),
+                  // Card-to-detail continuity: the SAME persisted row values
+                  // this card is rendering ride the push, so the detail opens
+                  // on the numbers just read instead of a skeleton. The loaded
+                  // record replaces them with identical ones — never a
+                  // projection.
+                  startedAt: String(lastSession.startedAt),
+                  fg: String(Math.round(lastSession.fgPct * 100)),
+                  makes: String(lastSession.makes),
+                  attempts: String(lastSession.attempts),
+                },
+              })
+            }
           >
             {({ pressed }) => (
               <Card style={pressed ? styles.cardPressed : undefined}>
@@ -868,10 +887,14 @@ export default function HomeScreen() {
                     style={styles.sparkBand}
                   >
                     <View style={styles.sparkBandChart}>
+                      {/* progress opts the line into its draw-on: real
+                          points, landing on the real last value (static
+                          under reduced motion — see Sparkline). */}
                       <Sparkline
                         data={recentTrend}
                         width={contentWidth - space.lg * 2}
                         height={SPARK_BAND_H}
+                        progress={1}
                       />
                     </View>
                     <Text style={styles.sparkBandLabel}>

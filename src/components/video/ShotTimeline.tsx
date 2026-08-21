@@ -115,10 +115,11 @@ function TimelineMarkerDot({
       }
       accessibilityHint="Seeks playback to just before this shot"
       accessibilityState={{ selected: active }}
-      style={[
+      style={({ pressed }) => [
         styles.markerHit,
         { left: leftPx - MARKER_TARGET_W / 2 },
         active && styles.markerHitActive,
+        pressed && { opacity: 0.7 },
       ]}
     >
       <Animated.View pointerEvents="none" style={[styles.activeHalo, haloStyle]} />

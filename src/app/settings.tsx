@@ -32,6 +32,10 @@ import { color, iconSize, layout, motion, radius, space, touch, type } from '@/c
 import type { ShootingHand } from '@/core/types';
 import { runBackupExport, runBackupImport } from '@/data/backupRunner';
 import { useCardStagger, type EnteringProp } from '@/components/motion';
+// Concrete paths (the ScreenHeader precedent): suites that stub the motion
+// barrel down to the stagger hooks must not lose the wave-3 primitives.
+import { SelectableChip } from '@/components/motion/SelectableChip';
+import { SheetScrim } from '@/components/motion/SheetScrim';
 import { haptic } from '@/utils/haptics';
 import {
   CLIP_POST_ROLL_MAX,
@@ -269,6 +273,7 @@ function MoreDetail({ label, detail }: { label: string; detail: string }) {
         accessibilityState={{ expanded }}
         hitSlop={space.sm}
         onPress={() => setExpanded((v) => !v)}
+        style={({ pressed }) => pressed && { opacity: 0.7 }}
       >
         <Text style={styles.moreLink}>{expanded ? 'Less' : 'More'}</Text>
       </Pressable>
@@ -342,25 +347,12 @@ function SelectChip({
   selected: boolean;
   onPress: () => void;
 }) {
-  return (
-    <Pressable
-      accessibilityRole="button"
-      accessibilityLabel={label}
-      accessibilityState={{ selected }}
-      onPress={onPress}
-      style={({ pressed }) => [
-        styles.selectChip,
-        selected && styles.selectChipSelected,
-        pressed && !selected && styles.selectChipPressed,
-        pressed && selected && { opacity: 0.82 },
-      ]}
-    >
-      {selected && <Ionicons name="checkmark" size={iconSize.sm} color={color.accent} />}
-      <Text style={[styles.selectChipLabel, selected && styles.selectChipLabelSelected]}>
-        {label}
-      </Text>
-    </Pressable>
-  );
+  // SelectableChip owns the press spring, the selected-color crossfade and
+  // the (settings-gated) selection tick - call sites no longer tick() here.
+  // Same a11y shape as the hand-rolled chip: role button, label, {selected}.
+  // `check` keeps the checkmark the hand-rolled chip carried: on a picker
+  // the chip is the ONLY record of the choice, so it may not be color-only.
+  return <SelectableChip check label={label} selected={selected} onPress={onPress} />;
 }
 
 /**
@@ -766,7 +758,6 @@ export default function SettingsScreen() {
                 label={SOUND_PACK_LABELS[pack]}
                 selected={soundPack === pack}
                 onPress={() => {
-                  tick();
                   set('soundPack', pack);
                   if (soundsEnabled) previewPack(pack);
                 }}
@@ -797,7 +788,6 @@ export default function SettingsScreen() {
                 label={opt.label}
                 selected={voiceMetric === opt.value}
                 onPress={() => {
-                  tick();
                   set('voiceMetric', opt.value);
                 }}
               />
@@ -1076,7 +1066,6 @@ export default function SettingsScreen() {
                 label={opt.label}
                 selected={shootingHand === opt.value}
                 onPress={() => {
-                  tick();
                   set('shootingHand', opt.value);
                 }}
               />
@@ -1100,7 +1089,6 @@ export default function SettingsScreen() {
                 label={opt.label}
                 selected={ballSize === opt.value}
                 onPress={() => {
-                  tick();
                   set('ballSize', opt.value);
                 }}
               />
@@ -1286,10 +1274,15 @@ export default function SettingsScreen() {
       <Modal
         visible={importOpen}
         transparent
-        animationType="fade"
+        animationType="none"
         onRequestClose={() => setImportOpen(false)}
       >
-        <View style={styles.importBackdrop}>
+        {/* ONE sheet grammar: SheetScrim owns the scrim fade + panel rise
+            (Reduce Motion included). Inside an RN Modal `exiting` never
+            plays, so only the ENTRANCE moves to the primitive. The old
+            animationType="fade" faded the CLOSE too; dismissal is now a hard
+            cut. Same trade as the profile sheet - see its note. */}
+        <SheetScrim align="center">
           <View style={styles.importSheet}>
             <Text style={styles.importTitle} accessibilityRole="header">
               Import data
@@ -1341,7 +1334,7 @@ export default function SettingsScreen() {
               </Pressable>
             </Row>
           </View>
-        </View>
+        </SheetScrim>
       </Modal>
     </Screen>
   );
@@ -1438,12 +1431,15 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: space.lg,
     borderRadius: radius.md,
-    borderWidth: 1,
+    // Hairline for the plain resting boundary; the selected ring below keeps
+    // full weight - borderWidth 1 is reserved for hierarchy, not boxes.
+    borderWidth: StyleSheet.hairlineWidth,
     borderColor: color.border,
     paddingHorizontal: space.md,
     paddingVertical: space.xs,
   },
   presetRowSelected: {
+    borderWidth: 1,
     borderColor: color.accent,
     backgroundColor: color.accentTint,
   },
@@ -1469,32 +1465,6 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
     gap: space.sm,
     marginTop: space.md,
-  },
-  selectChip: {
-    minHeight: touch.minTarget,
-    paddingHorizontal: space.lg,
-    borderRadius: radius.pill,
-    borderWidth: 1,
-    borderColor: color.border,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: space.xs,
-  },
-  selectChipSelected: {
-    backgroundColor: color.accentTint,
-    borderColor: color.accent,
-  },
-  selectChipPressed: {
-    backgroundColor: color.surfaceRaised,
-    borderColor: color.textFaint,
-  },
-  selectChipLabel: {
-    ...type.bodyMedium,
-    color: color.textDim,
-  },
-  selectChipLabelSelected: {
-    color: color.accent,
   },
   optionRow: {
     minHeight: touch.minTarget,
@@ -1528,7 +1498,7 @@ const styles = StyleSheet.create({
     width: touch.minTarget,
     height: touch.minTarget,
     borderRadius: radius.pill,
-    borderWidth: 1,
+    borderWidth: StyleSheet.hairlineWidth,
     borderColor: color.border,
     alignItems: 'center',
     justifyContent: 'center',
@@ -1563,17 +1533,11 @@ const styles = StyleSheet.create({
     ...type.caption,
     color: color.textDim,
   },
-  // Import paste sheet (P19).
-  importBackdrop: {
-    flex: 1,
-    backgroundColor: color.scrim,
-    justifyContent: 'center',
-    padding: space.lg,
-  },
+  // Import paste sheet (P19). Scrim + centering live in SheetScrim now.
   importSheet: {
     backgroundColor: color.surface,
     borderRadius: radius.lg,
-    borderWidth: 1,
+    borderWidth: StyleSheet.hairlineWidth,
     borderColor: color.border,
     padding: space.lg,
     gap: space.md,
@@ -1588,7 +1552,7 @@ const styles = StyleSheet.create({
     minHeight: 120,
     maxHeight: 220,
     borderRadius: radius.md,
-    borderWidth: 1,
+    borderWidth: StyleSheet.hairlineWidth,
     borderColor: color.border,
     backgroundColor: color.surfaceRaised,
     padding: space.md,
@@ -1599,10 +1563,12 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     paddingHorizontal: space.lg,
     borderRadius: radius.pill,
-    borderWidth: 1,
+    borderWidth: StyleSheet.hairlineWidth,
     borderColor: color.border,
   },
   importBtnPrimary: {
+    // Accent ring at full weight - the one emphasized control in the sheet.
+    borderWidth: 1,
     backgroundColor: color.accentTint,
     borderColor: color.accent,
   },
