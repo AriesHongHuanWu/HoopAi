@@ -2,7 +2,8 @@
  * poseParser tests: normal MoveNet decode plus the bounds/NaN guards that
  * keep a corrupted or truncated pose tensor from producing a keypoint with
  * non-finite coordinates (FormAnalyzer has no defense of its own against
- * that).
+ * that), and the timestamp guard that refuses a frame the session could
+ * never place in time.
  */
 import { describe, expect, test } from '@jest/globals';
 
@@ -64,6 +65,25 @@ describe('parseMoveNet', () => {
     expect(frame.keypoints.nose).toBeDefined();
     // Nothing beyond index 4 should be present; no out-of-range keys.
     expect(Object.keys(frame.keypoints).length).toBeLessThanOrEqual(5);
+  });
+
+  test('refuses a non-finite timestamp and returns an empty frame at t 0', () => {
+    // iOS frame timestamps are metadata.timestamp.seconds with no CMTime
+    // validity guard, so NaN is reachable. One such frame keys the prune Maps
+    // on an unplaceable value, poisons every dt (One-Euro filters, the fps
+    // EMA) and passes no window test again — for the rest of the session.
+    // Refusing it must produce a frame that measured NOTHING, not a frame at
+    // an invented time carrying real keypoints.
+    const noseIdx = MOVENET_KEYPOINTS.indexOf('nose');
+    const data = buildBuffer({ [noseIdx]: [0.25, 0.5, 0.9] });
+    for (const bad of [NaN, Infinity, -Infinity]) {
+      const frame = parseMoveNet(data, 640, 640, bad);
+      expect(frame.t).toBe(0);
+      expect(Object.keys(frame.keypoints)).toHaveLength(0);
+    }
+    // A finite t on the SAME buffer still decodes — the guard refuses the
+    // timestamp, never the tensor.
+    expect(parseMoveNet(data, 640, 640, 2).keypoints.nose).toBeDefined();
   });
 
   test('handles an empty buffer gracefully', () => {

@@ -21,6 +21,22 @@
  * shot simply stays unsure. The offline pass can only ADD information, never
  * fight the user or the live call.
  *
+ * THE REPLAY IS STRICTLY WEAKER THAN THE LIVE PASS, AND MUST NEVER OUT-CLAIM IT.
+ * It sees {@link RECHECK.fps} = 6 fps instead of the camera rate, and it has no
+ * net channel at all (net motion needs dense frame PAIRS). So the replay is
+ * allowed to confirm what the live call could not decide — it is never allowed
+ * to be more confident than the live pass on less evidence. Three rules enforce
+ * that, and each one is a suppression:
+ *   1. The replay FSM is constructed with the SAME guards the live app enables
+ *      (depth veto / reappearance / rattle guard / settle window). Running them
+ *      OFF made the offline FSM strictly more permissive than the live one.
+ *   2. A netless make resting on 2D geometry ALONE is refused
+ *      ({@link offlineMakeCorroborated}) — at 6 fps a "crossing pair" spans
+ *      167 ms, which is not a look at the ball going through the hoop.
+ *   3. The resolve CLOSEST to the live tResolved wins, inside a tolerance
+ *      narrower than SHOT_FSM.shotCooldownSec, so a neighbouring rebound or
+ *      put-back can never supply the verdict for the original attempt.
+ *
  * Time bookkeeping: shot timestamps are engine-clock seconds; the recording
  * starts later (at rim lock). videoTime = cameraTime − recordingStartSec, and
  * samples are fed to the FSM at cameraTime so the offline resolve lands on the
@@ -44,8 +60,14 @@ export const RECHECK = {
    * The offline resolve must land within this many seconds of the original
    * tResolved to be accepted as the SAME attempt — a resolve further away is
    * some other ball activity in the window and must not speak for this shot.
+   *
+   * MUST STAY BELOW SHOT_FSM.shotCooldownSec (1.5). At the old 2.0 the window
+   * was WIDER than the FSM's own "this is a different attempt" cooldown, so a
+   * rebound or put-back was inside the same-attempt window BY CONSTRUCTION and
+   * could hand its verdict to the shot next to it. Pinned by an inequality
+   * test rather than a magic number so the two can never drift apart again.
    */
-  matchToleranceSec: 2.0,
+  matchToleranceSec: 1.2,
 } as const;
 
 /**
@@ -92,6 +114,12 @@ export type RecheckSkipReason =
   | 'no-resolve'
   /** The offline pass also came out unsure. */
   | 'offline-unsure'
+  /**
+   * The offline pass called a MAKE from 2D geometry alone — no net channel
+   * exists offline and no 'ball_in_basket' fired — so the make was refused and
+   * the shot stays unsure. See {@link offlineMakeCorroborated}.
+   */
+  | 'uncorroborated-make'
   /** The run was cancelled mid-shot. */
   | 'cancelled';
 
@@ -138,6 +166,28 @@ export function reconcileOutcome(
   if (original !== 'unsure') return null;
   if (offline === 'make' || offline === 'miss') return offline;
   return null;
+}
+
+/**
+ * Whether an offline MAKE carries corroboration beyond 2D geometry.
+ *
+ * The live pass mints a netless geo-only make (fuse(): `net === null &&
+ * geo === true`) because live geometry is sampled at the camera rate. The
+ * offline replay runs at {@link RECHECK.fps} = 6 fps, where the two samples
+ * either side of the rim plane are 167 ms apart — the ball travels most of a
+ * rim width between them, and "it was above, then it was below, and the
+ * interpolated x was inside the span" is an inference, not an observation.
+ * That is exactly the reading the live pass declined to convict on, arriving
+ * with LESS evidence, so the replay may not upgrade an unsure on it.
+ *
+ * Corroboration means a second, independent channel said the same thing:
+ * `net === true` (never available offline today, kept so this stays correct if
+ * a net channel is ever recomputed) or `cls === true` (a 'ball_in_basket'
+ * detection at the hoop). Absence of both is not evidence of a miss either —
+ * the shot simply stays unsure, with 'uncorroborated-make' on the receipt.
+ */
+export function offlineMakeCorroborated(signals: ShotSignals): boolean {
+  return signals.net === true || signals.cls === true;
 }
 
 /**
@@ -217,13 +267,18 @@ interface SampledFrame {
  *    in the window ⇒ skip the shot — there is no geometry to judge by.
  * 3. Seed a fresh BallTracker + ShotFsm and feed the samples in timestamp
  *    order (camera clock, so units match the persisted shot).
- * 4. Accept the FIRST offline resolve whose tResolved lands within
- *    ±matchToleranceSec of the original as this shot's verdict, reconciled
+ * 4. Of the offline resolves landing within ±matchToleranceSec of the
+ *    original, take the one CLOSEST to it as this shot's verdict, reconciled
  *    conservatively (unsure→decided only).
+ * 5. Refuse a make that rests on 2D geometry alone
+ *    ({@link offlineMakeCorroborated}); the shot keeps its unsure outcome and
+ *    the receipt records 'uncorroborated-make'.
  *
  * Net motion is not recomputed offline (no dense frame pairs at 6 fps), so the
- * net channel reads unavailable and the FSM's netless fusion applies — geometry
- * first, exactly the high-precision path.
+ * net channel reads unavailable and the FSM's netless fusion applies. That
+ * netless branch treats geometry ALONE as a make, which is why step 5 exists —
+ * offline geometry at 6 fps is the weakest reading in the system, not the
+ * high-precision path.
  */
 export async function recheckShot(
   shot: RecheckShotRef,
@@ -274,8 +329,27 @@ export async function recheckShot(
 
   // --- Phase 3: replay through a fresh tracker + FSM in timestamp order.
   const tracker = new BallTracker({});
-  const fsm = new ShotFsm(rim, { width: deps.frameSize, height: deps.frameSize });
-  let matched: { outcome: ShotOutcome; signals: ShotSignals } | null = null;
+  // Every guard the LIVE app enables via settingsStore -> adoptRim
+  // (shotPipeline.adoptRim). config.ts ships them constructor-default FALSE as
+  // the unit-test baseline, so passing no opts here ran the offline pass with
+  // depth veto, reappearance, rattle guard and settle window ALL OFF — a
+  // strictly MORE permissive FSM than the live one, on strictly less evidence.
+  // All four are demote-or-corroborate by construction (config.ts documents
+  // each: the depth veto is make->miss only, reappearance upgrades only with
+  // net/cls agreement, the rattle guard only demotes to unsure, the settle
+  // window only buys observation time) — none of them can mint a make — so
+  // turning them on can only make the offline pass stricter.
+  const fsm = new ShotFsm(
+    rim,
+    { width: deps.frameSize, height: deps.frameSize },
+    {
+      useDepthRatioVeto: true,
+      useReappearance: true,
+      useRattleGuard: true,
+      useSettleWindow: true,
+    },
+  );
+  let matched: { outcome: ShotOutcome; signals: ShotSignals; dt: number } | null = null;
   for (const f of frames) {
     const ball = tracker.step(
       {
@@ -299,18 +373,21 @@ export async function recheckShot(
           ? person.box
           : null,
     });
-    if (
-      matched === null &&
-      result.resolved !== null &&
-      Math.abs(result.resolved.tResolved - shot.tResolved) <= matchToleranceSec
-    ) {
-      matched = {
-        outcome: result.resolved.outcome,
-        signals: result.resolved.signals,
-      };
-      // FIRST matching resolve is the verdict — later window activity
-      // (a rebound, the next attempt bleeding in) must not overwrite it.
-      break;
+    // CLOSEST matching resolve wins, not the first one in sequence. The window
+    // is ±(3.5, 1.5) s and can easily contain a rebound or a put-back; taking
+    // whichever resolve happened to fire first let a NEIGHBOUR speak for this
+    // attempt whenever it landed inside the tolerance. Nearest-in-time is the
+    // only tie-break that identifies the shot we were asked about, so the whole
+    // window is replayed (no early break) before the verdict is chosen.
+    if (result.resolved !== null) {
+      const dt = Math.abs(result.resolved.tResolved - shot.tResolved);
+      if (dt <= matchToleranceSec && (matched === null || dt < matched.dt)) {
+        matched = {
+          outcome: result.resolved.outcome,
+          signals: result.resolved.signals,
+          dt,
+        };
+      }
     }
   }
 
@@ -318,6 +395,17 @@ export async function recheckShot(
     return { ...base, framesSampled: frames.length, reason: 'no-resolve' };
   }
   const verdict = reconcileOutcome(shot.outcome, matched.outcome);
+  // A make with no second channel behind it is the offline pass out-claiming
+  // the live one: same 2D geometry, six frames a second, no net. Keep the
+  // shot unsure and say why on the receipt.
+  if (verdict === 'make' && !offlineMakeCorroborated(matched.signals)) {
+    return {
+      ...base,
+      framesSampled: frames.length,
+      signals: matched.signals,
+      reason: 'uncorroborated-make',
+    };
+  }
   return {
     ...base,
     framesSampled: frames.length,

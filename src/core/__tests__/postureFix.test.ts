@@ -1,3 +1,13 @@
+/**
+ * posturePlan — the ranked posture-cue engine.
+ *
+ * RE-PINNED for the six-rule engine. Dip depth and shoulder alignment were
+ * removed: the decoder hip-centres every frame, so the dip-depth rule scored
+ * the ARCHETYPE's dip rather than the shooter's, and at the side profile Form
+ * Check asks for the two shoulders are near-coincident, so the tilt rule was
+ * atan2 noise whose sign flipped with the camera side. Fixtures that drove
+ * those two rules now drive rules that survive; nothing was weakened.
+ */
 import { PLAYER_ARCHETYPES } from '../nbaBenchmarks';
 import { referenceSequence } from '../nbaReferenceForms';
 import { posturePlan, type PostureCue } from '../postureFix';
@@ -13,6 +23,25 @@ function clone(seq: DecodedFrame[]): DecodedFrame[] {
     for (const k of Object.keys(f) as PoseKeypointName[]) out[k] = { ...f[k]! };
     return out;
   });
+}
+
+/**
+ * The same motion filmed from the other side: image x negates, anatomical
+ * labels stay with the shooter. Every surviving rule must be blind to this.
+ */
+function mirrorX(seq: DecodedFrame[]): DecodedFrame[] {
+  return seq.map((f) => {
+    const out: DecodedFrame = {};
+    for (const k of Object.keys(f) as PoseKeypointName[]) {
+      out[k] = { x: -f[k]!.x, y: f[k]!.y };
+    }
+    return out;
+  });
+}
+
+/** Index of the SET phase frame — mirrors postureFix's PHASE_FRAC.SET. */
+function setIdx(seq: readonly DecodedFrame[]): number {
+  return Math.round(0.6 * (seq.length - 1));
 }
 
 describe('posturePlan', () => {
@@ -63,9 +92,11 @@ describe('posturePlan', () => {
   test('every cue carries joint, phase, cue text and a drill', () => {
     const ref = referenceSequence(CURRY);
     const user = clone(ref);
+    // Was a hip perturbation, which drove only the dropped dip-depth rule and
+    // now moves nothing. Raise the shooting wrist instead: that is read by the
+    // release-height rule and by the three elbow-angle rules, all surviving.
     for (const f of user) {
-      if (f.left_hip) f.left_hip.y -= 0.15;
-      if (f.right_hip) f.right_hip.y -= 0.15;
+      if (f.right_wrist) f.right_wrist.y -= 0.18;
     }
     const cues = posturePlan(user, ref, 'right', 8);
     expect(cues.length).toBeGreaterThan(0);
@@ -94,19 +125,61 @@ describe('posturePlan', () => {
     expect(cues).toEqual([]);
   });
 
-  test('sign of the diff drives which cue variant is shown (deeper dip)', () => {
+  test('sign of the diff drives which cue variant is shown (higher release)', () => {
+    // Was pinned on dip depth, a dropped rule. Release height carries the same
+    // signed-length semantics and survives, so the sign contract is pinned there.
     const ref = referenceSequence(CURRY);
     const user = clone(ref);
-    // Sink the user's hips much lower at the dip → deeper than reference.
+    // Raise the user's release point (+y is DOWN, so higher = smaller y).
     for (const f of user) {
-      if (f.left_hip) f.left_hip.y += 0.2;
-      if (f.right_hip) f.right_hip.y += 0.2;
+      if (f.right_wrist) f.right_wrist.y -= 0.2;
     }
     const cues = posturePlan(user, ref, 'right', 8);
-    const depth = cues.find((c) => c.id === 'dip_depth') as PostureCue;
-    expect(depth).toBeDefined();
-    expect(depth.diff).toBeGreaterThan(0); // user hipY larger (+y down = lower)
-    expect(depth.cue.toLowerCase()).toContain('lower');
+    const height = cues.find((c) => c.id === 'release_height') as PostureCue;
+    expect(height).toBeDefined();
+    expect(height.diff).toBeLessThan(0); // user wristY smaller (+y down = higher)
+    expect(height.cue.toLowerCase()).toContain('higher');
+  });
+
+  test('the dropped rules produce no cue at all', () => {
+    const ref = referenceSequence(CURRY);
+    // A hip line 0.5 body-heights off the reference. The decoder centres every
+    // frame on the hips, so this was never the shooter's error to report.
+    const hips = clone(ref);
+    for (const f of hips) if (f.left_hip) f.left_hip.y += 0.5;
+    expect(posturePlan(hips, ref, 'right', 8)).toEqual([]);
+    // A ~45° shoulder tilt at the set point: unmeasurable side-on, so silent.
+    const tilt = clone(ref);
+    const s = tilt[setIdx(tilt)]!;
+    if (s.left_shoulder) s.left_shoulder.y += 0.15;
+    expect(posturePlan(tilt, ref, 'right', 8)).toEqual([]);
+  });
+
+  test('the arm-line cue is identical from mirrored facings', () => {
+    const ref = referenceSequence(CURRY);
+    const user = clone(ref);
+    // Flare the shooting elbow outboard at the set point.
+    user[setIdx(user)]!.right_elbow!.x += 0.09;
+    const cues = posturePlan(user, ref, 'right', 8);
+    const arm = cues.find((c) => c.id === 'arm_line_set') as PostureCue;
+    expect(arm).toBeDefined();
+    expect(arm.cue.toLowerCase()).toContain('flares outside');
+    // Same shooter, phone on the other wing: raw (elbow.x − wrist.x) flips
+    // sign, so the whole cue list must be unchanged once it is signed by the
+    // shooter's own shoulder axis.
+    expect(posturePlan(mirrorX(user), ref, 'right', 8)).toEqual(cues);
+  });
+
+  test('the arm-line rule abstains when facing cannot be read', () => {
+    const ref = referenceSequence(CURRY);
+    const user = clone(ref);
+    const i = setIdx(user);
+    user[i]!.right_elbow!.x += 0.09;
+    // Collapse the apparent shoulder separation below the facing floor — at
+    // the side profile the sign of the offset is the camera's, not the shooter's.
+    user[i]!.left_shoulder!.x = user[i]!.right_shoulder!.x - 0.02;
+    const cues = posturePlan(user, ref, 'right', 8);
+    expect(cues.find((c) => c.id === 'arm_line_set')).toBeUndefined();
   });
 
   test('empty sequences produce no cues and do not throw', () => {

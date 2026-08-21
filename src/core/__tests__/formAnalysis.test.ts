@@ -350,7 +350,15 @@ describe('coachingTips', () => {
     expect(tips[0]!.severity).toBe(3);
   });
 
-  test('follow-through collapse → "Hold your follow-through"', () => {
+  // RE-PINNED (copy honesty): the message used to read "Keep the arm extended
+  // and the wrist snapped until the ball hits the rim." COCO-17 has no keypoint
+  // distal to the wrist, so NO consumer of this tip observes a wrist snap, and
+  // Form Check calls coachingTips() with no ball and no rim. This tip's only
+  // inputs are followThroughElbowDeg + followThroughHeldMs, both elbow-extension
+  // readings, so the copy is now elbow-only. Firing condition, metric key and
+  // severity are unchanged — this suppresses an unmeasured claim, it does not
+  // change when the cue fires.
+  test('follow-through collapse → "Hold your follow-through" (elbow-only copy)', () => {
     const tips = coachingTips({
       ...GOOD,
       followThroughElbowDeg: 140,
@@ -358,6 +366,10 @@ describe('coachingTips', () => {
     });
     expect(tips).toHaveLength(1);
     expect(tips[0]!.title).toBe('Hold your follow-through');
+    expect(tips[0]!.metric).toBe('followThroughElbowDeg');
+    expect(tips[0]!.message).toBe(
+      'Keep the shooting arm extended after release — the elbow came down early.',
+    );
   });
 
   test('release-angle inconsistency → "Consistency over power"', () => {
@@ -399,5 +411,122 @@ describe('coachingTips', () => {
     for (let i = 1; i < tips.length; i++) {
       expect(tips[i]!.severity).toBeLessThanOrEqual(tips[i - 1]!.severity);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Copy-layer invariant: tips may only name what the pipeline measures
+// ---------------------------------------------------------------------------
+
+/**
+ * Honesty pins, in the style of core/__tests__/ironRules.invariants.test.ts.
+ *
+ * MoveNet emits COCO-17 and ml/poseParser.ts's keypoint list ends at
+ * left_wrist / right_wrist — no finger, thumb, knuckle or palm point exists
+ * anywhere in the pipeline, so wrist flexion is unobservable in EVERY consumer
+ * of coachingTips(). Form Check (core/formCheck.ts) additionally runs with no
+ * ball and no rim. If this suite goes red the copy started claiming something
+ * nothing measured: fix the string, never relax the banned list.
+ */
+const BANNED_CLAIMS = ['wrist flick', 'wrist snap', 'grip', 'follow-through angle'];
+
+/** Every title the rule engine can emit — the anti-vacuity list. */
+const ALL_TIP_TITLES = [
+  'Raise your set point',
+  'Lower your set point',
+  'Bend your knees',
+  'Ease the dip',
+  'Add arc',
+  'Flatten slightly',
+  'Shoot with more arc',
+  'Bring the arc down',
+  'Hold your follow-through',
+  'Consistency over power',
+  'Quicken your release',
+];
+
+/** One deviation at a time, so the 3-tip cap can never hide a branch. */
+function sweepTipCopy(): { title: string; message: string }[] {
+  const variants: FormMetrics[] = [
+    NULLS,
+    GOOD,
+    { ...GOOD, setPointElbowDeg: 70 }, // mildly low
+    { ...GOOD, setPointElbowDeg: 55 }, // flagged low
+    { ...GOOD, setPointElbowDeg: 95 }, // mildly high
+    { ...GOOD, setPointElbowDeg: 165 }, // the ball-free hanging-arm dip
+    { ...GOOD, kneeFlexionDeg: 140 },
+    { ...GOOD, kneeFlexionDeg: 175 },
+    { ...GOOD, kneeFlexionDeg: 98 },
+    { ...GOOD, kneeFlexionDeg: 80 },
+    { ...GOOD, releaseAngleDeg: 40 },
+    { ...GOOD, releaseAngleDeg: 62 },
+    { ...GOOD, entryAngleDeg: 35 },
+    { ...GOOD, entryAngleDeg: 55 },
+    { ...GOOD, followThroughElbowDeg: 140, followThroughHeldMs: 100 },
+    { ...GOOD, followThroughElbowDeg: null, followThroughHeldMs: 0 },
+    { ...GOOD, releaseTimeMs: 1200 },
+  ];
+  const stds = [
+    undefined,
+    { releaseAngleStdDeg: null },
+    { releaseAngleStdDeg: 2 },
+    { releaseAngleStdDeg: 12 },
+  ];
+  const out: { title: string; message: string }[] = [];
+  for (const m of variants) {
+    for (const sd of stds) {
+      for (const t of coachingTips(m, sd)) {
+        out.push({ title: t.title, message: t.message });
+      }
+    }
+  }
+  return out;
+}
+
+describe('coachingTips copy honesty', () => {
+  test('the sweep reaches every tip the engine can emit (no vacuous pass)', () => {
+    const seen = [...new Set(sweepTipCopy().map((c) => c.title))].sort();
+    expect(seen).toEqual([...ALL_TIP_TITLES].sort());
+  });
+
+  test('no tip claims a hand, a wrist snap or a grip', () => {
+    for (const { title, message } of sweepTipCopy()) {
+      const text = (title + ' ' + message).toLowerCase();
+      for (const banned of BANNED_CLAIMS) {
+        expect(text).not.toContain(banned);
+      }
+    }
+  });
+
+  // Form Check feeds coachingTips() a metrics object whose ball-derived fields
+  // are all null (formCheck.ts: "the ball-derived nulls simply produce no ball
+  // tips"). Whatever DOES fire there must not reference a ball, rim, hoop or
+  // net — none of them are in frame, let alone tracked.
+  test('ball-free Form Check output never references a ball, rim, hoop or net', () => {
+    const ballFree: FormMetrics = {
+      ...GOOD,
+      releaseAngleDeg: null,
+      entryAngleDeg: null,
+    };
+    const variants: FormMetrics[] = [
+      { ...ballFree, setPointElbowDeg: 165 },
+      { ...ballFree, setPointElbowDeg: 55 },
+      { ...ballFree, kneeFlexionDeg: 175 },
+      { ...ballFree, kneeFlexionDeg: 80 },
+      { ...ballFree, followThroughElbowDeg: 140, followThroughHeldMs: 100 },
+      { ...ballFree, followThroughElbowDeg: null, followThroughHeldMs: 0 },
+      { ...ballFree, releaseTimeMs: 1500 },
+    ];
+    let emitted = 0;
+    for (const m of variants) {
+      for (const t of coachingTips(m)) {
+        emitted++;
+        const text = (t.title + ' ' + t.message).toLowerCase();
+        for (const banned of ['ball', 'rim', 'hoop', 'net']) {
+          expect(text).not.toContain(banned);
+        }
+      }
+    }
+    expect(emitted).toBe(variants.length);
   });
 });

@@ -81,6 +81,26 @@
  * {@link FormCheckSessionReport.lowConfidence}. RELAXING A GATE IS ALLOWED;
  * CLAIMING A CLEAN CAPTURE THAT DID NOT HAPPEN IS NOT.
  *
+ * V4 — MEASURE AT THE RIGHT FRAME, JUDGE AGAINST THE RIGHT BAND. V3 bought
+ * back the ball-free demo motion; V4 stops mis-reporting it. Every item is a
+ * SUPPRESSION or a re-aim of an existing comparison — none of them makes a
+ * number easier to claim:
+ *  - THE GATHER GATE ({@link dipGatherOf}): {@link findDip} is a global
+ *    argmax, so on a rep that starts from rest it picks the HANGING ARM and
+ *    reports a ~165° "set point" against FORM's 75-90° band. The three
+ *    dip-frame numbers are now refused when that frame is not a plausible
+ *    gather, each refusal carrying its reason ({@link MetricRefusal}).
+ *  - the dip epsilon is body-relative ({@link dipEpsFor}) — a fixed 0.25 px
+ *    confirms a dip off keypoint jitter on a ~130 px shooter.
+ *  - the follow-through is judged against {@link FT_ELBOW_MIN_DEG}, the
+ *    detector's own fire point, with a frame-resolution tolerance at both
+ *    ends of the window ({@link followThroughHeldFull}). config.FORM.
+ *    followThrough is untouched — the live pipeline still reads it.
+ *  - the RE-ARM GATE: a held follow-through cannot mint a rep per debounce
+ *    period any more; the wrist has to come back to the shoulder first.
+ *  - {@link computePhaseTiming} takes the same tilt as the metrics, so both
+ *    dips are found in one rotated space.
+ *
  * Pure TypeScript: no I/O, no wall clock — time comes exclusively from the
  * camera timestamps on each {@link PoseFrame}.
  */
@@ -210,8 +230,16 @@ export const FOLLOW_TAIL_SEC = 0.5;
  * FOLLOW_TAIL_SEC (1.7 s) — the oldest frame a rep needs is that old by the
  * time its tail completes. FormSequenceBuffer is NOT reused here because its
  * 1.2 s prune would have dropped the dip by then.
+ *
+ * 3.0, not the old 2.0: the prune runs on the CURRENT frame's timestamp, so
+ * the 0.3 s of slack 2.0 left had to absorb the whole tail's worth of late
+ * frames. One stalled delivery — the JS-thread hop has no backpressure — and
+ * the window's oldest frames (the dip, the descent onset) are gone by
+ * finalize time, which reads as a rep that silently lost its set point. The
+ * cost is ~1 s more of a ≤17-entry Map ring; the dip is the one frame every
+ * refusal in this module is judged against.
  */
-export const REP_BUFFER_SEC = 2.0;
+export const REP_BUFFER_SEC = 3.0;
 
 /** Minimum reps that must have measured a metric before a spread is real. */
 export const MIN_SPREAD_REPS = 3;
@@ -307,11 +335,66 @@ export const REP_CONFIDENCE_REASONS: readonly RepConfidenceReason[] = [
  * px past its running max before the dip is confirmed. Keeping the value in
  * lockstep keeps Form Check's dip the same dip a live session reports.
  */
-const DIP_EPS_PX = 0.25;
+export const DIP_EPS_PX = 0.25;
+
+/** Body-relative dip epsilon: a real rise is ≥ 2% of the shooter's height. */
+export const DIP_EPS_BODY_FRAC = 0.02;
+
+/** Floor for the body-relative epsilon, px — never below the 1 px grid. */
+export const DIP_EPS_MIN_PX = 1.0;
+
+/**
+ * The dip-confirmation epsilon for a shooter of this pixel height:
+ * max(2% of the body, 1 px). Null body height (no estimate this window) ⇒
+ * the mirrored {@link DIP_EPS_PX} default, unchanged.
+ */
+export function dipEpsFor(bodyHeightPx: number | null | undefined): number {
+  if (bodyHeightPx == null || !Number.isFinite(bodyHeightPx) || bodyHeightPx <= 0) {
+    return DIP_EPS_PX;
+  }
+  return Math.max(DIP_EPS_BODY_FRAC * bodyHeightPx, DIP_EPS_MIN_PX);
+}
+
+/**
+ * Elbow ceiling for a plausible GATHER, degrees. FORM.elbowSetPoint bands a
+ * real set point at 75-90°; 140 is deliberately far outside it so only an
+ * ESSENTIALLY STRAIGHT arm is refused. An arm hanging at the side reads
+ * 160-180°, which is what findDip's global argmax picks on a ball-free rep
+ * that starts from rest — see {@link dipGatherOf}.
+ */
+export const GATHER_MAX_ELBOW_DEG = 140;
+
+/**
+ * How far below the hip the dip-frame wrist may sit and still be a gather,
+ * as a fraction of body height. A low set point puts the wrist at hip level;
+ * a hanging arm puts it at mid-thigh, ~0.15-0.2 body-heights lower.
+ */
+export const GATHER_WRIST_BELOW_HIP_FRAC = 0.05;
 
 /** MIRRORED from FormAnalyzer (private FT_AVG_WINDOW_SEC): the follow-through
  *  elbow angle is averaged over this window after the release. */
 const FT_AVG_WINDOW_SEC = 0.15;
+
+/**
+ * Form-Check-LOCAL follow-through elbow floor, degrees — the detector's OWN
+ * fire point, by reference so the two can never drift apart.
+ *
+ * config.FORM.followThrough.elbowMinDeg is 155 and stays 155: the live shot
+ * pipeline's FormAnalyzer reads it and must keep judging a game-speed
+ * release. But Form Check COUNTS a rep at {@link FORM_MOTION}'s 130° push
+ * (V3 bought that motion back deliberately), so judging that same rep's hold
+ * against 155° reports "held 0 ms" on every ball-free rep — an ARM COLLAPSE
+ * NOBODY WATCHED, and currently the top-priority spoken callout. A rep is
+ * now judged against the extension that counted it: the hold is the time the
+ * elbow stayed at least as open as the motion Form Check agreed to call a
+ * rep.
+ *
+ * The stated cost: an arm that really does drop from 175° to 135° inside the
+ * tail reads as HELD here, where a live-session FormAnalyzer would flag it.
+ * Form Check cannot have it both ways — 155 makes the metric a constant 0
+ * for the motion this mode exists to measure.
+ */
+export const FT_ELBOW_MIN_DEG = FORM_MOTION.minElbowExtensionDeg;
 
 /**
  * Shoulder/hip x-separation (normalized by body height) of a shooter facing
@@ -594,7 +677,9 @@ export const MOTION_MAX_VY_GAP_SEC = 0.15;
  * second, and (c) the elbow opens past
  * {@link FORM_MOTION.minElbowExtensionDeg}. Each condition may land on a
  * different frame — a motion is a sequence, not a pose — but all three must
- * be recent together. At most one event per {@link FORM_MOTION.debounceSec}.
+ * be recent together. At most one event per {@link FORM_MOTION.debounceSec},
+ * and never two without the wrist dropping back to the shoulder in between
+ * (the re-arm gate; see {@link FormMotionDetector.armed}).
  *
  * Missing landmarks (below FORM.keypointScoreMin) simply leave their
  * condition un-refreshed that frame: never a throw, never a stale emit.
@@ -613,6 +698,21 @@ export class FormMotionDetector {
 
   /** Time of the last emitted event (debounce). */
   private lastEmitT = -Infinity;
+
+  /**
+   * RE-ARM GATE. After an event fires, the wrist must be seen at or below
+   * the shoulder again before another one may. A presenter holding a
+   * follow-through for the audience keeps conditions (a) and (c) true every
+   * frame, so the tiniest hand tremor refreshes (b) and mints a rep per
+   * debounce period — the over-count DEMO-RUNBOOK works around in prose
+   * ("keep your arms down between reps"), encoded here instead.
+   *
+   * It cannot refuse a genuine shot: every real shot starts with the wrist
+   * below the shoulder, and condition (a) already proves the wrist got
+   * ABOVE it. Starts armed so the first rep of a session — including one
+   * caught mid-motion — is never swallowed.
+   */
+  private armed = true;
 
   constructor(opts: { hand: ShootingHand; frameHeight: number }) {
     this.hand = opts.hand;
@@ -648,6 +748,11 @@ export class FormMotionDetector {
       this.aboveShoulderT = t;
     }
 
+    // Re-arm: the wrist came back down to (or below) the shoulder line.
+    if (wrist !== null && shoulder !== null && wrist.y >= shoulder.y) {
+      this.armed = true;
+    }
+
     // (c) Elbow opened past the extension floor.
     if (wrist !== null && elbow !== null && shoulder !== null) {
       const deg = angleAtDeg(shoulder, elbow, wrist);
@@ -681,7 +786,10 @@ export class FormMotionDetector {
     this.elbowExtendedT = -Infinity;
 
     if (t - this.lastEmitT < FORM_MOTION.debounceSec) return null;
+    // The arm never came back down since the last rep — one motion, not two.
+    if (!this.armed) return null;
     this.lastEmitT = t;
+    this.armed = false;
     return { t, wristX: wrist.x, wristY: wrist.y };
   }
 
@@ -977,6 +1085,7 @@ function findDip(
   series: readonly Map<PoseKeypointName, Point>[],
   wristName: PoseKeypointName,
   releaseT: number,
+  dipEpsPx: number = DIP_EPS_PX,
 ): { dipIdx: number; dipMaxY: number; dipConfirmed: boolean } {
   let dipIdx = -1;
   let dipMaxY = -Infinity;
@@ -993,7 +1102,7 @@ function findDip(
     for (let i = dipIdx + 1; i < frames.length; i++) {
       if (frames[i]!.t > releaseT + 1e-9) break;
       const w = series[i]!.get(wristName);
-      if (w && dipMaxY - w.y > DIP_EPS_PX) {
+      if (w && dipMaxY - w.y > dipEpsPx) {
         dipConfirmed = true;
         break;
       }
@@ -1003,9 +1112,74 @@ function findDip(
 }
 
 /**
+ * THE GATHER GATE. {@link findDip} is a global argmax of filtered wrist y —
+ * it returns the LOWEST the wrist ever was before the release, whatever the
+ * shooter was doing at that instant. On a rep that starts from rest (the
+ * ball-free demo motion this mode exists for) that frame is the arm HANGING
+ * AT THE SIDE, and the set point then reads ~165° against FORM's 75-90°
+ * band: a headline "lower your set point" cue generated off a frame nobody
+ * would call a gather.
+ *
+ * The argmax is kept — the dip really is the lowest wrist. What is added is
+ * the REFUSAL: a dip frame that is not a plausible gather yields no
+ * dip-frame number at all. Two independent checks, each of which may only
+ * REFUSE:
+ *  - the dip-frame elbow is flexed (≤ {@link GATHER_MAX_ELBOW_DEG});
+ *  - the dip-frame wrist is at or above the hip line (within
+ *    {@link GATHER_WRIST_BELOW_HIP_FRAC} of body height).
+ * A check whose landmarks are missing abstains — but if NEITHER could run,
+ * the gather is unverified and that refuses too. Nothing here can make a
+ * metric appear; it can only take one away, with its reason attached.
+ */
+function dipGatherOf(
+  dipFrame: RawSeqFrame,
+  dipSeries: ReadonlyMap<PoseKeypointName, Point>,
+  hand: ShootingHand,
+): { gathered: boolean; reason: string | null } {
+  // The elbow test reads the FILTERED series — it has to judge the very
+  // angle it is refusing. The hip line reads the RAW frame: the hip is a
+  // near-static landmark on this window and filtering it buys nothing.
+  const s = dipSeries.get(`${hand}_shoulder` as PoseKeypointName);
+  const e = dipSeries.get(`${hand}_elbow` as PoseKeypointName);
+  const w = dipSeries.get(`${hand}_wrist` as PoseKeypointName);
+  const elbowDeg = s && e && w ? angleAtDeg(s, e, w) : null;
+  if (elbowDeg != null && elbowDeg > GATHER_MAX_ELBOW_DEG) {
+    return {
+      gathered: false,
+      reason: `dip frame is not a gather — elbow ${Math.round(elbowDeg)}°, arm was extended`,
+    };
+  }
+
+  const rawWrist = dipFrame.pts.get(`${hand}_wrist` as PoseKeypointName);
+  const rawHip = dipFrame.pts.get(`${hand}_hip` as PoseKeypointName);
+  let hipChecked = false;
+  if (rawWrist && rawHip) {
+    hipChecked = true;
+    const body = bodyHeightOf(dipFrame.pts);
+    const slack = body != null ? GATHER_WRIST_BELOW_HIP_FRAC * body : 0;
+    // +y down: a wrist BELOW the hip has the larger y.
+    if (rawWrist.y > rawHip.y + slack) {
+      return {
+        gathered: false,
+        reason: 'dip frame is not a gather — wrist below the hip line, arm was hanging',
+      };
+    }
+  }
+
+  if (elbowDeg == null && !hipChecked) {
+    return {
+      gathered: false,
+      reason: 'dip frame gather unverified — no elbow angle and no hip on that frame',
+    };
+  }
+  return { gathered: true, reason: null };
+}
+
+/**
  * Follow-through over the post-release tail (FormAnalyzer's windows):
- * FT_AVG_WINDOW_SEC mean elbow angle + the unbroken ≥ elbowMinDeg streak
- * capped at holdSec. Extracted from computeRepMetrics VERBATIM.
+ * FT_AVG_WINDOW_SEC mean elbow angle + the unbroken ≥ {@link FT_ELBOW_MIN_DEG}
+ * streak capped at holdSec. Extracted from computeRepMetrics VERBATIM; the
+ * elbow floor is the ONE divergence and it is documented on the constant.
  */
 function followThroughOf(
   frames: readonly RawSeqFrame[],
@@ -1044,15 +1218,74 @@ function followThroughOf(
       }
     }
     if (n > 0) followThroughElbowDeg = sum / n;
+
+    // FRAME-RESOLUTION TOLERANCE AT THE START. The release fires on the RAW
+    // elbow crossing the extension floor, while this streak reads the
+    // ONE-EURO-FILTERED angle — which is still a frame or so behind it at
+    // exactly that instant. On a ball-free push that crosses the floor near
+    // the top of the motion, the very first tail sample therefore lands a
+    // degree or two short and the streak breaks before it starts: 0 ms,
+    // reported as an arm collapse nobody watched. The streak may begin one
+    // median frame period late; the hold is then measured FROM WHERE IT
+    // ACTUALLY STARTED, never from the release, so no millisecond is claimed
+    // across an interval that was not observed extended. A real post-release
+    // collapse lasts far longer than one frame and still reports short.
+    let medDt = 0;
+    if (ftT.length > 1) {
+      const dts: number[] = [];
+      for (let i = 1; i < ftT.length; i++) {
+        const dt = ftT[i]! - ftT[i - 1]!;
+        if (dt > 0) dts.push(dt);
+      }
+      medDt = median(dts) ?? 0;
+    }
+    let start = 0;
+    while (
+      start < ftT.length &&
+      ftDeg[start]! < FT_ELBOW_MIN_DEG &&
+      ftT[start]! - releaseT <= medDt + 1e-9
+    ) {
+      start++;
+    }
+    let heldStart: number | null = null;
     let heldEnd: number | null = null;
-    for (let i = 0; i < ftT.length; i++) {
-      if (ftDeg[i]! >= FORM.followThrough.elbowMinDeg) heldEnd = ftT[i]!;
-      else break;
+    for (let i = start; i < ftT.length; i++) {
+      if (ftDeg[i]! < FT_ELBOW_MIN_DEG) break;
+      if (heldStart == null) heldStart = ftT[i]!;
+      heldEnd = ftT[i]!;
     }
     followThroughHeldMs =
-      heldEnd == null ? 0 : Math.min((heldEnd - releaseT) * 1000, holdMs);
+      heldEnd == null || heldStart == null
+        ? 0
+        : Math.min((heldEnd - heldStart) * 1000, holdMs);
   }
   return { followThroughElbowDeg, followThroughHeldMs };
+}
+
+/**
+ * Did the follow-through hold the FULL window, at this rep's own frame
+ * resolution?
+ *
+ * followThroughHeldMs is the last SAMPLED instant the elbow was still
+ * extended, so it lands on a frame boundary: at 30 fps a hold that really
+ * ran the whole 300 ms window reports at most 300 − 33 ms, at 15 fps 300 −
+ * 67, at 8 fps 300 − 125. Compared against a bare 300 the metric therefore
+ * reads "collapsed" on every rep at the 15-21 fps the runbook accepts on
+ * stage — a systematic quantization bias, not a shooter's fault.
+ *
+ * The tolerance widens the COMPARISON by one median frame period. It does
+ * NOT touch the number: inventing the missing milliseconds would report a
+ * hold across an interval nobody sampled. `poseFps` ≤ 0 (unknown rate) ⇒ no
+ * tolerance, the strict old test.
+ */
+export function followThroughHeldFull(
+  heldMs: number | null,
+  poseFps: number,
+): boolean {
+  if (heldMs == null) return false;
+  const holdMs = FORM.followThrough.holdSec * 1000;
+  const tolMs = poseFps > 0 ? 1000 / poseFps : 0;
+  return heldMs >= holdMs - tolMs - 1e-6;
 }
 
 /**
@@ -1092,8 +1325,8 @@ function rotateFrames(
  *    when the wrist later rises more than DIP_EPS_PX past it;
  *  - set-point elbow / knee flexion are angleAtDeg at the dip frame;
  *  - follow-through elbow is averaged over FT_AVG_WINDOW_SEC after release,
- *    and the hold is the unbroken ≥ FORM.followThrough.elbowMinDeg streak
- *    capped at FORM.followThrough.holdSec.
+ *    and the hold is the unbroken ≥ {@link FT_ELBOW_MIN_DEG} streak capped
+ *    at FORM.followThrough.holdSec.
  *
  * DIVERGES where the ball is required, honestly:
  *  - releaseTimeMs is dip→release (no ball, no pickup) — the UI relabels it;
@@ -1103,6 +1336,11 @@ function rotateFrames(
  * keypoints by −tiltDeg about the frame center BEFORE filtering. null / 0 /
  * absent produces output identical to v1 (regression-pinned): the frames
  * pass through untouched, not through an identity rotation.
+ *
+ * V4 — the three DIP-FRAME numbers (set point, knee, tempo) are refused when
+ * that frame is not a plausible gather ({@link dipGatherOf}); the reason
+ * rides on {@link computeRepMetricsDetailed}. `opts.dipEpsPx` defaults to
+ * the mirrored {@link DIP_EPS_PX}; live call sites pass {@link dipEpsFor}.
  *
  * Anything unmeasurable (missing landmarks, no dip, empty tail) is null —
  * never NaN.
@@ -1114,8 +1352,47 @@ export function computeRepMetrics(
     frameHeight: number;
     releaseT: number;
     tiltDeg?: number | null;
+    /** Dip-confirmation epsilon, px. Default: the mirrored DIP_EPS_PX. */
+    dipEpsPx?: number;
   },
 ): FormMetrics {
+  return computeRepMetricsDetailed(frames, opts).metrics;
+}
+
+/** Why a metric was refused, in the data — never only in the copy layer. */
+export type MetricRefusalKind = 'dipNotGather';
+
+/** One refusal: which metrics it took away, and the reason to show. */
+export interface MetricRefusal {
+  kind: MetricRefusalKind;
+  /** {@link FormMetrics} keys this refusal nulled. */
+  metrics: readonly (keyof FormMetrics)[];
+  /** Stated reason, ready to render. Never empty. */
+  reason: string;
+}
+
+/** {@link computeRepMetrics} plus the refusals that shaped it. */
+export interface RepMetricsResult {
+  metrics: FormMetrics;
+  /** Empty = every metric that is null was simply never measurable. */
+  refusals: readonly MetricRefusal[];
+}
+
+/**
+ * {@link computeRepMetrics} with its refusals attached. Same math, same
+ * output — the plain form is a thin wrapper so no existing call site has to
+ * change and no refusal can be dropped on the floor by accident.
+ */
+export function computeRepMetricsDetailed(
+  frames: readonly RawSeqFrame[],
+  opts: {
+    hand: ShootingHand;
+    frameHeight: number;
+    releaseT: number;
+    tiltDeg?: number | null;
+    dipEpsPx?: number;
+  },
+): RepMetricsResult {
   const { hand, frameHeight, releaseT } = opts;
   const tilt = opts.tiltDeg;
   const work =
@@ -1132,22 +1409,41 @@ export function computeRepMetrics(
   const kneeName = `${hand}_knee` as PoseKeypointName;
   const ankleName = `${hand}_ankle` as PoseKeypointName;
 
-  const { dipIdx, dipConfirmed } = findDip(work, series, wristName, releaseT);
+  const { dipIdx, dipConfirmed } = findDip(
+    work,
+    series,
+    wristName,
+    releaseT,
+    opts.dipEpsPx,
+  );
 
+  const refusals: MetricRefusal[] = [];
   let setPointElbowDeg: number | null = null;
   let kneeFlexionDeg: number | null = null;
   let releaseTimeMs: number | null = null;
   if (dipConfirmed && dipIdx >= 0) {
     const dip = series[dipIdx]!;
-    const s = dip.get(shoulderName);
-    const e = dip.get(elbowName);
-    const w = dip.get(wristName);
-    if (s && e && w) setPointElbowDeg = angleAtDeg(s, e, w);
-    const hp = dip.get(hipName);
-    const kn = dip.get(kneeName);
-    const an = dip.get(ankleName);
-    if (hp && kn && an) kneeFlexionDeg = angleAtDeg(hp, kn, an);
-    releaseTimeMs = (releaseT - work[dipIdx]!.t) * 1000;
+    // THE GATHER GATE: all three dip-frame numbers stand or fall together —
+    // they are all read off this one frame, so if the frame is not a gather
+    // none of them describes a set point.
+    const gather = dipGatherOf(work[dipIdx]!, dip, hand);
+    if (!gather.gathered) {
+      refusals.push({
+        kind: 'dipNotGather',
+        metrics: ['setPointElbowDeg', 'kneeFlexionDeg', 'releaseTimeMs'],
+        reason: gather.reason!,
+      });
+    } else {
+      const s = dip.get(shoulderName);
+      const e = dip.get(elbowName);
+      const w = dip.get(wristName);
+      if (s && e && w) setPointElbowDeg = angleAtDeg(s, e, w);
+      const hp = dip.get(hipName);
+      const kn = dip.get(kneeName);
+      const an = dip.get(ankleName);
+      if (hp && kn && an) kneeFlexionDeg = angleAtDeg(hp, kn, an);
+      releaseTimeMs = (releaseT - work[dipIdx]!.t) * 1000;
+    }
   }
 
   // ── Release height: filtered wrist at the frame nearest releaseT. The
@@ -1180,16 +1476,20 @@ export function computeRepMetrics(
   );
 
   return {
-    setPointElbowDeg,
-    kneeFlexionDeg,
-    // Ball-derived, ALWAYS null in Form Check — the mode cannot see the ball
-    // and never fabricates a trajectory number. The UI renders "not measured".
-    releaseAngleDeg: null,
-    entryAngleDeg: null,
-    releaseTimeMs,
-    followThroughHeldMs,
-    followThroughElbowDeg,
-    releaseHeightNorm,
+    metrics: {
+      setPointElbowDeg,
+      kneeFlexionDeg,
+      // Ball-derived, ALWAYS null in Form Check — the mode cannot see the
+      // ball and never fabricates a trajectory number. The UI renders "not
+      // measured".
+      releaseAngleDeg: null,
+      entryAngleDeg: null,
+      releaseTimeMs,
+      followThroughHeldMs,
+      followThroughElbowDeg,
+      releaseHeightNorm,
+    },
+    refusals,
   };
 }
 
@@ -1205,7 +1505,7 @@ export interface RepPhaseTiming {
   riseMs: number | null;
   /** Shoulder crossing → the release event, ms. */
   releaseMs: number | null;
-  /** The existing follow-through hold (≥ elbowMinDeg streak), ms. */
+  /** The existing follow-through hold (≥ {@link FT_ELBOW_MIN_DEG} streak), ms. */
   followMs: number | null;
 }
 
@@ -1222,39 +1522,73 @@ export interface RepPhaseTiming {
  *    the RAW shoulder (the exact gate the ReleaseDetector fires on);
  *  - followMs = the same follow-through hold computeRepMetrics reports.
  * Unmeasured segments are null; the UI renders gaps, not interpolations.
+ *
+ * V4 — `opts.tiltDeg` / `opts.frameHeight` mirror computeRepMetrics EXACTLY:
+ * without them the two findDip calls ran in different coordinate spaces and
+ * at 15° of roll could land on different frames, so the phase bars described
+ * one frame while the numbers above them described another. Same rotation,
+ * same dip. `opts.dipEpsPx` defaults to DIP_EPS_PX (pins unchanged), and the
+ * same gather gate applies: a dip frame that is not a gather yields no
+ * dip / rise / release segment, only the follow-through it really observed.
  */
 export function computePhaseTiming(
   frames: readonly RawSeqFrame[],
-  opts: { hand: ShootingHand; releaseT: number },
+  opts: {
+    hand: ShootingHand;
+    releaseT: number;
+    /** Confident camera roll, degrees — rotate by −tiltDeg before filtering. */
+    tiltDeg?: number | null;
+    /** Analysis-square side; required for the rotation's center. */
+    frameHeight?: number;
+    /** Dip-confirmation epsilon, px. Default: the mirrored DIP_EPS_PX. */
+    dipEpsPx?: number;
+  },
 ): RepPhaseTiming {
   const { hand, releaseT } = opts;
+  const tilt = opts.tiltDeg;
+  const frameHeight = opts.frameHeight;
+  const work =
+    tilt != null &&
+    Number.isFinite(tilt) &&
+    tilt !== 0 &&
+    frameHeight != null &&
+    frameHeight > 0
+      ? rotateFrames(frames, -tilt, frameHeight)
+      : frames;
   const wristName = `${hand}_wrist` as PoseKeypointName;
   const elbowName = `${hand}_elbow` as PoseKeypointName;
   const shoulderName = `${hand}_shoulder` as PoseKeypointName;
-  const series = filterSeries(frames, [shoulderName, elbowName, wristName]);
+  const series = filterSeries(work, [shoulderName, elbowName, wristName]);
 
   const { dipIdx, dipMaxY, dipConfirmed } = findDip(
-    frames,
+    work,
     series,
     wristName,
     releaseT,
+    opts.dipEpsPx,
   );
 
   let dipMs: number | null = null;
   let riseMs: number | null = null;
   let releaseMs: number | null = null;
 
-  if (dipConfirmed && dipIdx >= 0) {
-    const tDip = frames[dipIdx]!.t;
+  const gathered =
+    dipConfirmed && dipIdx >= 0
+      ? dipGatherOf(work[dipIdx]!, series[dipIdx]!, hand).gathered
+      : false;
+
+  if (gathered && dipIdx >= 0) {
+    const tDip = work[dipIdx]!.t;
 
     // ── Descent onset: walk back through frames still at dip depth (the
-    // held set point, within DIP_EPS_PX of the max), then through the
+    // held set point, within the dip epsilon of the max), then through the
     // strictly-descending run; a missing wrist or a reversal ends the scan.
+    const eps = opts.dipEpsPx ?? DIP_EPS_PX;
     const wy = (i: number): number | null => series[i]!.get(wristName)?.y ?? null;
     let i = dipIdx - 1;
     while (i >= 0) {
       const y = wy(i);
-      if (y == null || y <= dipMaxY - DIP_EPS_PX) break;
+      if (y == null || y <= dipMaxY - eps) break;
       i--;
     }
     let onset: number | null = null;
@@ -1262,19 +1596,20 @@ export function computePhaseTiming(
     while (i >= 0 && prevY != null) {
       const y = wy(i);
       if (y == null || y >= prevY) break;
-      if (y <= dipMaxY - DIP_EPS_PX) onset = i;
+      if (y <= dipMaxY - eps) onset = i;
       prevY = y;
       i--;
     }
-    if (onset != null) dipMs = (tDip - frames[onset]!.t) * 1000;
+    if (onset != null) dipMs = (tDip - work[onset]!.t) * 1000;
 
     // ── Shoulder cross: first post-dip frame with the RAW wrist above the
     // RAW shoulder (smaller y = higher; the ReleaseDetector's own gate).
-    for (let k = dipIdx + 1; k < frames.length; k++) {
-      const t = frames[k]!.t;
+    // "Raw" = unfiltered, in the SAME (possibly un-rolled) space as the dip.
+    for (let k = dipIdx + 1; k < work.length; k++) {
+      const t = work[k]!.t;
       if (t > releaseT + 1e-9) break;
-      const w = frames[k]!.pts.get(wristName);
-      const s = frames[k]!.pts.get(shoulderName);
+      const w = work[k]!.pts.get(wristName);
+      const s = work[k]!.pts.get(shoulderName);
       if (w && s && w.y < s.y) {
         riseMs = (t - tDip) * 1000;
         releaseMs = (releaseT - t) * 1000;
@@ -1284,7 +1619,7 @@ export function computePhaseTiming(
   }
 
   const { followThroughHeldMs } = followThroughOf(
-    frames,
+    work,
     series,
     shoulderName,
     elbowName,
@@ -1394,7 +1729,6 @@ export function pickBestRep(
 
   const E = FORM.elbowSetPoint;
   const K = FORM.kneeFlexion;
-  const holdMs = FORM.followThrough.holdSec * 1000;
 
   interface Scored {
     rep: FormCheckRep;
@@ -1424,7 +1758,7 @@ export function pickBestRep(
     }
     if (m.followThroughHeldMs != null) {
       measured++;
-      if (m.followThroughHeldMs >= holdMs - 1e-6) {
+      if (followThroughHeldFull(m.followThroughHeldMs, rep.poseFps)) {
         inBand++;
         parts.push(`follow-through held ${Math.round(m.followThroughHeldMs)} ms`);
       }
@@ -1501,6 +1835,14 @@ export interface FormCheckRep {
    * carries the array.
    */
   lowConfidence?: readonly RepConfidenceReason[];
+  /**
+   * Metrics this rep REFUSED to report, each with its reason. Different from
+   * {@link lowConfidence}: that qualifies numbers the rep DID produce, this
+   * says why a number is absent. Empty = every null in `metrics` is simply
+   * an unmeasurable landmark. Optional so existing rep fixtures compile; a
+   * session-produced rep always carries the array.
+   */
+  refusals?: readonly MetricRefusal[];
 }
 
 export interface FormCheckSessionReport {
@@ -2305,6 +2647,16 @@ export class FormCheckSession {
   // Rep finalization
   // -------------------------------------------------------------------------
 
+  /** Median per-frame body height over a window, px (null when none votes). */
+  private windowBodyHeightPx(window: readonly RawSeqFrame[]): number | null {
+    const hs: number[] = [];
+    for (const f of window) {
+      const h = bodyHeightOf(f.pts);
+      if (h != null) hs.push(h);
+    }
+    return median(hs);
+  }
+
   private finalizeRep(releaseT: number): FormCheckRep {
     const lo = releaseT - PRE_RELEASE_SEC - 1e-9;
     const hi = releaseT + FOLLOW_TAIL_SEC + 1e-9;
@@ -2313,11 +2665,17 @@ export class FormCheckSession {
       this.lockedTilt != null && this.lockedTilt.confident
         ? this.lockedTilt.tiltDeg
         : null;
-    const metrics = computeRepMetrics(window, {
+    // Body-relative dip epsilon from THIS rep's own window — a fixed 0.25 px
+    // is a noise crossing on a shooter who is ~130 px tall, so the dip would
+    // confirm off jitter. Median over the window (not the calibration
+    // baseline) so a skipped calibration is no worse off.
+    const dipEpsPx = dipEpsFor(this.windowBodyHeightPx(window));
+    const { metrics, refusals } = computeRepMetricsDetailed(window, {
       hand: this.handSide,
       frameHeight: this.frameHeight,
       releaseT,
       tiltDeg,
+      dipEpsPx,
     });
 
     // Metric release height — an ESTIMATE, only with a calibration scale
@@ -2340,12 +2698,20 @@ export class FormCheckSession {
       releaseT,
       sequence: buildSequence(window, this.handSide, releaseT),
       metrics,
-      phases: computePhaseTiming(window, { hand: this.handSide, releaseT }),
+      phases: computePhaseTiming(window, {
+        hand: this.handSide,
+        releaseT,
+        // Same rotation, same epsilon, same dip as the metrics above.
+        tiltDeg,
+        frameHeight: this.frameHeight,
+        dipEpsPx,
+      }),
       releaseHeightM,
-      flags: this.repFlags(window, releaseT),
+      flags: this.repFlags(window, releaseT, dipEpsPx),
       tips: [],
       poseFps,
       lowConfidence: this.repConfidence(window, poseFps, lo),
+      refusals,
     };
     // coachingTips already skips null metrics, so the ball-derived nulls
     // simply produce no ball tips — never a fabricated one.
@@ -2404,7 +2770,11 @@ export class FormCheckSession {
    * compare in raw (untilted) pixel space — the same space the shadow
    * baselines were captured in.
    */
-  private repFlags(window: readonly RawSeqFrame[], releaseT: number): RepFlag[] {
+  private repFlags(
+    window: readonly RawSeqFrame[],
+    releaseT: number,
+    dipEpsPx: number,
+  ): RepFlag[] {
     const flags: RepFlag[] = [];
     if (this.calibPhase !== 'done') return flags;
     const hand = this.handSide;
@@ -2412,7 +2782,13 @@ export class FormCheckSession {
 
     if (this.lockedSetPointWristY != null && this.baselineBodyHeightPx != null) {
       const series = filterSeries(window, [wristName]);
-      const { dipMaxY, dipConfirmed } = findDip(window, series, wristName, releaseT);
+      const { dipMaxY, dipConfirmed } = findDip(
+        window,
+        series,
+        wristName,
+        releaseT,
+        dipEpsPx,
+      );
       if (
         dipConfirmed &&
         this.lockedSetPointWristY - dipMaxY >

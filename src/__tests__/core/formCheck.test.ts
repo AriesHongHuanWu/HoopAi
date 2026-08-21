@@ -26,20 +26,29 @@
 import {
   computePhaseTiming,
   computeRepMetrics,
+  computeRepMetricsDetailed,
+  DIP_EPS_PX,
+  dipEpsFor,
   estimateTilt,
   FOLLOW_TAIL_SEC,
   FORM_MOTION,
   FormCheckSession,
   FormMotionDetector,
+  followThroughHeldFull,
   FPS_OVERRIDE_MIN,
   frameVisibility,
+  FT_ELBOW_MIN_DEG,
+  GATHER_MAX_ELBOW_DEG,
+  GATHER_WRIST_BELOW_HIP_FRAC,
   heightScaleOf,
   MIN_POSE_FPS,
   MIN_SPREAD_REPS,
   MOTION_MAX_VY_GAP_SEC,
   NOSE_TO_ANKLE_STATURE_FRAC,
   pickBestRep,
+  PRE_RELEASE_SEC,
   readinessOf,
+  REP_BUFFER_SEC,
   REP_CONFIDENCE_REASONS,
   savedLowConfidenceOf,
   sessionSpreads,
@@ -54,7 +63,7 @@ import {
   type FormCheckRep,
   type ReadinessSample,
 } from '@/core/formCheck';
-import { RELEASE } from '@/core/config';
+import { FORM, RELEASE } from '@/core/config';
 import { decodeSequence, type RawSeqFrame } from '@/core/formSequence';
 import { angleAtDeg } from '@/core/geometry';
 import type {
@@ -2071,5 +2080,784 @@ describe('savedLowConfidenceOf (the receipt after persistence)', () => {
         reason,
       ]);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// V4 — measure at the right frame, judge against the right band
+// ---------------------------------------------------------------------------
+
+/**
+ * Fixture: a rep that STARTS FROM REST. The arm hangs at the side, then
+ * rises overhead — exactly the ball-free demo motion a presenter performs
+ * when they are not already holding a set point.
+ *
+ * findDip is a global argmax of filtered wrist y, so the frame it selects is
+ * the HANGING ARM: its elbow reads ~178° against FORM.elbowSetPoint's 75-90°
+ * band, which is what generated "lower your set point" as the headline cue
+ * on essentially every rep. The gate below refuses that frame; the argmax is
+ * untouched.
+ */
+const REST_ARM = { elbow: [97, 75] as const, wrist: [99, 105] as const };
+
+/** Hanging → overhead over 8 frames, then parked. */
+function restFrame(i: number, hangFrames = 15): RawSeqFrame {
+  const k = i - hangFrames;
+  let elbow: readonly [number, number];
+  let wrist: readonly [number, number];
+  if (k < 0) {
+    elbow = REST_ARM.elbow;
+    wrist = REST_ARM.wrist;
+  } else if (k >= 8) {
+    elbow = EXT_ARM.elbow;
+    wrist = EXT_ARM.wrist;
+  } else {
+    const u = (k + 1) / 8;
+    elbow = [
+      REST_ARM.elbow[0] + (EXT_ARM.elbow[0] - REST_ARM.elbow[0]) * u,
+      REST_ARM.elbow[1] + (EXT_ARM.elbow[1] - REST_ARM.elbow[1]) * u,
+    ];
+    wrist = [
+      REST_ARM.wrist[0] + (EXT_ARM.wrist[0] - REST_ARM.wrist[0]) * u,
+      REST_ARM.wrist[1] + (EXT_ARM.wrist[1] - REST_ARM.wrist[1]) * u,
+    ];
+  }
+  return raw(i * DT, { ...STATIC, right_elbow: elbow, right_wrist: wrist });
+}
+
+/** A held dip pose (constant from f0, so the filter output IS the pose),
+ *  then a snap overhead and a parked tail. */
+function dipPoseWindow(
+  dip: { elbow: readonly [number, number]; wrist: readonly [number, number] },
+  opts: { holdFrames?: number; snapFrames?: number; parkFrames?: number } = {},
+): { frames: RawSeqFrame[]; releaseT: number } {
+  const { holdFrames = 20, snapFrames = 5, parkFrames = 13 } = opts;
+  const frames: RawSeqFrame[] = [];
+  const total = holdFrames + snapFrames + parkFrames;
+  for (let i = 0; i < total; i++) {
+    const k = i - holdFrames;
+    let elbow: readonly [number, number];
+    let wrist: readonly [number, number];
+    if (k < 0) {
+      elbow = dip.elbow;
+      wrist = dip.wrist;
+    } else if (k >= snapFrames) {
+      elbow = EXT_ARM.elbow;
+      wrist = EXT_ARM.wrist;
+    } else {
+      const u = (k + 1) / snapFrames;
+      elbow = [
+        dip.elbow[0] + (EXT_ARM.elbow[0] - dip.elbow[0]) * u,
+        dip.elbow[1] + (EXT_ARM.elbow[1] - dip.elbow[1]) * u,
+      ];
+      wrist = [
+        dip.wrist[0] + (EXT_ARM.wrist[0] - dip.wrist[0]) * u,
+        dip.wrist[1] + (EXT_ARM.wrist[1] - dip.wrist[1]) * u,
+      ];
+    }
+    frames.push(raw(i * DT, { ...STATIC, right_elbow: elbow, right_wrist: wrist }));
+  }
+  return { frames, releaseT: (holdFrames + snapFrames + 2) * DT };
+}
+
+/** Dip pose whose elbow angle is exactly `deg`, wrist safely above the hip. */
+function dipAtElbowDeg(deg: number): {
+  elbow: readonly [number, number];
+  wrist: readonly [number, number];
+} {
+  // Elbow 25 px below the shoulder (95, 45); the forearm leaves it at `deg`
+  // from the elbow→shoulder direction, 25 px long.
+  const elbow = [95, 70] as const;
+  // elbow→shoulder points at (0, -1); rotating it by `deg` gives the forearm.
+  const rad = (deg * Math.PI) / 180;
+  return {
+    elbow,
+    wrist: [elbow[0] + 25 * Math.sin(rad), elbow[1] - 25 * Math.cos(rad)],
+  };
+}
+
+/** PoseFrame from a RawSeqFrame (every landmark comfortably above the gate). */
+function poseFromRaw(f: RawSeqFrame): PoseFrame {
+  const keypoints: PoseFrame['keypoints'] = {};
+  for (const [name, p] of f.pts) keypoints[name] = { x: p.x, y: p.y, score: 0.9 };
+  return { t: f.t, keypoints };
+}
+
+describe('the dip GATHER GATE', () => {
+  test('a rep that starts from rest refuses all three dip-frame numbers, with a reason', () => {
+    const frames = Array.from({ length: 38 }, (_, i) => restFrame(i));
+    const releaseT = 27 * DT;
+
+    // What the ungated argmax would have reported: a hanging arm, far
+    // outside FORM's own set-point band. This is the number being suppressed.
+    const hanging = angleAtDeg(
+      { x: 95, y: 45 },
+      { x: REST_ARM.elbow[0], y: REST_ARM.elbow[1] },
+      { x: REST_ARM.wrist[0], y: REST_ARM.wrist[1] },
+    )!;
+    expect(hanging).toBeGreaterThan(FORM.elbowSetPoint.flagAbove);
+    expect(hanging).toBeGreaterThan(GATHER_MAX_ELBOW_DEG);
+
+    const { metrics, refusals } = computeRepMetricsDetailed(frames, {
+      hand: 'right',
+      frameHeight: FRAME,
+      releaseT,
+    });
+    expect(metrics.setPointElbowDeg).toBeNull();
+    expect(metrics.kneeFlexionDeg).toBeNull();
+    expect(metrics.releaseTimeMs).toBeNull();
+
+    expect(refusals).toHaveLength(1);
+    expect(refusals[0]!.kind).toBe('dipNotGather');
+    expect(refusals[0]!.metrics).toEqual([
+      'setPointElbowDeg',
+      'kneeFlexionDeg',
+      'releaseTimeMs',
+    ]);
+    // EVERY refusal states its reason — a null with no reason is a bug.
+    expect(refusals[0]!.reason).toMatch(/not a gather/);
+    expect(refusals[0]!.reason).toMatch(/elbow/);
+
+    // The follow-through is read off the TAIL, not the dip: still measured.
+    expect(metrics.followThroughElbowDeg).not.toBeNull();
+    expectNoNaN(metrics);
+  });
+
+  test('the held set point still measures — the gate refuses frames, not reps', () => {
+    // The v1 hold-then-snap fixture: elbow 90° at the dip, wrist above the
+    // hip. Nothing about it may change.
+    const frames: RawSeqFrame[] = [];
+    for (let i = 0; i < 38; i++) frames.push(rawAt(i * DT, i, 20));
+    const { metrics, refusals } = computeRepMetricsDetailed(frames, {
+      hand: 'right',
+      frameHeight: FRAME,
+      releaseT: 27 * DT,
+    });
+    expect(refusals).toEqual([]);
+    expect(Math.abs(metrics.setPointElbowDeg! - 90)).toBeLessThanOrEqual(2);
+    expect(metrics.releaseTimeMs).not.toBeNull();
+  });
+
+  test('elbow floor: below and AT GATHER_MAX_ELBOW_DEG measure, above refuses', () => {
+    const measure = (deg: number) => {
+      const { frames, releaseT } = dipPoseWindow(dipAtElbowDeg(deg));
+      return computeRepMetricsDetailed(frames, {
+        hand: 'right',
+        frameHeight: FRAME,
+        releaseT,
+      });
+    };
+    // The dip pose is constant from f0, so the One-Euro output at the dip IS
+    // the constructed pose — the bracket is exact, not filter-blurred.
+    const below = measure(GATHER_MAX_ELBOW_DEG - 0.5);
+    expect(below.refusals).toEqual([]);
+    // The fixture really does build the angle it claims to (a mis-built
+    // bracket would pass this suite while testing nothing).
+    expect(below.metrics.setPointElbowDeg!).toBeCloseTo(GATHER_MAX_ELBOW_DEG - 0.5, 6);
+
+    const at = measure(GATHER_MAX_ELBOW_DEG);
+    expect(at.refusals).toEqual([]);
+    expect(at.metrics.setPointElbowDeg!).toBeCloseTo(GATHER_MAX_ELBOW_DEG, 6);
+
+    const above = measure(GATHER_MAX_ELBOW_DEG + 0.5);
+    expect(above.refusals).toHaveLength(1);
+    expect(above.metrics.setPointElbowDeg).toBeNull();
+    expect(above.metrics.releaseTimeMs).toBeNull();
+  });
+
+  test('hip line: at the slack boundary measures, a hair below it refuses', () => {
+    // Body height for this fixture is nose(25)→left_ankle(165) = 140 px, so
+    // the wrist may sit up to 0.05 × 140 = 7 px below the hip line (y 95).
+    const bodyPx = 140;
+    const limit = 95 + GATHER_WRIST_BELOW_HIP_FRAC * bodyPx;
+    const atWristY = (y: number) =>
+      computeRepMetricsDetailed(
+        // Forearm horizontal → a 90° elbow, so ONLY the hip line is on trial.
+        dipPoseWindow({ elbow: [95, y], wrist: [120, y] }).frames,
+        {
+          hand: 'right',
+          frameHeight: FRAME,
+          releaseT: dipPoseWindow({ elbow: [95, y], wrist: [120, y] }).releaseT,
+        },
+      );
+
+    const above = atWristY(limit - 2);
+    expect(above.refusals).toEqual([]);
+    expect(above.metrics.setPointElbowDeg).not.toBeNull();
+
+    const at = atWristY(limit);
+    expect(at.refusals).toEqual([]);
+
+    const below = atWristY(limit + 0.5);
+    expect(below.refusals).toHaveLength(1);
+    expect(below.refusals[0]!.reason).toMatch(/wrist below the hip line/);
+    expect(below.metrics.releaseTimeMs).toBeNull();
+  });
+
+  test('a dip frame with neither check available is UNVERIFIED, not assumed', () => {
+    // No elbow (no angle) and no hip (no hip line): nothing observed says
+    // this frame was a gather, so no dip-frame number is reported.
+    const frames: RawSeqFrame[] = [];
+    for (let i = 0; i < 38; i++) {
+      const arm = armAt(i, 20);
+      frames.push(
+        raw(i * DT, {
+          nose: STATIC.nose,
+          right_shoulder: STATIC.right_shoulder,
+          right_wrist: arm.wrist,
+          right_knee: STATIC.right_knee,
+          right_ankle: STATIC.right_ankle,
+        }),
+      );
+    }
+    const { metrics, refusals } = computeRepMetricsDetailed(frames, {
+      hand: 'right',
+      frameHeight: FRAME,
+      releaseT: 27 * DT,
+    });
+    expect(refusals).toHaveLength(1);
+    expect(refusals[0]!.reason).toMatch(/unverified/);
+    expect(metrics.releaseTimeMs).toBeNull();
+    expectNoNaN(metrics);
+  });
+
+  test('computePhaseTiming refuses the same frame — the bars agree with the numbers', () => {
+    const frames = Array.from({ length: 38 }, (_, i) => restFrame(i));
+    const p = computePhaseTiming(frames, { hand: 'right', releaseT: 27 * DT });
+    expect(p.dipMs).toBeNull();
+    expect(p.riseMs).toBeNull();
+    expect(p.releaseMs).toBeNull();
+    // The follow-through segment never depended on the dip.
+    expect(p.followMs).not.toBeNull();
+  });
+
+  test('a session rep carries its refusals, and counts anyway', () => {
+    // The gate suppresses NUMBERS, never the rep: the motion happened.
+    const session = new FormCheckSession({
+      hand: 'right',
+      frameHeight: FRAME,
+      calibrate: false,
+    });
+    const reps: FormCheckRep[] = [];
+    for (let i = 0; i < 45; i++) {
+      const rep = session.push(poseFromRaw(restFrame(i)));
+      if (rep != null) reps.push(rep);
+    }
+    expect(reps).toHaveLength(1);
+    expect(reps[0]!.metrics.setPointElbowDeg).toBeNull();
+    expect(reps[0]!.refusals).toHaveLength(1);
+    expect(reps[0]!.refusals![0]!.reason.length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The dip epsilon, in body units
+// ---------------------------------------------------------------------------
+
+describe('the body-relative dip epsilon', () => {
+  test('dipEpsFor: 2% of the body, floored at 1 px, defaulting to the mirror', () => {
+    // No body estimate ⇒ the FormAnalyzer-mirrored default, so every direct
+    // caller (and every fixture pinned before this change) is untouched.
+    expect(dipEpsFor(null)).toBe(DIP_EPS_PX);
+    expect(dipEpsFor(undefined)).toBe(DIP_EPS_PX);
+    expect(dipEpsFor(0)).toBe(DIP_EPS_PX);
+    expect(dipEpsFor(-5)).toBe(DIP_EPS_PX);
+    expect(dipEpsFor(Number.NaN)).toBe(DIP_EPS_PX);
+    // A demo-distance shooter (~130 px of the 192 square).
+    expect(dipEpsFor(130)).toBeCloseTo(2.6, 10);
+    // Floor: a tiny/far body never asks for a sub-pixel rise.
+    expect(dipEpsFor(40)).toBe(1.0);
+  });
+
+  /** A held dip, then an instant rise of `risePx` held long enough for the
+   *  One-Euro output to settle (measured: within 0.05 px). */
+  function riseWindow(risePx: number): { frames: RawSeqFrame[]; releaseT: number } {
+    const frames: RawSeqFrame[] = [];
+    for (let i = 0; i < 20; i++) {
+      frames.push(raw(i * DT, { ...STATIC, right_elbow: [95, 80], right_wrist: [120, 80] }));
+    }
+    for (let i = 20; i < 60; i++) {
+      frames.push(
+        raw(i * DT, {
+          ...STATIC,
+          right_elbow: [95, 80 - risePx],
+          right_wrist: [120, 80 - risePx],
+        }),
+      );
+    }
+    return { frames, releaseT: 59 * DT };
+  }
+
+  const confirmed = (risePx: number, dipEpsPx?: number) =>
+    computeRepMetrics(riseWindow(risePx).frames, {
+      hand: 'right',
+      frameHeight: FRAME,
+      releaseT: riseWindow(risePx).releaseT,
+      dipEpsPx,
+    }).releaseTimeMs != null;
+
+  test('a rise below / at / above the epsilon: only above confirms the dip', () => {
+    // This fixture's body is nose(25)→left_ankle(165) = 140 px ⇒ eps 2.8 px.
+    const eps = dipEpsFor(140);
+    expect(eps).toBeCloseTo(2.8, 10);
+    expect(confirmed(eps - 0.3, eps)).toBe(false);
+    // AT the epsilon does not confirm: the test is a strict >, and a
+    // filtered rise settles just short of its target.
+    expect(confirmed(eps, eps)).toBe(false);
+    expect(confirmed(eps + 0.4, eps)).toBe(true);
+  });
+
+  test('THE POINT: a 1 px jitter used to confirm a dip on a 140 px body', () => {
+    // Old behavior, still the default for direct callers.
+    expect(confirmed(1.0)).toBe(true);
+    // Body-relative: 1 px of keypoint noise is not a gather any more, so the
+    // three dip-frame numbers are refused rather than read off jitter.
+    expect(confirmed(1.0, dipEpsFor(140))).toBe(false);
+  });
+
+  test('the session feeds its OWN window body height, not a constant', () => {
+    // A rep whose whole window is the far-distance fixture (~128 px body)
+    // still measures: the epsilon scales with the shooter, not the room.
+    const session = new FormCheckSession({
+      hand: 'right',
+      frameHeight: FRAME,
+      calibrate: false,
+    });
+    const reps = feed(session, slowMotion({ vyPxPerSec: SLOW_RISE_PX / 1.2 }));
+    expect(reps).toHaveLength(1);
+    expect(reps[0]!.metrics.setPointElbowDeg).not.toBeNull();
+    expect(reps[0]!.refusals).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Follow-through: the right band, at the frame resolution we actually have
+// ---------------------------------------------------------------------------
+
+describe('the follow-through band', () => {
+  /** Dip → snap → a long tail parked at `tailElbowDeg`, release inside it. */
+  function tailWindow(tailElbowDeg: number): {
+    frames: RawSeqFrame[];
+    releaseT: number;
+  } {
+    const elbow = [95, 25] as const;
+    // elbow→shoulder points at (0, +1) here (the elbow is ABOVE the
+    // shoulder); rotate it by the target angle to place the wrist.
+    const rad = (tailElbowDeg * Math.PI) / 180;
+    const wrist: readonly [number, number] = [
+      elbow[0] - 20 * Math.sin(rad),
+      elbow[1] + 20 * Math.cos(rad),
+    ];
+    const frames: RawSeqFrame[] = [];
+    const hold = 20;
+    const snap = 5;
+    const park = 26;
+    for (let i = 0; i < hold + snap + park; i++) {
+      const k = i - hold;
+      let e: readonly [number, number];
+      let w: readonly [number, number];
+      if (k < 0) {
+        e = [95, 80];
+        w = [120, 80];
+      } else if (k >= snap) {
+        e = elbow;
+        w = wrist;
+      } else {
+        const u = (k + 1) / snap;
+        e = [95 + (elbow[0] - 95) * u, 80 + (elbow[1] - 80) * u];
+        w = [120 + (wrist[0] - 120) * u, 80 + (wrist[1] - 80) * u];
+      }
+      frames.push(raw(i * DT, { ...STATIC, right_elbow: e, right_wrist: w }));
+    }
+    // Release 10 parked frames in — the filter has settled on the tail pose,
+    // and 0.3 s of tail (9 frames at 30 fps) still fits inside the window.
+    return { frames, releaseT: (hold + snap + 10) * DT };
+  }
+
+  const heldMs = (tailElbowDeg: number) =>
+    computeRepMetrics(tailWindow(tailElbowDeg).frames, {
+      hand: 'right',
+      frameHeight: FRAME,
+      releaseT: tailWindow(tailElbowDeg).releaseT,
+    }).followThroughHeldMs;
+
+  test('config.FORM.followThrough is UNTOUCHED — the live pipeline reads it', () => {
+    expect(FORM.followThrough.elbowMinDeg).toBe(155);
+    expect(FORM.followThrough.holdSec).toBe(0.3);
+    // Form Check judges the hold against the extension that COUNTED the rep.
+    expect(FT_ELBOW_MIN_DEG).toBe(FORM_MOTION.minElbowExtensionDeg);
+    expect(FT_ELBOW_MIN_DEG).toBeLessThan(FORM.followThrough.elbowMinDeg);
+  });
+
+  test('an elbow at / above the floor holds; below it collapses to 0', () => {
+    expect(heldMs(FT_ELBOW_MIN_DEG + 1)).toBeGreaterThan(250);
+    expect(heldMs(FT_ELBOW_MIN_DEG)).toBeGreaterThan(250);
+    expect(heldMs(FT_ELBOW_MIN_DEG - 1)).toBe(0);
+  });
+
+  test('RE-PINNED: the 138° demo push no longer reports a collapse it never had', () => {
+    // A ball-free push tops out at 130-145°; against config's 155 band this
+    // metric read 0 ms on EVERY rep and became the top spoken callout —
+    // an arm collapse nobody watched happen. It is a real hold now.
+    expect(138).toBeLessThan(FORM.followThrough.elbowMinDeg);
+    expect(heldMs(138)).toBeGreaterThan(250);
+  });
+
+  test('the slow ball-free demo rep now reports the hold it really had', () => {
+    // The stage motion tops out at ~138°: under config's 155 band its hold
+    // read 0 ms on every rep. The arm never dropped — nothing was measured
+    // differently, only judged against the band that counted the rep.
+    expect(slowElbowDeg(1)).toBeLessThan(FORM.followThrough.elbowMinDeg);
+    expect(slowElbowDeg(1)).toBeGreaterThanOrEqual(FT_ELBOW_MIN_DEG);
+    const session = new FormCheckSession({
+      hand: 'right',
+      frameHeight: FRAME,
+      calibrate: false,
+    });
+    const reps = feed(session, slowMotion({ vyPxPerSec: SLOW_RISE_PX / 1.2 }));
+    expect(reps).toHaveLength(1);
+    expect(reps[0]!.metrics.followThroughHeldMs!).toBeGreaterThan(200);
+  });
+
+  test('followThroughHeldFull tolerates exactly one frame period, never more', () => {
+    const holdMs = FORM.followThrough.holdSec * 1000;
+    // 30 fps: the last SAMPLED instant of a full hold is 300 − 33.3 ms.
+    expect(followThroughHeldFull(holdMs, 30)).toBe(true);
+    expect(followThroughHeldFull(holdMs - 1000 / 30, 30)).toBe(true);
+    expect(followThroughHeldFull(holdMs - 1000 / 30 - 1, 30)).toBe(false);
+    // 15 fps (the runbook accepts 15-21 on stage): 66.7 ms of tolerance.
+    expect(followThroughHeldFull(holdMs - 66, 15)).toBe(true);
+    expect(followThroughHeldFull(holdMs - 70, 15)).toBe(false);
+    // Unknown rate ⇒ no tolerance at all, the strict old test.
+    expect(followThroughHeldFull(holdMs, 0)).toBe(true);
+    expect(followThroughHeldFull(holdMs - 1, 0)).toBe(false);
+    // Never measured is never held.
+    expect(followThroughHeldFull(null, 30)).toBe(false);
+  });
+
+  test('pickBestRep credits a full hold at 15 fps, and prints the REAL ms', () => {
+    const mk = (index: number, m: Partial<FormMetrics>, poseFps: number): FormCheckRep => ({
+      index,
+      releaseT: index,
+      sequence: null,
+      metrics: {
+        setPointElbowDeg: null,
+        kneeFlexionDeg: null,
+        releaseAngleDeg: null,
+        entryAngleDeg: null,
+        releaseTimeMs: null,
+        followThroughHeldMs: null,
+        followThroughElbowDeg: null,
+        releaseHeightNorm: null,
+        ...m,
+      },
+      phases: { dipMs: null, riseMs: null, releaseMs: null, followMs: null },
+      releaseHeightM: null,
+      flags: [],
+      tips: [],
+      poseFps,
+    });
+    const reps = [
+      mk(1, { setPointElbowDeg: 84, followThroughHeldMs: 234 }, 15),
+      mk(2, { setPointElbowDeg: 40, followThroughHeldMs: 0 }, 15),
+    ];
+    const best = pickBestRep(reps, sessionSpreads(reps));
+    expect(best!.index).toBe(1);
+    // The tolerance widens the COMPARISON; the printed number stays the
+    // measured one (inventing the missing 66 ms is explicitly rejected).
+    expect(best!.reason).toContain('follow-through held 234 ms');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The re-arm gate
+// ---------------------------------------------------------------------------
+
+describe('the re-arm gate', () => {
+  const detect = (frames: readonly PoseFrame[]) => {
+    const d = new FormMotionDetector({ hand: 'right', frameHeight: FRAME });
+    let fired = 0;
+    for (const f of frames) if (d.push(f) != null) fired++;
+    return fired;
+  };
+
+  /** A raised, extended arm wobbling ±1 px at `fps` for `sec` — a presenter
+   *  admiring their follow-through. Every frame refreshes wrist-above-
+   *  shoulder and elbow-extended; the wobble refreshes the vy spike. */
+  function admiring(sec: number, fps = 30): PoseFrame[] {
+    const frames: PoseFrame[] = [];
+    const n = Math.round(sec * fps);
+    for (let i = 0; i < n; i++) {
+      // First 6 frames: a real rise from below the shoulder (the one rep).
+      const rising = i < 6;
+      const wristY = rising ? 80 - (i * 70) / 5 : 10 + (i % 2) * 1.2;
+      const elbowY = rising ? 80 - (i * 50) / 5 : 30;
+      frames.push(
+        poseOf(i / fps, {
+          ...STATIC,
+          right_elbow: [95, elbowY],
+          right_wrist: [95, wristY],
+        }),
+      );
+    }
+    return frames;
+  }
+
+  test('a held follow-through mints exactly ONE rep over 10 s', () => {
+    const frames = admiring(10);
+    expect(frames.length).toBe(300);
+    // NON-VACUOUS: fed the held tail alone, a fresh (armed) detector still
+    // completes the signature off the wobble — the wrist never leaves the
+    // top, so wrist-above-shoulder and elbow-extended are true every frame
+    // and only the vy spike has to re-arrive. That is the phantom-rep
+    // mechanism, and the gate below is the only thing refusing it.
+    expect(detect(frames.slice(20))).toBeGreaterThanOrEqual(1);
+    expect(detect(frames)).toBe(1);
+  });
+
+  test('the wrist must reach the shoulder line: at it re-arms, above it does not', () => {
+    const shoulderY = STATIC.right_shoulder![1];
+    /**
+     * One motion, a park at `parkY`, then a second motion rising from that
+     * park. Only the park height differs between the three cases — every
+     * other frame is identical, so the gate is the only variable.
+     */
+    const twoReps = (parkY: number): PoseFrame[] => {
+      const frames: PoseFrame[] = [];
+      let i = 0;
+      const push = (elbowY: number, wristY: number) => {
+        frames.push(
+          poseOf(i / 30, { ...STATIC, right_elbow: [95, elbowY], right_wrist: [95, wristY] }),
+        );
+        i++;
+      };
+      /** Rise from `fromY` to the overhead hold, then hold it. */
+      const rise = (fromY: number) => {
+        for (let k = 1; k <= 6; k++) {
+          const u = k / 6;
+          push(fromY - 20 - (fromY - 50) * u, fromY - (fromY - 10) * u);
+        }
+        for (let k = 0; k < 4; k++) push(30, 10);
+      };
+      rise(80);
+      // Come DOWN to the park and hold it — the only thing under test.
+      for (let k = 1; k <= 6; k++) push(30 + (parkY - 10) * (k / 6), 10 + (parkY - 10) * (k / 6));
+      for (let k = 0; k < 30; k++) push(parkY + 20, parkY);
+      rise(parkY);
+      return frames;
+    };
+    // Below the shoulder line (larger y): re-arms, the second rep counts.
+    expect(detect(twoReps(shoulderY + 5))).toBe(2);
+    // Exactly AT the shoulder line: at-or-below re-arms.
+    expect(detect(twoReps(shoulderY))).toBe(2);
+    // A hair above it: the arm never came down, so it is still one motion.
+    const above = twoReps(shoulderY - 1);
+    expect(detect(above)).toBe(1);
+    // NON-VACUOUS: the second motion IS a complete signature — fed to a
+    // fresh (armed) detector from the park onward it fires. The re-arm gate
+    // is the only thing that refused it, not the debounce or a floor.
+    expect(detect(above.slice(40))).toBe(1);
+  });
+
+  test('it cannot refuse a first rep, even one caught mid-motion', () => {
+    // The detector starts ARMED: a session that opens with the arm already
+    // rising still counts that rep. The gate only refuses REPEATS.
+    const frames: PoseFrame[] = [];
+    for (let k = 0; k < 6; k++) {
+      frames.push(
+        poseOf(k / 30, {
+          ...STATIC,
+          right_elbow: [95, 80 - (k * 50) / 5],
+          right_wrist: [95, 80 - (k * 70) / 5],
+        }),
+      );
+    }
+    // Never a frame with the wrist at or below the shoulder after f0.
+    expect(detect(frames)).toBe(1);
+  });
+
+  test('two real motions with the arm coming down between them BOTH count', () => {
+    // The runbook workaround ("keep your arms down between reps") is now the
+    // code's own contract — and it is exactly what a real rep does.
+    const session = new FormCheckSession({
+      hand: 'right',
+      frameHeight: FRAME,
+      calibrate: false,
+    });
+    const reps: FormCheckRep[] = [];
+    reps.push(...runRep(session, { t0: 0, dipFrames: 10, parkFrames: 15 }));
+    reps.push(...runRep(session, { t0: 1, dipFrames: 10, parkFrames: 20 }));
+    expect(reps).toHaveLength(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Window retention + one rotated space for both dips
+// ---------------------------------------------------------------------------
+
+describe('rep window retention', () => {
+  test('REP_BUFFER_SEC keeps a full rep window plus a second of slack', () => {
+    expect(REP_BUFFER_SEC).toBe(3.0);
+    // The prune runs on the CURRENT frame's timestamp, so the slack past the
+    // rep window is what absorbs a late delivery without losing the dip.
+    expect(REP_BUFFER_SEC - (PRE_RELEASE_SEC + FOLLOW_TAIL_SEC)).toBeGreaterThanOrEqual(1.0);
+  });
+});
+
+describe('computePhaseTiming tilt compensation', () => {
+  function phaseFrames(): { frames: RawSeqFrame[]; releaseT: number } {
+    // Same scripted motion the phase suite uses: a real descent, a set-point
+    // hold, a snap and a parked tail.
+    const frames: RawSeqFrame[] = [];
+    for (let i = 0; i < 41; i++) {
+      let wrist: [number, number];
+      let elbow: [number, number];
+      if (i < 6) {
+        wrist = [110, 70];
+        elbow = [95, 70];
+      } else if (i < 14) {
+        const u = (i - 5) / 8;
+        wrist = [110 + 10 * u, 70 + 15 * u];
+        elbow = [95, 70 + 15 * u];
+      } else if (i < 18) {
+        wrist = [120, 85];
+        elbow = [95, 85];
+      } else if (i < 23) {
+        const u = (i - 17) / 5;
+        wrist = [120 - 25 * u, 85 - 70 * u];
+        elbow = [95, 85 - 55 * u];
+      } else {
+        wrist = [95, 15];
+        elbow = [95, 30];
+      }
+      frames.push(raw(i * DT, { ...STATIC, right_wrist: wrist, right_elbow: elbow }));
+    }
+    return { frames, releaseT: 25 * DT };
+  }
+
+  test('REGRESSION PIN: no tilt / null / 0 / no frameHeight are v1-identical', () => {
+    const { frames, releaseT } = phaseFrames();
+    const base = computePhaseTiming(frames, { hand: 'right', releaseT });
+    expect(computePhaseTiming(frames, { hand: 'right', releaseT, tiltDeg: null })).toEqual(base);
+    expect(
+      computePhaseTiming(frames, { hand: 'right', releaseT, tiltDeg: 0, frameHeight: FRAME }),
+    ).toEqual(base);
+    // A tilt with no frame height has no rotation center — pass through
+    // untouched rather than rotating about a guessed one.
+    expect(computePhaseTiming(frames, { hand: 'right', releaseT, tiltDeg: 12 })).toEqual(base);
+  });
+
+  test('the same roll compensation as the metrics — one dip, one space', () => {
+    const { frames, releaseT } = phaseFrames();
+    const level = computePhaseTiming(frames, { hand: 'right', releaseT });
+    const rolled = frames.map((f) => {
+      const pts = new Map<PoseKeypointName, { x: number; y: number }>();
+      for (const [name, p] of f.pts) {
+        const [x, y] = rot([p.x, p.y], 12);
+        pts.set(name, { x, y });
+      }
+      return { t: f.t, pts };
+    });
+    const compensated = computePhaseTiming(rolled, {
+      hand: 'right',
+      releaseT,
+      tiltDeg: 12,
+      frameHeight: FRAME,
+    });
+    expect(compensated.riseMs).toBeCloseTo(level.riseMs!, 6);
+    expect(compensated.releaseMs).toBeCloseTo(level.releaseMs!, 6);
+    expect(compensated.dipMs).not.toBeNull();
+
+    // The metrics and the bars now agree because they share the rotation:
+    // the compensated tempo and the compensated dip→cross→release add up.
+    const m = computeRepMetrics(rolled, {
+      hand: 'right',
+      frameHeight: FRAME,
+      releaseT,
+      tiltDeg: 12,
+    });
+    expect(m.releaseTimeMs).toBeCloseTo(compensated.riseMs! + compensated.releaseMs!, 6);
+  });
+});
+
+describe('the follow-through START tolerance', () => {
+  /**
+   * Dip pose held (the filter settles on it), then the arm opens to an
+   * overhead `deg` over `rampFrames` AFTER the release and holds. The
+   * release fires on the RAW crossing; the metric reads the FILTERED angle,
+   * which is a frame behind it — this fixture puts that lag on trial.
+   */
+  function rampTail(deg: number, rampFrames: number) {
+    const elbow = [95, 25] as const;
+    const rad = (deg * Math.PI) / 180;
+    const wrist: readonly [number, number] = [
+      elbow[0] - 20 * Math.sin(rad),
+      elbow[1] + 20 * Math.cos(rad),
+    ];
+    const hold = 20;
+    const frames: RawSeqFrame[] = [];
+    for (let i = 0; i < hold; i++) {
+      frames.push(raw(i * DT, { ...STATIC, right_elbow: [95, 80], right_wrist: [120, 80] }));
+    }
+    for (let i = hold; i < hold + 20; i++) {
+      const u = Math.min(1, (i - hold) / rampFrames);
+      frames.push(
+        raw(i * DT, {
+          ...STATIC,
+          right_elbow: [95 + (elbow[0] - 95) * u, 80 + (elbow[1] - 80) * u],
+          right_wrist: [120 + (wrist[0] - 120) * u, 80 + (wrist[1] - 80) * u],
+        }),
+      );
+    }
+    return computeRepMetrics(frames, {
+      hand: 'right',
+      frameHeight: FRAME,
+      releaseT: hold * DT,
+    });
+  }
+
+  test('one frame of lag is absorbed; two frames is not a hold at all', () => {
+    // WITHIN one median frame period of the release: the streak starts where
+    // it was really observed extended, and the hold is measured FROM THERE —
+    // 300 ms of window minus the frames that were not extended.
+    const withinOneFrame = rampTail(170, 1);
+    expect(withinOneFrame.followThroughHeldMs!).toBeCloseTo((7 / 30) * 1000, 6);
+    expect(withinOneFrame.followThroughHeldMs!).toBeLessThan(300);
+
+    // BEYOND it: the arm was still on its way up two frames after the
+    // release. No hold is claimed, and no millisecond is invented to bridge
+    // the gap — this is the bound that keeps a real collapse visible.
+    expect(rampTail(170, 2).followThroughHeldMs).toBe(0);
+    expect(rampTail(170, 4).followThroughHeldMs).toBe(0);
+  });
+
+  test('a REAL collapse still reports short — the tolerance cannot launder it', () => {
+    // Extended for 4 frames after the release, then the arm drops to 90°.
+    const hold = 20;
+    const frames: RawSeqFrame[] = [];
+    for (let i = 0; i < hold; i++) {
+      frames.push(raw(i * DT, { ...STATIC, right_elbow: [95, 80], right_wrist: [120, 80] }));
+    }
+    for (let i = hold; i < hold + 20; i++) {
+      const collapsed = i >= hold + 4;
+      frames.push(
+        raw(i * DT, {
+          ...STATIC,
+          right_elbow: [95, 25],
+          // Straight up (≈180°) then folded across (≈90°).
+          right_wrist: collapsed ? [75, 25] : [95, 5],
+        }),
+      );
+    }
+    const m = computeRepMetrics(frames, {
+      hand: 'right',
+      frameHeight: FRAME,
+      releaseT: hold * DT,
+    });
+    expect(m.followThroughHeldMs!).toBeGreaterThan(0);
+    expect(m.followThroughHeldMs!).toBeLessThan(200);
+    // And the collapse test agrees at every plausible stage frame rate.
+    expect(followThroughHeldFull(m.followThroughHeldMs, 30)).toBe(false);
+    expect(followThroughHeldFull(m.followThroughHeldMs, 15)).toBe(false);
   });
 });

@@ -8,6 +8,15 @@
  * - {@link coachingTips}: deterministic rule engine turning metrics into at
  *   most 3 prioritized {@link CoachingTip}s (one-cue-at-a-time coaching).
  *
+ * IMPORTANT (honesty): the pose input is COCO-17, whose arm chain ENDS at the
+ * wrist — there is no finger, thumb, knuckle or palm keypoint, so wrist flexion
+ * (the "snap") is observed by nothing here: two hands 90° apart in flexion give
+ * byte-identical COCO-17. Form Check (formCheck.ts) also calls
+ * {@link coachingTips} with NO ball and no rim. So coaching copy may name only
+ * the shoulder, elbow, wrist POSITION, hip, knee and ankle, plus the
+ * ball-derived angles the FSM hands in — never a hand, a grip, or a ball/rim
+ * reference. Same discipline pose3d/angles3d.ts states for FOREARM TILT.
+ *
  * Pure TypeScript, analysis-frame pixel space (+y DOWN), time in seconds
  * from camera timestamps. No I/O, no wall clock.
  */
@@ -595,12 +604,16 @@ export function coachingTips(
         ? (FORM.followThrough.elbowMinDeg - ftDeg) /
           (180 - FORM.followThrough.elbowMinDeg)
         : (holdMs - (ftHeld ?? 0)) / holdMs;
+    // Copy names the ELBOW only. Both inputs to this tip —
+    // followThroughElbowDeg and followThroughHeldMs — are elbow-extension
+    // readings, so the cue may not claim a wrist snap (COCO-17 ends at the
+    // wrist) nor a ball or rim (Form Check tracks neither).
     pushBandTip(
       cands,
       'followThroughElbowDeg',
       2,
       'Hold your follow-through',
-      'Keep the arm extended and the wrist snapped until the ball hits the rim.',
+      'Keep the shooting arm extended after release — the elbow came down early.',
       dev,
     );
   }

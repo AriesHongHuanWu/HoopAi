@@ -231,6 +231,15 @@ const MODEL_LOAD_TIMEOUT_MS = 12000;
 const WARMUP_FRAMES = 8;
 
 /**
+ * How long the frame counter may stand still before the rail calls the pose
+ * loop stalled, ms. 750 is ~22 frames at 30 fps and 11 at 15 fps — well clear
+ * of any plausible worklet-to-JS visibility delay, so a false stall costs a
+ * banner nobody needed, while the state it catches is a green readiness
+ * verdict painted over a dead skeleton.
+ */
+const FRAME_STALL_MS = 750;
+
+/**
  * Frame timestamps are nanoseconds on Android and CMTime SECONDS since boot
  * on iOS. This used to be guessed from the magnitude (`timestamp > 1e6`),
  * which silently inverts on an iPhone that has been up for more than 11.6
@@ -436,6 +445,11 @@ function useFormPose(
           // Camera presentation timestamp → seconds (iOS seconds; Android ns).
           // Platform-decided, never magnitude-guessed — see TS_IS_NANOS.
           const tSec = TS_IS_NANOS ? frame.timestamp / 1e9 : frame.timestamp;
+          // iOS hands over metadata.timestamp.seconds with no CMTime validity
+          // guard, so tSec can be NaN. One such frame permanently halts both
+          // prune loops and poisons every filter downstream — drop it here,
+          // the way PoseOrientationDetector and useShotEngine already do.
+          if (!Number.isFinite(tSec)) return;
           // De-normalize into the 192-square analysis space — the detector's
           // vy threshold and the sequence packer both live there.
           const pose = parseMoveNet(
@@ -589,9 +603,34 @@ export function orientationChipHint(
 }
 
 /**
+ * FRAME-STALL WATCHDOG (pure, so it is testable off-device).
+ *
+ * `FormCheckSession` only ever recomputes its readiness inside `push()`, so a
+ * pose loop that dies — a wedged interpreter, a frame processor the OS
+ * stopped, a resizer that stopped returning — leaves the LAST verdict on the
+ * rail forever. The failure the presenter sees is a frozen skeleton under a
+ * green "28 FPS" chip and "Ready — shoot when you like."
+ *
+ * @param framesDelta Frames counted since the previous check (≤ 0 = none).
+ * @param elapsedMs   Wall clock since the last frame actually arrived.
+ * @param started     Has ANY frame arrived yet? A loop that has not started
+ *                    is not stalled — "Starting the camera…" owns that state,
+ *                    and arming before the first frame would call every cold
+ *                    start a failure.
+ */
+export function frameStall(
+  framesDelta: number,
+  elapsedMs: number,
+  started: boolean,
+): boolean {
+  if (!started) return false;
+  return framesDelta <= 0 && elapsedMs >= FRAME_STALL_MS;
+}
+
+/**
  * The ONE guidance banner, chosen by priority: model error → model warmup →
- * camera warmup → fps → full body → arm → side-profile → low-confidence
- * advisories → all clear. Hard gates pause rep counting (the caller appends
+ * camera warmup → frame stall → fps → full body → arm → side-profile →
+ * low-confidence advisories → all clear. Hard gates pause rep counting (the caller appends
  * the paused line); the advisories never pause — the capture is degraded,
  * not refused, and the honest move is to say so and keep counting.
  * While `collecting`, the arm branch is skipped (calibration is what
@@ -612,6 +651,8 @@ export function guidanceBanner(
     modelErr?: string | null;
     /** No camera frame has arrived yet. */
     warming?: boolean;
+    /** Frames STARTED and then stopped — see {@link frameStall}. */
+    stalled?: boolean;
     /** Front camera in a dim room has a recovery the presenter can perform. */
     camPosition?: 'front' | 'back';
   } = {},
@@ -625,6 +666,14 @@ export function guidanceBanner(
   // before a single frame has landed is the first thing the audience reads.
   if (opts.warming === true || r.fps <= 0) {
     return { text: 'Starting the camera…', pauses: true };
+  }
+  // Ahead of every readiness gate below, because those gates are reading a
+  // verdict that stopped updating: `readiness` is only recomputed inside
+  // push(), so a stalled loop makes each of them report the last live frame
+  // as if it were the current one. A stale green gate outranked by nothing is
+  // the screen claiming a measurement it is no longer taking.
+  if (opts.stalled === true) {
+    return { text: 'No camera frames — the pose loop stalled.', pauses: true };
   }
   if (!r.fpsOk) {
     return {
@@ -879,6 +928,30 @@ export default function FormCheckScreen() {
   useEffect(() => {
     heightRef.current = heightCm ?? null;
   }, [heightCm]);
+  /**
+   * Has something STRONGER than the Settings default decided the arm — a
+   * manual chip flip, or the session's own auto-handedness commit? Both are
+   * statements about the shooter; the rehydration sync below must never
+   * overwrite one.
+   */
+  const handPinnedRef = useRef(false);
+  /**
+   * The settings store persists through expo-sqlite and rehydrates
+   * ASYNCHRONOUSLY, so the two seeds above run on first render against the
+   * built-in 'right' default and a left-handed user's saved pick lands after
+   * them — every angle, phase timing and spread of the session, plus the
+   * persisted hand column, then describes the arm they don't shoot with.
+   * Re-sync from the store, exactly as heightRef does above.
+   *
+   * Gated on 'guide': mid-session this would desync sessionRef's watched arm
+   * from handRef and split one report across two arms. The guide is the only
+   * phase where nothing is being measured.
+   */
+  useEffect(() => {
+    if (phase !== 'guide' || handPinnedRef.current) return;
+    handRef.current = settingsHand;
+    setHand(settingsHand);
+  }, [phase, settingsHand]);
   /** A space change threw this session away — the stepper says so. */
   const [viewReset, setViewReset] = useState(false);
 
@@ -944,6 +1017,9 @@ export default function FormCheckScreen() {
     // (that would read as a manual pick and disable the vote).
     if (session.hand !== handRef.current) {
       handRef.current = session.hand;
+      // A measured verdict about the shooter outranks the Settings default —
+      // returning to the guide must not undo it.
+      handPinnedRef.current = true;
       setHand(session.hand);
     }
     if (rep != null) {
@@ -1045,6 +1121,9 @@ export default function FormCheckScreen() {
   const flipHand = useCallback(() => {
     const next: ShootingHand = handRef.current === 'right' ? 'left' : 'right';
     handRef.current = next;
+    // The human's pick outranks the Settings default for the rest of the
+    // screen — the guide-phase re-sync must not walk it back.
+    handPinnedRef.current = true;
     // A manual pick wins permanently for the session and disables auto.
     sessionRef.current?.setHand(next, 'manual');
     setHand(next);
@@ -1548,15 +1627,41 @@ function LiveRail({
   const insets = useSafeAreaInsets();
   const [snap, setSnap] = useState<RailSnap | null>(() => railSnapOf(sessionRef.current));
   const [warming, setWarming] = useState(true);
+  const [stalled, setStalled] = useState(false);
   const [orient, setOrient] = useState<PoseOrientationState>(() =>
     orientRef.current.state(),
   );
+  /** Frame counter and wall clock as of the last tick that saw NEW frames. */
+  const lastFramesRef = useRef(0);
+  const lastFramesAtRef = useRef(0);
   useEffect(() => {
     const id = setInterval(() => {
       setSnap(railSnapOf(sessionRef.current));
       // A SharedValue read on the JS thread is legal in a callback, never in
       // a render body — this is the file's existing poll pattern.
-      setWarming((framesSv?.value ?? 0) < WARMUP_FRAMES);
+      const frames = framesSv?.value ?? 0;
+      setWarming(frames < WARMUP_FRAMES);
+      // Frame-stall watchdog on the SAME poll. Wall clock, not frame time:
+      // the whole point is that no frame time is arriving.
+      const now = Date.now();
+      if (lastFramesAtRef.current === 0) lastFramesAtRef.current = now;
+      if (frames < lastFramesRef.current) {
+        // The counter went BACKWARDS — the loop was reset (the foreground
+        // guard zeroes it on every background/restore). That is a restart,
+        // not a stall, and `warming` already says so.
+        lastFramesRef.current = frames;
+        lastFramesAtRef.current = now;
+        setStalled(false);
+      } else {
+        const delta = frames - lastFramesRef.current;
+        setStalled(
+          frameStall(delta, now - lastFramesAtRef.current, lastFramesRef.current > 0),
+        );
+        if (delta > 0) {
+          lastFramesRef.current = frames;
+          lastFramesAtRef.current = now;
+        }
+      }
       // Same 4 Hz poll: the detector runs at frame rate on the sink and the
       // rail never re-renders per frame.
       setOrient(orientRef.current.state());
@@ -1598,7 +1703,7 @@ function LiveRail({
     calib?.hand ?? 'right',
     calib,
     collecting,
-    { modelErr, warming, camPosition },
+    { modelErr, warming, stalled, camPosition },
   );
 
   /**
@@ -1613,7 +1718,10 @@ function LiveRail({
    * pill anyway — which is exactly where the core would refuse it.
    */
   const canOverrideFps =
-    readiness != null && !readiness.fpsOk && readiness.fps >= FPS_OVERRIDE_MIN;
+    // Never over a stalled loop: the rate it would override is the last live
+    // frame's, and counting anyway is a promise the screen cannot keep while
+    // no frames arrive.
+    !stalled && readiness != null && !readiness.fpsOk && readiness.fps >= FPS_OVERRIDE_MIN;
   const bannerAction: { label: string; onPress: () => void } | null =
     modelErr != null
       ? { label: 'Retry', onPress: onRetryModel }
@@ -1631,6 +1739,7 @@ function LiveRail({
   const chipRow = (
     <ChipRow
       readiness={readiness}
+      stalled={stalled}
       calib={calib}
       onFlipHand={onFlipHand}
       orient={orient}
@@ -1780,23 +1889,31 @@ function LiveRail({
  */
 function ChipRow({
   readiness,
+  stalled = false,
   calib,
   onFlipHand,
   orient,
   onFlipOrientation,
 }: {
   readiness: FormCheckReadiness | null;
+  /** The pose loop stopped delivering frames — see {@link frameStall}. */
+  stalled?: boolean;
   calib: CalibrationState | null;
   onFlipHand: () => void;
   orient: PoseOrientationState;
   onFlipOrientation: () => void;
 }) {
-  const fps = readiness?.fps ?? 0;
-  const fpsOk = readiness?.fpsOk ?? false;
-  const overridden = readiness?.fpsOverridden === true;
-  const fullBodyOk = readiness?.fullBodyOk ?? false;
-  const armOk = readiness?.armOk ?? false;
-  const sideOk = readiness?.sideOk ?? true;
+  // A stalled loop has no CURRENT reading: `readiness` still holds the last
+  // live frame's verdict, and rendering it green is the rail asserting a
+  // measurement it is not taking. Every gauge drops to amber instead. The
+  // VIEW chip is untouched — it reports a latched verdict about the buffer,
+  // not a live gauge.
+  const fps = stalled ? 0 : (readiness?.fps ?? 0);
+  const fpsOk = !stalled && (readiness?.fpsOk ?? false);
+  const overridden = !stalled && readiness?.fpsOverridden === true;
+  const fullBodyOk = !stalled && (readiness?.fullBodyOk ?? false);
+  const armOk = !stalled && (readiness?.armOk ?? false);
+  const sideOk = !stalled && (readiness?.sideOk ?? true);
   const chipHand = calib?.hand ?? 'right';
   const chipSource = calib?.handSource ?? 'settings';
 
@@ -1822,9 +1939,9 @@ function ChipRow({
         />
       </Pressable>
       <SideChip
-        sideness={readiness?.sideness ?? null}
+        sideness={stalled ? null : (readiness?.sideness ?? null)}
         ok={sideOk}
-        trusted={readiness?.sideTrusted !== false}
+        trusted={!stalled && readiness?.sideTrusted !== false}
       />
       {/* A correction that fires must be VISIBLE — one nobody can see is one
           nobody can overrule. Only a verified-upright buffer earns green:

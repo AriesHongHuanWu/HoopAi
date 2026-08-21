@@ -34,7 +34,7 @@ export const MOVENET_KEYPOINTS: readonly PoseKeypointName[] = [
  * @param data     Flattened [1,1,17,3] MoveNet output (51 floats, y,x,score).
  * @param frameW   Analysis-frame width in px (square input side).
  * @param frameH   Analysis-frame height in px.
- * @param t        Frame timestamp, seconds.
+ * @param t        Frame timestamp, seconds. Non-finite = frame refused.
  * @param scoreMin Drop keypoints below this confidence.
  */
 export function parseMoveNet(
@@ -45,6 +45,16 @@ export function parseMoveNet(
   scoreMin = 0.3,
 ): PoseFrame {
   'worklet';
+  // TIMESTAMP GUARD. `t` is a camera presentation timestamp, and on iOS that
+  // is metadata.timestamp.seconds with no CMTime validity check — it can
+  // arrive NaN. A non-finite t is not a late frame, it is an unplaceable one:
+  // downstream it keys the prune Maps (which then grow unbounded at camera
+  // rate), it is subtracted for every dt (poisoning the One-Euro filters and
+  // the fps EMA for the rest of the session) and every window test against it
+  // is false. Refuse the frame — an EMPTY keypoint set at t 0 says the frame
+  // measured nothing, which is exactly what happened. The return TYPE is
+  // unchanged: jump.tsx and useShotEngine.ts call this too.
+  if (!Number.isFinite(t)) return { t: 0, keypoints: {} };
   const keypoints: PoseFrame['keypoints'] = {};
   // Bounds guard: a truncated/mismatched output buffer (wrong model loaded,
   // delegate returning a short tensor) must never index past the end of

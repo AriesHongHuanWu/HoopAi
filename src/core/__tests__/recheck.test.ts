@@ -1,6 +1,8 @@
+import { SHOT_FSM } from '../config';
 import {
   RECHECK,
   medianRimBox,
+  offlineMakeCorroborated,
   recheckShot,
   recheckShots,
   reconcileOutcome,
@@ -8,7 +10,26 @@ import {
   type RecheckDeps,
   type RecheckShotRef,
 } from '../recheck';
-import type { Box, DetClass, Detection } from '../types';
+import type { Box, DetClass, Detection, ShotSignals } from '../types';
+
+/**
+ * Constructor opts of every replay ShotFsm recheckShot builds. The spy
+ * SUBCLASSES the real FSM (requireActual), so every other test in this file
+ * still runs the genuine state machine — this only records the opts, which is
+ * the one thing no fixture can observe from the outside.
+ */
+const mockFsmOpts: Record<string, unknown>[] = [];
+
+jest.mock('../shotFsm', () => {
+  const actual = jest.requireActual('../shotFsm');
+  class SpyShotFsm extends actual.ShotFsm {
+    constructor(rim: never, frame: never, opts: Record<string, unknown> = {}) {
+      super(rim, frame, opts);
+      mockFsmOpts.push(opts);
+    }
+  }
+  return { ...actual, ShotFsm: SpyShotFsm };
+});
 
 // ---------------------------------------------------------------------------
 // Fixtures & helpers
@@ -37,20 +58,68 @@ function det(cls: DetClass, score: number, box: Box): Detection {
 const rimDet = (box: Box = RIM_BOX, score = 0.8): Detection => det('rim', score, box);
 const ballDet = (cx: number, cy: number): Detection =>
   det('ball', 0.7, boxAround(cx, cy, 24));
+/** A 'ball_in_basket' blip at the hoop — the cls half of the corroboration pair. */
+const clsDet = (): Detection => det('ball_in_basket', 0.6, boxAround(320, 215, 20));
 
 /**
  * Synthetic SWISH the live pass missed: a clean gravity parabola in VIDEO
  * time — y(τ) = 165 + 200·(τ − 1.9)² px (+y down) at constant x = 320 — that
  * rises through the up-zone, peaks above the rim plane (y 200) and drops
  * straight through the central span, vanishing into the net below y≈300.
- * The rim is visible every frame. No net-motion, no ball_in_basket — the
- * offline verdict must come from re-tracked GEOMETRY alone.
+ * The rim is visible every frame. No net-motion, no ball_in_basket — so the
+ * offline verdict would rest on re-tracked GEOMETRY alone, which is exactly
+ * what the replay is no longer allowed to convict on.
  */
 function swishFrame(videoTimeSec: number): Detection[] {
   const dets: Detection[] = [rimDet()];
   const y = 165 + 200 * (videoTimeSec - 1.9) ** 2;
   if (videoTimeSec >= 0.4 && videoTimeSec <= 2.72 && y <= 600) {
     dets.push(ballDet(320, y));
+  }
+  return dets;
+}
+
+/** The same swish, CORROBORATED by a ball_in_basket blip at the hoop. */
+function corroboratedSwishFrame(videoTimeSec: number): Detection[] {
+  const dets = swishFrame(videoTimeSec);
+  if (videoTimeSec >= 2.2 && videoTimeSec <= 2.9) dets.push(clsDet());
+  return dets;
+}
+
+/** The same parabola offset to x = 380 — outside the crossing span, a MISS. */
+function missFrame(videoTimeSec: number): Detection[] {
+  const dets: Detection[] = [rimDet()];
+  const y = 165 + 200 * (videoTimeSec - 1.9) ** 2;
+  if (videoTimeSec >= 0.4 && videoTimeSec <= 2.72 && y <= 600) {
+    dets.push(ballDet(380, y));
+  }
+  return dets;
+}
+
+/**
+ * TWO attempts inside one re-check window — the rebound/put-back case the
+ * matching rule has to survive.
+ *
+ *  - Attempt A (video 0.0–1.8, x = 320, ball_in_basket firing): a corroborated
+ *    MAKE that resolves at video 1.5, i.e. camera 101.5 — 2.0 s from the live
+ *    tResolved of 103.5, and FIRST in sequence.
+ *  - Attempt B (video 3.0–, x = 380): the shot actually under re-check. Crosses
+ *    the plane outside the span, so it resolves MISS at video 4.333 — camera
+ *    104.333, 0.833 s from the live tResolved.
+ *
+ * The two resolves are 2.8 s apart, comfortably clear of SHOT_FSM's own
+ * shotCooldownSec, so both are genuine separate attempts.
+ */
+function twoAttemptsFrame(videoTimeSec: number): Detection[] {
+  const dets: Detection[] = [rimDet()];
+  if (videoTimeSec >= 0 && videoTimeSec <= 1.8) {
+    const y = 165 + 400 * (videoTimeSec - 0.6) ** 2;
+    if (y <= 600) dets.push(ballDet(320, y));
+  }
+  if (videoTimeSec >= 0.9 && videoTimeSec <= 1.8) dets.push(clsDet());
+  if (videoTimeSec >= 3.0) {
+    const y = 165 + 400 * (videoTimeSec - 3.5) ** 2;
+    if (y <= 600) dets.push(ballDet(380, y));
   }
   return dets;
 }
@@ -73,6 +142,10 @@ function depsFor(
   return { deps, calls };
 }
 
+function signals(over: Partial<ShotSignals> = {}): ShotSignals {
+  return { geo: null, net: null, cls: null, ...over };
+}
+
 // ---------------------------------------------------------------------------
 // reconcileOutcome — the conservative upgrade rule
 // ---------------------------------------------------------------------------
@@ -91,6 +164,47 @@ describe('reconcileOutcome', () => {
     expect(reconcileOutcome('make', 'miss')).toBeNull();
     expect(reconcileOutcome('miss', 'make')).toBeNull();
     expect(reconcileOutcome('make', 'unsure')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// offlineMakeCorroborated — a netless geo-only make is not evidence
+// ---------------------------------------------------------------------------
+
+describe('offlineMakeCorroborated', () => {
+  it('refuses a make that rests on 2D geometry alone', () => {
+    // The offline pass has no net channel at all, so this is the shape EVERY
+    // geometry-only replay make arrives in: geo true, net null, cls false.
+    expect(offlineMakeCorroborated(signals({ geo: true, net: null, cls: false }))).toBe(
+      false,
+    );
+    expect(offlineMakeCorroborated(signals({ geo: true, net: null, cls: null }))).toBe(
+      false,
+    );
+  });
+
+  it('accepts a second channel — ball_in_basket or net motion', () => {
+    expect(offlineMakeCorroborated(signals({ geo: true, net: null, cls: true }))).toBe(
+      true,
+    );
+    expect(offlineMakeCorroborated(signals({ geo: true, net: true, cls: false }))).toBe(
+      true,
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// RECHECK tunables
+// ---------------------------------------------------------------------------
+
+describe('RECHECK tunables', () => {
+  // Iron rule for the matching window. At the old 2.0 the "same attempt"
+  // tolerance was WIDER than the FSM's own minimum spacing between attempts,
+  // so a rebound or put-back was inside the window BY CONSTRUCTION and could
+  // supply the verdict for the shot next to it. Pinned as an inequality so the
+  // two constants can never drift back past each other.
+  it('the same-attempt tolerance stays inside the FSM shot cooldown', () => {
+    expect(RECHECK.matchToleranceSec).toBeLessThan(SHOT_FSM.shotCooldownSec);
   });
 });
 
@@ -170,16 +284,64 @@ describe('sampleCameraTimes', () => {
 // ---------------------------------------------------------------------------
 
 describe('recheckShot', () => {
-  it('upgrades an unsure shot to MAKE from a re-tracked swish (geo alone, netless fusion)', async () => {
+  beforeEach(() => {
+    mockFsmOpts.length = 0;
+  });
+
+  // RE-PINNED (was: "upgrades an unsure shot to MAKE from a re-tracked swish
+  // (geo alone, netless fusion)"). The replay sees 6 fps and has no net
+  // channel; its "crossing pair" spans 167 ms. Calling a make off that is the
+  // weakest reading in the system out-claiming the live pass, which declined to
+  // decide with the full frame rate AND the net channel available. The evidence
+  // is still recorded on the receipt — only the verdict is refused.
+  it('refuses a MAKE that rests on re-tracked geometry alone', async () => {
     const { deps } = depsFor(swishFrame);
     const result = await recheckShot(UNSURE_SHOT, deps);
     expect(result.shotId).toBe(7);
-    expect(result.verdict).toBe('make');
+    expect(result.verdict).toBeNull();
+    expect(result.reason).toBe('uncorroborated-make');
+    // The receipt still carries WHAT the replay saw, so the refusal is legible.
     expect(result.signals).not.toBeNull();
     expect(result.signals!.geo).toBe(true);
     expect(result.signals!.net).toBeNull(); // no net channel offline
-    expect(result.reason).toBeUndefined();
+    expect(result.signals!.cls).toBe(false);
     expect(result.framesSampled).toBe(31);
+  });
+
+  it('upgrades to MAKE when ball_in_basket corroborates the geometry', async () => {
+    const { deps } = depsFor(corroboratedSwishFrame);
+    const result = await recheckShot(UNSURE_SHOT, deps);
+    expect(result.verdict).toBe('make');
+    expect(result.reason).toBeUndefined();
+    expect(result.signals!.geo).toBe(true);
+    expect(result.signals!.cls).toBe(true);
+  });
+
+  it('still upgrades a clean MISS (crossing outside the span)', async () => {
+    // The refusal is one-directional: it guards the MAKE term only. An
+    // observed descending crossing OUTSIDE the rim span is the same geometric
+    // reading the live pass convicts a miss on.
+    const { deps } = depsFor(missFrame);
+    const result = await recheckShot(UNSURE_SHOT, deps);
+    expect(result.verdict).toBe('miss');
+    expect(result.signals!.geo).toBe(false);
+  });
+
+  it('replays with the same guard flags the LIVE pipeline enables', async () => {
+    // config.ts ships these constructor-default FALSE as the unit-test
+    // baseline; shotPipeline.adoptRim turns all four on from settingsStore.
+    // Passing no opts here ran the offline pass on a MORE permissive FSM than
+    // the live one — more confidence from less evidence. All four are
+    // demote-or-corroborate only, so this can only make the replay stricter.
+    const { deps } = depsFor(corroboratedSwishFrame);
+    await recheckShot(UNSURE_SHOT, deps);
+    expect(mockFsmOpts).toHaveLength(1);
+    expect(mockFsmOpts[0]).toEqual({
+      useDepthRatioVeto: true,
+      useReappearance: true,
+      useRattleGuard: true,
+      useSettleWindow: true,
+    });
   });
 
   it('feeds the injected detector VIDEO time (camera − recordingStartSec)', async () => {
@@ -190,6 +352,10 @@ describe('recheckShot', () => {
     expect(Math.max(...calls)).toBeLessThanOrEqual(5.0 + 1e-6);
   });
 
+  // RE-PINNED: the fixture now carries the ball_in_basket corroboration the
+  // make gate requires, so this keeps testing the MEDIAN RIM BOX (its actual
+  // subject) end-to-end instead of silently becoming a duplicate of the
+  // geometry-only refusal above.
   it('survives rim jitter and a one-frame decoy via the median rim box', async () => {
     let frameNo = 0;
     const { deps } = depsFor((videoT) => {
@@ -199,7 +365,7 @@ describe('recheckShot', () => {
         frameNo === 5
           ? rimDet({ x: 80, y: 480, width: 120, height: 90 }, 0.9) // decoy
           : rimDet({ ...RIM_BOX, x: RIM_BOX.x + jitter, y: RIM_BOX.y + jitter });
-      const dets = swishFrame(videoT).filter((d) => d.cls !== 'rim');
+      const dets = corroboratedSwishFrame(videoT).filter((d) => d.cls !== 'rim');
       return [rim, ...dets];
     });
     const result = await recheckShot(UNSURE_SHOT, deps);
@@ -238,8 +404,8 @@ describe('recheckShot', () => {
 
   it('ignores a resolve outside the ±match tolerance of the original', async () => {
     // Same swish, but demand the offline resolve land within 50 ms of the
-    // live tResolved — the re-tracked resolve is ~0.7–1 s earlier, so no match.
-    const { deps } = depsFor(swishFrame, { matchToleranceSec: 0.05 });
+    // live tResolved — the re-tracked resolve is ~0.7 s earlier, so no match.
+    const { deps } = depsFor(corroboratedSwishFrame, { matchToleranceSec: 0.05 });
     const result = await recheckShot(UNSURE_SHOT, deps);
     expect(result.verdict).toBeNull();
     expect(result.reason).toBe('no-resolve');
@@ -259,6 +425,32 @@ describe('recheckShot', () => {
     expect(result.reason).toBe('cancelled');
     expect(result.framesSampled).toBe(4);
   });
+
+  describe('a neighbouring attempt cannot speak for this shot', () => {
+    it('the default tolerance keeps the neighbour out of the window', async () => {
+      // Attempt A (a corroborated make) resolves 2.0 s from the live
+      // tResolved. The tolerance is now narrower than shotCooldownSec, so A is
+      // simply not the same attempt and only B — the real one — is considered.
+      const { deps } = depsFor(twoAttemptsFrame);
+      const result = await recheckShot(UNSURE_SHOT, deps);
+      expect(result.verdict).toBe('miss');
+      expect(result.signals!.geo).toBe(false);
+      expect(result.signals!.cls).toBe(false); // A's cls did not come along
+    });
+
+    it('the CLOSEST resolve wins, not the first one in sequence', async () => {
+      // Widen the tolerance back to the old 2.0 so BOTH resolves are in the
+      // window — the selection rule is what is under test here, and it has to
+      // hold on its own. A fires first (2.0 s away, make + cls); B is the real
+      // attempt (0.83 s away, miss). The old first-matching-resolve rule
+      // handed this shot A's MAKE.
+      const { deps } = depsFor(twoAttemptsFrame, { matchToleranceSec: 2.0 });
+      const result = await recheckShot(UNSURE_SHOT, deps);
+      expect(result.verdict).toBe('miss');
+      expect(result.signals!.geo).toBe(false);
+      expect(result.signals!.cls).toBe(false);
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -273,7 +465,7 @@ describe('recheckShots', () => {
   ];
 
   it('walks shots in order with progress + per-result hooks', async () => {
-    const { deps } = depsFor(swishFrame);
+    const { deps } = depsFor(corroboratedSwishFrame);
     const progress: [number, number][] = [];
     const resultIds: number[] = [];
     const summary = await recheckShots(TWO_SHOTS, deps, {
@@ -294,9 +486,17 @@ describe('recheckShots', () => {
     expect(summary.results[1].verdict).toBeNull();
   });
 
+  it('an uncorroborated make counts as checked, never as corrected', async () => {
+    const { deps } = depsFor(swishFrame);
+    const summary = await recheckShots(TWO_SHOTS, deps);
+    expect(summary.checked).toBe(2);
+    expect(summary.corrected).toBe(0);
+    expect(summary.results[0].reason).toBe('uncorroborated-make');
+  });
+
   it('cancellation between shots keeps completed work and stops the rest', async () => {
     let cancelled = false;
-    const { deps } = depsFor(swishFrame, { isCancelled: () => cancelled });
+    const { deps } = depsFor(corroboratedSwishFrame, { isCancelled: () => cancelled });
     const summary = await recheckShots(TWO_SHOTS, deps, {
       onResult: () => {
         cancelled = true; // flip right after the first shot lands

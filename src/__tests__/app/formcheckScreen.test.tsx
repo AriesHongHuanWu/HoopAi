@@ -36,6 +36,12 @@
  *     state; Recalibrate is a hold; Restart and Check again are the two
  *     one-tap recoveries; and every relaxed-gate reason the core reports is
  *     rendered on the rep and in the report.
+ *  8. FRAME-INGEST HARDENING — the watched arm follows a Settings value that
+ *     rehydrates AFTER first render (a left-handed session used to be
+ *     measured end to end on the wrong arm), without ever moving mid-session
+ *     or over a manual pick; and the pure frameStall() watchdog plus its
+ *     banner priority, which is what stops a frozen pose loop from wearing
+ *     the last live frame's green readiness verdict.
  *
  * What these CANNOT reach: anything downstream of a real pose frame. The
  * frame output is stubbed inert, so the session never receives a sample and
@@ -295,6 +301,7 @@ import FormCheckScreen, {
   FormCheckReport,
   armChipLabel,
   formSessionRowOf,
+  frameStall,
   guidanceBanner,
   lowConfidenceLine,
   orientationChipHint,
@@ -316,6 +323,7 @@ import {
 } from '@/core/formCheck';
 import { buildSequence, type RawSeqFrame } from '@/core/formSequence';
 import type { FormMetrics, PoseKeypointName } from '@/core/types';
+import { useSettings } from '@/state/settingsStore';
 
 // ---------------------------------------------------------------------------
 // Helpers (sessionFormReport.test.tsx idiom)
@@ -817,6 +825,74 @@ describe('FormCheck — calibration rail', () => {
     const r = await render(<FormCheckScreen />);
     await pressButton(r, 'Start form check');
     expect(textOf(r.toJSON())).toContain('Camera access needed');
+    await unmount(r);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The watched arm — seeded from Settings, which rehydrates LATE
+
+describe('FormCheck — shooting hand from Settings', () => {
+  const ARM_CHIP_RIGHT =
+    'Watching your right arm (assumed from Settings). Tap to watch the other arm.';
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    mockCameraState.hasPermission = true;
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+    // Never leak the pick into the next test — the store is a real one.
+    useSettings.setState({ shootingHand: 'right' });
+  });
+
+  it('adopts a hand that rehydrated AFTER the first render', async () => {
+    // The settings store persists through expo-sqlite and rehydrates
+    // ASYNCHRONOUSLY, so the screen's `useState`/`useRef` seeds run against
+    // the built-in 'right' default. Without the guide-phase re-sync a
+    // left-handed session was measured end to end on the arm they don't
+    // shoot with — every angle, every phase timing, every spread, and the
+    // persisted hand column.
+    const r = await render(<FormCheckScreen />);
+    await act(async () => {
+      useSettings.setState({ shootingHand: 'left' });
+    });
+    await pressButton(r, 'Start form check');
+    await pressButton(r, 'Skip');
+    expect(textOf(r.toJSON())).toContain('ASSUMED LEFT');
+    await unmount(r);
+  });
+
+  it('never re-syncs mid-session, and never over the human’s own pick', async () => {
+    const r = await render(<FormCheckScreen />);
+    await pressButton(r, 'Start form check');
+    await pressButton(r, 'Skip');
+    expect(textOf(r.toJSON())).toContain('ASSUMED RIGHT');
+
+    // The presenter's call: LEFT, manual.
+    await pressA11y(r, ARM_CHIP_RIGHT);
+    await act(async () => {
+      jest.advanceTimersByTime(400);
+    });
+    expect(textOf(r.toJSON())).toContain('LEFT ARM');
+
+    // A store change landing MID-CAPTURE must not move the watched arm: the
+    // session is already measuring one, and switching arms underneath it
+    // would split a single report across two of them.
+    await act(async () => {
+      useSettings.setState({ shootingHand: 'right' });
+      jest.advanceTimersByTime(400);
+    });
+    expect(textOf(r.toJSON())).toContain('LEFT ARM');
+
+    // Back on the guide the sync is allowed to run again — but a manual pick
+    // is a statement about the SHOOTER, so it outranks the Settings default.
+    await pressButton(r, 'Cancel');
+    await pressButton(r, 'Start form check');
+    await pressButton(r, 'Skip');
+    expect(textOf(r.toJSON())).toContain('LEFT');
+    expect(textOf(r.toJSON())).not.toContain('RIGHT');
+
     await unmount(r);
   });
 });
@@ -1536,6 +1612,40 @@ describe('guidanceBanner', () => {
     ).toBeNull();
   });
 
+  it('a stalled pose loop outranks the readiness verdict it froze', () => {
+    // FormCheckSession recomputes readiness only inside push(), so a dead
+    // loop leaves the LAST frame's verdict on the rail forever: green chips
+    // and "Ready — shoot when you like." over a skeleton that stopped moving.
+    // The stall has to win over that, and over a stale failing gate too.
+    expect(guidanceBanner(true, readyAll, 'right', null, false, { stalled: true })).toEqual({
+      text: 'No camera frames — the pose loop stalled.',
+      pauses: true,
+    });
+    expect(
+      guidanceBanner(
+        true,
+        { ...readyAll, fpsOk: false, fps: 9, ready: false },
+        'right',
+        null,
+        false,
+        { stalled: true },
+      )!.text,
+    ).toContain('stalled');
+  });
+
+  it('a stall never displaces the cold-start or dead-loader copy', () => {
+    // Before the first frame the honest state is "Starting the camera…" —
+    // frameStall is what keeps `stalled` false there, but the ORDER is
+    // pinned here so a future edit cannot call every cold start a failure.
+    expect(
+      guidanceBanner(true, readyAll, 'right', null, false, { warming: true, stalled: true })!.text,
+    ).toBe('Starting the camera…');
+    expect(
+      guidanceBanner(true, readyAll, 'right', null, false, { modelErr: 'boom', stalled: true })!
+        .text,
+    ).toContain("didn't load");
+  });
+
   it('heavy tilt is an ADVISORY — it never pauses rep counting', () => {
     const banner = guidanceBanner(
       true,
@@ -1555,6 +1665,28 @@ describe('guidanceBanner', () => {
         false,
       ),
     ).toBeNull();
+  });
+});
+
+describe('frameStall', () => {
+  it('never arms before the first frame — a cold start is not a stall', () => {
+    // "Starting the camera…" owns the pre-first-frame state. Arming here
+    // would label every slow camera open a failure.
+    expect(frameStall(0, 5_000, false)).toBe(false);
+  });
+
+  it('holds while the counter is still advancing', () => {
+    expect(frameStall(7, 250, true)).toBe(false);
+    // Even ONE frame in the window is a loop that is alive.
+    expect(frameStall(1, 5_000, true)).toBe(false);
+  });
+
+  it('arms only once the counter has stood still past the window', () => {
+    // 0, 1 and 3 poll ticks of 250 ms since the last frame actually landed —
+    // only the third clears the 750 ms window.
+    expect(frameStall(0, 0, true)).toBe(false);
+    expect(frameStall(0, 250, true)).toBe(false);
+    expect(frameStall(0, 750, true)).toBe(true);
   });
 });
 

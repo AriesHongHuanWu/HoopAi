@@ -11,7 +11,14 @@
  * (dip / set / release / follow), so a fast one-motion release is compared
  * against the same phase of the user's motion, not the same wall-clock instant.
  *
- * Pure + deterministic. ~8 rules; returns them ranked worst-first.
+ * Viewpoint honesty: every rule here must survive the SIDE profile Form Check
+ * asks for, and must not change sign with which wing the phone is on. Rules
+ * that could not (dip depth, read off a hip line the decoder pins to the
+ * origin; shoulder tilt, atan2 noise once the shoulders are near-coincident)
+ * were removed rather than reported — see src/core/formSimilarity.ts, which
+ * mirrors this file's measurements and must stay in lockstep.
+ *
+ * Pure + deterministic. ~6 rules; returns them ranked worst-first.
  */
 import { angleAtDeg } from './geometry';
 import type { DecodedFrame } from './formSequence';
@@ -74,10 +81,6 @@ function names(hand: ShootingHand) {
     hip: `${s}_hip` as PoseKeypointName,
     knee: `${s}_knee` as PoseKeypointName,
     ankle: `${s}_ankle` as PoseKeypointName,
-    lShoulder: 'left_shoulder' as PoseKeypointName,
-    rShoulder: 'right_shoulder' as PoseKeypointName,
-    lHip: 'left_hip' as PoseKeypointName,
-    rHip: 'right_hip' as PoseKeypointName,
   };
 }
 
@@ -103,33 +106,44 @@ function kneeAngle(frame: DecodedFrame | null, hand: ShootingHand): number | nul
   return angleAtDeg(h, k, a);
 }
 
-/** Shoulder-line tilt from horizontal (deg), signed. Null if a shoulder is missing. */
-function shoulderTiltDeg(frame: DecodedFrame | null, hand: ShootingHand): number | null {
-  if (!frame) return null;
-  const n = names(hand);
-  const l = frame[n.lShoulder];
-  const r = frame[n.rShoulder];
+/**
+ * Apparent shoulder x-separation, in body-heights, below which the shooter's
+ * facing is UNKNOWN. A square-on stance shows ~0.28; the side profile Form
+ * Check asks for collapses it toward 0, where keypoint noise picks the sign.
+ */
+const FACING_MIN_SHOULDER_DX = 0.06;
+
+/**
+ * Which way the shooter faces, as the sign of their own shoulder axis
+ * (right − left) in image x. Null when the two shoulders are too close in x
+ * to tell — at that point the sign is noise, not facing.
+ */
+function facingSign(frame: DecodedFrame): -1 | 1 | null {
+  const l = frame.left_shoulder;
+  const r = frame.right_shoulder;
   if (!l || !r) return null;
-  return (Math.atan2(r.y - l.y, r.x - l.x) * 180) / Math.PI;
+  const dx = r.x - l.x;
+  if (Math.abs(dx) < FACING_MIN_SHOULDER_DX) return null;
+  return dx < 0 ? -1 : 1;
 }
 
-/** Hip-center y at a phase (depth proxy; +y down = lower). Null if no hip. */
-function hipY(frame: DecodedFrame | null): number | null {
-  if (!frame) return null;
-  const l = frame.left_hip;
-  const r = frame.right_hip;
-  if (l && r) return (l.y + r.y) / 2;
-  return l?.y ?? r?.y ?? null;
-}
-
-/** Signed horizontal offset of elbow from wrist at a phase (arm-line proxy). */
+/**
+ * Horizontal offset of the elbow from the wrist at a phase (arm-line proxy),
+ * signed by the shooter's OWN facing rather than by the camera: raw
+ * (elbow.x − wrist.x) flips polarity with which wing the phone sits on, so
+ * the same flare reads "inside" from one side and "outside" from the other.
+ * Multiplying by the shoulder-axis sign makes it mirror-invariant, and the
+ * rule ABSTAINS when facing cannot be established.
+ */
 function elbowUnderBallOffset(frame: DecodedFrame | null, hand: ShootingHand): number | null {
   if (!frame) return null;
   const n = names(hand);
   const e = frame[n.elbow];
   const w = frame[n.wrist];
   if (!e || !w) return null;
-  return e.x - w.x;
+  const sign = facingSign(frame);
+  if (sign == null) return null;
+  return sign * (e.x - w.x);
 }
 
 // ---------------------------------------------------------------------------
@@ -256,31 +270,18 @@ export function posturePlan(
     'Relaxed-wrist reps: finish with a floppy "reaching into the cookie jar" wrist snap. 3×15.',
   );
 
-  // 5. Shoulder alignment (level shoulders at the set point).
-  push(
-    'shoulder_set',
-    'Shoulder alignment',
-    'SET',
-    degRule(shoulderTiltDeg(uSet, hand), shoulderTiltDeg(rSet, hand)),
-    'Your shoulders tilt more than the reference at the set point — level them so the shot goes straight up.',
-    'Your shoulders tilt more than the reference at the set point — level them so the shot goes straight up.',
-    'Square-up drill: film from the front, freeze at the set point, and level a broomstick across the shoulders. 20 reps.',
-    'Square-up drill: film from the front, freeze at the set point, and level a broomstick across the shoulders. 20 reps.',
-  );
+  // NOT MEASURABLE HERE, so not reported:
+  //  · Shoulder alignment at SET — at the side profile the two shoulders are
+  //    near-coincident, so atan2 across them is noise whose sign flips with
+  //    the camera side, against a reference that is exactly 0° (right) or
+  //    180° (left) by construction.
+  //  · Dip depth at DIP — formSequence hip-centres every decoded frame, so the
+  //    user's hip y is identically 0 and the rule reported the ARCHETYPE's dip
+  //    depth as the shooter's error.
+  // Both need a front-on view and an un-centred hip line; neither exists in
+  // this pipeline. Do not reinstate either without one.
 
-  // 6. Dip depth (hip height at the dip vs reference).
-  push(
-    'dip_depth',
-    'Dip depth',
-    'DIP',
-    lenRule(hipY(uDip), hipY(rDip)),
-    'Your dip is shallower than the reference — a slightly deeper gather adds rhythm and power.',
-    'You dip lower than the reference — a shallower dip quickens the release against closeouts.',
-    'Depth-target dips: mark a wall height for your hips, load to it, and rise. 3×12.',
-    'Quick-dip catches: on the catch, load only halfway and fire — trains a compact, fast gather. 3×10.',
-  );
-
-  // 7. Arm line at set (elbow under the wrist/ball).
+  // 5. Arm line at set (elbow under the wrist/ball).
   push(
     'arm_line_set',
     'Arm line',
@@ -295,7 +296,7 @@ export function posturePlan(
     'Elbow-in reps: shoot with a towel lightly pinned at the ribcage on the shooting side to stop the flare. 3×15.',
   );
 
-  // 8. Release wrist height (release point vs reference).
+  // 6. Release wrist height (release point vs reference).
   const relWristY = (f: DecodedFrame | null): number | null => {
     if (!f) return null;
     const w = f[names(hand).wrist];

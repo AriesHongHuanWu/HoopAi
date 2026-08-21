@@ -5,11 +5,16 @@
  * new form-check math ships as new pure core files. The measurement helpers
  * below are MIRRORED from postureFix's module-private implementations
  * (documented mirror — the formCheck.ts idiom for FormAnalyzer/formSequence
- * privates) so the similarity number reads the exact same 8 measurements
+ * privates) so the similarity number reads the exact same 6 measurements
  * posturePlan compares, sampled at the same phase timeline, without exporting
  * postureFix's internals. Keep them in lockstep with postureFix.ts; the
  * exact-score pins in src/__tests__/core/formSimilarity.test.ts (including
  * the reference-matches-itself-at-100 integration) fail on drift.
+ *
+ * Viewpoint honesty: a rule only counts if it survives the SIDE profile Form
+ * Check asks for and does not change sign with which wing the phone is on.
+ * Dip depth and shoulder tilt failed both tests and were removed, not scored;
+ * the arm-line rule abstains when the shooter's facing cannot be read.
  *
  * Pure + deterministic. No I/O.
  */
@@ -52,10 +57,6 @@ function names(hand: ShootingHand) {
     hip: `${s}_hip` as PoseKeypointName,
     knee: `${s}_knee` as PoseKeypointName,
     ankle: `${s}_ankle` as PoseKeypointName,
-    lShoulder: 'left_shoulder' as PoseKeypointName,
-    rShoulder: 'right_shoulder' as PoseKeypointName,
-    lHip: 'left_hip' as PoseKeypointName,
-    rHip: 'right_hip' as PoseKeypointName,
   };
 }
 
@@ -81,33 +82,41 @@ function kneeAngle(frame: DecodedFrame | null, hand: ShootingHand): number | nul
   return angleAtDeg(h, k, a);
 }
 
-/** Shoulder-line tilt from horizontal (deg), signed. Null if a shoulder is missing. */
-function shoulderTiltDeg(frame: DecodedFrame | null, hand: ShootingHand): number | null {
-  if (!frame) return null;
-  const n = names(hand);
-  const l = frame[n.lShoulder];
-  const r = frame[n.rShoulder];
+/**
+ * Apparent shoulder x-separation, in body-heights, below which the shooter's
+ * facing is UNKNOWN. MIRRORED from postureFix.
+ */
+const FACING_MIN_SHOULDER_DX = 0.06;
+
+/**
+ * Which way the shooter faces, as the sign of their own shoulder axis
+ * (right − left) in image x. Null when the shoulders are too close in x to
+ * tell — at that point the sign is noise, not facing. MIRRORED from postureFix.
+ */
+function facingSign(frame: DecodedFrame): -1 | 1 | null {
+  const l = frame.left_shoulder;
+  const r = frame.right_shoulder;
   if (!l || !r) return null;
-  return (Math.atan2(r.y - l.y, r.x - l.x) * 180) / Math.PI;
+  const dx = r.x - l.x;
+  if (Math.abs(dx) < FACING_MIN_SHOULDER_DX) return null;
+  return dx < 0 ? -1 : 1;
 }
 
-/** Hip-center y at a phase (depth proxy; +y down = lower). Null if no hip. */
-function hipY(frame: DecodedFrame | null): number | null {
-  if (!frame) return null;
-  const l = frame.left_hip;
-  const r = frame.right_hip;
-  if (l && r) return (l.y + r.y) / 2;
-  return l?.y ?? r?.y ?? null;
-}
-
-/** Signed horizontal offset of elbow from wrist at a phase (arm-line proxy). */
+/**
+ * Horizontal offset of the elbow from the wrist at a phase (arm-line proxy),
+ * signed by the shooter's OWN facing so the same flare reads the same from
+ * either wing; abstains when facing cannot be established. MIRRORED from
+ * postureFix.
+ */
 function elbowUnderBallOffset(frame: DecodedFrame | null, hand: ShootingHand): number | null {
   if (!frame) return null;
   const n = names(hand);
   const e = frame[n.elbow];
   const w = frame[n.wrist];
   if (!e || !w) return null;
-  return e.x - w.x;
+  const sign = facingSign(frame);
+  if (sign == null) return null;
+  return sign * (e.x - w.x);
 }
 
 /** Per-unit deviation normalizers — MIRRORED from postureFix's rule engine. */
@@ -118,25 +127,29 @@ const LEN_NORM = 0.12; // one "unit" of length deviation, body-heights
 // Form similarity
 // ---------------------------------------------------------------------------
 
-/** Rules a similarity score can draw on (posturePlan's exact 8 measurements). */
-const SIMILARITY_TOTAL_RULES = 8;
+/** Rules a similarity score can draw on (posturePlan's exact 6 measurements). */
+const SIMILARITY_TOTAL_RULES = 6;
 
-/** Minimum measured rules before a similarity score exists at all. */
-const SIMILARITY_MIN_RULES = 5;
+/**
+ * Minimum measured rules before a similarity score exists at all. Four, so a
+ * side-on rep still scores on the viewpoint-robust core (three elbow angles
+ * plus the knee) after the arm-line rule abstains for want of a facing.
+ */
+const SIMILARITY_MIN_RULES = 4;
 
 export interface FormSimilarity {
   /** 0..100 — how closely the measured angles/offsets match the reference. */
   score: number;
-  /** How many of the 8 rules had BOTH sides measurable. */
+  /** How many of the 6 rules had BOTH sides measurable. */
   measuredRules: number;
-  totalRules: 8;
+  totalRules: 6;
 }
 
 /**
  * Whole-motion similarity between a user's motion and a reference motion:
- * the SAME 8 measurements postureFix.posturePlan compares (elbow@DIP,
- * knee@DIP, elbow@RELEASE, elbow@FOLLOW, shoulderTilt@SET, hipY@DIP,
- * elbowUnderBall@SET, wristY@RELEASE), sampled at the same PHASE_FRAC
+ * the SAME 6 measurements postureFix.posturePlan compares (elbow@DIP,
+ * knee@DIP, elbow@RELEASE, elbow@FOLLOW, elbowUnderBall@SET,
+ * wristY@RELEASE), sampled at the same PHASE_FRAC
  * timeline. Each rule contributes a normalized deviation capped at 1
  * (degrees / DEG_NORM, body-heights / LEN_NORM — no deadband: similarity
  * measures everything, the deadband only gates cue-worthiness);
@@ -176,12 +189,9 @@ export function formSimilarity(
     { u: kneeAngle(uDip, hand), r: kneeAngle(rDip, hand), norm: DEG_NORM },
     { u: elbowAngle(uRel, hand), r: elbowAngle(rRel, hand), norm: DEG_NORM },
     { u: elbowAngle(uFol, hand), r: elbowAngle(rFol, hand), norm: DEG_NORM },
-    {
-      u: shoulderTiltDeg(uSet, hand),
-      r: shoulderTiltDeg(rSet, hand),
-      norm: DEG_NORM,
-    },
-    { u: hipY(uDip), r: hipY(rDip), norm: LEN_NORM },
+    // shoulderTilt@SET and hipY@DIP are absent on purpose — see the module
+    // header and postureFix's matching block. Neither is measurable from the
+    // viewpoint this pipeline captures, so neither may move the score.
     {
       u: elbowUnderBallOffset(uSet, hand),
       r: elbowUnderBallOffset(rSet, hand),
