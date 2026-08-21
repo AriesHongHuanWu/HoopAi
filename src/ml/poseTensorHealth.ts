@@ -141,17 +141,21 @@ export function poseWarmupVerdict(out: unknown): PoseWarmupVerdict {
   if (!Array.isArray(out) || out.length === 0) {
     return { kind: 'unverifiable', detail: 'no output tensor' };
   }
-  const t = out[0] as ArrayLike<number> | undefined;
-  if (t == null || typeof t.length !== 'number' || t.length < POSE_WARMUP_GOLDEN.length) {
-    return { kind: 'unverifiable', detail: `output length ${String(t?.length)}` };
+  let t = out[0] as ArrayLike<number> | ArrayBuffer | undefined;
+  if (t instanceof ArrayBuffer) {
+    t = new Float32Array(t);
   }
+  if (t == null || (t as ArrayLike<number>).length == null || (t as ArrayLike<number>).length < POSE_WARMUP_GOLDEN.length) {
+    return { kind: 'unverifiable', detail: `output length ${String((t as ArrayLike<number> | undefined)?.length)}` };
+  }
+  const f32 = t as ArrayLike<number>;
   // From here the tensor IS readable, so every remaining verdict is a claim
   // about its VALUES and a mismatch is a real finding.
   let lo = Number.POSITIVE_INFINITY;
   let hi = Number.NEGATIVE_INFINITY;
   let maxScore = Number.NEGATIVE_INFINITY;
   for (let i = 0; i < POSE_WARMUP_GOLDEN.length; i++) {
-    const v = t[i]!;
+    const v = f32[i]!;
     if (!Number.isFinite(v)) return { kind: 'mismatch', detail: `non-finite at ${i}` };
     if (i % 3 === 2) {
       if (v > maxScore) maxScore = v;
@@ -178,7 +182,7 @@ export function poseWarmupVerdict(out: unknown): PoseWarmupVerdict {
   for (let k = 0; k < POSE_WARMUP_GOLDEN.head.length; k++) {
     const g = POSE_WARMUP_GOLDEN.head[k]!;
     for (let c = 0; c < 2; c++) {
-      const d = Math.abs(t[k * 3 + c]! - g[c]!);
+      const d = Math.abs(f32[k * 3 + c]! - g[c]!);
       if (d > WARMUP_COORD_EPS) {
         return { kind: 'mismatch', detail: `keypoint ${k} axis ${c} off by ${d.toFixed(4)}` };
       }
