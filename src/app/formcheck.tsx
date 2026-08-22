@@ -405,28 +405,30 @@ interface FormPoseSample {
  * with the least claim to be representative.
  */
 async function warmUpPose(m: TensorflowModel): Promise<PoseWarmupVerdict> {
-  try {
-    // Size from the model's own input tensor; fall back to what the resizer
-    // is configured to emit (uint8 192×192×3 interleaved).
-    const shape = m.inputs[0]?.shape;
-    const elems =
-      shape != null && shape.length > 0
-        ? shape.reduce((a, b) => a * Math.max(1, b), 1)
-        : POSE_INPUT * POSE_INPUT * 3;
-    // ZERO-FILLED, and it must stay that way: the fingerprint is only valid
-    // against this buffer. A uniform grey of 8 moves a golden coordinate by
-    // 0.39 — six times the epsilon — so "warm it up with something more
-    // realistic" would silently turn this check into a random rung rejector.
-    const dummy = new Uint8Array(elems).buffer;
-    await m.run([dummy]);
-    return poseWarmupVerdict(await m.run([dummy]));
-  } catch (err) {
-    console.warn('[formcheck] pose warm-up threw (treating as mismatch to trigger automatic fallback)', err);
-    // A throw during warm-up usually means the delegate (e.g. CoreML) failed
-    // to compile or run the graph. Returning 'mismatch' ensures the ladder
-    // automatically falls back to CPU without showing the user an error banner.
-    return { kind: 'mismatch', detail: 'warm-up threw' };
-  }
+  // Size from the model's own input tensor; fall back to what the resizer
+  // is configured to emit (uint8 192×192×3 interleaved).
+  const shape = m.inputs[0]?.shape;
+  const elems =
+    shape != null && shape.length > 0
+      ? shape.reduce((a, b) => a * Math.max(1, b), 1)
+      : POSE_INPUT * POSE_INPUT * 3;
+  // ZERO-FILLED, and it must stay that way: the fingerprint is only valid
+  // against this buffer. A uniform grey of 8 moves a golden coordinate by
+  // 0.39 — six times the epsilon — so "warm it up with something more
+  // realistic" would silently turn this check into a random rung rejector.
+  const dummy = new Uint8Array(elems).buffer;
+  // DO NOT catch here. If m.run() throws, the exception must propagate to
+  // the loader ladder's own catch block. That is how the ladder knows to
+  // fall through to the next rung — or, on the LAST rung, to properly set
+  // modelErr and show "The pose model didn't load — tap Retry." instead of
+  // publishing a broken model that crashes on every frame.
+  //
+  // Returning 'mismatch' from the catch was a v1.0.4 regression: the ladder
+  // intentionally IGNORES mismatches on the last rung (because rejecting it
+  // would cost the whole screen), so a throw disguised as a mismatch on the
+  // CPU rung got published and every frame died in the frame processor.
+  await m.run([dummy]);
+  return poseWarmupVerdict(await m.run([dummy]));
 }
 
 /**
@@ -707,7 +709,7 @@ function useFormPose(
   const onSample = useMemo(() => (s: FormPoseSample) => sink(s), [sink]);
 
   const frameOutput = useFrameOutput({
-    pixelFormat: 'rgb',
+    pixelFormat: 'yuv',
     enablePreviewSizedOutputBuffers: true,
     enablePhysicalBufferRotation: true,
     dropFramesWhileBusy: true,

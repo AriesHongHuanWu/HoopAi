@@ -1195,7 +1195,7 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
   );
 
   const frameOutput = useFrameOutput({
-    pixelFormat: 'rgb',
+    pixelFormat: 'yuv',
     // ML gets small buffers; the video output keeps recording at full res.
     enablePreviewSizedOutputBuffers: true,
     // Physically rotate the frame buffer to the output orientation (the locked
