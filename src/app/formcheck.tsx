@@ -421,11 +421,11 @@ async function warmUpPose(m: TensorflowModel): Promise<PoseWarmupVerdict> {
     await m.run([dummy]);
     return poseWarmupVerdict(await m.run([dummy]));
   } catch (err) {
-    console.warn('[formcheck] pose warm-up skipped', err);
-    // A throw during warm-up is NOT a fingerprint verdict. The loader's own
-    // catch never sees this (the throw is swallowed here, as it always was),
-    // so saying "unverifiable" is the literal truth: nothing was measured.
-    return { kind: 'unverifiable', detail: 'warm-up threw' };
+    console.warn('[formcheck] pose warm-up threw (treating as mismatch to trigger automatic fallback)', err);
+    // A throw during warm-up usually means the delegate (e.g. CoreML) failed
+    // to compile or run the graph. Returning 'mismatch' ensures the ladder
+    // automatically falls back to CPU without showing the user an error banner.
+    return { kind: 'mismatch', detail: 'warm-up threw' };
   }
 }
 
