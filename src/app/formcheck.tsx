@@ -599,9 +599,14 @@ function useFormPose(
       if (alive) setModelErr('the pose model took too long to load');
     }, MODEL_LOAD_TIMEOUT_MS);
     void (async () => {
-      const accel: ('core-ml' | 'android-gpu')[] =
-        Platform.OS === 'ios' ? ['core-ml'] : ['android-gpu'];
-      const cpu = [] as ('core-ml' | 'android-gpu')[];
+      // Metal (GPU) rather than Core ML (ANE): the quantised MoveNet graph is
+      // known to mis-run on the Apple Neural Engine on several iPhone
+      // generations, producing a dead x-channel or outright throws. The GPU
+      // delegate (Metal) is more reliable across devices for this graph —
+      // the same choice the detector ladder already made.
+      const accel: ('metal' | 'android-gpu')[] =
+        Platform.OS === 'ios' ? ['metal'] : ['android-gpu'];
+      const cpu = [] as ('metal' | 'android-gpu')[];
       // `cpuOnly` drops the accelerated rung: the presenter has just told the
       // screen that the published model throws on every frame, and that rung
       // is the suspect. Nothing else about the load changes.

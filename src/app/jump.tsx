@@ -134,9 +134,9 @@ function useJumpPose(active: boolean, sink: (s: JumpSample) => void) {
   useEffect(() => {
     let alive = true;
     void (async () => {
-      const accel: ('core-ml' | 'android-gpu')[] =
-        Platform.OS === 'ios' ? ['core-ml'] : ['android-gpu'];
-      for (const d of [accel, [] as ('core-ml' | 'android-gpu')[]]) {
+      const accel: ('metal' | 'android-gpu')[] =
+        Platform.OS === 'ios' ? ['metal'] : ['android-gpu'];
+      for (const d of [accel, [] as ('metal' | 'android-gpu')[]]) {
         try {
           const m = await loadTensorflowModel(POSE_ASSET, d);
           if (!alive) return;

@@ -969,9 +969,9 @@ export function useShotEngine(mode: EngineMode, events: ShotEngineEvents): ShotE
       return;
     }
     void (async () => {
-      const delegates: ('core-ml' | 'android-gpu')[] =
-        Platform.OS === 'ios' ? ['core-ml'] : ['android-gpu'];
-      for (const d of [delegates, [] as ('core-ml' | 'android-gpu')[]]) {
+      const delegates: ('metal' | 'android-gpu')[] =
+        Platform.OS === 'ios' ? ['metal'] : ['android-gpu'];
+      for (const d of [delegates, [] as ('metal' | 'android-gpu')[]]) {
         try {
           const pm = await loadTensorflowModel(POSE_ASSET, d);
           if (!alive) return;
