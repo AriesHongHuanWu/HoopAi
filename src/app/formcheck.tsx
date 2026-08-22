@@ -707,7 +707,7 @@ function useFormPose(
   const onSample = useMemo(() => (s: FormPoseSample) => sink(s), [sink]);
 
   const frameOutput = useFrameOutput({
-    pixelFormat: 'yuv',
+    pixelFormat: 'rgb',
     enablePreviewSizedOutputBuffers: true,
     enablePhysicalBufferRotation: true,
     dropFramesWhileBusy: true,
@@ -764,7 +764,7 @@ function useFormPose(
         } finally {
           if (resized != null) resized.dispose();
         }
-      } catch {
+      } catch (err) {
         // A single bad frame must never kill the frame processor — that
         // contract is unchanged. What changes is that the frame is now
         // COUNTED: a model whose delegate cannot Invoke this graph throws
@@ -772,6 +772,9 @@ function useFormPose(
         // the screen had for it was "Starting the camera…", forever.
         try {
           failedSv.value += 1;
+          if (failedSv.value === 1 && err != null) {
+            console.error('[formcheck] Frame processor threw:', err);
+          }
         } catch {
           // The counter must never become a second way to kill the loop.
         }

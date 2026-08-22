@@ -176,7 +176,7 @@ function useJumpPose(active: boolean, sink: (s: JumpSample) => void) {
   );
 
   const frameOutput = useFrameOutput({
-    pixelFormat: 'yuv',
+    pixelFormat: 'rgb',
     enablePreviewSizedOutputBuffers: true,
     enablePhysicalBufferRotation: true,
     dropFramesWhileBusy: true,
